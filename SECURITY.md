@@ -2,10 +2,10 @@
 
 ## Supported Versions
 
-As deer-flow doesn't provide an official release yet, please use the latest version for the security updates.
+As deer-flow doesn't provide an official release yet, please use the latest version to receive security updates.
 Currently, we have two branches to maintain:
 * main branch for deer-flow 2.x
-* main-1.x branch for deer-flow 1.x 
+* main-1.x branch for deer-flow 1.x
 
 ## Reporting a Vulnerability
 

@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français | [Русский](./README_ru.md)
+[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français | [Русский](./README_ru.md) | [Português](./README_pt.md) | [한국어](./README_ko.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -18,13 +18,15 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ## Site officiel
 
-[<img width="2880" height="1600" alt="image" src="https://github.com/user-attachments/assets/a598c49f-3b2f-41ea-a052-05e21349188a" />](https://deerflow.tech)
-
 Découvrez-en plus et regardez des **démos réelles** sur notre [**site officiel**](https://deerflow.tech).
 
-## Coding Plan de ByteDance Volcengine
+## Projets associés
 
-<img width="4808" height="2400" alt="英文方舟" src="https://github.com/user-attachments/assets/2ecc7b9d-50be-4185-b1f7-5542d222fb2d" />
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - Découvrez notre arme secrète derrière DeerFlow — un outil de bureau pour prototyper des idées d'agents, inspecter chaque étape du harness, rejouer les échecs et tester les performances.
+
+## Coding Plan de ByteDance Volcengine
 
 - Nous recommandons fortement d'utiliser Doubao-Seed-2.0-Code, DeepSeek v3.2 et Kimi 2.5 pour exécuter DeerFlow
 - [En savoir plus](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
@@ -46,6 +48,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Site officiel](#site-officiel)
+  - [Coding Plan de ByteDance Volcengine](#coding-plan-de-bytedance-volcengine)
   - [InfoQuest](#infoquest)
   - [Table des matières](#table-des-matières)
   - [Installation en une phrase pour un coding agent](#installation-en-une-phrase-pour-un-coding-agent)
@@ -59,16 +62,22 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
       - [Serveur MCP](#serveur-mcp)
       - [Canaux de messagerie](#canaux-de-messagerie)
       - [Traçage LangSmith](#traçage-langsmith)
+      - [Traçage Langfuse](#traçage-langfuse)
+      - [Utiliser les deux fournisseurs](#utiliser-les-deux-fournisseurs)
   - [Du Deep Research au Super Agent Harness](#du-deep-research-au-super-agent-harness)
   - [Fonctionnalités principales](#fonctionnalités-principales)
     - [Skills et outils](#skills-et-outils)
       - [Intégration Claude Code](#intégration-claude-code)
+    - [Objectifs de session (Session Goals)](#objectifs-de-session-session-goals)
     - [Sub-Agents](#sub-agents)
     - [Sandbox et système de fichiers](#sandbox-et-système-de-fichiers)
     - [Context Engineering](#context-engineering)
     - [Mémoire à long terme](#mémoire-à-long-terme)
   - [Modèles recommandés](#modèles-recommandés)
   - [Client Python intégré](#client-python-intégré)
+  - [Projets](#projets)
+  - [Tâches planifiées (Scheduled Tasks)](#tâches-planifiées-scheduled-tasks)
+  - [Atelier terminal (TUI)](#atelier-terminal-tui)
   - [Documentation](#documentation)
   - [⚠️ Avertissement de sécurité](#️-avertissement-de-sécurité)
   - [Contribuer](#contribuer)
@@ -98,36 +107,54 @@ Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt s
    cd deer-flow
    ```
 
-2. **Générer les fichiers de configuration locaux**
+2. **Lancer l'assistant de configuration (recommandé)**
 
    Depuis le répertoire racine du projet (`deer-flow/`), exécutez :
 
    ```bash
-   make config
+   make setup
    ```
 
-   Cette commande crée les fichiers de configuration locaux à partir des templates fournis.
+   Cette commande lance un assistant interactif qui vous guide dans le choix d'un fournisseur LLM, d'une recherche web optionnelle et des préférences d'exécution/sécurité (mode sandbox, accès bash, outils d'écriture de fichiers). Il génère un `config.yaml` minimal et écrit vos clés dans `.env`. Comptez environ 2 minutes.
 
-3. **Configurer le(s) modèle(s) de votre choix**
+   Exécutez `make doctor` à tout moment pour vérifier votre configuration et obtenir des pistes de correction concrètes.
+   Si vous ouvrez une issue GitHub à propos d'un problème de configuration ou d'exécution en local, exécutez
+   `make support-bundle`. La commande affiche les prochaines étapes pour le rapporteur, écrit un fichier
+   `*-issue-summary.md` à coller dans l'issue, un fichier `*-issue-draft.md` destiné au dépôt d'issue
+   assisté par IA, ainsi qu'un zip de preuves optionnel sous
+   `.deer-flow/support-bundles/`. Si un assistant IA dépose l'issue, partez du brouillon et remplacez
+   chaque placeholder REQUIRED au lieu d'inventer les informations manquantes. N'attachez le zip que si
+   un mainteneur le demande, ou si le résumé seul ne suffit pas. Les mainteneurs et les outils de triage
+   IA peuvent commencer par `triage.json` ; le bundle ne contient que des diagnostics expurgés et des
+   manifestes de fichiers, et n'inclut ni `.env`, ni les messages bruts des conversations, ni le contenu
+   des fichiers de l'utilisateur.
 
-   Éditez `config.yaml` et définissez au moins un modèle :
+   > **Configuration avancée / manuelle** : si vous préférez éditer `config.yaml` directement, exécutez plutôt `make config` pour copier le template complet. Voir `config.example.yaml` pour la référence complète, y compris les providers basés sur un CLI (Codex CLI, Claude Code OAuth), OpenRouter, l'API Responses, et plus encore.
+
+   <details>
+   <summary>Exemples de configuration manuelle des modèles</summary>
 
    ```yaml
    models:
-     - name: gpt-4                       # Internal identifier
-       display_name: GPT-4               # Human-readable name
-       use: langchain_openai:ChatOpenAI  # LangChain class path
-       model: gpt-4                      # Model identifier for API
-       api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
-       max_tokens: 4096                  # Maximum tokens per request
-       temperature: 0.7                  # Sampling temperature
+     - name: gpt-4o
+       display_name: GPT-4o
+       use: langchain_openai:ChatOpenAI
+       model: gpt-4o
+       api_key: $OPENAI_API_KEY
 
      - name: openrouter-gemini-2.5-flash
        display_name: Gemini 2.5 Flash (OpenRouter)
        use: langchain_openai:ChatOpenAI
        model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
+       api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
+
+     - name: opper-claude-sonnet-4-6
+       display_name: Claude Sonnet 4.6 (Opper)
+       use: langchain_openai:ChatOpenAI
+       model: claude-sonnet-4-6
+       api_key: $OPPER_API_KEY
+       base_url: https://api.opper.ai/v3/compat
 
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
@@ -136,11 +163,25 @@ Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt s
        api_key: $OPENAI_API_KEY
        use_responses_api: true
        output_version: responses/v1
+
+     - name: qwen3-32b-vllm
+       display_name: Qwen3 32B (vLLM)
+       use: deerflow.models.vllm_provider:VllmChatModel
+       model: Qwen/Qwen3-32B
+       api_key: $VLLM_API_KEY
+       base_url: http://localhost:8000/v1
+       supports_thinking: true
+       when_thinking_enabled:
+         extra_body:
+           chat_template_kwargs:
+             enable_thinking: true
    ```
 
    OpenRouter et les passerelles compatibles OpenAI similaires doivent être configurés avec `langchain_openai:ChatOpenAI` et `base_url`. Si vous préférez utiliser un nom de variable d'environnement propre au fournisseur, pointez `api_key` vers cette variable explicitement (par exemple `api_key: $OPENROUTER_API_KEY`).
 
    Pour router les modèles OpenAI via `/v1/responses`, continuez d'utiliser `langchain_openai:ChatOpenAI` et définissez `use_responses_api: true` avec `output_version: responses/v1`.
+
+   Pour vLLM 0.19.0, utilisez `deerflow.models.vllm_provider:VllmChatModel`. Pour les modèles de raisonnement de type Qwen, DeerFlow active le raisonnement via `extra_body.chat_template_kwargs.enable_thinking` et préserve le champ non standard `reasoning` de vLLM au fil des conversations multi-tours avec appels d'outils. Les anciennes configurations `thinking` sont normalisées automatiquement pour assurer la rétrocompatibilité. Les modèles de raisonnement peuvent aussi exiger que le serveur soit démarré avec `--reasoning-parser ...`. Si votre déploiement vLLM local accepte n'importe quelle clé API non vide, vous pouvez tout de même définir `VLLM_API_KEY` avec une valeur factice.
 
    Exemples de providers basés sur un CLI :
 
@@ -162,46 +203,22 @@ Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt s
    ```
 
    - Codex CLI lit `~/.codex/auth.json`
-   - L'endpoint Responses de Codex rejette actuellement `max_tokens` et `max_output_tokens`, donc `CodexChatModel` n'expose pas de limite de tokens par requête
-   - Claude Code accepte `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, ou en clair `~/.claude/.credentials.json`
-   - Sur macOS, DeerFlow ne sonde pas le Keychain automatiquement. Exportez l'auth Claude Code explicitement si nécessaire :
+   - Claude Code accepte `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, ou `~/.claude/.credentials.json`
+   - Les entrées d'agents ACP sont distinctes des providers de modèles — si vous configurez `acp_agents.codex`, pointez-le vers un adaptateur Codex ACP tel que `npx -y @zed-industries/codex-acp`
+   - Sur macOS, exportez l'auth Claude Code explicitement si nécessaire :
 
    ```bash
    eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
    ```
 
-4. **Définir les clés API pour le(s) modèle(s) configuré(s)**
-
-   Choisissez l'une des méthodes suivantes :
-
-- Option A : Éditer le fichier `.env` à la racine du projet (recommandé)
-
+   Les clés API peuvent aussi être définies manuellement dans `.env` (recommandé) ou exportées dans votre shell :
 
    ```bash
-   TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
-   # OpenRouter also uses OPENAI_API_KEY when your config uses langchain_openai:ChatOpenAI + base_url.
-   # Add other provider keys as needed
-   INFOQUEST_API_KEY=your-infoquest-api-key
+   TAVILY_API_KEY=your-tavily-api-key
    ```
 
-- Option B : Exporter les variables d'environnement dans votre shell
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-   Pour les providers basés sur un CLI :
-   - Codex CLI : `~/.codex/auth.json`
-   - Claude Code OAuth : handoff explicite via env/fichier ou `~/.claude/.credentials.json`
-
-- Option C : Éditer `config.yaml` directement (non recommandé en production)
-
-   ```yaml
-   models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # Replace placeholder
-   ```
+   </details>
 
 ### Lancer l'application
 
@@ -214,7 +231,7 @@ make docker-init    # Pull sandbox image (only once or when image updates)
 make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
 ```
 
-`make docker-start` ne lance `provisioner` que si `config.yaml` utilise le mode provisioner (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` avec `provisioner_url`).
+`make docker-start` ne lance `provisioner` que si `config.yaml` utilise le mode provisioner (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` avec `provisioner_url`). Les utilisateurs qui lancent Compose directement peuvent ajouter `--profile provisioner` à la commande dev pour le même mode ; la stack par défaut ne nécessite pas Kubernetes.
 Les processus backend récupèrent automatiquement les changements dans `config.yaml` au prochain accès à la configuration, donc les mises à jour de métadonnées des modèles ne nécessitent pas de redémarrage manuel en développement.
 
 > [!TIP]
@@ -228,7 +245,7 @@ make down   # Stop and remove containers
 ```
 
 > [!NOTE]
-> Le serveur d'agents LangGraph fonctionne actuellement via `langgraph dev` (le serveur CLI open source).
+> Le runtime d'agent s'exécute actuellement dans la Gateway. nginx réécrit `/api/langgraph/*` vers l'API compatible LangGraph servie par la Gateway.
 
 Accès : http://localhost:2026
 
@@ -238,7 +255,8 @@ Voir [CONTRIBUTING.md](CONTRIBUTING.md) pour le guide complet de développement 
 
 Si vous préférez lancer les services en local :
 
-Prérequis : complétez d'abord les étapes de « Configuration » ci-dessus (`make config` et clés API des modèles). `make dev` nécessite un fichier de configuration valide (par défaut `config.yaml` à la racine du projet ; modifiable via `DEER_FLOW_CONFIG_PATH`).
+Prérequis : complétez d'abord les étapes de « Configuration » ci-dessus (`make setup`). `make dev` nécessite un fichier `config.yaml` valide à la racine du projet. Définissez `DEER_FLOW_PROJECT_ROOT` pour indiquer explicitement cette racine, ou `DEER_FLOW_CONFIG_PATH` pour pointer vers un fichier de configuration précis. L'état d'exécution est écrit par défaut dans `.deer-flow` sous la racine du projet et peut être déplacé avec `DEER_FLOW_HOME` ; les skills sont lus par défaut depuis `skills/` sous la racine du projet et peuvent être déplacés avec `DEER_FLOW_SKILLS_PATH`. Exécutez `make doctor` pour vérifier votre configuration avant de démarrer.
+Sous Windows, exécutez le flux de développement local depuis Git Bash. Les shells natifs `cmd.exe` et PowerShell ne sont pas pris en charge pour les scripts de service basés sur bash, et WSL n'est pas garanti car certains scripts dépendent d'utilitaires de Git for Windows comme `cygpath`.
 
 1. **Vérifier les prérequis** :
    ```bash
@@ -285,26 +303,31 @@ Voir le [Guide MCP Server](backend/docs/MCP_SERVER.md) pour les instructions dé
 
 DeerFlow peut recevoir des tâches depuis des applications de messagerie. Les canaux démarrent automatiquement une fois configurés — aucune IP publique n'est requise.
 
+DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisateur dans l'UI du workspace. Quand `channel_connections` est activé, les utilisateurs connectés peuvent lier Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ ou Buzz depuis la barre latérale / Settings > Channels. Cela réutilise les transports sortants `channels.*` existants, donc aucune IP publique ni URL de callback provider n'est requise. Les messages IM entrants s'exécutent ensuite sous le compte utilisateur DeerFlow connecté. Voir [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) pour la configuration et les notes de sécurité.
+
 | Canal | Transport | Difficulté |
 |---------|-----------|------------|
 | Telegram | Bot API (long-polling) | Facile |
 | Slack | Socket Mode | Modérée |
 | Feishu / Lark | WebSocket | Modérée |
+| WeChat | Tencent iLink (long-polling) | Modérée |
+| WeCom | WebSocket | Modérée |
+| DingTalk | Stream Push (WebSocket) | Modérée |
+| QQ | WebSocket (texte : messages privés et mentions de groupe) | Modérée |
+| Buzz | Relais Nostr (WebSocket, NIP-42) | Modérée |
 
 **Configuration dans `config.yaml` :**
 
 ```yaml
 channels:
-  # LangGraph Server URL (default: http://localhost:2024)
-  langgraph_url: http://localhost:2024
+  # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
+  langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
 
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false
@@ -317,6 +340,11 @@ channels:
     # domain: https://open.feishu.cn       # China (default)
     # domain: https://open.larksuite.com   # International
 
+  wecom:
+    enabled: true
+    bot_id: $WECOM_BOT_ID
+    bot_secret: $WECOM_BOT_SECRET
+
   slack:
     enabled: true
     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
@@ -326,7 +354,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # empty = allow all
+    allowed_users: []               # identifiants numériques, pas de @pseudo ; vide = tout le monde autorisé
 
     # Optional: per-channel / per-user session settings
     session:
@@ -341,6 +369,26 @@ channels:
           context:
             thinking_enabled: true
             subagent_enabled: true
+
+  wechat:
+    enabled: false
+    bot_token: $WECHAT_BOT_TOKEN
+    ilink_bot_id: $WECHAT_ILINK_BOT_ID
+    qrcode_login_enabled: true      # optionnel : autorise le bootstrap QR à la première utilisation quand bot_token est absent
+    allowed_users: []               # vide = tout le monde autorisé
+    polling_timeout: 35
+    state_dir: ./.deer-flow/wechat/state
+    max_inbound_image_bytes: 20971520
+    max_outbound_image_bytes: 20971520
+    max_inbound_file_bytes: 52428800
+    max_outbound_file_bytes: 52428800
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID             # ClientId depuis DingTalk Open Platform
+    client_secret: $DINGTALK_CLIENT_SECRET     # ClientSecret depuis DingTalk Open Platform
+    allowed_users: []                          # vide = tout le monde autorisé
+    card_template_id: ""                       # Optionnel : ID de modèle AI Card pour l'effet machine à écrire en streaming
 ```
 
 Définissez les clés API correspondantes dans votre fichier `.env` :
@@ -356,6 +404,18 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# WeChat iLink
+WECHAT_BOT_TOKEN=your_ilink_bot_token
+WECHAT_ILINK_BOT_ID=your_ilink_bot_id
+
+# WeCom
+WECOM_BOT_ID=your_bot_id
+WECOM_BOT_SECRET=your_bot_secret
+
+# DingTalk
+DINGTALK_CLIENT_ID=your_client_id
+DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
 **Configuration Telegram**
@@ -377,6 +437,29 @@ FEISHU_APP_SECRET=your_app_secret
 2. Ajoutez les permissions : `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
 3. Dans **Events**, abonnez-vous à `im.message.receive_v1` et sélectionnez le mode **Long Connection**.
 4. Copiez l'App ID et l'App Secret. Définissez `FEISHU_APP_ID` et `FEISHU_APP_SECRET` dans `.env` et activez le canal dans `config.yaml`.
+
+**Configuration WeChat**
+
+1. Activez le canal `wechat` dans `config.yaml`.
+2. Soit définissez `WECHAT_BOT_TOKEN` dans `.env`, soit mettez `qrcode_login_enabled: true` pour le bootstrap QR à la première utilisation.
+3. Quand `bot_token` est absent et que le bootstrap QR est activé, surveillez les logs du backend pour le contenu du QR renvoyé par iLink et complétez le flux de binding.
+4. Une fois le flux QR réussi, DeerFlow persiste le token acquis sous `state_dir` pour les redémarrages ultérieurs.
+5. Pour les déploiements Docker Compose, gardez `state_dir` sur un volume persistant afin que le curseur `get_updates_buf` et l'état d'auth sauvegardé survivent aux redémarrages.
+
+**Configuration WeCom**
+
+1. Créez un bot sur la plateforme WeCom AI Bot et obtenez le `bot_id` et le `bot_secret`.
+2. Activez `channels.wecom` dans `config.yaml` et renseignez `bot_id` / `bot_secret`.
+3. Définissez `WECOM_BOT_ID` et `WECOM_BOT_SECRET` dans `.env`.
+4. Assurez-vous que les dépendances du backend incluent `wecom-aibot-python-sdk`. Le canal utilise une connexion longue WebSocket et ne nécessite pas d'URL de callback publique.
+5. L'intégration actuelle prend en charge les messages entrants texte, image et fichier. Les images/fichiers finaux générés par l'agent sont aussi renvoyés dans la conversation WeCom.
+
+**Configuration DingTalk**
+
+1. Créez une application sur [DingTalk Open Platform](https://open.dingtalk.com/) et activez la capacité **Robot**.
+2. Dans la page de configuration du robot, définissez le mode de réception des messages sur **Stream**.
+3. Copiez le `Client ID` et le `Client Secret`. Définissez `DINGTALK_CLIENT_ID` et `DINGTALK_CLIENT_SECRET` dans `.env` et activez le canal dans `config.yaml`.
+4. *(Optionnel)* Pour activer les réponses en streaming AI Card (effet machine à écrire), créez un modèle **AI Card** sur la [plateforme de cartes DingTalk](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), puis définissez `card_template_id` dans `config.yaml` avec l'ID du modèle. Vous devez également demander les permissions `Card.Streaming.Write` et `Card.Instance.Write`.
 
 **Commandes**
 
@@ -404,6 +487,37 @@ LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
+
+#### Traçage Langfuse
+
+DeerFlow prend également en charge l'observabilité via [Langfuse](https://langfuse.com) pour les exécutions compatibles LangChain.
+
+Ajoutez les lignes suivantes à votre fichier `.env` :
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+Si vous utilisez une instance Langfuse auto-hébergée, définissez `LANGFUSE_BASE_URL` sur l'URL de votre déploiement.
+
+**Champs de corrélation des traces.** Chaque exécution d'agent est annotée avec les attributs de trace réservés de Langfuse afin que les pages Sessions et Users se remplissent automatiquement :
+
+- `session_id` = `thread_id` de LangGraph — regroupe toutes les traces d'une même conversation
+- `user_id` = utilisateur effectif issu de `get_effective_user_id()` (revient à `default` en mode sans authentification)
+- `trace_name` = assistant id (par défaut `lead-agent`)
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omis lorsqu'ils ne sont pas définis)
+- `metadata.deerflow_trace_id` = id de corrélation de requête DeerFlow, toujours identique à l'en-tête de réponse `X-Trace-Id` renvoyé par la même requête (`logging.enhance.enabled` contrôle uniquement si cet id est écrit dans les logs)
+
+Ces champs sont injectés dans `RunnableConfig.metadata` à la racine de l'invocation du graphe, à la fois pour le chemin gateway (`runtime/runs/worker.py::run_agent`) et le chemin embarqué (`client.py::DeerFlowClient.stream`), de sorte que tout callback compatible LangChain puisse les lire. Définissez `DEER_FLOW_ENV` (ou `ENVIRONMENT`) pour étiqueter les traces par environnement de déploiement.
+
+#### Utiliser les deux fournisseurs
+
+Si LangSmith et Langfuse sont tous deux activés, DeerFlow attache les deux callbacks de traçage et rapporte la même activité de modèle aux deux systèmes.
+
+Si un fournisseur est explicitement activé mais qu'il manque les identifiants requis, ou si son callback échoue à s'initialiser, DeerFlow échoue immédiatement (fail fast) lors de l'initialisation du traçage à la création du modèle, et le message d'erreur indique le fournisseur à l'origine de l'échec.
 
 Pour les déploiements Docker, le traçage est désactivé par défaut. Définissez `LANGSMITH_TRACING=true` et `LANGSMITH_API_KEY` dans votre `.env` pour l'activer.
 
@@ -477,6 +591,22 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 Voir [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) pour la référence API complète.
 
+### Objectifs de session (Session Goals)
+
+Utilisez `/goal <condition de complétion>` pour attacher une condition de complétion active au thread courant. Le goal est un état de portée thread, pas une activation de skill — il reste actif entre les tours jusqu'à ce que DeerFlow détermine qu'il a été satisfait, ou jusqu'à ce que vous le supprimiez.
+
+Commandes prises en charge :
+
+```text
+/goal finish the implementation and make all tests pass
+/goal              # afficher le goal actif
+/goal clear        # le supprimer
+```
+
+Après chaque exécution menée par la Gateway, DeerFlow évalue la conversation visible, y compris les appels d'outils de l'assistant et leurs résultats abrégés, par rapport au goal actif à l'aide d'un modèle évaluateur non-thinking. Un résultat d'outil réussi ne suffit pas à satisfaire un goal, et lorsque l'assistant a dû deviner une information manquante ou ambiguë, l'évaluateur renvoie `needs_user_input`. L'évaluateur doit renvoyer un blocker typé (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait` ou `goal_not_met_yet`) accompagné de preuves visibles. DeerFlow n'injecte une hidden continuation que si le dernier tour assistant est durablement checkpointé, que le blocker est `goal_not_met_yet`, que le thread n'a pas changé durant l'évaluation et que le disjoncteur de non-progression n'a pas déclenché. Le plafond de sécurité est de 8 hidden continuations par défaut, et les évaluations identiques de non-progression s'arrêtent après 2 tentatives répétées. `/goal clear` ainsi que toute nouvelle saisie utilisateur ont priorité sur les continuations en file d'attente. Lorsque le goal est satisfait, DeerFlow le supprime automatiquement et publie l'état mis à jour du thread.
+
+Le Web UI affiche le goal actif au-dessus de la zone de saisie. La même commande est disponible depuis le TUI et les canaux IM pris en charge. Dans le Web UI et les canaux IM pris en charge, définir `/goal <condition de complétion>` lance aussi une exécution avec la condition comme tâche ; les commandes de statut et de suppression ne gèrent que l'état du goal lui-même.
+
 ### Sub-Agents
 
 Les tâches complexes tiennent rarement en une seule passe. DeerFlow les décompose.
@@ -546,9 +676,110 @@ models = client.list_models()        # {"models": [...]}
 skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
 client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
+client.set_goal("thread-1", "finish the implementation and make all tests pass")
+client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
+client.clear_goal("thread-1")
 ```
 
 Toutes les méthodes retournant des dicts sont validées en CI contre les modèles de réponse Pydantic du Gateway (`TestGatewayConformance`), garantissant que le client intégré reste synchronisé avec les schémas de l'API HTTP. Voir `backend/packages/harness/deerflow/client.py` pour la documentation API complète.
+
+## Projets
+
+Les projets regroupent des conversations liées sous un nom partagé, des instructions et une étagère de documents.
+
+Une conversation rejoint un projet au moment de sa création (lorsqu'un projet est sélectionné) ou plus tard via le menu de déplacement. Les exécutions ne modifient jamais l'appartenance : l'envoi d'un message ne peut pas affecter ou réaffecter une conversation. Déplacer une conversation hors d'un projet la laisse non affectée jusqu'à ce qu'elle soit à nouveau explicitement déplacée.
+
+Le déplacement d'une conversation actualise son rattachement dans l'en-tête ainsi que les listes de projets, y compris lorsqu'une requête de métadonnées plus ancienne est encore en cours.
+
+Les projets exigent les tables et colonnes de base de données actuelles. Une base de données estampillée `0019_thread_incarnations` issue de l'ancien déploiement basé sur 0018 est rejetée au démarrage si le schéma des projets est absent. Suivez la [procédure de récupération hors ligne de la base de données](docs/database-forward-revision-recovery.md) avant de démarrer ce build sur cette base.
+
+### Instructions de projet
+
+Chaque projet stocke des instructions en forme libre — contexte, conventions et contraintes s'appliquant à toutes les conversations du projet — modifiables dans l'onglet Instructions de la page du projet, avec un compteur d'octets en direct. Lorsqu'une exécution démarre sur un thread membre, le Gateway fige une seule fois l'état actuel du projet et rend les instructions sous forme d'un bloc `<project>` borné, propre à cette requête et réservé à cette exécution : le bloc n'entre jamais dans le prompt système ni dans l'historique persisté, et chaque nouvelle exécution voit les dernières instructions enregistrées. Les instructions sont plafonnées à `projects.instructions_max_bytes` octets UTF-8 (par défaut 8192, plage 256–262144) ; les caractères multioctets comptent pour leur longueur en octets UTF-8. Les instructions trop longues sont rejetées avec un `422` à l'écriture et ne sont jamais tronquées silencieusement.
+
+### Étagère de documents
+
+Chaque projet dispose d'une étagère de documents pour les fichiers partagés par l'ensemble du projet, gérée depuis la section Documents de la page du projet :
+
+- **Téléverser** un fichier (bouton ou glisser-déposer, un fichier par requête). Les limites de taille de l'étagère réutilisent `uploads.max_file_size` (par défaut 50 Mio) ; re-téléverser un contenu identique renvoie l'entrée existante au lieu de créer un doublon.
+- **Lister** les entrées avec leur nom, taille, date de modification et provenance (téléversées vs. enregistrées depuis une conversation), et prévisualiser ou télécharger n'importe quelle entrée.
+- **Enregistrer dans le projet** depuis un fichier de thread : le navigateur en lecture seule des fichiers de conversation sous l'étagère liste les téléversements et sorties des threads membres, chacun avec une action « Enregistrer dans le projet ».
+- **Joindre à un thread** : copier un fichier de l'étagère vers les téléversements d'un thread via le pipeline d'ingestion normal, pour que la conversation puisse l'utiliser directement.
+
+Les exécutions sur les threads membres reçoivent également un index `<documents>` borné, rendu à chaque exécution à partir de l'instantané figé (limité par `projects.shelf_index_max_entries` et `projects.shelf_index_max_bytes`), et l'agent peut parcourir l'étagère et lire les documents avec les outils `list_project_documents` et `read_project_document`.
+
+### Sémantique de lecture des projets archivés
+
+Archiver un projet gèle les écritures mais conserve les lectures. Les threads d'un projet archivé s'exécutent toujours et reçoivent toujours les instructions du projet et l'index de l'étagère, et l'étagère reste entièrement lisible : listage, prévisualisation/téléchargement, navigateur de fichiers de conversation et jonction à un thread continuent de fonctionner. Les téléversements, l'enregistrement dans le projet et le déplacement de fichiers individuels de l'étagère vers la corbeille exigent un projet actif, et un document mis à la corbeille ne peut pas être restauré dans un projet archivé. La suppression d'un projet archivé reste possible et déplace toute son étagère vers la corbeille.
+
+### Corbeille
+
+Supprimer un document de l'étagère le déplace vers la corbeille au lieu de l'effacer : l'entrée conserve ses octets et un instantané de son projet d'origine pendant `projects.trash_retention_days` (par défaut 30) avant que le balayage de rétention puisse la purger définitivement. La page `/workspace/trash` — accessible depuis la section Documents de la page du projet et l'en-tête Projets de la barre latérale — liste les documents mis à la corbeille avec leur projet d'origine et la rétention restante, avec des actions Restaurer et Supprimer définitivement par entrée, plus une action Vider la corbeille qui supprime définitivement tous les documents de la corbeille — immédiatement, et non après la fenêtre de rétention ; la fenêtre ne fait que borner la durée pendant laquelle une entrée peut y rester avant que le balayage de rétention ne la récupère. La restauration renvoie le document à son projet d'origine, ou à un projet de votre choix lorsque l'origine a disparu ou est archivée ; si la cible contient déjà un fichier actif identique, les entrées fusionnent. La suppression d'un projet déplace toute son étagère vers la corbeille en une seule étape.
+
+## Tâches planifiées (Scheduled Tasks)
+
+DeerFlow inclut désormais un MVP de tâches planifiées (scheduled-task) de premier niveau dans le workspace.
+
+Capacités actuelles du MVP :
+
+- Gérer les tâches depuis `/workspace/scheduled-tasks`
+- Choisir si chaque tâche planifiée réutilise un thread ou crée un nouveau thread à chaque exécution
+- Prendre en charge les planifications `once`, `cron` et `interval`
+- Exécuter les tâches planifiées en arrière-plan comme des exécutions DeerFlow non interactives (`ask_clarification` n'y est pas exposé)
+- Utiliser le comportement de chevauchement `skip` pour les exécutions cron dues qui entrent en collision avec une exécution active sur le même thread réutilisé
+- Mettre en pause, reprendre, déclencher, inspecter l'historique et supprimer les tâches
+- Exécuter le travail planifié via le cycle de vie d'exécution normal de DeerFlow
+
+Limites actuelles du MVP :
+
+- Pas de tâches de notification en texte seul
+- Pas de cibles de dispatch canal ou GitHub
+
+Activez le polling en arrière-plan avec `config.yaml -> scheduler.enabled`. Le déclenchement manuel utilise la même ressource scheduled-task et le même chemin d'exécution.
+
+### Cycle de vie, plafonds de sécurité et conditions d'arrêt
+
+- La page des tâches et l'API REST (`POST` / `PATCH /api/scheduled-tasks`) acceptent un objectif par exécution (`goal_objective`), un plafond de sécurité (`max_runs`, `end_at`) et une condition d'arrêt (`stop_condition`). Envoyer `null` dans un PATCH efface l'un de ces quatre champs ; un `end_at` sans décalage UTC est une heure locale dans le fuseau de la tâche.
+- La condition d'arrêt est la règle « arrête-toi quand … » de l'utilisateur. Elle est stockée dans un champ dédié (migration `0031`), jamais dans les instructions de la tâche. DeerFlow ne l'ajoute au message d'une exécution qu'au moment où celle-ci démarre, en lui demandant d'appeler `stop_scheduled_task` lorsque la règle est remplie. Lorsque `scheduler.tool_enabled` est activé, chaque exécution planifiée peut mettre en pause sa propre planification, que la tâche ait été créée dans une conversation ou sur la page des tâches ; sinon, l'exécution signale simplement que la règle est remplie.
+- Les tâches avec objectif créées sur la page des tâches sont désormais évaluées comme celles créées dans une conversation, et leurs exécutions reçoivent aussi les notes enregistrées et la référence à l'exécution précédente.
+- La reprise calcule la prochaine exécution à partir de maintenant : une longue pause ne déclenche jamais d'exécution de rattrapage. Une tâche ponctuelle dont l'heure est passée renvoie `422 once_time_passed` et demande une nouvelle heure. Reprendre une tâche active ne change rien ; mettre en pause une tâche terminée renvoie `409 task_finished`.
+- `max_runs` compte les exécutions automatiques sur toute la vie de la tâche ; les exécutions d'essai ne comptent jamais. Réactiver une tâche dont le plafond est atteint (reprise, ou PATCH qui réarme la planification d'une tâche terminée) renvoie `409 limits_exhausted`, sauf si la même requête renouvelle la limite épuisée : un nombre d'exécutions épuisé demande un `max_runs` plus élevé ou `null`, une heure de fin dépassée demande un `end_at` plus tardif ou `null` (repousser `end_at` seul ne relance pas une tâche dont `max_runs` est épuisé). `POST /api/scheduled-tasks/{task_id}/resume` accepte pour cela un corps facultatif `{"max_runs": …, "end_at": …}` (`null` supprime un plafond). Un PATCH qui ne change que le plafond d'une tâche terminée l'enregistre et la laisse terminée.
+- Les échecs de vérification de l'objectif (évaluateur en échec, ou conversation modifiée pendant la vérification) ne comptent pas pour la pause automatique après trois échecs et ne remettent pas le compteur à zéro. Modifier l'objectif, les instructions ou la condition d'arrêt, ou ajouter une note, repart d'un nouveau compte ; la reprise le conserve.
+- Tant que le planificateur de ce processus Gateway ne tourne pas, la création d'une tâche (y compris la duplication) renvoie `409 scheduler_not_running`. `GET /api/features` expose `scheduled_tasks.available`, `running`, `tool_enabled` et `min_interval_seconds`.
+- Les erreurs de `/api/scheduled-tasks*` ont la forme `{"detail": {"code", "message", "params"}}` ; voir [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) et `contracts/scheduled_task_errors_contract.json`.
+- Les créneaux d'exécution sont partagés équitablement entre les propriétaires des tâches : un même propriétaire peut avoir au plus `scheduler.max_concurrent_runs_per_user` exécutions planifiées en démarrage ou en cours à la fois (2 par défaut, jamais plus que `max_concurrent_runs` ; `0` désactive ce plafond par propriétaire), et la file d'attente est vidée propriétaire par propriétaire, si bien que l'arriéré de l'un ne retarde jamais l'exécution d'un autre. Une exécution qui attend plus longtemps que `scheduler.queue_timeout_seconds` est ignorée, et l'historique indique qu'elle a attendu trop longtemps un créneau libre.
+- Avec `channel_connections.enabled: true`, les mises à jour des tâches planifiées sont envoyées aux identités IM connectées du propriétaire, uniquement sur les applications qui gèrent l'envoi proactif (WeCom aujourd'hui) ; les paramètres indiquent pour chaque application si les mises à jour y sont envoyées. Chaque occurrence envoie au plus un message (exécution terminée, en échec ou objectif non atteint, pause automatique, pause par l'agent, fin de la tâche), mis en file dans la même transaction que le résultat, donc une seule fois même après une reprise sur panne. Le message se lit seul, dans la langue de votre interface web (sinon `channel_connections.notification_locale`), sans identifiants ni liens. Les essais manuels simples et les exécutions interrompues ne notifient pas.
+
+### Créer des planifications dans une conversation
+
+Activez `scheduler.enabled: true` et `scheduler.tool_enabled: true`, puis redémarrez le Gateway. Un tour interactif autorisé peut alors utiliser `schedule_task` pour créer, modifier, lister, mettre en pause, reprendre ou supprimer des tâches, lancer une exécution d'essai ou enregistrer une note. Par exemple : « Chaque jour ouvré à 9 h, vérifie release-checklist.md et dis-moi ce qui n'est pas coché ; arrête-toi quand tout est coché. » Dans l'application web, le résultat s'affiche sous forme de carte mise à jour en direct (planification, condition d'arrêt, boutons) et l'agent répond en une ou deux phrases ; dans les messageries (IM) et les autres tours hors web, il décrit en texte la planification, la prochaine exécution et la condition d'arrêt.
+
+- **Tâches gérées par une conversation.** Celles qui y ont été créées et, dans une conversation d'exécution (le chat où une exécution planifiée a publié son résultat), la tâche de cette exécution : « mets-la en pause » ou « passe-la à 10 h » y fonctionnent aussi. Cela ne vaut que pour les messages que vous envoyez ; une exécution planifiée ne peut que mettre en pause sa propre planification avec `stop_scheduled_task`.
+- **Une modification garde la tâche.** Changer l'horaire, les instructions, l'objectif, la condition d'arrêt ou le plafond de sécurité est un `update` de la même tâche : son identifiant et son historique sont conservés. `resume` relance une tâche en pause ou terminée, sans exécution de rattrapage. Si le plafond est atteint, l'agent demande comment renouveler la limite épuisée (relever `max_runs` ou le supprimer ; repousser `end_at` ou le supprimer), puis l'envoie avec la reprise.
+- **Fuseau horaire.** Un fuseau que vous nommez l'emporte. Sinon, une nouvelle tâche utilise le fuseau du navigateur que l'application web envoie avec chaque message (`context.client_timezone`, lu uniquement pour cela), et le résultat indique le fuseau retenu. Les intervalles et les heures ponctuelles avec décalage UTC n'en ont pas besoin ; pour un cron ou une heure locale ponctuelle sans fuseau connu (par exemple depuis une messagerie), l'agent pose la question. Une modification garde le fuseau enregistré ; le fuseau du navigateur ne change jamais une tâche existante.
+- **Où apparaissent les résultats.** Chaque exécution publie son résultat dans un nouveau chat intitulé « {tâche} · {heure locale} », ou dans le chat d'origine lorsque la tâche s'y exécute. Quand le planning est mis en pause par l'agent, mis en pause automatiquement ou se termine, le chat d'origine affiche une ligne à l'endroit où en était la conversation, avec un lien vers cette exécution ou vers la tâche ; rien d'autre n'y est renvoyé. La ligne reste après la suppression de la tâche. Le chat d'exécution affiche les instructions de la tâche dans un bloc replié « Instructions de la tâche » sous l'en-tête de l'exécution.
+- **Langue.** L'agent rédige le titre, les instructions et la condition d'arrêt dans votre langue, et les exécutions planifiées répondent dans la langue des instructions.
+- **Essai.** Demandez-le directement, par exemple « Run it now » ou « 先跑一次吧 » ; le bouton **Run once now** de la carte fait de même. Un simple « yes », une mention de la tâche ou une demande citée ou conditionnelle ne lance pas d'exécution payante. Un essai ne compte pas dans `max_runs`.
+
+## Atelier terminal (TUI)
+
+`deerflow` est un atelier natif terminal pour ceux qui vivent dans le shell. Il s'exécute de manière **intégrée** sur `DeerFlowClient` — pas besoin de Gateway, de frontend, de nginx ou de Docker — tout en honorant les mêmes `config.yaml`, checkpointer, skills, mémoire, MCP et sandbox que le reste de DeerFlow.
+
+![DeerFlow TUI](docs/tui/tui-preview.svg)
+
+```bash
+uv pip install 'deerflow-harness[tui]'        # dépendance optionnelle 'textual'
+
+deerflow                                      # lancer l'UI terminal (TTY requis)
+deerflow --continue                           # reprendre le thread le plus récent
+deerflow --resume THREAD                      # reprendre un thread par id
+deerflow --print "summarize this repo"        # réponse one-shot headless vers stdout
+deerflow --json  "hello"                       # StreamEvents séparés par saut de ligne en mode headless
+```
+
+Une surface de chat pilotée au clavier avec un transcript en streaming (réponses rendues en Markdown), des cartes d'activité d'outils compactes, une palette de commandes slash `/`, la gestion des goal via `/goal`, des sélecteurs `/model` et `/threads`, l'historique de saisie, et l'interruption via `Esc` / `Ctrl+C`. Les sessions ouvertes dans le TUI apparaissent aussi dans la barre latérale du Web UI — elles écrivent dans le magasin de threads partagé sous l'utilisateur local par défaut, donc le terminal et le web restent synchronisés **sans lancer la Gateway**.
+
+Voir [backend/docs/TUI.md](backend/docs/TUI.md) pour le guide complet.
 
 ## Documentation
 
@@ -607,4 +838,4 @@ Votre engagement sans faille et votre expertise sont le moteur du succès de Dee
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)

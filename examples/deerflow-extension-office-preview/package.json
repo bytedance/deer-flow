@@ -1,0 +1,19 @@
+{
+  "name": "deerflow-office-preview-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@jvmr/pptx-to-html": "1.1.2",
+    "@xmldom/xmldom": "0.9.12",
+    "docx-preview": "0.3.7",
+    "exceljs": "4.4.0",
+    "jszip": "3.10.1",
+    "saxes": "6.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

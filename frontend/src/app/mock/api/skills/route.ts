@@ -34,6 +34,14 @@ export function GET() {
         enabled: true,
       },
       {
+        name: "music-generation",
+        description:
+          "Use this skill when the user requests to generate, create, compose, or produce music or songs — background music, theme songs, jingles, or instrumental tracks. Generates a song from a style/mood prompt and optional lyrics via the MiniMax music API.",
+        license: null,
+        category: "public",
+        enabled: true,
+      },
+      {
         name: "podcast-generation",
         description:
           "Use this skill when the user requests to generate, create, or produce podcasts from text content. Converts written content into a two-host conversational podcast audio format with natural dialogue.",

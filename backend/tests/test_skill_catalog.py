@@ -1,0 +1,322 @@
+"""Tests for SkillCatalog — deferred skill discovery search engine."""
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from deerflow.skills.catalog import MAX_QUERY_CHARS, MAX_RESULTS, SkillCatalog, _normalize_search_text
+from deerflow.skills.types import Skill, SkillCategory
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+def _make_skill(
+    name: str,
+    description: str = "A skill",
+    category: SkillCategory = SkillCategory.PUBLIC,
+    allowed_tools: tuple[str, ...] | None = None,
+) -> Skill:
+    """Create a minimal Skill for testing."""
+    base = Path("/mnt/skills") / category.value / name
+    return Skill(
+        name=name,
+        description=description,
+        license=None,
+        skill_dir=base,
+        skill_file=base / "SKILL.md",
+        relative_path=Path(name),
+        category=category,
+        allowed_tools=allowed_tools,
+        enabled=True,
+    )
+
+
+@pytest.fixture
+def sample_skills() -> list[Skill]:
+    return [
+        _make_skill("data-analysis", "Analyze data with Python, pandas, jupyter"),
+        _make_skill("deep-research", "Conduct multi-source research with fact-checking"),
+        _make_skill("chart-visualization", "Visualize data with interactive charts"),
+        _make_skill("podcast-generation", "Generate podcast scripts and audio"),
+        _make_skill("music-generation", "Generate music compositions"),
+        _make_skill("video-generation", "Generate video from text prompts"),
+        _make_skill("image-generation", "Generate images from descriptions"),
+        _make_skill("ppt-generation", "Generate PowerPoint presentations"),
+        _make_skill("custom-analyzer", "Custom data analyzer", category=SkillCategory.CUSTOM),
+    ]
+
+
+@pytest.fixture
+def catalog(sample_skills: list[Skill]) -> SkillCatalog:
+    return SkillCatalog(tuple(sample_skills))
+
+
+# ── Name property ─────────────────────────────────────────────────────────────
+
+
+def test_names_returns_frozenset(catalog: SkillCatalog):
+    assert isinstance(catalog.names, frozenset)
+
+
+def test_names_contains_all_skills(catalog: SkillCatalog, sample_skills: list[Skill]):
+    expected = {s.name for s in sample_skills}
+    assert catalog.names == expected
+
+
+def test_empty_catalog_names():
+    catalog = SkillCatalog(())
+    assert catalog.names == frozenset()
+
+
+# ── Exact selection (select:) ─────────────────────────────────────────────────
+
+
+def test_select_single(catalog: SkillCatalog):
+    result = catalog.search("select:data-analysis")
+    assert len(result) == 1
+    assert result[0].name == "data-analysis"
+
+
+def test_select_multiple(catalog: SkillCatalog):
+    result = catalog.search("select:data-analysis,deep-research")
+    names = {s.name for s in result}
+    assert names == {"data-analysis", "deep-research"}
+
+
+def test_select_nonexistent(catalog: SkillCatalog):
+    result = catalog.search("select:nonexistent-skill")
+    assert result == []
+
+
+def test_select_partial_match(catalog: SkillCatalog):
+    """select: with one valid and one invalid name returns only the valid one."""
+    result = catalog.search("select:data-analysis,nonexistent")
+    assert len(result) == 1
+    assert result[0].name == "data-analysis"
+
+
+def test_select_returns_all_requested(catalog: SkillCatalog, sample_skills: list[Skill]):
+    """select: returns all requested names without capping — exact selection, not ranked search."""
+    all_names = ",".join(sorted(catalog.names))
+    result = catalog.search(f"select:{all_names}")
+    assert len(result) == len(sample_skills)
+
+
+def test_long_select_preserves_exact_names_and_catalog_order():
+    skills = tuple(_make_skill(f"skill-number-{i:02d}-with-a-longish-name") for i in range(30))
+    catalog = SkillCatalog(skills)
+    requested = [s.name for s in reversed(skills)] + [skills[0].name, "missing", "SKILL-NUMBER-00-WITH-A-LONGISH-NAME"]
+    query = "  select:" + ", ".join(requested) + "  "
+    assert len(query) > MAX_QUERY_CHARS
+
+    assert catalog.search(query) == list(skills)
+
+
+def test_select_does_not_match_a_name_cut_at_search_limit():
+    skills = (_make_skill("data"), _make_skill("data-analysis"))
+    prefix = "select:" + "," * (MAX_QUERY_CHARS - len("select:data"))
+
+    assert SkillCatalog(skills).search(f"{prefix}data-analysis") == [skills[1]]
+
+
+@pytest.mark.parametrize("prefix", ["", "+report "])
+def test_ranked_search_still_ignores_terms_beyond_character_limit(prefix: str):
+    catalog = SkillCatalog((_make_skill("report", "needle"),))
+    query = prefix + "unknown " * MAX_QUERY_CHARS + "needle"
+
+    assert catalog.search(query) == catalog.search(query[:MAX_QUERY_CHARS])
+
+
+def test_search_normalizes_catalog_metadata_once(catalog: SkillCatalog):
+    with patch("deerflow.skills.catalog._normalize_search_text", wraps=_normalize_search_text) as normalize:
+        assert catalog.search("select:data-analysis")
+        normalize.assert_not_called()
+        assert catalog.search("data")
+        assert catalog.search("+data Python")
+        assert catalog.search("+data")
+        assert catalog.search("research")
+        normalized_inputs = [call.args[0] for call in normalize.call_args_list]
+        for skill in catalog.skills:
+            assert normalized_inputs.count(skill.name) == 1
+            assert normalized_inputs.count(skill.description) == 1
+
+
+# ── Required-prefix search (+) ────────────────────────────────────────────────
+
+
+def test_required_prefix_filters_by_name(catalog: SkillCatalog):
+    result = catalog.search("+podcast")
+    assert all("podcast" in s.name for s in result)
+
+
+def test_required_prefix_with_ranking(catalog: SkillCatalog):
+    """'+gen generation' should require 'gen' in name, rank by 'generation'."""
+    result = catalog.search("+gen generation")
+    assert all("gen" in s.name for s in result)
+
+
+def test_required_prefix_bare_plus(catalog: SkillCatalog):
+    """Bare '+' with no token returns empty."""
+    result = catalog.search("+")
+    assert result == []
+
+
+def test_required_prefix_no_match(catalog: SkillCatalog):
+    result = catalog.search("+zzz_nonexistent")
+    assert result == []
+
+
+def test_required_prefix_keeps_single_letter_semantics():
+    catalog = SkillCatalog((_make_skill("r-analysis"), _make_skill("python-analysis")))
+
+    assert [skill.name for skill in catalog.search("+r")] == ["r-analysis"]
+
+
+# ── Free-text intent search ───────────────────────────────────────────────────
+
+
+def test_keyword_matches_name(catalog: SkillCatalog):
+    result = catalog.search("podcast")
+    assert any(s.name == "podcast-generation" for s in result)
+
+
+def test_keyword_matches_description(catalog: SkillCatalog):
+    """Description match should also be returned."""
+    result = catalog.search("pandas")
+    assert any(s.name == "data-analysis" for s in result)
+
+
+def test_name_match_scores_higher_than_description(catalog: SkillCatalog):
+    """When both name and description match, name match should rank first."""
+    # 'data-analysis' name matches 'data', description also matches 'data'
+    # 'deep-research' description matches 'data' (no, it doesn't)
+    # Let's use 'chart' — matches chart-visualization by name
+    result = catalog.search("chart")
+    assert result[0].name == "chart-visualization"
+
+
+def test_search_is_case_insensitive(catalog: SkillCatalog):
+    result_lower = catalog.search("data")
+    result_upper = catalog.search("DATA")
+    assert {s.name for s in result_lower} == {s.name for s in result_upper}
+
+
+def test_regex_punctuation_is_treated_as_literal_input(catalog: SkillCatalog):
+    """Model-generated punctuation must not be compiled or raise."""
+    result = catalog.search("(invalid")
+    assert isinstance(result, list)
+
+
+def test_multi_term_query_matches_across_name_separators(catalog: SkillCatalog):
+    result = catalog.search("chart visualization")
+
+    assert result[0].name == "chart-visualization"
+
+
+def test_multi_term_query_matches_noncontiguous_description(catalog: SkillCatalog):
+    result = catalog.search("analyze Python")
+
+    assert result[0].name == "data-analysis"
+
+
+def test_more_intent_terms_outrank_incidental_match():
+    catalog = SkillCatalog(
+        (
+            _make_skill("python-style", "Format Python source code"),
+            _make_skill("spreadsheet-analysis", "Analyze spreadsheet data with Python"),
+        )
+    )
+
+    result = catalog.search("analyze spreadsheet python")
+
+    assert [skill.name for skill in result] == ["spreadsheet-analysis", "python-style"]
+
+
+def test_name_match_outranks_description_only_at_equal_coverage():
+    catalog = SkillCatalog(
+        (
+            _make_skill("scripting", "Automate work with Python"),
+            _make_skill("python-workflow", "Automate developer work"),
+        )
+    )
+
+    result = catalog.search("python")
+
+    assert [skill.name for skill in result] == ["python-workflow", "scripting"]
+
+
+def test_score_ties_preserve_catalog_order():
+    catalog = SkillCatalog(
+        (
+            _make_skill("first", "Generate reports"),
+            _make_skill("second", "Generate reports"),
+        )
+    )
+
+    assert [skill.name for skill in catalog.search("reports")] == ["first", "second"]
+
+
+def test_unicode_compatibility_normalization(catalog: SkillCatalog):
+    result = catalog.search("ＤＡＴＡ")
+
+    assert result[0].name == "data-analysis"
+
+
+def test_single_letter_language_term_remains_searchable():
+    catalog = SkillCatalog((_make_skill("cpp-analysis", "Analyze C++ code"),))
+
+    assert catalog.search("C++")[0].name == "cpp-analysis"
+
+
+def test_cjk_terms_rank_by_coverage():
+    catalog = SkillCatalog(
+        (
+            _make_skill("generic-chart", "生成可视化图表"),
+            _make_skill("data-visualization", "执行数据分析和可视化"),
+        )
+    )
+
+    result = catalog.search("数据 可视化")
+
+    assert [skill.name for skill in result] == ["data-visualization", "generic-chart"]
+
+
+def test_empty_query(catalog: SkillCatalog):
+    result = catalog.search("")
+    assert result == []
+
+
+def test_whitespace_only_query(catalog: SkillCatalog):
+    result = catalog.search("   ")
+    assert result == []
+
+
+def test_punctuation_only_query(catalog: SkillCatalog):
+    assert catalog.search("((...---___") == []
+
+
+def test_long_query_is_bounded_and_does_not_raise(catalog: SkillCatalog):
+    result = catalog.search("data " * 100_000)
+
+    assert result[0].name == "data-analysis"
+
+
+def test_max_results_cap(catalog: SkillCatalog):
+    """Free-text search should cap results at MAX_RESULTS."""
+    # 'generation' matches many descriptions
+    result = catalog.search("generation")
+    assert len(result) <= MAX_RESULTS
+
+
+# ── Edge cases ────────────────────────────────────────────────────────────────
+
+
+def test_frozen_catalog_is_hashable(catalog: SkillCatalog):
+    """SkillCatalog with real skills must be hashable (frozen=True on both Skill and SkillCatalog)."""
+    assert hash(catalog) is not None
+
+
+def test_names_cached_property_stable(catalog: SkillCatalog):
+    """Multiple accesses to .names should return the same frozenset."""
+    assert catalog.names is catalog.names
