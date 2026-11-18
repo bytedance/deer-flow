@@ -86,6 +86,29 @@ test("denied reads return no pending attachments without interrupting staging or
   ).not.toThrow();
 });
 
+test("staging preserves pending attachments when their stored list cannot be read", () => {
+  stageProjectAttachment("thread-1", ATTACHMENT);
+  rs.spyOn(window.sessionStorage, "getItem").mockImplementationOnce(() => {
+    throw new DOMException("Read denied", "SecurityError");
+  });
+
+  stageProjectAttachment("thread-1", OTHER);
+
+  expect(readProjectAttachments("thread-1")).toEqual([ATTACHMENT]);
+});
+
+test("retiring sent attachments preserves the list when it cannot be read", () => {
+  stageProjectAttachment("thread-1", ATTACHMENT);
+  stageProjectAttachment("thread-1", OTHER);
+  rs.spyOn(window.sessionStorage, "getItem").mockImplementationOnce(() => {
+    throw new DOMException("Read denied", "SecurityError");
+  });
+
+  retireProjectAttachments("thread-1", [ATTACHMENT]);
+
+  expect(readProjectAttachments("thread-1")).toEqual([ATTACHMENT, OTHER]);
+});
+
 test("quota failures do not interrupt staging or retirement of a partial list", () => {
   stageProjectAttachment("thread-1", ATTACHMENT);
   stageProjectAttachment("thread-1", OTHER);

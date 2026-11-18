@@ -84,7 +84,8 @@ from the project page's Documents section:
   conversation even when the browser blocks or fills `sessionStorage`. The
   staged attachment handoff is best-effort in that case, so a blocked storage
   area can prevent the attachment chip from surviving the route change or a
-  reload.
+  reload. If the browser temporarily blocks reading the pending list, adding
+  a document or clearing sent attachments leaves the saved list intact.
 
 New shelf names, including explicit upload `name` and promotion `shelf_name`,
 follow ordinary upload filename validation. Names containing NUL, Windows

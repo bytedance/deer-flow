@@ -43,14 +43,6 @@ function safeSessionStorage(): Storage | null {
   }
 }
 
-function safeGetItem(storage: Storage, key: string): string | null {
-  try {
-    return storage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
 function safeSetItem(storage: Storage, key: string, value: string): void {
   try {
     storage.setItem(key, value);
@@ -91,14 +83,15 @@ export function stageProjectAttachment(
   if (!storage) {
     return;
   }
-  const pending = readProjectAttachments(threadId).filter(
+  const key = storageKey(threadId);
+  const pending = readStoredAttachments(storage, key);
+  if (pending === null) {
+    return;
+  }
+  const remaining = pending.filter(
     (candidate) => candidate.virtual_path !== attachment.virtual_path,
   );
-  safeSetItem(
-    storage,
-    storageKey(threadId),
-    JSON.stringify([...pending, attachment]),
-  );
+  safeSetItem(storage, key, JSON.stringify([...remaining, attachment]));
 }
 
 /**
@@ -113,7 +106,20 @@ export function readProjectAttachments(
   if (!storage) {
     return [];
   }
-  const raw = safeGetItem(storage, storageKey(threadId));
+  return readStoredAttachments(storage, storageKey(threadId)) ?? [];
+}
+
+function readStoredAttachments(
+  storage: Storage,
+  key: string,
+): AttachProjectDocumentResult[] | null {
+  let raw: string | null;
+  try {
+    raw = storage.getItem(key);
+  } catch {
+    // The list is unknown. Mutating callers must leave the stored value intact.
+    return null;
+  }
   if (raw === null) {
     return [];
   }
@@ -128,7 +134,7 @@ export function readProjectAttachments(
   } catch {
     // Corrupt payload: drop it.
   }
-  safeRemoveItem(storage, storageKey(threadId));
+  safeRemoveItem(storage, key);
   return [];
 }
 
@@ -146,14 +152,19 @@ export function retireProjectAttachments(
   if (!storage) {
     return;
   }
+  const key = storageKey(threadId);
+  const pending = readStoredAttachments(storage, key);
+  if (pending === null) {
+    return;
+  }
   const sentPaths = new Set(sent.map((attachment) => attachment.virtual_path));
-  const remaining = readProjectAttachments(threadId).filter(
+  const remaining = pending.filter(
     (attachment) => !sentPaths.has(attachment.virtual_path),
   );
   if (remaining.length === 0) {
-    safeRemoveItem(storage, storageKey(threadId));
+    safeRemoveItem(storage, key);
   } else {
-    safeSetItem(storage, storageKey(threadId), JSON.stringify(remaining));
+    safeSetItem(storage, key, JSON.stringify(remaining));
   }
 }
 
