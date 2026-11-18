@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Literal
 
@@ -15,6 +16,7 @@ from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
+from deerflow.models.selection import ModelScope, resolve_model_control
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,7 @@ class ModelResponse(BaseModel):
     description: str | None = Field(None, description="Model description")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode (deprecated: derived from `reasoning`)")
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort (deprecated: derived from `reasoning`)")
+    provider: str | None = Field(default=None, description="Managed provider display label; no endpoint or credentials")
     reasoning: ReasoningCapabilitiesResponse = Field(..., description="Normalized reasoning capability contract")
 
 
@@ -73,6 +76,7 @@ def _model_response(model: ModelConfig) -> ModelResponse:
         model=model.model,
         display_name=model.display_name,
         description=model.description,
+        provider=model._managed_provider,
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
         reasoning=ReasoningCapabilitiesResponse(**reasoning_capabilities_payload(resolve_reasoning_contract(model))),
@@ -90,6 +94,44 @@ class ModelsListResponse(BaseModel):
 
     models: list[ModelResponse]
     token_usage: TokenUsageResponse
+
+
+class ModelControlRequest(BaseModel):
+    text: str = Field(max_length=4000)
+    model_name: str | None = Field(default=None, max_length=200)
+    scope: ModelScope | None = None
+
+
+@router.post("/models/resolve", summary="Resolve a direct user model selection")
+async def resolve_model_selection(body: ModelControlRequest, request: Request, config: AppConfig = Depends(get_config)) -> dict:
+    """Read-only preview. Never starts a run or changes model defaults."""
+    listing = await list_models(request, config)
+    visible_names = {model.name for model in listing.models}
+    visible_models = [model for model in config.models if model.name in visible_names]
+    result = resolve_model_control(body.text, visible_models, model_name=body.model_name, scope=body.scope)
+    if result["candidates"]:
+        user = await get_optional_user_from_request(request)
+        if user is not None:
+            owner = await _resolve_bound_owner_for_model_list(request)
+            internal = _is_internal_caller(request, user)
+            if result["status"] == "resolved":
+                await asyncio.to_thread(authorize_model_use, owner or user, result["model_name"], is_internal=internal, app_config=config)
+            else:
+                usable_names = set()
+                for candidate in result["candidates"]:
+                    try:
+                        await asyncio.to_thread(authorize_model_use, owner or user, candidate["name"], is_internal=internal, app_config=config)
+                    except HTTPException as exc:
+                        if exc.status_code != 403:
+                            raise
+                    else:
+                        usable_names.add(candidate["name"])
+                if not usable_names:
+                    # A recognized but denied choice must not become ordinary task text.
+                    result.update(status="unavailable", model_name=None, candidates=[])
+                else:
+                    result = resolve_model_control(body.text, [model for model in visible_models if model.name in usable_names], model_name=body.model_name, scope=body.scope)
+    return result
 
 
 @router.get(
@@ -155,7 +197,7 @@ async def list_models(
         owner = await _resolve_bound_owner_for_model_list(request)
         principal_user = owner if owner is not None else user
         try:
-            provider, principal = resolve_model_authorization(principal_user, is_internal=_is_internal_caller(request, user))
+            provider, principal = await asyncio.to_thread(resolve_model_authorization, principal_user, is_internal=_is_internal_caller(request, user))
         except _AuthorizationUnavailable as exc:
             if exc.fail_closed:
                 visible_models = []
@@ -221,6 +263,6 @@ async def get_model(
     # model exists but the role lacks permission to use it).
     user = await get_optional_user_from_request(request)
     if user is not None:
-        authorize_model_use(user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
+        await asyncio.to_thread(authorize_model_use, user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
 
     return _model_response(model)

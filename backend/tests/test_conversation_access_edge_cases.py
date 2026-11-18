@@ -39,9 +39,9 @@ def test_visible_text_is_parsed_once_per_scan_and_refreshed_on_the_next_read(mon
 
     calls = Counter()
 
-    def track_projection(row):
+    def track_projection(row, **kwargs):
         calls[row["seq"]] += 1
-        return _visible_text(row)
+        return _visible_text(row, **kwargs)
 
     monkeypatch.setattr(conversation_access, "_visible_text", track_projection)
 
@@ -50,7 +50,7 @@ def test_visible_text_is_parsed_once_per_scan_and_refreshed_on_the_next_read(mon
         await threads.create("source", user_id="alice")
         await _put(events, "oldest")
         await _put(events, "<think>private</think>older")
-        newest = await _put(events, [{"type": "text", "text": "newest"}, {"type": "text", "text": "answer"}])
+        await _put(events, [{"type": "text", "text": "newest"}, {"type": "text", "text": "answer"}])
         reader, _ = prepare(["source"])
 
         page = json.loads(await reader(thread_id="source", limit=1))
@@ -59,7 +59,8 @@ def test_visible_text_is_parsed_once_per_scan_and_refreshed_on_the_next_read(mon
         assert calls == {3: 1, 2: 1}
 
         calls.clear()
-        newest["content"]["content"] = "updated answer"
+        # Model a store-side content refresh; the public receipt is intentionally detached.
+        events._events["source"][2]["content"]["content"] = "updated answer"
         refreshed = json.loads(await reader(thread_id="source", limit=1))
         assert refreshed["messages"][0]["text"] == "updated answer"
         assert calls == {3: 1, 2: 1}
@@ -94,6 +95,13 @@ def test_only_visible_text_blocks_cross_the_reader():
     }
 
     assert _visible_text(row) == ("assistant", "visible answer")
+
+
+@pytest.mark.parametrize("malformed_role", [["ai"], {"type": "ai"}])
+def test_visible_text_skips_unhashable_message_roles(malformed_role):
+    row = {"seq": 1, "content": {"type": malformed_role, "content": "ignored"}}
+
+    assert _visible_text(row) is None
 
 
 @pytest.mark.parametrize("path", ["/workspace/chats/source", "/workspace/agents/researcher/chats/source"])

@@ -75,11 +75,20 @@ Python and POSIX utilities required by the selected workload and output sync.
 The normal warm-up creates and destroys a separate remote before measurement.
 
 CLI `--replicas` and `--idle-timeout` override their YAML values, including their
-CLI defaults (3 and 600). `--image` overrides YAML only when supplied. Connection
-settings, including HTTPS and `use_server_proxy`, are retained. The exported
-configuration dimensions contain only image, replicas and idle timeout; credentials,
-endpoint and environment are not copied into result rows. Record non-secret SDK,
-server and deployment versions separately for reproducibility.
+CLI defaults (3 and 600). All providers reject negative and NaN
+`--idle-timeout` values before provider creation. BoxLite and AIO likewise reject
+negative and NaN `--health-check-skip-seconds`; zero, positive finite values,
+and positive infinity remain accepted. OpenSandbox still rejects every nonzero
+health-check skip value as unsupported. Zero idle timeout disables idle reaping,
+except that the `idle_timeout` scenario requires a finite positive value because
+it sleeps past the timeout. `--image` overrides YAML only when supplied.
+Connection settings, including HTTPS and `use_server_proxy`, are retained. The
+exported configuration dimensions contain only image, replicas, idle timeout,
+and the health-check skip window; credentials, endpoint and environment are not
+copied into result rows. BoxLite consumes the skip window during warm reclaim;
+AIO accepts and records it for comparison but does not currently alter provider
+behavior. Record non-secret SDK, server and deployment versions separately for
+reproducibility.
 
 `release_ms` includes production best-effort output synchronization. Successful
 command/release timing does not prove that every artifact was mirrored. Warm hits

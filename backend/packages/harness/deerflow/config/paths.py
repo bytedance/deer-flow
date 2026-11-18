@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 from pathlib import Path, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
@@ -28,6 +29,25 @@ def _default_local_base_dir() -> Path:
 def _validate_thread_id(thread_id: str) -> str:
     """Validate a thread ID before using it in filesystem paths."""
     return validate_thread_id(thread_id)
+
+
+def _clear_read_only_tree(root: Path) -> None:
+    """Clear the read-only attribute under *root* before repeating a failed deletion.
+
+    Windows refuses ``unlink``/``rmdir`` on a read-only file or directory, where
+    POSIX needs only a writable parent, so a restored archive or a mode-preserving
+    sync leaves a thread undeletable (``WinError 5``). Best effort: entries that
+    vanished or cannot be stat-ed are skipped, and the retry reports what is left.
+    Symlinks are skipped because ``chmod`` would follow them to their target.
+    """
+    for entry in (root, *root.rglob("*")):
+        try:
+            mode = entry.lstat().st_mode
+            if stat.S_ISLNK(mode) or mode & stat.S_IWRITE:
+                continue
+            entry.chmod(mode | stat.S_IWRITE)
+        except OSError:
+            continue
 
 
 def _validate_user_id(user_id: str) -> str:
@@ -488,11 +508,28 @@ class Paths:
     def delete_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Delete all persisted data for a thread.
 
-        The operation is idempotent: missing thread directories are ignored.
+        Idempotent: missing thread directories are ignored. The tree is removed
+        through the Windows extended-length namespace so a nested file whose full
+        path exceeds ``MAX_PATH`` (for example a plugin's ``files/<sha256>.docx``
+        under a deep user/thread workspace) is still unlinked. Without the prefix
+        ``shutil.rmtree`` leaves the long child behind and ``os.rmdir`` fails with
+        ``WinError 145``.
+
+        A file the host marks read-only is retried once after clearing that bit,
+        because Windows refuses to unlink it where POSIX only needs a writable
+        parent; a file that stays undeletable still raises.
         """
-        thread_dir = self.thread_dir(thread_id, user_id=user_id)
-        if thread_dir.exists():
+        thread_dir = extended_length_path(self.thread_dir(thread_id, user_id=user_id))
+        try:
             shutil.rmtree(thread_dir)
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            _clear_read_only_tree(thread_dir)
+            try:
+                shutil.rmtree(thread_dir)
+            except FileNotFoundError:
+                return
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str | None = None) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.

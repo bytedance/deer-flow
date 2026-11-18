@@ -45,36 +45,33 @@ def _search_images(
     """
     try:
         from ddgs import DDGS
-    except ImportError:
-        logger.error("ddgs library not installed. Run: pip install ddgs")
-        return []
+    except ImportError as exc:
+        raise RuntimeError("ddgs library not installed. Run: pip install ddgs") from exc
 
     ddgs = DDGS(timeout=30)
 
-    try:
-        kwargs = {
-            "region": region,
-            "safesearch": safesearch,
-            "max_results": max_results,
-        }
+    kwargs = {
+        "region": region,
+        "safesearch": safesearch,
+        "max_results": max_results,
+    }
 
-        if size:
-            kwargs["size"] = size
-        if color:
-            kwargs["color"] = color
-        if type_image:
-            kwargs["type_image"] = type_image
-        if layout:
-            kwargs["layout"] = layout
-        if license_image:
-            kwargs["license_image"] = license_image
+    if size:
+        kwargs["size"] = size
+    if color:
+        kwargs["color"] = color
+    if type_image:
+        kwargs["type_image"] = type_image
+    if layout:
+        kwargs["layout"] = layout
+    if license_image:
+        kwargs["license_image"] = license_image
 
-        results = ddgs.images(query, **kwargs)
-        return list(results) if results else []
-
-    except Exception as e:
-        logger.error(f"Failed to search images: {e}")
-        return []
+    # DDGS 9.14.1 can raise its "No results found." sentinel after a backend
+    # exceeds the dispatcher deadline. Only a returned empty collection proves
+    # an empty search; propagate every exception to the async error boundary.
+    results = ddgs.images(query, **kwargs)
+    return list(results) if results else []
 
 
 @tool("image_search", parse_docstring=True)
@@ -96,6 +93,7 @@ async def image_search_tool(
     - Before generating fashion/clothing: search for style and detail references
 
     The returned image URLs can be used as reference images in image generation to significantly improve quality.
+    An error other than "No images found" means the search failed, not that the query has no matching images.
 
     Args:
         query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
@@ -128,7 +126,11 @@ async def image_search_tool(
             license_image=license_image,
         )
 
-    results = await asyncio.to_thread(search_with_config)
+    try:
+        results = await asyncio.to_thread(search_with_config)
+    except Exception as exc:
+        logger.exception("Failed to search images")
+        return json.dumps({"error": f"DuckDuckGo image search failed: {type(exc).__name__}: {exc}", "query": query}, ensure_ascii=False)
 
     if not results:
         return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)

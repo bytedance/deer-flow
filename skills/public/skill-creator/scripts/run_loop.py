@@ -78,10 +78,10 @@ def run_loop(
 
     for iteration in range(1, max_iterations + 1):
         if verbose:
-            print(f"\n{'='*60}", file=sys.stderr)
+            print(f"\n{'=' * 60}", file=sys.stderr)
             print(f"Iteration {iteration}/{max_iterations}", file=sys.stderr)
             print(f"Description: {current_description}", file=sys.stderr)
-            print(f"{'='*60}", file=sys.stderr)
+            print(f"{'=' * 60}", file=sys.stderr)
 
         # Evaluate train + test together in one batch for parallelism
         all_queries = train_set + test_set
@@ -118,23 +118,25 @@ def run_loop(
             test_results = None
             test_summary = None
 
-        history.append({
-            "iteration": iteration,
-            "description": current_description,
-            "train_passed": train_summary["passed"],
-            "train_failed": train_summary["failed"],
-            "train_total": train_summary["total"],
-            "train_results": train_results["results"],
-            "test_passed": test_summary["passed"] if test_summary else None,
-            "test_failed": test_summary["failed"] if test_summary else None,
-            "test_total": test_summary["total"] if test_summary else None,
-            "test_results": test_results["results"] if test_results else None,
-            # For backward compat with report generator
-            "passed": train_summary["passed"],
-            "failed": train_summary["failed"],
-            "total": train_summary["total"],
-            "results": train_results["results"],
-        })
+        history.append(
+            {
+                "iteration": iteration,
+                "description": current_description,
+                "train_passed": train_summary["passed"],
+                "train_failed": train_summary["failed"],
+                "train_total": train_summary["total"],
+                "train_results": train_results["results"],
+                "test_passed": test_summary["passed"] if test_summary else None,
+                "test_failed": test_summary["failed"] if test_summary else None,
+                "test_total": test_summary["total"] if test_summary else None,
+                "test_results": test_results["results"] if test_results else None,
+                # For backward compat with report generator
+                "passed": train_summary["passed"],
+                "failed": train_summary["failed"],
+                "total": train_summary["total"],
+                "results": train_results["results"],
+            }
+        )
 
         # Write live report if path provided
         if live_report_path:
@@ -151,6 +153,7 @@ def run_loop(
             live_report_path.write_text(generate_html(partial_output, auto_refresh=True, skill_name=name), encoding="utf-8")
 
         if verbose:
+
             def print_eval_stats(label, results, elapsed):
                 pos = [r for r in results if r["should_trigger"]]
                 neg = [r for r in results if not r["should_trigger"]]
@@ -164,7 +167,7 @@ def run_loop(
                 precision = tp / (tp + fp) if (tp + fp) > 0 else 1.0
                 recall = tp / (tp + fn) if (tp + fn) > 0 else 1.0
                 accuracy = (tp + tn) / total if total > 0 else 0.0
-                print(f"{label}: {tp+tn}/{total} correct, precision={precision:.0%} recall={recall:.0%} accuracy={accuracy:.0%} ({elapsed:.1f}s)", file=sys.stderr)
+                print(f"{label}: {tp + tn}/{total} correct, precision={precision:.0%} recall={recall:.0%} accuracy={accuracy:.0%} ({elapsed:.1f}s)", file=sys.stderr)
                 for r in results:
                     status = "PASS" if r["pass"] else "FAIL"
                     rate_str = f"{r['triggers']}/{r['runs']}"
@@ -192,10 +195,7 @@ def run_loop(
 
         t0 = time.time()
         # Strip test scores from history so improvement model can't see them
-        blinded_history = [
-            {k: v for k, v in h.items() if not k.startswith("test_")}
-            for h in history
-        ]
+        blinded_history = [{k: v for k, v in h.items() if not k.startswith("test_")} for h in history]
         new_description = improve_description(
             skill_name=name,
             skill_content=content,
@@ -265,7 +265,11 @@ def main():
         print(f"Error: No SKILL.md found at {skill_path}", file=sys.stderr)
         sys.exit(1)
 
-    name, _, _ = parse_skill_md(skill_path)
+    try:
+        name, _, _ = parse_skill_md(skill_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # Set up live report path
     if args.report != "none":

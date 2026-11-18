@@ -1,23 +1,54 @@
+import asyncio
 import json
 import logging
+import os
 
 from langchain.tools import tool
 from tavily import AsyncTavilyClient
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
+from deerflow.config.tool_config import ToolConfig
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
 _FORMAT_ERROR = "Tavily returned an unexpected response format"
+_UNSET = object()
 
 
-def _get_tavily_client(tool_name: str = "web_search") -> AsyncTavilyClient:
-    config = get_app_config().get_tool_config(tool_name)
+def _get_tavily_client(tool_name: str = "web_search", config: ToolConfig | None = _UNSET) -> AsyncTavilyClient:
+    """Build a Tavily client, from ``config`` when the caller already read it."""
+    if config is _UNSET:
+        config = get_app_config().get_tool_config(tool_name)
     api_key = None
     if config is not None and "api_key" in config.model_extra:
-        api_key = config.model_extra.get("api_key")
-    return AsyncTavilyClient(api_key=api_key)
+        api_key = resolve_api_key(config.model_extra.get("api_key"))
+    if api_key is None:
+        api_key = resolve_api_key(os.getenv("TAVILY_API_KEY"))
+    # The SDK re-reads TAVILY_API_KEY unstripped when api_key is None; "" makes a
+    # blank value fail as a missing key instead.
+    return AsyncTavilyClient(api_key=api_key or "")
+
+
+async def _open_tavily_client(tool_name: str = "web_search", config: ToolConfig | None = _UNSET) -> AsyncTavilyClient:
+    """Build the client off-loop and close it if construction is cancelled."""
+    construction = asyncio.create_task(asyncio.to_thread(_get_tavily_client, tool_name, config))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+
+        async def close_after_construction() -> None:
+            try:
+                client = await construction
+                await client.close()
+            except Exception as exc:
+                logger.error("Tavily client cleanup after cancellation failed (%s)", type(exc).__name__)
+
+        await await_drained(close_after_construction())
+        raise
 
 
 def _response_objects(data: object, container: str) -> list[dict] | None:
@@ -51,7 +82,9 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         query: The query to search for.
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
-    config = get_app_config().get_tool_config("web_search")
+    # Config resolution stats and hashes the config files; keep it off the event
+    # loop, and build the client from the same read.
+    config = (await asyncio.to_thread(get_app_config)).get_tool_config("web_search")
     max_results = 5
     if config is not None and "max_results" in config.model_extra:
         max_results = config.model_extra.get("max_results")
@@ -65,7 +98,7 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         search_kwargs["include_domains_mode"] = "filter"
     if time_range is not None:
         search_kwargs["time_range"] = time_range
-    client = _get_tavily_client()
+    client = await _open_tavily_client(config=config)
     try:
         res = await client.search(query, **search_kwargs)
     finally:
@@ -76,7 +109,7 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
     normalized_results = [
         {
             "title": result.get("title") or "",
-            "url": result.get("url") or "",
+            "url": safe_public_result_url(result.get("url")),
             "snippet": result.get("content") or "",
         }
         for result in results
@@ -96,7 +129,8 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    client = _get_tavily_client("web_fetch")
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    client = await _open_tavily_client("web_fetch")
     try:
         res = await client.extract([url])
     finally:

@@ -17,7 +17,7 @@ from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import AppConfig
 from deerflow.knowledge import KnowledgeRequestContext, RetrievalCatalogPage
 from deerflow.knowledge.providers import get_knowledge_capabilities, resolve_knowledge_provider
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_authenticated_user_id, get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -94,7 +94,8 @@ async def list_retrieval_catalog_datasets(
     config: AppConfig = Depends(get_config),
 ) -> dict[str, Any]:
     provider = await _scope_catalog(config, agent_name, request, "catalog")
-    return await _catalog_result(provider.catalog(context=KnowledgeRequestContext(user_id=get_effective_user_id(), agent_name=agent_name), page=page, page_size=page_size, search=search))
+    context = KnowledgeRequestContext(user_id=get_effective_user_id(), agent_name=agent_name, authenticated_user_id=get_authenticated_user_id())
+    return await _catalog_result(provider.catalog(context=context, page=page, page_size=page_size, search=search))
 
 
 @router.get("/retrieval-catalog/datasets/{dataset_id:path}/documents")
@@ -109,4 +110,5 @@ async def list_retrieval_catalog_documents(
     config: AppConfig = Depends(get_config),
 ) -> dict[str, Any]:
     provider = await _scope_catalog(config, agent_name, request, "documents")
-    return await _catalog_result(provider.documents(dataset_id, context=KnowledgeRequestContext(user_id=get_effective_user_id(), agent_name=agent_name), page=page, page_size=page_size, search=search))
+    context = KnowledgeRequestContext(user_id=get_effective_user_id(), agent_name=agent_name, authenticated_user_id=get_authenticated_user_id())
+    return await _catalog_result(provider.documents(dataset_id, context=context, page=page, page_size=page_size, search=search))

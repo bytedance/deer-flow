@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "community.bookmarks",
+  "locales": {
+    "zh-CN": {
+      "title": "会话书签",
+      "description": "收藏有用的回答，在独立页面查找与整理自己的书签。",
+      "usage": [
+        {
+          "title": "收藏有用的回答",
+          "description": "在已有回答的会话菜单中，选择“书签 → 保存最后一条回答”。"
+        },
+        {
+          "title": "查找与整理",
+          "description": "打开“我的书签”，按文字搜索、修改名称，或回到原会话查看上下文。"
+        }
+      ]
+    },
+    "en-US": {
+      "title": "Bookmarks",
+      "description": "Save useful answers and find and organize your own bookmarks on a dedicated page.",
+      "usage": [
+        {
+          "title": "Save a useful answer",
+          "description": "In a conversation with an answer, choose Bookmarks → Save last answer from its menu."
+        },
+        {
+          "title": "Find and organize",
+          "description": "Open My bookmarks to search saved text, rename entries or return to their source conversations."
+        }
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-bookmarks#readme"
+}

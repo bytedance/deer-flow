@@ -190,16 +190,6 @@ _PERMANENT_CLOSE_PREFIXES = (_AUTH_REQUIRED_CLOSE_PREFIX, "restricted:", "blocke
 # guessing wrong in that direction.
 _PERMANENT_CLOSE_MARKERS = ("revoke", "not a member", "not a channel member", "no longer a member", "access denied", "unauthorized", "forbidden", "archiv", "not found", "does not exist")
 
-# Wording mirrors every sibling adapter's `/connect` reply style (discord.py's
-# `_send_connection_reply`, slack.py's `_post_connection_reply`, and the same
-# templates in wecom.py / feishu.py / dingtalk.py / wechat.py), substituting
-# "Buzz" for the platform name.
-_CONNECT_REPLY_TEXT = {
-    "success": "Buzz connected to DeerFlow.",
-    "invalid": "Buzz connection code is invalid or expired.",
-    "error": "Buzz connection could not be completed from this message.",
-}
-
 
 def _chunk_text(text: str, limit: int = EDIT_MAX_BYTES) -> list[str]:
     """Split *text* into chunks whose UTF-8 ENCODED byte length never exceeds *limit*.
@@ -1428,12 +1418,15 @@ class BuzzChannel(Channel):
         """
         if self._connection_repo is None:
             return  # unreachable in practice: _pending_connect_code already requires this
+        # Known once the code is consumed; the reply then uses that user's language.
+        owner_user_id: str | None = None
         try:
             state = await self._connection_repo.consume_oauth_state(provider="buzz", state=code)
             if state is None:
                 logger.info("[buzz] /connect code invalid, expired, or already used (pubkey=%s)", author)
-                outcome = "invalid"
+                outcome = "invalid_code"
             else:
+                owner_user_id = state["owner_user_id"]
                 await self._connection_repo.upsert_connection(
                     owner_user_id=state["owner_user_id"],
                     provider="buzz",
@@ -1443,17 +1436,17 @@ class BuzzChannel(Channel):
                     status="connected",
                 )
                 logger.info("[buzz] connected pubkey=%s to owner_user_id=%s", author, state["owner_user_id"])
-                outcome = "success"
+                outcome = "connected"
         except Exception:
             # A repo/DB error binding the code must not propagate: handle_relay_frame's
             # outer guard would also catch it, but catching here keeps the log specific
             # to the bind failure instead of a generic "malformed relay event ignored".
             logger.exception("[buzz] failed to bind /connect code for pubkey=%s", author)
-            outcome = "error"
+            outcome = "incomplete"
 
         # Bind success/failure is already fully decided and logged above; sending
         # the reply is a separate, best-effort concern from here on.
-        await self._reply_to_connect(channel_id, author, _CONNECT_REPLY_TEXT[outcome])
+        await self._reply_to_connect(channel_id, author, await self._connect_reply_text(outcome, owner_user_id=owner_user_id))
 
     async def _reply_to_connect(self, channel_id: str, author: str, text: str) -> None:
         """Best-effort confirmation/error reply for a ``/connect`` attempt.

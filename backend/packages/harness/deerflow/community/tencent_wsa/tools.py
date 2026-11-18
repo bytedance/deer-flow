@@ -9,6 +9,8 @@ from typing import Any
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -31,13 +33,7 @@ def _get_tool_extras(tool_name: str) -> Mapping[str, Any]:
 
 def _get_api_key(tool_name: str = "web_search", *, extras: Mapping[str, Any] | None = None) -> str | None:
     api_key = (extras if extras is not None else _get_tool_extras(tool_name)).get("api_key")
-    if isinstance(api_key, str) and api_key.strip():
-        return api_key.strip()
-
-    env_key = os.getenv(_API_KEY_ENV)
-    if isinstance(env_key, str) and env_key.strip():
-        return env_key.strip()
-    return None
+    return resolve_api_key(api_key) or resolve_api_key(os.getenv(_API_KEY_ENV))
 
 
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
@@ -218,7 +214,7 @@ def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[s
         content = page_data.get("content") or page_data.get("passage") or ""
         result = {
             "title": title if isinstance(title, str) else "",
-            "url": url if isinstance(url, str) else "",
+            "url": safe_public_result_url(url),
             "snippet": content if isinstance(content, str) else "",
         }
         for field in ("date", "site", "score"):

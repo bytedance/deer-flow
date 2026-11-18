@@ -173,6 +173,54 @@ async def test_scheduled_goal_is_installed_before_first_turn_and_removed_at_term
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("heartbeat", [False, True])
+@pytest.mark.parametrize("with_events", [False, True])
+async def test_scheduled_cleanup_failure_updates_terminal_outcome_without_run_store(monkeypatch, heartbeat, with_events):
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    checkpointer = InMemorySaver()
+    events = MemoryRunEventStore() if with_events else None
+    manager = RunManager(event_store=events, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=heartbeat))
+    metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Make a verified report"}
+    record = await manager.create("fresh", user_id="alice", metadata=metadata)
+    graph = StateGraph(get_thread_state_schema("full"))
+    graph.add_node("report", lambda state: {"messages": [AIMessage(content="Verified report complete.")]})
+    graph.add_edge(START, "report")
+    graph.add_edge("report", END)
+    original_write = worker.write_thread_goal
+    cleanup_statuses = []
+
+    async def fail_cleanup(checkpointer, thread_id, value, **kwargs):
+        if value is None:
+            cleanup_statuses.append(record.status)
+            raise RuntimeError("deterministic scheduled cleanup failure")
+        return await original_write(checkpointer, thread_id, value, **kwargs)
+
+    monkeypatch.setattr(worker, "write_thread_goal", fail_cleanup)
+    monkeypatch.setattr(worker, "create_goal_evaluator_model", lambda **kwargs: object())
+    monkeypatch.setattr(worker, "evaluate_goal_completion", AsyncMock(return_value={"satisfied": True, "blocker": "none", "reason": "Verified", "relied_on_assumption": False}))
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await worker.run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=worker.RunContext(checkpointer=checkpointer, event_store=events, scheduled_task_runtime={"task_id": "task", "occurrence_id": "occurrence", "user_id": "alice", "goal_objective": metadata["scheduled_goal_objective"]}),
+        agent_factory=lambda config: graph.compile(checkpointer=checkpointer),
+        graph_input={"messages": [HumanMessage(content="Make the report")]},
+        config={"configurable": {"thread_id": "fresh"}, "context": {"non_interactive": True}},
+    )
+    assert cleanup_statuses == [RunStatus.success]
+    assert record.status == RunStatus.error
+    assert record.error == "Scheduled goal cleanup failed"
+    assert manager.terminal_event_status(record) == "error"
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    if events is not None:
+        terminal = await events.list_events(record.thread_id, record.run_id, event_types=["run.terminal"])
+        assert len(terminal) == 1
+        assert terminal[0]["content"] == {"status": "error"}
+
+
+@pytest.mark.asyncio
 async def test_captured_verdict_counts_goal_continuations(monkeypatch):
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     checkpointer = InMemorySaver()

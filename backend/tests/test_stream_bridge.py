@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 from collections import defaultdict
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -50,6 +50,7 @@ class _FakeRedis:
         self.closed = False
         self.ping_calls = 0
         self.ping_error: Exception | None = None
+        self._eval_lock = asyncio.Lock()
 
     async def ping(self):
         self.ping_calls += 1
@@ -107,7 +108,20 @@ class _FakeRedis:
     async def mget(self, *names):
         return [self.values.get(name) for name in names]
 
+    def _tail_is_end(self, stream_key):
+        entries = self.streams.get(stream_key, [])
+        return bool(entries and entries[-1][1].get("kind") == "end")
+
+    def _has_end_marker(self, stream_key):
+        return any(fields.get("kind") == "end" for _event_id, fields in self.streams.get(stream_key, []))
+
     async def eval(self, script, numkeys, *args):
+        # Redis executes a Lua script atomically. Keep the fake's assertion
+        # surface faithful even though individual emulated commands yield.
+        async with self._eval_lock:
+            return await self._eval(script, numkeys, *args)
+
+    async def _eval(self, script, numkeys, *args):
         keys = args[:numkeys]
         values = args[numkeys:]
         if numkeys == 2 and not values:
@@ -133,11 +147,18 @@ class _FakeRedis:
                 return 0
             await self.delete(stream_key, tracking_key, active_key)
             return 1
-        if numkeys == 2 and len(values) == 5:
+        if numkeys == 2 and len(values) == 6:
             active_key, stream_key = keys
-            maxlen, stream_ttl, kind, event, data = values
+            maxlen, stream_ttl, kind, event, data, legacy_scan_enabled = values
             if active_key in self.values:
-                return None
+                return 0
+            if kind == "end" and stream_key not in self.streams:
+                return 2
+            if kind == "end":
+                if self._tail_is_end(stream_key) or (int(legacy_scan_enabled) and self._has_end_marker(stream_key)):
+                    return 1
+            elif self._tail_is_end(stream_key):
+                return 1
             event_id = await self.xadd(
                 stream_key,
                 {"kind": kind, "event": event, "data": data},
@@ -166,9 +187,14 @@ class _FakeRedis:
             return 1
         if numkeys == 3:
             active_key, tracking_key, stream_key = keys
-            token, maxlen, stream_ttl, kind, event, data = values
+            token, maxlen, stream_ttl, kind, event, data, legacy_scan_enabled = values
             if self.values.get(active_key) != token or self.values.get(tracking_key) != token:
-                return None
+                return 0
+            if kind == "end":
+                if self._tail_is_end(stream_key) or (int(legacy_scan_enabled) and self._has_end_marker(stream_key)):
+                    return 1
+            elif self._tail_is_end(stream_key):
+                return 1
             event_id = await self.xadd(
                 stream_key,
                 {"kind": kind, "event": event, "data": data},
@@ -225,6 +251,24 @@ class _DelayedBlockingReadRedis:
             self.wake_response_captured.set()
             await self.release_wake_response.wait()
         return response
+
+
+class _LostAckRedis:
+    """Delegate to Redis but drop one successful EVAL response."""
+
+    def __init__(self, redis) -> None:
+        self._delegate = redis
+        self.drop_next_successful_eval = False
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+    async def eval(self, script, numkeys, *args):
+        result = await self._delegate.eval(script, numkeys, *args)
+        if self.drop_next_successful_eval and result:
+            self.drop_next_successful_eval = False
+            raise TimeoutError("simulated lost Redis EVAL acknowledgement")
+        return result
 
 
 class _FakeRedisPipeline:
@@ -705,6 +749,148 @@ async def test_redis_publish_subscribe(redis_bridge: RedisStreamBridge):
 
 
 @pytest.mark.anyio
+async def test_redis_publish_end_is_idempotent(redis_bridge: RedisStreamBridge):
+    """Concurrent and repeated END publication must append at most one marker."""
+    fake = redis_bridge._redis
+    run_id = "redis-run-idempotent-end"
+    key = redis_bridge._stream_key(run_id)
+
+    await redis_bridge.start_producer_lease(run_id)
+    try:
+        await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+        await asyncio.gather(*(redis_bridge.publish_end(run_id) for _ in range(8)))
+        await redis_bridge.publish_end(run_id)
+
+        entries = fake.streams[key]
+        assert [fields["kind"] for _event_id, fields in entries] == ["event", "end"]
+
+        received = [entry async for entry in redis_bridge.subscribe(run_id, heartbeat_interval=1.0)]
+        assert [entry.event for entry in received[:-1]] == ["metadata"]
+        assert received[-1] is END_SENTINEL
+    finally:
+        await redis_bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_publish_end_recognizes_legacy_end_before_late_events(redis_bridge: RedisStreamBridge):
+    """An END written by the old buggy writer still prevents a duplicate END."""
+    fake = redis_bridge._redis
+    run_id = "redis-run-legacy-end-not-tail"
+    key = redis_bridge._stream_key(run_id)
+    fake.streams[key] = [
+        ("1-0", {"kind": "event", "event": "metadata", "data": "{}"}),
+        ("2-0", {"kind": "end"}),
+        ("3-0", {"kind": "event", "event": "late", "data": "{}"}),
+    ]
+
+    await redis_bridge.publish_end(run_id)
+
+    assert [fields["kind"] for _event_id, fields in fake.streams[key]].count("end") == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("owned", [False, True], ids=["recovery", "owner"])
+async def test_redis_legacy_midstream_end_allows_data_but_deduplicates_end(owned: bool):
+    """Data checks only the tail; END retries still inspect the retained window."""
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=8, client=fake)
+    run_id = "redis-run-legacy-data-after-end"
+    key = bridge._stream_key(run_id)
+    if owned:
+        await bridge.start_producer_lease(run_id)
+    try:
+        await fake.xadd(key, {"kind": "end"})
+        await fake.xadd(key, {"kind": "event", "event": "legacy-late", "data": "{}"})
+        before = list(fake.streams[key])
+
+        await bridge.publish(run_id, "current-data", {"step": 2})
+
+        entries = list(fake.streams[key])
+        assert entries[:2] == before
+        assert len(entries) == 3
+        assert entries[-1][1]["event"] == "current-data"
+        await bridge.publish_end(run_id)
+        assert fake.streams[key] == entries
+    finally:
+        if owned:
+            await bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_owned_end_recreates_missing_buffer_with_live_lease():
+    """Only unowned recovery END is a no-op on a missing buffer."""
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-owned-missing-buffer"
+    key = bridge._stream_key(run_id)
+    await bridge.start_producer_lease(run_id)
+    try:
+        await bridge.publish(run_id, "metadata", {})
+        await fake.delete(key)
+
+        await bridge.publish_end(run_id)
+
+        assert [fields["kind"] for _event_id, fields in fake.streams[key]] == ["end"]
+    finally:
+        await bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_publish_after_end_is_rejected_without_appending(redis_bridge: RedisStreamBridge):
+    """Once END is retained, later event publication cannot corrupt terminal order."""
+    fake = redis_bridge._redis
+    run_id = "redis-run-publish-after-end"
+    key = redis_bridge._stream_key(run_id)
+
+    await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+    await redis_bridge.publish_end(run_id)
+    before = list(fake.streams[key])
+
+    with pytest.raises(RuntimeError, match="already ended"):
+        await redis_bridge.publish(run_id, "late", {"step": 2})
+
+    assert fake.streams[key] == before
+
+
+@pytest.mark.anyio
+async def test_redis_event_end_race_never_appends_after_end(redis_bridge: RedisStreamBridge):
+    """The atomic terminal check keeps END last even when an event races it."""
+    fake = redis_bridge._redis
+    run_id = "redis-run-event-end-race"
+    key = redis_bridge._stream_key(run_id)
+
+    await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+    event_result, end_result = await asyncio.gather(
+        redis_bridge.publish(run_id, "racing-event", {"step": 2}),
+        redis_bridge.publish_end(run_id),
+        return_exceptions=True,
+    )
+
+    assert end_result is None
+    assert event_result is None or "already ended" in str(event_result)
+    kinds = [fields["kind"] for _event_id, fields in fake.streams[key]]
+    assert kinds.count("end") == 1
+    assert kinds[-1] == "end"
+
+
+@pytest.mark.anyio
+async def test_redis_recovery_end_after_cleanup_does_not_resurrect_stream(redis_bridge: RedisStreamBridge):
+    """A delayed recovery END is a no-op when cleanup already removed the stream."""
+    fake = redis_bridge._redis
+    run_id = "redis-run-cleaned-end-retry"
+    key = redis_bridge._stream_key(run_id)
+
+    await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+    await redis_bridge.publish_end(run_id)
+    await redis_bridge.cleanup(run_id)
+    assert key not in fake.streams
+
+    await redis_bridge.publish_end(run_id)
+
+    assert key not in fake.streams
+
+
+@pytest.mark.anyio
 async def test_redis_replays_after_last_event_id(redis_bridge: RedisStreamBridge):
     """Redis XREAD should resume after Last-Event-ID."""
     run_id = "redis-run-replay"
@@ -1096,6 +1282,30 @@ async def test_redis_finish_does_not_delete_a_successor_token():
     await bridge.finish_producer_lease(run_id)
 
     assert fake.values[active_key] == "successor-token"
+
+
+@pytest.mark.anyio
+async def test_redis_lost_owner_does_not_get_idempotent_end_success():
+    """Lease validation precedes retained-END detection for a stale owner."""
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-lost-owner-existing-end"
+    active_key = bridge._producer_active_key(run_id)
+    key = bridge._stream_key(run_id)
+    replacement_owner = asyncio.create_task(asyncio.Event().wait())
+
+    await bridge.start_producer_lease(run_id)
+    bridge.transfer_producer_lease(run_id, replacement_owner)
+    await bridge.publish_end(run_id)
+    fake.values[active_key] = "successor-token"
+    try:
+        with pytest.raises(RuntimeError, match="producer lease was lost"):
+            await bridge.publish_end(run_id)
+        assert [fields["kind"] for _event_id, fields in fake.streams[key]].count("end") == 1
+    finally:
+        await bridge.finish_producer_lease(run_id)
+        replacement_owner.cancel()
+        await asyncio.gather(replacement_owner, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -2103,6 +2313,7 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
             max_connections=50,
             stream_ttl_seconds=42,
             producer_lease_recovery_enabled=True,
+            legacy_end_scan_enabled=False,
         )
     )
     try:
@@ -2111,6 +2322,7 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
             assert bridge.heartbeat_interval == 2.5
             assert bridge._stream_ttl_seconds == 42
             assert bridge.producer_lease_recovery_enabled is True
+            assert bridge._legacy_end_scan_enabled is False
         assert captured["max_connections"] == 50
         assert captured["decode_responses"] is True
     finally:
@@ -2186,6 +2398,189 @@ async def test_redis_integration_publish_subscribe_and_id_format(real_redis_brid
     assert received[-1] is END_SENTINEL
     # Real Redis stream IDs use the <ms>-<seq> format the fake only approximates.
     assert re.match(r"^\d+-\d+$", received[0].id), received[0].id
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_end_is_idempotent_across_independent_clients():
+    """Concurrent END writers must serialize through Redis, not local process state."""
+    from redis.asyncio import Redis
+
+    clients = [
+        Redis.from_url(REDIS_TEST_URL, decode_responses=True),
+        Redis.from_url(REDIS_TEST_URL, decode_responses=True),
+    ]
+    key_prefix = f"deerflow:test:{uuid.uuid4().hex}"
+    bridges = [
+        RedisStreamBridge(
+            redis_url=REDIS_TEST_URL,
+            queue_maxsize=2,
+            key_prefix=key_prefix,
+            client=client,
+        )
+        for client in clients
+    ]
+    run_id = "integ-end-idempotent"
+    key = bridges[0]._stream_key(run_id)
+    try:
+        await bridges[0].publish(run_id, "metadata", {"run_id": run_id})
+        await asyncio.gather(*(bridge.publish_end(run_id) for bridge in bridges))
+        await asyncio.gather(*(bridge.publish_end(run_id) for bridge in bridges))
+
+        entries = await clients[0].xrange(key)
+        assert [fields["kind"] for _event_id, fields in entries] == ["event", "end"]
+
+        first_event_id = entries[0][0]
+        replayed = [
+            entry
+            async for entry in bridges[1].subscribe(
+                run_id,
+                last_event_id=first_event_id,
+                heartbeat_interval=1.0,
+            )
+        ]
+        assert replayed == [END_SENTINEL]
+    finally:
+        async for existing_key in clients[0].scan_iter(f"{key_prefix}:*"):
+            await clients[0].delete(existing_key)
+        await asyncio.gather(*(client.aclose() for client in clients))
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_recovery_end_cannot_race_active_owner(real_redis_bridge):
+    """Recovery may append END only after the valid producer's lease is released."""
+    from redis.asyncio import Redis
+
+    recovery_client = Redis.from_url(REDIS_TEST_URL, decode_responses=True)
+    recovery = RedisStreamBridge(
+        redis_url=REDIS_TEST_URL,
+        queue_maxsize=2,
+        key_prefix=real_redis_bridge._key_prefix,
+        client=recovery_client,
+    )
+    run_id = "integ-end-owner-recovery-race"
+    key = real_redis_bridge._stream_key(run_id)
+    try:
+        await real_redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+        await real_redis_bridge.start_producer_lease(run_id)
+
+        owner_result, recovery_result = await asyncio.gather(
+            real_redis_bridge.publish_end(run_id),
+            recovery.publish_end(run_id),
+            return_exceptions=True,
+        )
+        assert owner_result is None
+        assert isinstance(recovery_result, RuntimeError)
+        assert "active producer" in str(recovery_result)
+
+        entries = await recovery_client.xrange(key)
+        assert [fields["kind"] for _event_id, fields in entries] == ["event", "end"]
+
+        await real_redis_bridge.finish_producer_lease(run_id)
+        await recovery.publish_end(run_id)
+        entries = await recovery_client.xrange(key)
+        assert [fields["kind"] for _event_id, fields in entries] == ["event", "end"]
+    finally:
+        await real_redis_bridge.finish_producer_lease(run_id)
+        await recovery_client.aclose()
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_end_retry_after_lost_ack_is_idempotent(real_redis_bridge):
+    """A retry confirms the retained END without appending a duplicate."""
+    run_id = "integ-end-lost-ack"
+    key = real_redis_bridge._stream_key(run_id)
+
+    await real_redis_bridge.start_producer_lease(run_id)
+    try:
+        await real_redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+        lossy = _LostAckRedis(real_redis_bridge._redis)
+        real_redis_bridge._redis = lossy
+        lossy.drop_next_successful_eval = True
+
+        with pytest.raises(TimeoutError, match="lost Redis EVAL acknowledgement"):
+            await real_redis_bridge.publish_end(run_id)
+
+        await real_redis_bridge.publish_end(run_id)
+
+        entries = await lossy.xrange(key)
+        assert [fields["kind"] for _event_id, fields in entries] == ["event", "end"]
+    finally:
+        await real_redis_bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_cleanup_prevents_late_end_from_recreating_stream(real_redis_bridge):
+    """An END retry after cleanup is acknowledged as a no-op, not a resurrection."""
+    run_id = "integ-end-after-cleanup"
+    key = real_redis_bridge._stream_key(run_id)
+
+    await real_redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+    await real_redis_bridge.publish_end(run_id)
+    await real_redis_bridge.cleanup(run_id)
+    assert await real_redis_bridge._redis.exists(key) == 0
+
+    await real_redis_bridge.publish_end(run_id)
+
+    assert await real_redis_bridge._redis.exists(key) == 0
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+@pytest.mark.parametrize("owned", [False, True], ids=["recovery", "owner"])
+async def test_redis_integration_legacy_midstream_end_allows_data_but_deduplicates_end(real_redis_bridge, owned: bool):
+    """Pin the fake's legacy-stream decisions against the real Lua scripts."""
+    client = real_redis_bridge._redis
+    bridge = RedisStreamBridge(redis_url=REDIS_TEST_URL, queue_maxsize=8, key_prefix=real_redis_bridge._key_prefix, client=client)
+    run_id = "integ-legacy-data-after-end"
+    key = bridge._stream_key(run_id)
+    if owned:
+        await bridge.start_producer_lease(run_id)
+    try:
+        await client.xadd(key, {"kind": "end"})
+        await client.xadd(key, {"kind": "event", "event": "legacy-late", "data": "{}"})
+        before = await client.xrange(key)
+
+        await bridge.publish(run_id, "current-data", {"step": 2})
+
+        entries = await client.xrange(key)
+        assert entries[:2] == before
+        assert len(entries) == 3
+        assert entries[-1][1]["event"] == "current-data"
+        await bridge.publish_end(run_id)
+        assert await client.xrange(key) == entries
+    finally:
+        if owned:
+            await bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_owned_end_recreates_missing_buffer_with_live_lease(real_redis_bridge):
+    """A live owner retains the existing XADD behavior after buffer removal."""
+    bridge = real_redis_bridge
+    client = bridge._redis
+    run_id = "integ-owned-missing-buffer"
+    key = bridge._stream_key(run_id)
+    await bridge.start_producer_lease(run_id)
+    try:
+        await bridge.publish(run_id, "metadata", {})
+        await client.delete(key)
+
+        await bridge.publish_end(run_id)
+
+        assert [fields["kind"] for _event_id, fields in await client.xrange(key)] == ["end"]
+    finally:
+        await bridge.finish_producer_lease(run_id)
 
 
 @pytest.mark.integration
@@ -2385,3 +2780,80 @@ async def test_redis_integration_stream_ttl_reclaims_key():
         async for existing_key in client.scan_iter(f"{key_prefix}:*"):
             await client.delete(existing_key)
         await client.aclose()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_stream_bridge_config_legacy_end_scan_switch(enabled):
+    assert StreamBridgeConfig().legacy_end_scan_enabled is True
+    assert StreamBridgeConfig(legacy_end_scan_enabled=enabled).legacy_end_scan_enabled is enabled
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("owned", [False, True], ids=["recovery", "owner"])
+@pytest.mark.parametrize("enabled", [True, False], ids=["compatibility-scan", "tail-only"])
+async def test_redis_end_scan_switch_and_tail_fast_path(owned, enabled):
+    fake = _FakeRedis()
+    fake._has_end_marker = Mock(wraps=fake._has_end_marker)
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=8, legacy_end_scan_enabled=enabled, client=fake)
+    run_id = "scan-switch"
+    if owned:
+        await bridge.start_producer_lease(run_id)
+    try:
+        await bridge.publish(run_id, "values", {"content": "x" * 4096})
+        assert fake._has_end_marker.call_count == 0
+        await bridge.publish_end(run_id)
+        assert fake._has_end_marker.call_count == int(enabled)
+        await bridge.publish_end(run_id)
+        with pytest.raises(RuntimeError, match="already ended"):
+            await bridge.publish(run_id, "late", {})
+        assert fake._has_end_marker.call_count == int(enabled)
+        assert [fields["kind"] for _, fields in fake.streams[bridge._stream_key(run_id)]] == ["event", "end"]
+    finally:
+        if owned:
+            await bridge.finish_producer_lease(run_id)
+        await bridge.close()
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+@pytest.mark.parametrize("owned", [False, True], ids=["recovery", "owner"])
+@pytest.mark.parametrize("enabled", [True, False], ids=["compatibility-scan", "tail-only"])
+async def test_redis_integration_end_scan_switch_with_xrange_denied(real_redis_bridge, owned, enabled):
+    """Deny XRANGE so real Lua proves that tail-only END never scans history."""
+    from redis.asyncio import ConnectionPool, Redis
+    from redis.exceptions import ResponseError
+
+    admin = real_redis_bridge._redis
+    server = await admin.info("server")
+    if int(server["redis_version"].split(".", 1)[0]) < 6:
+        pytest.skip("This scan-path probe uses Redis 6+ ACLs")
+    username = "end-scan-" + uuid.uuid4().hex
+    prefix = real_redis_bridge._key_prefix
+    await admin.acl_setuser(username, enabled=True, reset=True, passwords=["+fixture-password"], keys=[f"{prefix}:*"], categories=["+all"], commands=["-xrange"])
+    pool = ConnectionPool.from_url(REDIS_TEST_URL, decode_responses=True)
+    pool.connection_kwargs.update(username=username, password="fixture-password")
+    client = Redis(connection_pool=pool)
+    bridge = RedisStreamBridge(redis_url=REDIS_TEST_URL, queue_maxsize=8, key_prefix=prefix, legacy_end_scan_enabled=enabled, client=client)
+    run_id = "scan-switch-acl"
+    try:
+        if owned:
+            await bridge.start_producer_lease(run_id)
+        await bridge.publish(run_id, "values", {"content": "x" * 4096})
+        if enabled:
+            with pytest.raises(ResponseError, match="(?i)acl|permission|user executing|allowed"):
+                await bridge.publish_end(run_id)
+            assert await admin.xlen(bridge._stream_key(run_id)) == 1
+        else:
+            await bridge.publish_end(run_id)
+            await bridge.publish_end(run_id)
+            with pytest.raises(RuntimeError, match="already ended"):
+                await bridge.publish(run_id, "late", {})
+            assert [fields["kind"] for _, fields in await admin.xrange(bridge._stream_key(run_id))] == ["event", "end"]
+    finally:
+        try:
+            await bridge.close()
+        finally:
+            await client.aclose()
+            await pool.disconnect()
+            await admin.acl_deluser(username)

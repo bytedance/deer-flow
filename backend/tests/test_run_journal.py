@@ -1327,6 +1327,34 @@ class TestLlmCallbacks:
         assert messages[0]["content"]["content"] == "Answer"
 
     @pytest.mark.anyio
+    async def test_interrupted_partial_response_is_idempotent(self, journal_setup):
+        j, store = journal_setup
+        partial = AIMessage(id="partial-ai", content="Visible so far")
+
+        assert j.record_interrupted_ai_responses([partial]) == 1
+        assert j.record_interrupted_ai_responses([partial]) == 0
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Visible so far"
+        assert messages[0]["metadata"]["partial"] is True
+
+    @pytest.mark.anyio
+    async def test_completed_response_wins_interruption_race(self, journal_setup):
+        j, store = journal_setup
+        completed = AIMessage(id="shared-ai", content="Complete answer")
+        response = LLMResult(generations=[[ChatGeneration(message=completed)]])
+
+        j.on_llm_end(response, run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j.record_interrupted_ai_responses([AIMessage(id="shared-ai", content="Complete ans")]) == 0
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Complete answer"
+
+    @pytest.mark.anyio
     async def test_on_llm_end_with_tool_calls_produces_ai_tool_call(self, journal_setup):
         """LLM response with pending tool_calls emits llm.ai.response with tool_calls in content."""
         j, store = journal_setup
@@ -1628,6 +1656,29 @@ class TestFinalToolMessageReconciliation:
         tool_results = [m for m in messages if m["event_type"] == "llm.tool.result"]
         assert len(tool_results) == 1
         assert tool_results[0]["content"]["name"] == "write_file"
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_a_rejection_for_a_call_adopted_from_the_paused_run(self, journal_setup):
+        """A HITL resume answers calls an earlier Run dispatched.
+
+        The rejection is written in ``after_model`` with no tool callback, so the
+        resume journal only persists it for the calls the paused Run handed over;
+        an earlier result outside that handover stays with its own Run.
+        """
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        earlier_ai = AIMessage(content="", tool_calls=[{"id": "call_old", "name": "bash", "args": {}}])
+        earlier = ToolMessage(content="ran earlier", tool_call_id="call_old", name="bash")
+        paused_ai = AIMessage(content="", tool_calls=[{"id": "call_write", "name": "write_file", "args": {}}])
+        rejected = ToolMessage(content="The tool was not executed.", tool_call_id="call_write", name="write_file", status="error")
+
+        j.adopt_resumed_tool_calls({"call_write": "write_file"})
+        j.on_chain_end({"messages": [earlier_ai, earlier, paused_ai, rejected]}, run_id=uuid4())
+        await j.flush()
+
+        tool_results = [m for m in await store.list_messages("t1") if m["event_type"] == "llm.tool.result"]
+        assert [result["content"]["tool_call_id"] for result in tool_results] == ["call_write"]
 
     @pytest.mark.anyio
     async def test_root_chain_end_does_not_reconcile_old_result_when_tool_call_id_is_reused(self, journal_setup):

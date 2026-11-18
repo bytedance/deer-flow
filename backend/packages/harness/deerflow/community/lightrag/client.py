@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -99,7 +100,7 @@ class LightRAGClient:
             client_kwargs["transport"] = self._transport
 
         try:
-            async with httpx.AsyncClient(**client_kwargs) as client:
+            async with await asyncio.to_thread(httpx.AsyncClient, **client_kwargs) as client:
                 response = await client.request(method, path, json=json)
         except httpx.TimeoutException:
             raise LightRAGConnectionError(f"LightRAG request timed out after {self.timeout:g} seconds.") from None

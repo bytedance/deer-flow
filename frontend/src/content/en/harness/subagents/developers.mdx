@@ -46,7 +46,7 @@ Public exports: `deerflow.agents` provides `create_deerflow_agent`, `RuntimeFeat
 `contracts/subagent_status_contract.json` is the fixture shared by backend and frontend (version 2):
 
 - Valid `subagent_status`: `completed`, `failed`, `cancelled`, `timed_out`, `polling_timed_out`.
-- Valid `subagent_stop_reason`: `token_capped`, `turn_capped`, `loop_capped`.
+- Valid `subagent_stop_reason`: `token_capped`, `turn_capped`, `loop_capped`, `model_length_capped`.
 - The tool result text is display content, not part of the contract.
 
 The backend writes metadata with `make_subagent_additional_kwargs` and reads it with `read_subagent_result_metadata`. The writer raises `ValueError` on an invalid status; the reader returns `None` for an unknown one and maps the legacy `max_turns_reached` to `turn_capped`. The frontend's `parseSubtaskResult` reads structured fields first and falls back to text prefixes only when no structured metadata exists at all. Additive fields (model name, token usage, receipts, acceptance) do not require a contract version bump.

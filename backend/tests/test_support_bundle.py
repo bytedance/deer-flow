@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -902,6 +903,20 @@ def test_main_reports_invalid_thread_id_without_traceback(tmp_path, capsys):
     assert "Traceback" not in captured.err
 
 
+def test_main_reports_directory_out_without_traceback(tmp_path, capsys):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    out_dir = tmp_path / "bundles"
+    out_dir.mkdir()
+
+    exit_code = support_bundle.main(["--project-root", str(project_root), "--out", str(out_dir)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "--out must be a file path, not a directory" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_main_prints_reporter_next_steps_and_optional_upload(tmp_path, capsys):
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -982,8 +997,13 @@ def test_thread_summary_honors_project_root_override(tmp_path, monkeypatch, sour
 def _local_launcher_home(project):
     """Execute the launcher's actual dotenv/default blocks without starting services."""
     bash = require_script_bash()
-    serve = (Path(support_bundle.__file__).parent / "serve.sh").read_text(encoding="utf-8")
-    dotenv_block = serve.split("# ── Load .env", 1)[1].split("\n\n", 1)[1].split("_pick_python()", 1)[0]
+    scripts = Path(support_bundle.__file__).parent
+    serve = (scripts / "serve.sh").read_text(encoding="utf-8")
+    pick_python = serve[serve.index("_pick_python() {") :].split("\n}\n", 1)[0] + "\n}\n"
+    dotenv_block = serve.split("# ── Load .env", 1)[1].split("\n\n", 1)[1].split("# ── Argument parsing", 1)[0]
+    # The block hands .env to the parser beside it in the checkout's scripts/.
+    (project / "scripts").mkdir(exist_ok=True)
+    shutil.copy2(scripts / "dotenv_exports.py", project / "scripts" / "dotenv_exports.py")
     defaults = serve[serve.index("# Runtime path defaults.") :].split("# Extra flags", 1)[0]
     result = subprocess.run(
         [
@@ -992,7 +1012,7 @@ def _local_launcher_home(project):
             # Git Bash answers with POSIX paths, and its mount table (for example Windows TEMP
             # at /tmp) is not reproducible from Python, so convert inside the shell. Passing the
             # value through argv instead would let MSYS rewrite shell syntax inside it.
-            'set -e\ncd "$REPO_ROOT"\n' + dotenv_block + defaults + '\nif command -v cygpath >/dev/null 2>&1; then cygpath -w "$DEER_FLOW_HOME"; else printf "%s" "$DEER_FLOW_HOME"; fi',
+            'set -e\ncd "$REPO_ROOT"\n' + pick_python + dotenv_block + defaults + '\nif command -v cygpath >/dev/null 2>&1; then cygpath -w "$DEER_FLOW_HOME"; else printf "%s" "$DEER_FLOW_HOME"; fi',
         ],
         cwd=project,
         env={**os.environ, "REPO_ROOT": str(project)},
@@ -1108,6 +1128,7 @@ def test_missing_dotenv_keeps_support_bundle_available(tmp_path, monkeypatch, so
         ("", "'$PWD/backend/.deer-flow'"),
         ("", "'${PWD}/backend/.deer-flow'"),
         ("", r'"\$PWD/backend/.deer-flow"'),
+        ("", '"$PWD/backend/$$runtime-data"'),
         ('RUNTIME_DATA="$PWD/runtime-data"\n', '"$RUNTIME_DATA"'),
         ('RUNTIME_DATA="$PWD/old"\nRUNTIME_DATA="$PWD/new"\n', '"${RUNTIME_DATA}"'),
         ('RUNTIME_DATA="$PWD/first"\nRUNTIME_DATA="$RUNTIME_DATA/second"\n', '"$RUNTIME_DATA"'),

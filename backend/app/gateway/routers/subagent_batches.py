@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.deps import (
     get_current_user,
     get_subagent_batch_repo,
@@ -70,6 +70,26 @@ async def list_batch_items(
     return await repo.list_items(batch_id, user_id=user_id, offset=offset, limit=limit, status=status) or []
 
 
+@router.get("/{batch_id}/items/{position}")
+@require_permission("threads", "read", owner_check=True)
+async def get_batch_item(
+    thread_id: ThreadId,
+    batch_id: str,
+    request: Request,
+    position: int = Path(..., ge=0),
+) -> dict:
+    _repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    item = await get_subagent_batch_service(request).read_browser_batch_item(
+        batch_id=batch_id,
+        user_id=user_id,
+        thread_id=thread_id,
+        position=position,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Subagent batch item not found")
+    return item
+
+
 @router.post("/{batch_id}/pause")
 @require_permission("threads", "write", owner_check=True)
 async def pause_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
@@ -90,6 +110,7 @@ async def cancel_batch(thread_id: ThreadId, batch_id: str, request: Request) -> 
     if not getattr(request.app.state, "subagent_batches_available", False):
         raise HTTPException(status_code=503, detail="Subagent batch worker is not running")
     _repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    require_cancel_permission_if(request, _batch.get("continuation_status") is not None)
     result = await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=user_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Subagent batch not found")
@@ -102,7 +123,7 @@ async def retry_batch_item(thread_id: ThreadId, batch_id: str, item_id: str, req
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
     item = await repo.retry_item(batch_id, item_id, user_id=user_id)
     if item is None:
-        raise HTTPException(status_code=409, detail="Only failed items can be retried")
+        raise HTTPException(status_code=409, detail="Only failed items of a batch that is not cancelled can be retried")
     return item
 
 

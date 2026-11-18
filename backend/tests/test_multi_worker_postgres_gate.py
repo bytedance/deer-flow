@@ -31,6 +31,7 @@ from app.gateway.routers.browser import _browser_tools_enabled
 from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, GENERATE_KEY_COMMAND
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, DeploymentConfig, multi_instance_declaration
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig
 
@@ -874,6 +875,32 @@ def test_credentials_key_consumers_name_the_enabled_features():
     assert credentials_key_consumers(_cluster_ready()) == [], "a config without the section uses no key"
     assert credentials_key_consumers(_with_channel_connections(_cluster_ready(), enabled=False)) == []
     assert credentials_key_consumers(_with_channel_connections(_cluster_ready())) == ["channel_connections.enabled=true"]
+
+
+def _with_mcp_oauth(config, *, grant_type: str = "refresh_token", oauth_enabled: bool = True, server_enabled: bool = True):
+    oauth = {"enabled": oauth_enabled, "token_url": "https://auth.example.invalid/token", "grant_type": grant_type, "refresh_token": "seed", "client_id": "client", "client_secret": "secret"}
+    config.extensions = ExtensionsConfig.model_validate({"mcpServers": {"reports": {"enabled": server_enabled, "type": "http", "url": "https://mcp.example.invalid/mcp", "oauth": oauth}}})
+    return config
+
+
+def test_rotating_mcp_oauth_servers_store_tokens_under_the_credentials_key():
+    """mcp_oauth_tokens keeps refresh_token connections' tokens encrypted; client_credentials stay in process."""
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready())) == ["mcpServers.reports.oauth.enabled=true"]
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), grant_type="client_credentials")) == []
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), oauth_enabled=False)) == []
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), server_enabled=False)) == []
+
+
+def test_declared_multi_instance_with_rotating_mcp_oauth_requires_the_credentials_key(monkeypatch):
+    """A peer that cannot decrypt the stored chain falls back to the consumed seed and gets invalid_grant."""
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_credentials_key(_with_mcp_oauth(_cluster_ready(deployment_multi_instance=True)))
+    msg = str(exc_info.value)
+    assert CREDENTIALS_KEY_ENV_VAR in msg
+    assert "mcpServers.reports.oauth.enabled=true" in msg
+    assert "or set mcpServers.reports.oauth.enabled=false" in msg
+    monkeypatch.setenv(CREDENTIALS_KEY_ENV_VAR, _VALID_KEY)
+    _enforce_credentials_key(_with_mcp_oauth(_cluster_ready(deployment_multi_instance=True)))
 
 
 def test_declared_multi_instance_with_channel_connections_requires_the_credentials_key():

@@ -35,14 +35,53 @@ def test_natural_language_hyphens_are_not_treated_as_fts5_syntax() -> None:
     assert not _is_advanced_query("real-time co-pilot node -js +python")
 
 
-@pytest.mark.skipif(not _jieba_available, reason="install the optional memory-zh extra")
+@pytest.mark.skipif(not _jieba_available, reason="requires the optional memory-zh extra to exercise the jieba branch")
 def test_chinese_subphrase_search_uses_jieba_tokenization(tmp_path: Path) -> None:
+    """With jieba installed, the same sub-phrase recall must still hold.
+
+    The complementary no-jieba case is forced with a monkeypatch below, so the
+    two tests cover the two tokenizer branches instead of skipping each other
+    on the same install.
+    """
     adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
     scope = {"userId": "alice", "agentName": "agent-a"}
     try:
         adapter.upsert(_fact("zh", "中文检索支持验证"), scope=scope, path="")
         results = adapter.search("检索", scopes=[scope], top_k=5, mode="fts5", filters=None)
         assert [item["fact"]["id"] for item in results] == ["zh"]
+    finally:
+        adapter.close()
+
+
+def test_chinese_fact_is_recallable_without_memory_zh_extra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CJK fact indexed in the default install must stay retrievable.
+
+    ``uv sync --group dev --locked`` and the contributor CI path install no
+    ``memory-zh`` extra, so ``_tokenize`` has to segment CJK on its own. It
+    emits character bigrams (the same ``relevance.cjk_token`` strategy the
+    relevance ranker uses) on both the index and the query side; a whitespace
+    fallback would keep the whole CJK run as one FTS5 token and silently return
+    zero hits for every sub-phrase. ``_jieba_available`` is read at call time,
+    so forcing it here runs this branch even where jieba is installed.
+    """
+    monkeypatch.setattr("deerflow.agents.memory.backends.deermem.deermem.core.retrieval._jieba_available", False)
+    adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        adapter.upsert(_fact("zh-default", "调度器会重试失败的任务"), scope=scope, path="")
+        results = adapter.search("重试", scopes=[scope], top_k=5, mode="fts5", filters=None)
+        assert results, "expected the stored Chinese fact to be recalled by the CJK sub-phrase '重试', got 0 hits: the no-jieba fallback must emit CJK bigrams instead of keeping '调度器会重试失败的任务' as one token"
+        assert [item["fact"]["id"] for item in results] == ["zh-default"]
+
+        # A single CJK character has no equal bigram token to match; the query
+        # side emits the FTS5 prefix phrase "重"* so the bigram index still hits.
+        single = adapter.search("重", scopes=[scope], top_k=5, mode="fts5", filters=None)
+        assert [item["fact"]["id"] for item in single] == ["zh-default"]
+
+        # The prefix stays anchored to that character: an absent one must not
+        # start matching everything in the index.
+        absent = adapter.search("蟹", scopes=[scope], top_k=5, mode="fts5", filters=None)
+        assert absent == []
     finally:
         adapter.close()
 
@@ -344,3 +383,112 @@ def test_substring_fallback_searches_every_fact_of_a_large_scope(tmp_path: Path)
         assert {"fact-101", "fact-150"} <= returned_ids
     finally:
         storage.close()
+
+
+@pytest.mark.parametrize("top_k", [1, 5])
+@pytest.mark.parametrize("reversal", ["confidence", "time_decay"])
+def test_engine_selects_composite_top_k_before_truncating(top_k: int, reversal: str, caplog: pytest.LogCaptureFixture) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    recent = now.isoformat()
+    older = (now - timedelta(days=3650)).isoformat()
+    engine = FTS5Retrieval()
+    try:
+        for index in range(30):
+            engine.index_fact(
+                f"short-{index:02d}",
+                f"Python Python tool{index:02d} reminder",
+                confidence=0.7 if reversal == "confidence" else 0.8,
+                created_at=recent if reversal == "confidence" else older,
+            )
+        engine.index_fact(
+            "best",
+            "Python deployment preference uses project virtual environments and pinned dependencies",
+            confidence=0.95 if reversal == "confidence" else 0.8,
+            created_at=recent,
+        )
+        complete = engine.search("Python", top_k=31)
+        assert len(complete) == 31
+        assert complete[0]["id"] == "best"
+        # The longer fact has weaker BM25 but the highest composite score.
+        assert complete[0]["bm25_score"] < complete[1]["bm25_score"]
+        assert complete[0]["score"] > complete[1]["score"]
+
+        with caplog.at_level("DEBUG", logger=FTS5Retrieval.__module__):
+            limited = engine.search("Python", top_k=top_k)
+        assert [fact["id"] for fact in limited] == [fact["id"] for fact in complete[:top_k]]
+        assert any(f"matched=31 retained={top_k}" in message for message in caplog.messages)
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("category", [None, "preference"])
+@pytest.mark.parametrize("top_k", [1, 5])
+def test_adapter_composite_ranking_preserves_category_and_limit(category: str | None, top_k: int) -> None:
+    from datetime import UTC, datetime
+
+    adapter = FTS5RetrievalAdapter()
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    recent = datetime.now(UTC).isoformat()
+    try:
+        for index in range(45):
+            adapter.upsert(
+                {**_fact(f"short-{index:02d}", f"Python Python tool{index:02d} reminder", category="preference"), "confidence": 0.7, "createdAt": recent},
+                scope=scope,
+                path="",
+            )
+        adapter.upsert(
+            {**_fact("best", "Python deployment preference uses project virtual environments and pinned dependencies", category="preference"), "confidence": 0.95, "createdAt": recent},
+            scope=scope,
+            path="",
+        )
+        adapter.upsert({**_fact("other-category", "Python", category="context"), "confidence": 1.0, "createdAt": recent}, scope=scope, path="")
+        adapter.upsert({**_fact("nonmatch", "Coffee brewing preference", category="preference"), "confidence": 1.0, "createdAt": recent}, scope=scope, path="")
+        filters = {"category": category} if category else None
+        complete = adapter.search("Python", scopes=[scope], top_k=100, mode="fts5", filters=filters)
+        assert complete[0]["fact"]["id"] == ("best" if category else "other-category")
+        limited = adapter.search("Python", scopes=[scope], top_k=top_k, mode="fts5", filters=filters)
+        assert [row["fact"]["id"] for row in limited] == [row["fact"]["id"] for row in complete[:top_k]]
+        assert all(row["matchType"] == "fts5" for row in limited)
+        assert all("Python" in row["fact"]["content"] for row in limited)
+        if category:
+            assert all(row["fact"]["category"] == category for row in limited)
+    finally:
+        adapter.close()
+
+
+def test_engine_composite_score_ties_keep_bm25_and_insertion_order() -> None:
+    from datetime import UTC, datetime
+
+    engine = FTS5Retrieval()
+    recent = datetime.now(UTC).isoformat()
+    try:
+        for fact_id in ("z-first", "a-second", "middle"):
+            engine.index_fact(fact_id, "Python same content", confidence=0.8, created_at=recent)
+        for top_k in (1, 2, 3, 10):
+            assert [fact["id"] for fact in engine.search("Python", top_k=top_k)] == ["z-first", "a-second", "middle"][:top_k]
+    finally:
+        engine.close()
+
+
+def test_deermem_default_tool_limit_keeps_best_composite_fact(tmp_path: Path) -> None:
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    try:
+        for index in range(90):
+            manager.create_fact(f"Python Python tool{index:02d} reminder", confidence=0.7, user_id="alice")
+        _, best_id = manager.create_fact(
+            "Python deployment preference uses project virtual environments and pinned dependencies",
+            confidence=0.95,
+            category="preference",
+            user_id="alice",
+        )
+        complete = manager.search("Python", top_k=100, user_id="alice")
+        assert len(complete) == 91
+        assert complete[0]["id"] == best_id
+        # memory_search's default limit is 10. Changing only the requested
+        # count must not decide whether the highest-scoring fact is reachable.
+        for top_k in (10, 12):
+            assert [fact["id"] for fact in manager.search("Python", top_k=top_k, user_id="alice")] == [fact["id"] for fact in complete[:top_k]]
+    finally:
+        manager.close()

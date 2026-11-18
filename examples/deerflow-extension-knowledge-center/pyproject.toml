@@ -1,0 +1,17 @@
+[project]
+name = "deerflow-extension-knowledge-center"
+version = "0.1.0"
+description = "Optional capability-aware knowledge center pages for DeerFlow"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = ["deerflow-extension-api>=0.2.9,<0.3"]
+
+[project.entry-points."deerflow.extensions"]
+knowledge-center = "deerflow_extension_knowledge_center:install"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deerflow_extension_knowledge_center"]

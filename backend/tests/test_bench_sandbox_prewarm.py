@@ -139,6 +139,39 @@ async def test_real_graph_prewarm_starts_during_model_and_is_claimed_once(observ
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("tool_tick_offset", [0.0, 0.015], ids=["same-tick", "next-tick"])
+async def test_prewarm_reused_uses_event_order_with_coarse_clock(observed, monkeypatch, tool_tick_offset: float):
+    """Pin #7044: prewarm classification follows event order, even when timestamps tie."""
+    provider, config = observed
+    tick = 100.0
+    # Isolate the benchmark's observation clock; asyncio timeouts keep real time.
+    monkeypatch.setattr(bench, "time", SimpleNamespace(monotonic=lambda: tick))
+
+    model_gate = asyncio.Event()
+    trace = bench.Trace(started=tick)
+    task = asyncio.create_task(bench.run_case(provider, config, case="tool", prewarm=True, model_delay=0, thread_id="coarse-tick", user_id="alice", trace=trace, model_gate=model_gate))
+    try:
+        await asyncio.wait_for(trace.model_started.wait(), 2)
+        await asyncio.wait_for(provider.started.wait(), 2)
+        provider.finish.set()
+        await asyncio.wait_for(trace.acquire_ready.wait(), 2)
+        # Advance only at this event boundary, independently of scheduler delays.
+        tick += tool_tick_offset
+        model_gate.set()
+        row = await asyncio.wait_for(task, 3)
+    finally:
+        provider.finish.set()
+        model_gate.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert trace.acquisitions[0]["started"] == trace.started
+    assert trace.timestamps["tool_requested"] == trace.started + tool_tick_offset
+    assert trace.acquisitions[0]["precedes_tool_request"] is True
+    assert row["success"], json.dumps(row)
+    assert row["acquire_calls"] == 1
+    assert row["prewarm_reused"] is True
+
+
+@pytest.mark.anyio
 async def test_real_graph_baseline_waits_until_tool_to_start(observed):
     provider, config = observed
     model_gate = asyncio.Event()

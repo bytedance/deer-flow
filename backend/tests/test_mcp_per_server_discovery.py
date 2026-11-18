@@ -61,6 +61,39 @@ def test_flatten_server_tool_groups_preserves_enabled_order_and_empty_success():
     assert groups["EMPTY"].tools == ()
 
 
+def test_flatten_server_tool_groups_drops_cross_server_duplicate_names(caplog):
+    """Server 'a' exposing 'b_x' and server 'a_b' exposing 'x' both bind 'a_b_x'."""
+    a_b_x = _tool("a_b_x")
+    duplicate = _tool("a_b_x")
+    other = _tool("a_other")
+    groups = {
+        "a": ServerDiscoveryResult(tools=(a_b_x, other)),
+        "a_b": ServerDiscoveryResult(tools=(duplicate,)),
+    }
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"):
+        flattened = _flatten_server_tool_groups(("a", "a_b"), groups)
+
+    assert flattened == [a_b_x, other]
+    assert flattened[0] is a_b_x
+    assert duplicate not in flattened
+    assert "a_b_x" in caplog.text
+    assert "'a_b'" in caplog.text
+
+
+def test_flatten_server_tool_groups_drops_duplicate_within_one_server(caplog):
+    first = _tool("A_search")
+    second = _tool("A_search")
+    groups = {"A": ServerDiscoveryResult(tools=(first, second))}
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"):
+        flattened = _flatten_server_tool_groups(("A",), groups)
+
+    assert flattened == [first]
+    assert "A_search" in caplog.text
+    assert "already served by server 'A'" in caplog.text
+
+
 def test_server_discovery_result_repr_hides_ownership_handles():
     pool = MagicMock()
     binding = ServerBinding(
@@ -556,7 +589,13 @@ async def test_personal_discovery_uses_personal_pool_domain_and_task_scope(monke
         AsyncMock(return_value=config),
     )
     monkeypatch.setattr("deerflow.mcp.tasks.runtime.is_mcp_task_runtime_available", lambda: True)
-    monkeypatch.setattr("deerflow.mcp.tools.OAuthTokenManager.from_extensions_config", lambda config: personal_manager)
+    oauth_owners: list[str | None] = []
+
+    def personal_manager_for(config, *, owner_user_id=None):
+        oauth_owners.append(owner_user_id)
+        return personal_manager
+
+    monkeypatch.setattr("deerflow.mcp.tools.OAuthTokenManager.from_extensions_config", personal_manager_for)
     monkeypatch.setattr("deerflow.mcp.tools.get_mcp_task_oauth_token_manager", deployment_manager)
     monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
     monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *args, **kwargs: [])
@@ -574,6 +613,8 @@ async def test_personal_discovery_uses_personal_pool_domain_and_task_scope(monke
     assert pool.ensure_binding.call_args.kwargs == {"domain": "personal"}
     assert ownership_domains == ["personal"]
     assert connection_scopes == ["personal"]
+    # Stored OAuth tokens are keyed by the owner of a personal connection.
+    assert oauth_owners == ["alice"]
     deployment_manager.assert_not_called()
 
 

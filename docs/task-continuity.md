@@ -41,6 +41,7 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `history_search`: keyword search over the current messages and compacted source
   batches reachable from the current checkpoint. English words and Chinese
   character bigrams are supported. Returns up to eight excerpts of at most 600 characters.
+  Repeated archives of one source share one result slot, preserving FTS ranking.
   The optional `role="user"`, `"assistant"`, or `"tool"` filters by message author
   type; omission or `null` preserves search across all roles. These values map to
   internal `human`, `ai`, and `tool` roles; returned role values stay unchanged.

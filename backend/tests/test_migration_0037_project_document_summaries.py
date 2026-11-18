@@ -103,7 +103,7 @@ async def test_0037_upgrade_keeps_rows_and_downgrade_drops_summary(tmp_path, bac
 
 def test_postgres_uri_tls_policy_is_preserved(tmp_path, monkeypatch):
     """The fixture must translate, never drop, an explicit sslmode (tests/AGENTS.md)."""
-    monkeypatch.setenv("TEST_POSTGRES_URI", "postgresql://u:p@db:5432/deerflow?sslmode=verify-full&channel_binding=require")
+    monkeypatch.setenv("TEST_POSTGRES_URI", "postgresql://u:p@db:5432/deerflow?sslmode=verify-full")
     captured = {}
 
     def capture_engine(url, **kwargs):
@@ -122,4 +122,16 @@ def test_postgres_uri_conflicting_ssl_settings_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_POSTGRES_URI", "postgresql://u:p@db:5432/deerflow?sslmode=require&ssl=disable")
     monkeypatch.setitem(globals(), "create_async_engine", lambda *a, **k: None)
     with pytest.raises(ValueError, match="Conflicting ssl and sslmode"):
+        _engine(tmp_path, "postgres")
+
+
+@pytest.mark.parametrize("channel_binding", ["disable", "prefer", "require"])
+async def test_postgres_uri_channel_binding_rejected_before_engine_creation(tmp_path, monkeypatch, channel_binding):
+    monkeypatch.setenv("TEST_POSTGRES_URI", f"postgresql://u:p@db:5432/deerflow?sslmode=verify-full&channel_binding={channel_binding}")
+
+    def reject_engine_creation(*args, **kwargs):
+        pytest.fail("Unsupported Channel Binding must be rejected before engine creation")
+
+    monkeypatch.setitem(globals(), "create_async_engine", reject_engine_creation)
+    with pytest.raises(ValueError, match="channel_binding"):
         _engine(tmp_path, "postgres")

@@ -46,6 +46,7 @@ _MODEL_METADATA_FIELDS = frozenset(
     {
         "name",
         "display_name",
+        "aliases",
         "description",
         "use",
         "context_window",

@@ -237,6 +237,31 @@ async def test_create_uses_bound_origin_and_echoes_goal_and_stop_details(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("action", "field"), [("create", "run_at"), ("update", "run_at"), ("create", "end_at"), ("update", "end_at"), ("resume", "end_at")])
+async def test_conversation_rejects_nonexistent_local_time_before_persistence(monkeypatch, action, field):
+    from app.gateway import scheduled_task_access as access
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 22, tzinfo=UTC)
+
+    monkeypatch.setattr(access, "datetime", FixedDatetime)
+    task = _task(timezone="America/New_York", status="paused" if action == "resume" else "enabled", next_run_at="2026-10-23T00:00:00+00:00")
+    prepare, repo, *_ = _setup(monkeypatch, task=task)
+    capability = await prepare(client_timezone="America/New_York")
+    wall_time = "2027-03-14T02:30:00"
+    fields = {"schedule_type": "once", "schedule_spec": {"run_at": wall_time}} if field == "run_at" else {"end_at": wall_time}
+    payload = {"title": "Report", "prompt": "Write the report", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}} if action == "create" else {"task_id": "task-1"}
+    result = await capability.manage(action=action, request={**payload, **fields})
+    assert result.get("status_code") == 422, result
+    assert result["code"] == ("invalid_schedule" if field == "run_at" else "invalid_request")
+    assert "does not exist" in result["error"]
+    repo.create.assert_not_awaited()
+    repo.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("objective", ["", " \t\n ", "g" * 4001])
 async def test_create_rejects_invalid_goal_before_persisting_schedule(monkeypatch, objective):
     prepare, repo, *_ = _setup(monkeypatch)
@@ -321,20 +346,15 @@ async def test_note_keeps_the_users_exact_text_and_repository_guard(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_trial_requires_a_current_user_turn_and_uses_manual_dispatch(monkeypatch):
+async def test_trial_without_current_text_requires_user_button(monkeypatch):
     prepare, _, _, service, *_ = _setup(monkeypatch, original_text="")
     capability = await prepare()
     result = await capability.manage(action="trial", request={"task_id": "task-1"})
-    assert result["status_code"] == 403
+    assert result["action"] == "trial"
+    assert result["requires_user_action"] == "run_once_now"
+    assert "trial" not in result
+    assert result["task"]["id"] == "task-1"
     service.dispatch_task.assert_not_awaited()
-    prepare, _, _, service, *_ = _setup(monkeypatch, original_text="Yes, run it now.")
-    capability = await prepare()
-    result = await capability.manage(action="trial", request={"task_id": "task-1"})
-    assert result["trial"]["outcome"] == "launched"
-    assert service.dispatch_task.await_args.kwargs["trigger"] == "manual"
-    service.dispatch_task.return_value = {"outcome": "failed", "error": "cannot launch"}
-    result = await capability.manage(action="trial", request={"task_id": "task-1"})
-    assert result["status_code"] == 502
 
 
 @pytest.mark.asyncio
@@ -367,22 +387,28 @@ async def test_trial_requires_a_current_user_turn_and_uses_manual_dispatch(monke
         "先跑一次，但不要真的执行",
     ],
 )
-async def test_trial_rejects_unrelated_negative_quoted_or_ambiguous_turns(monkeypatch, user_text):
+async def test_trial_ambiguous_turns_never_dispatch(monkeypatch, user_text):
     prepare, _, _, service, *_ = _setup(monkeypatch, original_text=user_text, task=_task(title="Report"))
     capability = await prepare()
     result = await capability.manage(action="trial", request={"task_id": "task-1"})
-    assert result["status_code"] == 403
+    assert result["action"] == "trial"
+    assert result["requires_user_action"] == "run_once_now"
+    assert "trial" not in result
+    assert result["task"]["id"] == "task-1"
     service.dispatch_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("user_text", ["Run it now", "Yes, run it now.", "Please run this task once", "Run task-1 now", "先跑一次", "请先试跑一次。", "可以，先跑一次", "先试跑task-1", "现在运行task-1一次"])
-async def test_trial_accepts_direct_requests_in_the_current_user_turn(monkeypatch, user_text):
+async def test_trial_direct_requests_still_require_user_button(monkeypatch, user_text):
     prepare, _, _, service, *_ = _setup(monkeypatch, original_text=user_text, task=_task(title="Report"))
     capability = await prepare()
     result = await capability.manage(action="trial", request={"task_id": "task-1"})
-    assert result["trial"]["outcome"] == "launched"
-    assert service.dispatch_task.await_args.kwargs["trigger"] == "manual"
+    assert result["action"] == "trial"
+    assert result["requires_user_action"] == "run_once_now"
+    assert "trial" not in result
+    assert result["task"]["id"] == "task-1"
+    service.dispatch_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -393,7 +419,10 @@ async def test_trial_never_uses_task_title_as_authorization_text(monkeypatch, ti
     prepare, _, _, service, *_ = _setup(monkeypatch, original_text=user_text, task=_task(title=title))
     capability = await prepare()
     result = await capability.manage(action="trial", request={"task_id": "task-1"})
-    assert result["status_code"] == 403
+    assert result["action"] == "trial"
+    assert result["requires_user_action"] == "run_once_now"
+    assert "trial" not in result
+    assert result["task"]["id"] == "task-1"
     service.dispatch_task.assert_not_awaited()
 
 
@@ -1002,22 +1031,28 @@ async def test_clear_fields_are_bounded_per_action(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_trial_existing_queued_is_reported(monkeypatch):
+async def test_trial_does_not_read_or_reuse_dispatch_outcomes(monkeypatch):
     prepare, _, _, service, *_ = _setup(monkeypatch, original_text="Run it now")
     service.dispatch_task.return_value = {"outcome": "queued", "existing": True, "thread_id": "queued-thread", "run_id": None}
     capability = await prepare()
     result = await capability.manage(action="trial", request={"task_id": "task-1"})
-    assert result["trial"] == {"outcome": "queued", "existing": True, "thread_id": "queued-thread"}
+    assert result["action"] == "trial"
+    assert result["requires_user_action"] == "run_once_now"
+    assert "trial" not in result
+    assert result["task"]["id"] == "task-1"
+    service.dispatch_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_trial_result_has_thread_id(monkeypatch):
-    prepare, *_ = _setup(monkeypatch, original_text="先跑一次")
+async def test_trial_card_does_not_claim_a_launched_thread(monkeypatch):
+    prepare, _, _, service, *_ = _setup(monkeypatch, original_text="先跑一次")
     capability = await prepare()
     result = await capability.manage(action="trial", request={"task_id": "task-1"})
     assert result["action"] == "trial"
-    assert result["trial"] == {"outcome": "launched", "existing": False, "thread_id": "trial-thread"}
+    assert result["requires_user_action"] == "run_once_now"
+    assert "trial" not in result
     assert result["task"]["id"] == "task-1"
+    service.dispatch_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1039,12 +1074,15 @@ async def test_trial_result_has_thread_id(monkeypatch):
         "立即试运行",
     ],
 )
-async def test_trial_accepts_natural_direct_requests(monkeypatch, user_text):
+async def test_trial_natural_requests_still_require_user_button(monkeypatch, user_text):
     prepare, _, _, service, *_ = _setup(monkeypatch, original_text=user_text)
     capability = await prepare()
     result = await capability.manage(action="trial", request={"task_id": "task-1"})
-    assert result["trial"]["outcome"] == "launched"
-    assert service.dispatch_task.await_args.kwargs["trigger"] == "manual"
+    assert result["action"] == "trial"
+    assert result["requires_user_action"] == "run_once_now"
+    assert "trial" not in result
+    assert result["task"]["id"] == "task-1"
+    service.dispatch_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1143,3 +1181,16 @@ def test_host_run_errors_reach_the_agent_as_short_keys():
     assert _reason_code({"status": "unmet", "error": "blocked:external_wait"}) == "blocked:external_wait"
     assert _reason_code({"status": "failed", "error": "boom: Traceback ...", "run_id": None}) == "launch_failed"
     assert _reason_code({"status": "success"}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_text", ["Run it now", "不要试跑", "请立即执行一遍这个任务", "quoted: run it now", ""])
+async def test_trial_presents_authenticated_user_action_without_dispatch(monkeypatch, user_text):
+    prepare, _, _, service, *_ = _setup(monkeypatch, original_text=user_text)
+    capability = await prepare()
+    result = await capability.manage(action="trial", request={"task_id": "task-1"})
+    assert result["action"] == "trial"
+    assert result["requires_user_action"] == "run_once_now"
+    assert result["task"]["id"] == "task-1"
+    assert "trial" not in result
+    service.dispatch_task.assert_not_awaited()

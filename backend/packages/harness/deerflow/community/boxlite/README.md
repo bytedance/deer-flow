@@ -51,6 +51,12 @@ loop on a daemon thread and marshals every coroutine onto it via
 `user_id:thread_id`, released into an in-process warm pool after each agent turn,
 and reclaimed by the same thread on the next acquire.
 
+Startup recovery uses the async runtime's `list_info()` and `get()` on that same
+private loop. Recovered native box handles collect stdout and stderr concurrently
+and return the SDK's `ExecResult`, matching fresh `SimpleBox` commands. Recovery
+does not use the thread-affine greenlet sync API or create replacements for boxes
+that disappear between listing and lookup; normal acquisition owns creation.
+
 | File | Role |
 | --- | --- |
 | `provider.py` | `SandboxProvider` lifecycle + the private-loop bridge |
@@ -75,6 +81,12 @@ from the SDK's `boxlite.TimeoutError`.
 
 The provider creates `/mnt/user-data/{workspace,uploads,outputs}` and
 `/mnt/skills` on box start so those virtual paths resolve natively.
+
+`tests/test_boxlite_provider.py` covers recovery, health checks, commands, and
+shutdown without the optional SDK. With `deerflow-harness[boxlite]` installed,
+`tests/test_boxlite_recovery_sdk.py` additionally checks the installed SDK's native
+command signature and `SimpleBox` result semantics against an offline native
+runtime double. These contract tests do not start a VM or require KVM/HVF.
 
 Warm-pool capacity is governed by `sandbox.replicas` across active + warm VMs.
 `sandbox.idle_timeout` controls how long released warm VMs stay running; `0`

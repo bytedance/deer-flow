@@ -359,13 +359,16 @@ describe("parseSubtaskResult — shared contract fixture", () => {
   }
 
   for (const stopReason of CONTRACT.valid_stop_reason_values) {
-    it(`carries stop_reason through unchanged: ${stopReason}`, () => {
-      const parsed = parseSubtaskResult("ignored content", {
-        [SUBAGENT_STATUS_KEY]: "completed",
-        [SUBAGENT_RESULT_BRIEF_KEY]: "partial work",
-        [SUBAGENT_STOP_REASON_KEY]: stopReason,
-      });
-      expect(parsed.stopReason).toBe(stopReason);
-    });
+    it.each(["completed", "failed"])(
+      `carries stop_reason ${stopReason} through unchanged for %s`,
+      (status) => {
+        const parsed = parseSubtaskResult("ignored content", {
+          [SUBAGENT_STATUS_KEY]: status,
+          [SUBAGENT_RESULT_BRIEF_KEY]: "partial work",
+          [SUBAGENT_STOP_REASON_KEY]: stopReason,
+        });
+        expect(parsed).toMatchObject({ status, stopReason });
+      },
+    );
   }
 });

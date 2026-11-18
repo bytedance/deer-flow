@@ -135,7 +135,7 @@ class JsonChannelStore:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd = tempfile.NamedTemporaryFile(mode="w", dir=self._path.parent, suffix=".tmp", delete=False)
+        fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._path.parent, suffix=".tmp", delete=False)
         try:
             json.dump(self._data, fd, indent=2)
             fd.close()
@@ -333,6 +333,9 @@ def _read_legacy_file(path: Path, *, log_missing: bool, on_corrupt: str) -> dict
     except FileNotFoundError:
         if log_missing:
             logger.debug("No legacy channel store at %s", path)
+        return None
+    except UnicodeDecodeError:
+        logger.warning(on_corrupt, path)
         return None
     except OSError:
         logger.warning(on_corrupt, path, exc_info=True)

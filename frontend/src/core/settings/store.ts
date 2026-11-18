@@ -4,6 +4,7 @@ import {
   THREAD_MODEL_KEY_PREFIX,
   getLocalSettings,
   getThreadModelName,
+  safeLocalStorage,
   saveLocalSettings,
   saveThreadModelName,
   type LocalSettings,
@@ -210,6 +211,22 @@ export const updateLocalSettings: LocalSettingsSetter = (key, value) => {
   preferenceEdit?.(previous, baseSettings);
   emitChange();
 };
+
+/** Explicit conversation-only selection; never edits account/base preferences. */
+export function selectThreadModel(threadId: string, modelName: string) {
+  ensureBaseSettingsLoaded();
+  ensureStorageListenerRegistered();
+  if (
+    !safeLocalStorage.setItem(
+      `${THREAD_MODEL_KEY_PREFIX}${threadId}`,
+      modelName,
+    )
+  ) {
+    throw new Error("Unable to save the conversation model in this browser.");
+  }
+  threadModelNames.set(threadId, modelName);
+  emitChange();
+}
 
 export function updateThreadSettings<K extends keyof LocalSettings>(
   threadId: string,

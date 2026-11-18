@@ -50,6 +50,7 @@ import argparse
 import importlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import statistics
@@ -241,6 +242,7 @@ def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         "container_prefix": config.get("container_prefix"),
         "replicas": config.get("replicas", 3),
         "idle_timeout": config.get("idle_timeout", 600),
+        "health_check_skip_seconds": config.get("health_check_skip_seconds", 0.0),
         "mounts": config.get("mounts", []),
         "environment": config.get("environment", {}),
         "provisioner_url": config.get("provisioner_url", ""),
@@ -751,6 +753,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if math.isnan(args.idle_timeout) or args.idle_timeout < 0:
+        raise SystemExit("idle timeout must be nonnegative and not NaN")
+    if math.isnan(args.health_check_skip_seconds) or args.health_check_skip_seconds < 0:
+        raise SystemExit("health-check skip seconds must be nonnegative and not NaN")
     if args.provider == "opensandbox" and (args.fault_inject is not None or args.health_check_skip_seconds != 0):
         raise SystemExit("opensandbox benchmarks do not support --fault-inject or nonzero --health-check-skip-seconds")
     if min(args.concurrency, args.users, args.replicas) < 1 or min(args.iterations, args.warmup_iterations) < 0:
@@ -759,8 +765,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("fault injection requires warm_same_thread, concurrency=1 and an enabled warm pool")
     if args.fault_inject is not None and not 0 <= args.fault_inject < args.iterations:
         raise SystemExit("fault injection iteration must be inside the measured batch")
-    if args.scenario == "idle_timeout" and (args.concurrency != 1 or args.idle_timeout <= 0):
-        raise SystemExit("idle_timeout requires concurrency=1 and a positive idle timeout")
+    if args.scenario == "idle_timeout" and (args.concurrency != 1 or not math.isfinite(args.idle_timeout) or args.idle_timeout <= 0):
+        raise SystemExit("idle_timeout requires concurrency=1 and a finite positive idle timeout")
     if args.workload == "state_reuse" and (args.scenario != "warm_same_thread" or args.concurrency != 1):
         raise SystemExit("state_reuse requires --scenario warm_same_thread --concurrency 1")
     args.run_id = args.run_id or uuid.uuid4().hex[:12]

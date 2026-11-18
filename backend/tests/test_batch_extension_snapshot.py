@@ -65,7 +65,9 @@ async def test_batch_keeps_its_construction_snapshot(monkeypatch, _subagent_env,
     def assemble(**kwargs):
         kwargs["include_mcp"] = False
         tools = real_assembly(**kwargs)
-        captured["tool_names"] = [t.name for t in tools]
+        # This test isolates extension snapshots; the run-status built-in is
+        # assembled independently of the monkeypatched BUILTIN_TOOLS list.
+        captured["tool_names"] = [t.name for t in tools if t.name != "inspect_run_status"]
         return tools
 
     monkeypatch.setattr("deerflow.tools.get_available_tools", assemble)

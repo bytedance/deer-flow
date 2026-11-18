@@ -1240,6 +1240,97 @@ async def test_run_agent_closes_stream_when_abort_breaks_iteration():
     assert record.status == RunStatus.interrupted
 
 
+@pytest.mark.anyio
+async def test_run_agent_persists_visible_partial_response_when_interrupted():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-partial-response")
+    event_store = MemoryRunEventStore()
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class PartialResponseAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            metadata = {"langgraph_node": "agent"}
+            yield ("messages", (AIMessageChunk(content="A useful ", id="partial-ai"), metadata))
+            yield ("messages", (AIMessageChunk(content="partial answer", id="partial-ai"), metadata))
+            record.abort_event.set()
+            # The worker observes the abort before publishing or capturing this
+            # frame, so only text the client actually saw may be recovered.
+            yield ("messages", (AIMessageChunk(content=" unseen", id="partial-ai"), metadata))
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda **_kwargs: PartialResponseAgent(),
+        graph_input={},
+        config={},
+        stream_modes=["messages-tuple", "values"],
+    )
+
+    messages = await event_store.list_messages(record.thread_id)
+    assert record.status == RunStatus.interrupted
+    assert len(messages) == 1
+    assert messages[0]["run_id"] == record.run_id
+    assert messages[0]["content"]["id"] == "partial-ai"
+    assert messages[0]["content"]["content"] == "A useful partial answer"
+    assert messages[0]["metadata"] == {
+        "caller": "lead_agent",
+        "interrupted": True,
+        "latency_ms": None,
+        "llm_call_index": 1,
+        "partial": True,
+        "usage": {},
+    }
+
+
+@pytest.mark.anyio
+async def test_run_agent_does_not_persist_hidden_partial_response():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-hidden-partial-response")
+    event_store = MemoryRunEventStore()
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class HiddenPartialResponseAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="internal context",
+                        id="hidden-ai",
+                        additional_kwargs={"hide_from_ui": True},
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+            )
+            record.abort_event.set()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda **_kwargs: HiddenPartialResponseAgent(),
+        graph_input={},
+        config={},
+        stream_modes=["messages-tuple", "values"],
+    )
+
+    assert record.status == RunStatus.interrupted
+    assert await event_store.list_messages(record.thread_id) == []
+
+
 @pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
 @pytest.mark.parametrize("close_fails", [False, True], ids=["close-succeeds", "close-fails"])
 @pytest.mark.anyio
@@ -1879,6 +1970,122 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     assert fetched.status == RunStatus.error
     assert fetched.error == "Connection error."
     bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_task_stop_carries_final_status_error_and_run_metadata_for_llm_error_fallback():
+    """The graph ends normally, so only on_task_stop can see that the run failed."""
+    from deerflow_extension_api import TaskOutcome
+
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    run_manager = RunManager()
+    scheduled = {"scheduled_task_id": "task-1", "scheduled_task_run_id": "occurrence-1", "scheduled_trigger": "scheduled"}
+    record = await run_manager.create("thread-1", "researcher", metadata=dict(scheduled))
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {
+                "messages": [
+                    AIMessage(
+                        content="The configured LLM provider is temporarily unavailable after multiple retries.",
+                        additional_kwargs={"deerflow_error_fallback": True, "error_detail": "Connection error."},
+                    )
+                ]
+            }
+
+    class Recorder:
+        def __init__(self):
+            self.starts = []
+            self.stops = []
+
+        async def on_task_start(self, _app_store, _task_store, info):
+            self.starts.append(info)
+
+        async def on_task_stop(self, _app_store, _task_store, info, outcome):
+            self.stops.append((info, outcome))
+
+    recorder = Recorder()
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:task-stop-detail"):
+        registry.task_lifecycle(recorder)
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, extensions=registry.build()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    [start] = recorder.starts
+    assert start.stop is None
+    assert {key: start.metadata[key] for key in scheduled} == scheduled
+    with pytest.raises(TypeError):
+        start.metadata["scheduled_task_id"] = "other"  # type: ignore[index]
+    [(info, outcome)] = recorder.stops
+    assert outcome is TaskOutcome.FAILED
+    assert info.stop is not None
+    assert info.stop.status == "error"
+    assert info.stop.error == "Connection error."
+    assert info.stop.goal_verdict is None
+    assert info.metadata == start.metadata
+    assert info.stop.persisted is True
+    assert info == start
+
+
+@pytest.mark.anyio
+async def test_task_stop_flags_a_staged_status_the_run_store_did_not_confirm(monkeypatch):
+    """A rejected terminal write must not reach observers as a confirmed final status."""
+    from deerflow_extension_api import TaskOutcome
+
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", "researcher")
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    original_persist = run_manager._persist_status
+
+    async def reject_terminal_writes(rec, status, **kwargs):
+        if status not in (RunStatus.pending, RunStatus.running):
+            return False
+        return await original_persist(rec, status, **kwargs)
+
+    monkeypatch.setattr(run_manager, "_persist_status", reject_terminal_writes)
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="done")]}
+
+    stops = []
+
+    class Recorder:
+        async def on_task_stop(self, _app_store, _task_store, info, outcome):
+            stops.append((info, outcome))
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:task-stop-unconfirmed"):
+        registry.task_lifecycle(Recorder())
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, extensions=registry.build()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.terminal_status_persisted is False
+    [(info, outcome)] = stops
+    assert outcome is TaskOutcome.COMPLETED
+    assert info.stop is not None
+    assert info.stop.status == "success"
+    assert info.stop.persisted is False
 
 
 @pytest.mark.anyio

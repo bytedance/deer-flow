@@ -41,6 +41,28 @@ def test_candidates_keep_the_name_then_number_then_timestamp(monkeypatch):
     ]
 
 
+class _FrozenClock(datetime):
+    """A coarse host clock: every sample inside one burst returns the same instant."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 10, 18, 12, 0, 0, tzinfo=UTC)
+
+
+def test_timestamped_fallbacks_stay_distinct_on_a_coarse_clock(monkeypatch):
+    # A host clock whose tick is coarser than the microsecond stamp (Windows'
+    # system-time tick is ~15 ms) hands back one value for all five samples in a
+    # burst. The fallback bound must not depend on the clock advancing between
+    # yields.
+    monkeypatch.setattr(output_names, "MAX_COLLISION_PROBES", 1)
+    monkeypatch.setattr(output_names, "datetime", _FrozenClock)
+
+    names = list(output_names.output_name_candidates("report.png"))
+
+    assert len(names) == 1 + 1 + output_names.MAX_TIMESTAMP_ATTEMPTS
+    assert len(set(names)) == len(names)
+
+
 def test_candidates_read_the_clock_only_when_a_fallback_is_reached(monkeypatch):
     monkeypatch.setattr(_StepClock, "ticks", 0)
     monkeypatch.setattr(output_names, "datetime", _StepClock)

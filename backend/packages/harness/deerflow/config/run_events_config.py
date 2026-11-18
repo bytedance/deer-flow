@@ -15,12 +15,21 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
 
 
 class RunEventsConfig(BaseModel):
+    producer_fencing: Literal["off", "strict"] = "off"
+    producer_cutover_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_producer_fencing(self):
+        if self.producer_fencing == "strict" and (self.backend != "db" or self.producer_cutover_id is None):
+            raise ValueError("Strict producer fencing requires backend=db and an explicit offline cutover ID")
+        return self
+
     backend: Literal["memory", "db", "jsonl"] = Field(
         default="memory",
         description="Storage backend for run events. 'memory' for development (no persistence), 'db' for production (SQL queries), 'jsonl' for lightweight single-node persistence.",

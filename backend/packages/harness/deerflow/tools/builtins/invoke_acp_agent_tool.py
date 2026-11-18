@@ -12,6 +12,12 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+# Bytes of agent stderr kept for the Gateway log when an invocation fails.
+_STDERR_TAIL_BYTES = 8 * 1024
+# After the agent process exits, how long the SDK receive loop may keep reading
+# responses still buffered in the stdout pipe before the call is declared failed.
+_EXIT_DRAIN_SECONDS = 2.0
+
 
 class _InvokeACPAgentInput(BaseModel):
     agent: str = Field(description="Name of the ACP agent to invoke")
@@ -185,6 +191,70 @@ def _resolve_agent_command(command: str, path: str | None = None) -> str:
     return resolved if os.path.isabs(resolved) else os.path.abspath(resolved)
 
 
+class _StderrTail:
+    """Drain an agent's stderr pipe, keeping only a bounded tail.
+
+    The SDK spawns agents with ``stderr=PIPE`` but never reads it. Once an agent
+    has logged more than asyncio's pipe buffering absorbs, its next stderr write
+    blocks, the agent stops answering, and the invocation stalls until the
+    timeout. Draining continuously keeps verbose agents running.
+    """
+
+    def __init__(self, stream: asyncio.StreamReader | None) -> None:
+        self._data = bytearray()
+        self._task = asyncio.create_task(self._drain(stream)) if stream is not None else None
+
+    async def _drain(self, stream: asyncio.StreamReader) -> None:
+        while chunk := await stream.read(65536):
+            self._data += chunk
+            del self._data[:-_STDERR_TAIL_BYTES]
+
+    async def text(self, *, wait: float = 0.0) -> str:
+        """Return the tail, waiting up to ``wait`` seconds for the pipe to reach EOF."""
+        if self._task is not None and wait > 0:
+            await asyncio.wait({self._task}, timeout=wait)
+        return self._data.decode("utf-8", errors="replace").strip()
+
+    async def aclose(self) -> None:
+        if self._task is not None:
+            # A descendant can keep the pipe open after the agent itself is reaped.
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+
+
+class _AgentExitedError(Exception):
+    """The agent process ended before answering an outstanding ACP request."""
+
+    def __init__(self, returncode: int | None) -> None:
+        super().__init__(returncode)
+        self.returncode = returncode
+
+
+async def _await_while_agent_runs(awaitable: Any, proc: asyncio.subprocess.Process) -> Any:
+    """Await an ACP exchange, failing fast if the agent process goes away.
+
+    Older SDK releases never fail a pending request when the agent closes its
+    stdout, so a crash at startup would otherwise wait out the whole timeout.
+    Newer releases raise ``ConnectionError`` instead; both are reported as the
+    agent having exited, which is what the operator needs to know.
+    """
+    exchange = asyncio.ensure_future(awaitable)
+    exited = asyncio.ensure_future(proc.wait())
+    try:
+        await asyncio.wait({exchange, exited}, return_when=asyncio.FIRST_COMPLETED)
+        if not exchange.done():
+            # A response may still sit in the stdout pipe behind the exit.
+            await asyncio.wait({exchange}, timeout=_EXIT_DRAIN_SECONDS)
+        if exchange.done() and not isinstance(exchange.exception(), ConnectionError):
+            return exchange.result()
+        await asyncio.wait({exited}, timeout=_EXIT_DRAIN_SECONDS)
+        raise _AgentExitedError(proc.returncode)
+    finally:
+        exchange.cancel()
+        exited.cancel()
+        await asyncio.gather(exchange, exited, return_exceptions=True)
+
+
 def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
     """Return a user-facing ACP invocation error with actionable remediation."""
     if not isinstance(exc, FileNotFoundError):
@@ -293,39 +363,63 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             )
             mcp_servers = []
 
+        async def _converse(conn) -> None:
+            await conn.initialize(
+                protocol_version=PROTOCOL_VERSION,
+                client_capabilities=ClientCapabilities(),
+                client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
+            )
+            session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
+            if agent_config.model:
+                session_kwargs["model"] = agent_config.model
+            session = await conn.new_session(**session_kwargs)
+            await conn.prompt(
+                session_id=session.session_id,
+                prompt=[text_block(prompt)],
+            )
+
+        stderr_tail: _StderrTail | None = None
+        timed_out = False
         try:
             from acp import spawn_agent_process
 
             async with spawn_agent_process(client, cmd, *args, env=agent_env, cwd=physical_cwd) as (conn, proc):
+                stderr_tail = _StderrTail(proc.stderr)
                 logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
                 try:
                     async with asyncio.timeout(agent_config.timeout_seconds) as deadline:
-                        await conn.initialize(
-                            protocol_version=PROTOCOL_VERSION,
-                            client_capabilities=ClientCapabilities(),
-                            client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
-                        )
-                        session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
-                        if agent_config.model:
-                            session_kwargs["model"] = agent_config.model
-                        session = await conn.new_session(**session_kwargs)
-                        await conn.prompt(
-                            session_id=session.session_id,
-                            prompt=[text_block(prompt)],
-                        )
+                        await _await_while_agent_runs(_converse(conn), proc)
                 except TimeoutError:
                     if not deadline.expired():
                         raise
+                    # Leave the SDK context first: it terminates and reaps the
+                    # agent, so the lines a stalled agent wrote last reach the tail.
+                    timed_out = True
+                except _AgentExitedError as exc:
+                    status = f"exited with code {exc.returncode}" if exc.returncode is not None else "closed its ACP connection"
                     logger.error(
-                        "ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt; terminating subprocess",
+                        "ACP agent '%s' %s before completing the ACP invocation. stderr tail:\n%s",
                         agent,
-                        agent_config.timeout_seconds,
+                        status,
+                        await stderr_tail.text(wait=_EXIT_DRAIN_SECONDS),
                     )
                     return (
-                        f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
-                        "without completing the ACP invocation. The agent subprocess has been terminated. If this agent handles "
-                        f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
+                        f"Error: ACP agent '{agent}' {status} before completing the ACP invocation. "
+                        f"Check that the agent is installed and authenticated and that acp_agents.{agent} in config.yaml is correct; "
+                        "the agent's stderr is recorded in the Gateway log."
                     )
+            if timed_out:
+                logger.error(
+                    "ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt; subprocess terminated. stderr tail:\n%s",
+                    agent,
+                    agent_config.timeout_seconds,
+                    await stderr_tail.text(wait=_EXIT_DRAIN_SECONDS),
+                )
+                return (
+                    f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
+                    "without completing the ACP invocation. The agent subprocess has been terminated. If this agent handles "
+                    f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
+                )
             result = client.collected_text
             logger.info("ACP agent '%s' returned %s", agent, result[:1000])
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))
@@ -335,6 +429,9 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             # Report the configured command, not the resolved path: remediation
             # text has to match what the operator wrote in config.yaml.
             return await asyncio.to_thread(_format_invocation_error, agent, agent_config.command, e)
+        finally:
+            if stderr_tail is not None:
+                await stderr_tail.aclose()
 
     return StructuredTool.from_function(
         name="invoke_acp_agent",

@@ -337,15 +337,6 @@ async def resolve_ragflow_datasets(
     return await _resolve_datasets(client, settings, requested_dataset_ids)
 
 
-def _group_searchable_datasets(datasets: list[_ResolvedDataset]) -> list[tuple[str, list[str]]]:
-    groups: dict[str, list[str]] = {}
-    for dataset in datasets:
-        if dataset.chunk_count == 0:
-            continue
-        groups.setdefault(dataset.embedding_model, []).append(dataset.dataset_id)
-    return sorted(groups.items())
-
-
 async def _validate_document_filters(
     client: RAGFlowClient,
     document_filters: list[dict[str, Any]],
@@ -540,7 +531,8 @@ async def knowledge_search(
         if resolved_scope["mode"] == "disabled":
             return "Error: Knowledge search is disabled for this turn."
 
-    settings, error = _settings_or_error()
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    settings, error = await asyncio.to_thread(_settings_or_error)
     if settings is None:
         return error or "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
 
@@ -601,7 +593,7 @@ async def knowledge_search(
 
 async def list_knowledge_bases() -> str:
     """List accessible RAGFlow knowledge-base names without exposing UUIDs."""
-    settings, error = _settings_or_error()
+    settings, error = await asyncio.to_thread(_settings_or_error)
     if settings is None:
         return error or "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
 

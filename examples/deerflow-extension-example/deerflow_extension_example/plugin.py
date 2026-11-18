@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from asyncio import CancelledError
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import Lock
@@ -95,7 +95,7 @@ def _stats(store: ExtensionData) -> ExampleStats:
 
 class ExampleMiddleware(AgentMiddleware):
     @contextmanager
-    def _observe(self, request: ToolCallRequest) -> Iterator[None]:
+    def _observe(self, request: ToolCallRequest) -> Generator[None, None, None]:
         task_store = task_store_from_runtime(getattr(request, "runtime", None))
         task_stats = task_store.get(ExampleStats) if task_store is not None else None
         if task_stats is None:

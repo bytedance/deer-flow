@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,8 +14,18 @@ from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.subagents.capacity import SubagentExecutionCapacity
+from deerflow.utils import assembly_io
 
 _MISSING = object()
+
+
+@pytest.fixture
+def isolated_assembly_pool(monkeypatch):
+    # Lifecycle deadlines must not include work queued by other tests, while
+    # retaining the real off-loop assembly and cancellation behavior.
+    with ThreadPoolExecutor(max_workers=assembly_io._ASSEMBLY_WORKERS, thread_name_prefix="test-batch-assembly") as pool:
+        monkeypatch.setattr(assembly_io, "_ASSEMBLY_EXECUTOR", pool)
+        yield
 
 
 class FakeStatus(Enum):
@@ -58,6 +69,169 @@ def _request(**overrides) -> BatchSubmitRequest:
     }
     values.update(overrides)
     return BatchSubmitRequest(**values)
+
+
+@pytest.mark.asyncio
+async def test_read_browser_batch_item_projects_report_and_captured_evidence() -> None:
+    repository = SimpleNamespace(
+        get_batch=AsyncMock(return_value={"id": "batch-1", "thread_id": "thread-1"}),
+        list_items=AsyncMock(
+            return_value=[
+                {
+                    "id": "item-1",
+                    "item_key": "record-1",
+                    "position": 0,
+                    "status": "succeeded",
+                    "attempt": 1,
+                    "model_name": "model-a",
+                    "result": "A report",
+                    "result_truncated": False,
+                    "error": None,
+                    "stop_reason": None,
+                    "acceptance_criteria": ["file:answer.md exists"],
+                    "acceptance_verdict": {"status": "passed"},
+                    "result_artifact": {
+                        "knowledge_sources": {
+                            "version": 1,
+                            "sources": [
+                                {
+                                    "id": "a" * 32 + "-1",
+                                    "provider": "ragflow",
+                                    "dataset_id": "dataset-1",
+                                    "document_id": "document-1",
+                                    "chunk_id": "chunk-1",
+                                    "dataset_name": "Private KB",
+                                    "document_name": "report.md",
+                                    "text": "Captured excerpt",
+                                    "pages": [2, True, 0, 3],
+                                    "truncated": True,
+                                    "secret": "must not escape",
+                                },
+                                {"provider": "other", "text": "drop me"},
+                            ],
+                            "omitted_count": 1,
+                        }
+                    },
+                    "started_at": "2026-10-17T00:00:00Z",
+                    "completed_at": "2026-10-17T00:01:00Z",
+                    "updated_at": "2026-10-17T00:01:00Z",
+                }
+            ]
+        ),
+    )
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    detail = await service.read_browser_batch_item(
+        batch_id="batch-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        position=0,
+    )
+
+    assert detail["report"] == "A report"
+    assert detail["acceptance_verdict"] == {"status": "passed"}
+    assert detail["evidence"] == {
+        "version": 1,
+        "sources": [
+            {
+                "id": "a" * 32 + "-1",
+                "provider": "ragflow",
+                "dataset_id": "dataset-1",
+                "document_id": "document-1",
+                "chunk_id": "chunk-1",
+                "dataset_name": "Private KB",
+                "document_name": "report.md",
+                "text": "Captured excerpt",
+                "pages": [2, 3],
+                "truncated": True,
+            }
+        ],
+        "omitted_count": 1,
+    }
+    assert "secret" not in detail["evidence"]["sources"][0]
+    repository.list_items.assert_awaited_once_with(
+        "batch-1",
+        user_id="user-1",
+        offset=0,
+        limit=1,
+        include_result=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,limit", [("id", 256), ("dataset_id", 256), ("document_id", 256), ("chunk_id", 256), ("dataset_name", 512), ("document_name", 512), ("text", 16_000)])
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_browser_evidence_bounds_legacy_rows(field, limit, oversized):
+    source = {
+        "id": "a" * 32 + "-1",
+        "provider": "ragflow",
+        "dataset_id": "dataset-1",
+        "document_id": "document-1",
+        "chunk_id": "chunk-1",
+        "dataset_name": "Private KB",
+        "document_name": "report.md",
+        "text": "Captured excerpt",
+        "pages": [2],
+        "truncated": False,
+    }
+    source[field] = "x" * (limit + int(oversized))
+    repository = SimpleNamespace(
+        get_batch=AsyncMock(return_value={"id": "batch-1", "thread_id": "thread-1"}),
+        list_items=AsyncMock(
+            return_value=[
+                {
+                    "position": 0,
+                    "result": "Stored report",
+                    "prompt": "Private prompt",
+                    "execution_spec": {"api_key": "private-key"},
+                    "result_artifact": {"knowledge_sources": {"version": 1, "sources": [source], "omitted_count": 2}},
+                }
+            ]
+        ),
+    )
+    service = SubagentBatchService(repository=repository, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig())
+    detail = await service.read_browser_batch_item(batch_id="batch-1", user_id="user-1", thread_id="thread-1", position=0)
+    assert detail["report"] == "Stored report"
+    assert detail["evidence"]["sources"] == ([] if oversized else [source])
+    assert detail["evidence"]["omitted_count"] == 2 + int(oversized)
+    assert "prompt" not in detail
+    assert "execution_spec" not in detail
+
+
+def test_browser_evidence_counts_valid_captured_excerpt_filtered_at_read():
+    from langchain_core.messages import ToolMessage
+
+    from deerflow.community.ragflow.formatting import format_retrieval_sources
+    from deerflow.community.ragflow.sources import durable_source_artifact
+    from deerflow.subagents.step_events import capture_step_message
+
+    content, artifact = format_retrieval_sources(
+        {"chunks": [{"id": "chunk", "dataset_id": "kb", "document_id": "doc", "content": "x" * 17_000}]},
+        dataset_names_by_id={"kb": "Knowledge base"},
+        max_chars_per_chunk=20_000,
+        max_total_chars=30_000,
+    )
+    captured = []
+    capture_step_message(ToolMessage(content=content, artifact=artifact, name="knowledge_search", tool_call_id="search", id="message"), captured, set())
+    source_id = artifact["knowledge_sources"]["sources"][0]["id"]
+    persisted = durable_source_artifact(captured, f"Claim [citation:1](#knowledge-{source_id})", max_chars=100_000)
+    assert len(persisted["knowledge_sources"]["sources"][0]["text"]) == 17_000
+    assert persisted["knowledge_sources"]["omitted_count"] == 0
+    assert service_module._browser_evidence_snapshot(persisted) == {"version": 1, "sources": [], "omitted_count": 1}
+
+
+@pytest.mark.parametrize("persisted_omissions", [0, 3])
+def test_browser_evidence_source_cap_preserves_omissions(persisted_omissions):
+    source = {"id": "a" * 32 + "-1", "provider": "ragflow", "dataset_id": "kb", "document_id": "doc", "chunk_id": "chunk", "dataset_name": "KB", "document_name": "Manual", "text": "Excerpt", "pages": [], "truncated": False}
+    artifact = {"knowledge_sources": {"version": 1, "sources": [source] * 103, "omitted_count": persisted_omissions}}
+    projected = service_module._browser_evidence_snapshot(artifact)
+    assert len(projected["sources"]) == 100
+    assert projected["omitted_count"] == persisted_omissions + 3
+    assert artifact["knowledge_sources"]["omitted_count"] == persisted_omissions
 
 
 @pytest.mark.asyncio
@@ -463,7 +637,7 @@ async def test_stopped_item_releases_its_execution_once_it_turns_terminal(monkey
 
 
 @pytest.mark.asyncio
-async def test_item_error_cancels_and_releases_an_unfinished_execution(monkeypatch) -> None:
+async def test_item_error_cancels_and_releases_an_unfinished_execution(monkeypatch, isolated_assembly_pool) -> None:
     # A repository error while polling fails the durable item; the subagent
     # must not keep running unsupervised, nor stay in the registry.
     registry = _Registry()

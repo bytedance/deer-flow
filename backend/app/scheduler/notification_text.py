@@ -86,6 +86,7 @@ _GOAL_REASON_TEXT: dict[str, dict[str, str]] = {
         "no_progress_detected": "no progress was made between turns",
         "token_capped": "the token budget was reached",
         "loop_capped": "repeated tool calls reached the safety limit",
+        "recursion_capped": "the run reached its step limit",
         "no_durable_end_of_turn": "no final reply was saved",
         "thread_changed_after_evaluation": "the conversation changed during the goal check",
         "thread_changed_before_continuation": "the conversation changed during the goal check",
@@ -104,6 +105,7 @@ _GOAL_REASON_TEXT: dict[str, dict[str, str]] = {
         "no_progress_detected": "多轮之间没有进展",
         "token_capped": "已达到 token 预算",
         "loop_capped": "重复工具调用触发了安全停止",
+        "recursion_capped": "运行达到了步数上限",
         "no_durable_end_of_turn": "没有保存最终回复",
         "thread_changed_after_evaluation": "目标检查期间对话发生了变化",
         "thread_changed_before_continuation": "目标检查期间对话发生了变化",
@@ -242,14 +244,23 @@ def _truncate(text: str, *, limit: int) -> str:
 _NO_EXTRA_REASON = frozenset({"goal_not_met_yet", "unknown"})
 
 
+def goal_reason_text(code: object, locale: str) -> str | None:
+    """Readable text of a host goal reason code (``blocked:`` prefix optional), else None.
+
+    ``locale`` is one of ``NOTIFICATION_LOCALES``. Only host-defined codes have
+    text, so evaluator or provider wording never passes through. The IM
+    ``/goal`` reply (``app/channels/goal_status.py``) shares these texts.
+    """
+    if not isinstance(code, str):
+        return None
+    return _GOAL_REASON_TEXT[locale].get(code.removeprefix("blocked:"))
+
+
 def _reason_text(code: object, locale: str) -> str | None:
     """Readable reason for a goal code, or None when it would add nothing."""
-    texts = _GOAL_REASON_TEXT[locale]
-    if isinstance(code, str):
-        code = code.removeprefix("blocked:")
-    if not isinstance(code, str) or code not in texts or code in _NO_EXTRA_REASON:
+    if isinstance(code, str) and code.removeprefix("blocked:") in _NO_EXTRA_REASON:
         return None
-    return texts[code]
+    return goal_reason_text(code, locale)
 
 
 def _with_reason(key: str, code: object, locale: str) -> str:

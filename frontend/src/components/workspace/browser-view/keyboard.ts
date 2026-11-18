@@ -25,6 +25,18 @@ export interface BrowserKeyContext {
   key: string;
   metaKey: boolean;
   ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}
+
+function keyChord(ctx: BrowserKeyContext): string {
+  const modifiers = [
+    ctx.ctrlKey ? "Control" : null,
+    ctx.metaKey ? "Meta" : null,
+    ctx.altKey ? "Alt" : null,
+    ctx.shiftKey ? "Shift" : null,
+  ].filter((modifier): modifier is string => modifier !== null);
+  return [...modifiers, ctx.key].join("+");
 }
 
 /**
@@ -42,14 +54,14 @@ export function decideBrowserKeyInput(
   if ((ctx.ctrlKey || ctx.metaKey) && ctx.key.length === 1) {
     return {
       type: "key",
-      key: `${ctx.metaKey ? "Meta" : "Control"}+${ctx.key.toUpperCase()}`,
+      key: keyChord({ ...ctx, key: ctx.key.toUpperCase() }),
     };
   }
   if (ctx.key.length === 1 && !ctx.metaKey && !ctx.ctrlKey) {
     return { type: "text", text: ctx.key };
   }
   if ((FORWARDED_NAMED_KEYS as readonly string[]).includes(ctx.key)) {
-    return { type: "key", key: ctx.key };
+    return { type: "key", key: keyChord(ctx) };
   }
   return null;
 }

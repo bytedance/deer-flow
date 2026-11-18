@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 
@@ -11,6 +12,8 @@ from deerflow.persistence.skill_mutations.model import SkillAssetRow, SkillOpera
 from deerflow.skills.mutations.assets import capture_package, open_directory_chain
 from deerflow.skills.mutations.codec import operation_packages
 from deerflow.skills.mutations.repository import supersede_views
+
+logger = logging.getLogger(__name__)
 
 
 def replace_main(root, content: bytes, *, operation_id: str) -> None:
@@ -48,6 +51,12 @@ def replace_main(root, content: bytes, *, operation_id: str) -> None:
                     os.unlink(temporary, dir_fd=parent)
                 except FileNotFoundError:
                     pass
+                except OSError:
+                    # The publication outcome is already decided; a leftover
+                    # temp is reported here and detected again by
+                    # ``assert_temporary_absent``, so it must not replace that
+                    # outcome with the cleanup error.
+                    logger.warning("Failed to remove skill mutation temporary %s", temporary, exc_info=True)
         finally:
             os.close(directory)
             if parent is not None:

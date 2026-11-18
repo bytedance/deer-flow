@@ -123,7 +123,13 @@ services:
   # ── Reverse Proxy ──────────────────────────────────────────────────────
   # Routes API traffic to gateway and (optionally) provisioner.
   nginx:
-    image: nginx:alpine
+    # Pinned tag, not `nginx:alpine`: from 1.31.3 the alpine builds ship musl
+    # 1.2.6, whose pwrite() issues pwritev2(RWF_NOAPPEND) — seccomp profiles
+    # on older Docker/EOL kernels reject that syscall and the master dies in a
+    # restart loop with `pwrite() "/run/nginx.pid" failed (1: Operation not
+    # permitted)` (#7615, nginx/docker-nginx#1059). 1.31.2 is the last musl
+    # 1.2.5 (pwrite64) alpine build. Keep in lockstep with docker-compose.yaml.
+    image: nginx:1.31.2-alpine
     container_name: deer-flow-nginx
     # Loopback-only by default; see the note in docker-compose.yaml. Override
     # with BIND_HOST when you deliberately need the dev stack reachable from

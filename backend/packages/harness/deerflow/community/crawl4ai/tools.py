@@ -3,6 +3,7 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 
@@ -82,7 +83,7 @@ def _build_client(cfg: dict | None) -> Crawl4AiClient:
     timeout_s: float = float(DEFAULT_TIMEOUT_S)
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
-        token = cfg.get("token", token)
+        token = resolve_api_key(cfg.get("token")) or ""
         timeout_s = _coerce_timeout(cfg.get("timeout"), DEFAULT_TIMEOUT_S)
     return Crawl4AiClient(base_url=base_url, token=token, timeout_s=timeout_s)
 
@@ -118,7 +119,8 @@ async def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
-        cfg = _get_tool_config("web_fetch")  # read config once; pass the values down
+        # Read config once, off the event loop (it stats and hashes the config files); pass the values down.
+        cfg = await asyncio.to_thread(_get_tool_config, "web_fetch")
         allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses") if cfg is not None else None, False)
         url_error = await asyncio.to_thread(validate_public_http_url, url, allow_private_addresses=allow_private_addresses)
         if url_error:

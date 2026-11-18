@@ -33,8 +33,8 @@ process-local backend (``memory``) has nothing to probe and reports
 unreachable. Connection-opening probes are serialized behind strict
 per-process gates, one per probe kind: the route is public through the
 ``/health`` auth prefix, so unlimited concurrent requests must never translate
-into unlimited new PostgreSQL connections, Redis pool growth or a connection
-flood at the provisioner.
+into unlimited new PostgreSQL connections, an ORM or Redis pool held by probe
+traffic or a connection flood at the provisioner.
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ from sqlalchemy import text
 
 from deerflow.persistence.engine import get_engine
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.http_policy import control_plane_trust_env
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -122,19 +123,27 @@ PROBE_UNREACHABLE = "unreachable"
 
 
 async def check_database_health() -> str:
-    """Probe the persistence engine; return one of the PROBE_* values."""
+    """Probe the persistence engine; return one of the PROBE_* values.
+
+    The probe checks a connection out of the application's own engine pool,
+    the one every repository uses. Probes are serialized so unauthenticated
+    probe traffic holds at most one of those connections per process instead
+    of the whole pool, which would leave request handlers waiting for
+    database connections.
+    """
     engine = get_engine()
     if engine is None:
         # backend=memory, or the engine has not been initialized yet: there is
         # no database to probe.
         return PROBE_NOT_CONFIGURED
-    try:
-        async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
-            async with engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-    except Exception:
-        logger.warning("Readiness database probe failed", exc_info=True)
-        return PROBE_UNREACHABLE
+    async with _probe_gate("database"):
+        try:
+            async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
+                async with engine.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
+        except Exception:
+            logger.warning("Readiness database probe failed", exc_info=True)
+            return PROBE_UNREACHABLE
     return PROBE_OK
 
 
@@ -313,10 +322,7 @@ def _make_provisioner_client(provisioner_url: str) -> httpx.AsyncClient:
     ``NO_PROXY``, so without this a private provisioner behind a proxy-only
     egress would be reported unreachable on every probe.
     """
-    # Lazy: importing the aio_sandbox package pulls in the whole provider stack.
-    from deerflow.community.aio_sandbox.backend import sandbox_http_trust_env
-
-    return httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS, trust_env=sandbox_http_trust_env(provisioner_url))
+    return httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS, trust_env=control_plane_trust_env(provisioner_url))
 
 
 async def _probe_provisioner(provisioner_url: str | None) -> str:

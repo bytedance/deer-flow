@@ -49,12 +49,18 @@ def _coerce_seconds(value: object, option: str) -> int:
 
 
 def _get_infoquest_client() -> InfoQuestClient:
-    search_config = get_app_config().get_tool_config("web_search")
+    """Build the client from one config read.
+
+    Config resolution stats and hashes the config files, so the async tools
+    call this through ``asyncio.to_thread``.
+    """
+    app_config = get_app_config()
+    search_config = app_config.get_tool_config("web_search")
     search_time_range = _NO_TIME_FILTER
     if search_config is not None and "search_time_range" in search_config.model_extra:
         search_time_range = _coerce_seconds(search_config.model_extra.get("search_time_range"), "search_time_range")
 
-    fetch_config = get_app_config().get_tool_config("web_fetch")
+    fetch_config = app_config.get_tool_config("web_fetch")
     fetch_time = _NO_TIME_FILTER
     if fetch_config is not None and "fetch_time" in fetch_config.model_extra:
         fetch_time = _coerce_seconds(fetch_config.model_extra.get("fetch_time"), "fetch_time")
@@ -65,7 +71,7 @@ def _get_infoquest_client() -> InfoQuestClient:
     if fetch_config is not None and "navigation_timeout" in fetch_config.model_extra:
         navigation_timeout = _coerce_seconds(fetch_config.model_extra.get("navigation_timeout"), "navigation_timeout")
 
-    image_search_config = get_app_config().get_tool_config("image_search")
+    image_search_config = app_config.get_tool_config("image_search")
     image_search_time_range = _NO_TIME_FILTER
     if image_search_config is not None and "image_search_time_range" in image_search_config.model_extra:
         image_search_time_range = _coerce_seconds(image_search_config.model_extra.get("image_search_time_range"), "image_search_time_range")
@@ -91,7 +97,7 @@ async def web_search_tool(query: str) -> str:
         query: The query to search for.
     """
 
-    client = _get_infoquest_client()
+    client = await asyncio.to_thread(_get_infoquest_client)
     return await client.web_search(query)
 
 
@@ -106,7 +112,7 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    client = _get_infoquest_client()
+    client = await asyncio.to_thread(_get_infoquest_client)
     result = await client.fetch(url)
     if result.startswith("Error: "):
         return result
@@ -129,5 +135,5 @@ async def image_search_tool(query: str) -> str:
     Args:
         query: The query to search for images.
     """
-    client = _get_infoquest_client()
+    client = await asyncio.to_thread(_get_infoquest_client)
     return await client.image_search(query)

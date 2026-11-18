@@ -152,7 +152,7 @@ async def test_crawl_transient_failure_logs_without_traceback(jina_client, monke
     with caplog.at_level(logging.DEBUG, logger="deerflow.community.jina_ai.jina_client"):
         result = await jina_client.crawl("https://example.com")
 
-    jina_records = [r for r in caplog.records if r.name == "deerflow.community.jina_ai.jina_client"]
+    jina_records = [r for r in caplog.records if r.name == "deerflow.community.jina_ai.jina_client" and r.levelno >= logging.WARNING]
     assert len(jina_records) == 1, f"expected exactly one log record, got {len(jina_records)}"
     record = jina_records[0]
     assert record.levelno == logging.WARNING, f"expected WARNING, got {record.levelname}"
@@ -244,6 +244,21 @@ async def test_crawl_includes_api_key_when_set(jina_client, monkeypatch):
     monkeypatch.setenv("JINA_API_KEY", "test-key-123")
     await jina_client.crawl("https://example.com")
     assert captured_headers["Authorization"] == "Bearer test-key-123"
+
+
+@pytest.mark.anyio
+async def test_crawl_uses_the_anonymous_tier_when_env_holds_the_template_placeholder(jina_client, monkeypatch):
+    """A fresh ``make config`` leaves ``JINA_API_KEY=your-jina-api-key``; sending it makes every fetch a 401."""
+    captured_headers = {}
+
+    async def mock_post(self, url, **kwargs):
+        captured_headers.update(kwargs.get("headers", {}))
+        return httpx.Response(200, text="ok", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    monkeypatch.setenv("JINA_API_KEY", "your-jina-api-key")
+    assert await jina_client.crawl("https://example.com") == "ok"
+    assert "Authorization" not in captured_headers
 
 
 @pytest.mark.anyio

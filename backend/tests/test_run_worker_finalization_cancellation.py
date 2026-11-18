@@ -84,7 +84,7 @@ async def reap(run):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["receipt", "subagent_flush", "thread_status", "terminal_status", "journal_close", "end"])
+@pytest.mark.parametrize("stage", ["receipt", "terminal_event", "subagent_flush", "thread_status", "terminal_status", "journal_close", "end"])
 async def test_cancellation_preserves_terminal_lifecycle(monkeypatch, stage):
     entered, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -94,7 +94,7 @@ async def test_cancellation_preserves_terminal_lifecycle(monkeypatch, stage):
 
     class GatedEventStore(MemoryRunEventStore):
         async def put_if_absent(self, **kwargs):
-            if stage == "receipt" and kwargs.get("event_type") == "run.delivery":
+            if (stage == "receipt" and kwargs.get("event_type") == "run.delivery") or (stage == "terminal_event" and kwargs.get("event_type") == "run.terminal"):
                 await gate()
             return await super().put_if_absent(**kwargs)
 

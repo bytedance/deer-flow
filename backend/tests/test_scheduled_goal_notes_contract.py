@@ -40,6 +40,7 @@ def test_cap_stand_down_reasons_are_in_contract():
     assert worker._stand_down_reason(at_cap, evaluation, 0) in _CODES
     assert worker._stand_down_reason({"continuation_count": 0}, evaluation, DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS) in _CODES
     assert worker._GOAL_RUN_HARD_STOP_REASONS <= _CODES
+    assert worker._GOAL_RUN_ERROR_STOP_REASONS <= _CODES
 
 
 def test_literal_stand_down_reasons_and_no_verdict_are_in_contract():

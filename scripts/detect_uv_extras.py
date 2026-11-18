@@ -15,6 +15,8 @@ Order of resolution:
    - sandbox.ownership.type == redis     -> redis
    - channels.discord.enabled == true    -> discord
    - channels.buzz.enabled == true       -> buzz
+   - channel_connections.enabled and channel_connections.discord.enabled -> discord
+   - channel_connections.enabled and channel_connections.buzz.enabled    -> buzz
    - models[].use == langchain_ollama:*  -> ollama
 3. Runtime environment toggles that enable optional backends:
    - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
@@ -363,10 +365,13 @@ def detect_from_config(path: Path) -> list[str]:
         extras.add("redis")
     if (nested_section_value(lines, "sandbox.ownership", "type") or "").lower() == "redis":
         extras.add("redis")
-    if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
-        extras.add("discord")
-    if (nested_section_value(lines, "channels.buzz", "enabled") or "").lower() == "true":
-        extras.add("buzz")
+    connections_enabled = (section_value(lines, "channel_connections", "enabled") or "").lower() == "true"
+    # Only channel providers with extras in backend/pyproject.toml [project.optional-dependencies] belong here; keep this set in sync.
+    for provider in ("discord", "buzz"):
+        legacy_enabled = (nested_section_value(lines, f"channels.{provider}", "enabled") or "").lower() == "true"
+        browser_enabled = connections_enabled and (nested_section_value(lines, f"channel_connections.{provider}", "enabled") or "").lower() == "true"
+        if legacy_enabled or browser_enabled:
+            extras.add(provider)
     if tools_include_name(lines, "browser_navigate"):
         extras.add("browser")
     for provider in models_use_providers(lines):

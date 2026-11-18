@@ -79,22 +79,65 @@ from chunk offsets, storage paths or response indexes.
 `user_ids` are exact server-authenticated DeerFlow IDs, not display names or
 model-supplied values. Resolve them from your deployment's user administration;
 for an unauthenticated/single-user installation use its actual runtime user ID.
-There is no default or wildcard binding. To bind multiple workspaces, add a
+The default `access_mode: users` requires a nonempty list; missing, null or empty
+`user_ids` never grants shared access. There is no wildcard binding. To bind multiple workspaces, add a
 `spaces` entry per endpoint/tenant pair, each with its own explicit users and
 credential environment variable. Configure each endpoint/tenant only once.
+
+### Shared read-only access for dynamic users
+
+For a knowledge base intentionally shared with every authenticated DeerFlow user,
+replace `user_ids` on that connection with **explicit** `access_mode: authenticated`:
+
+```yaml
+spaces:
+  - base_url: https://weknora.example.com
+    tenant_id: "42"
+    api_key_env: WEKNORA_SHARED_READ_KEY
+    access_mode: authenticated
+    knowledge_base_ids: ["YOUR_SHARED_WEKNORA_KB_ID"]
+    # agent_names: ["lead_agent", "researcher"]
+```
+
+Set the credential environment variable and restart Gateway after this operator
+configuration change. Newly registered users with a valid session can then use
+the connection without editing a user-ID list or restarting for each new user.
+PAT identities also qualify where existing host route/scope permissions allow.
+Do not combine `user_ids` with this mode; ambiguous configurations are rejected.
+
+**All authenticated users receive this credential's visibility**, narrowed by
+`knowledge_base_ids` and optional `agent_names`. Use a dedicated least-privilege
+credential and list only bases intended for sharing. This grants retrieval,
+catalog and Wiki search only; it does not grant management, space membership or
+per-user WeKnora impersonation. Existing host tool/route authorization still applies.
+
+This mode requires a Gateway host that supplies the optional
+`KnowledgeRequestContext.authenticated_user_id` provenance field. Older hosts
+and standalone callers without that proof fail closed. Anonymous requests,
+auth-disabled synthetic users, internal-service identities and client-provided
+authentication flags never qualify. Scheduled-task runs, IM-channel runs and
+durable batch items currently cannot use this shared mode: their owner `user_id`
+does not supply the required authentication proof. Durable batch items are
+launched by the Gateway's startup poller, so they do not inherit the submitting
+request's proof even within the same process. A valid session is still accepted
+when the local auth-disabled switch is present. Ordinary subagents launched from
+an authenticated execution inherit its verified identity and retain their own
+Agent restrictions. If a worker loses that context, access is denied; it is not
+reconstructed from a stored user ID. Keep `access_mode: users` for intentionally
+unauthenticated single-user deployments or explicit internal-user bindings.
 
 ## Authorization and scope
 
 Each operation resolves the trusted current user and executor against the
-operator-owned connection bindings. It sends `X-API-Key` and `X-Tenant-ID` to
+operator-owned connection access mode and bindings. It sends `X-API-Key` and `X-Tenant-ID` to
 WeKnora, whose API-key permissions and workspace/resource authorization remain
-final. The binding is a credential-routing decision: every listed user receives
+final. The binding is a credential-routing decision: every admitted user receives
 the resource visibility of that credential, further restricted by the optional
 base allowlist. It does **not** impersonate a WeKnora human user. Use dedicated
-least-privilege keys and only bind users intended to share that visibility.
+least-privilege keys and admit only users intended to share that visibility.
 
 Tenant-scoped keys must match the configured tenant. Platform keys always need
-an explicit tenant and user binding here; unbound platform discovery and
+an explicit tenant and access policy here; unbound platform discovery and
 fallback-to-all behavior are not supported. Missing bindings or keys fail
 closed. API-key roles/capabilities must allow base/document reads and knowledge
 search; restricted keys that cannot enumerate the configured bases are rejected.
@@ -179,7 +222,50 @@ against v0.8.3's `internal/handler/knowledgebase.go`, `internal/handler/session/
 
 This package registers the current `RetrievalProvider` contract rather than
 importing the older branch's provider discovery or native citation format.
-Uploads, deletion, processing management, Wiki/Graph, a knowledge management
+Uploads, deletion, processing management, Wiki/Graph management, a knowledge management
 page and new DeerFlow ACL persistence remain outside the read-only delivery.
 Shared-contract durable batch source forwarding retains the existing core
 limitation; ordinary subagent forwarding uses the shared evidence path.
+
+## New Phase 1: published knowledge entries
+
+On a host containing #6269's new Phase 1, add this independent tool entry:
+
+```yaml
+  - name: knowledge_entries_search
+    group: knowledge
+    use: deerflow.knowledge.tools:knowledge_entries_search_tool
+    provider: weknora
+```
+
+Keep or remove `knowledge_search` independently. Both use the same plugin
+connection bindings and current executor identity. Entries use v0.8.3's
+`GET /api/v1/knowledgebase/{kb_id}/wiki/search?q=...&limit=...`, reusing the
+published-page approach from superbuzzy's original `search_wiki()` while
+returning the current shared evidence contract. The endpoint returns `{pages}`
+rather than the document API's `{success,data}` envelope. Only Wiki-enabled
+bases and published pages are included; returned base membership is checked.
+
+Wiki search supports dataset filtering but not document filtering: a generated
+page may combine several documents. The shared selector therefore offers only
+base selection when both document and entry tools are configured. Recovered
+unsupported document selections fail closed, with no unfiltered retry.
+
+The pinned WeKnora API exposes Wiki links at `/wiki/graph`, not a public entity
+relation retrieval endpoint. This package does not advertise `relations_search`
+or substitute that page graph for entity relations. Use a provider with real
+relation evidence, such as the optional [LightRAG plugin](../deerflow-extension-lightrag/README.md).
+New Wiki retrieval has also passed real OrbStack/GLM integration checks; see the
+2026-10-20 follow-up in [the validation record](VALIDATION.md).
+
+Wiki search first sends the original query. If that returns no pages, it tries
+at most four distinct whitespace-separated keywords (at least two characters),
+within the same authorized knowledge base, and merges duplicate evidence. This
+helps model-generated keyword combinations match the upstream lexical search;
+it does not perform unrestricted search or retry authorization/provider errors.
+
+Document details are checked in batches of at most four concurrent requests per
+search. Every selected document is validated before retrieval; retrieved evidence
+is validated before returning results. Checks remain request-local and results
+retain provider order. A failed or cancelled batch cancels and drains its other
+requests; it never falls back to broader scope or returns partial evidence.

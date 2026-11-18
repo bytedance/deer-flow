@@ -10,6 +10,7 @@
     "no_progress_detected",
     "token_capped",
     "loop_capped",
+    "recursion_capped",
     "evaluator_failed",
     "no_durable_end_of_turn",
     "thread_changed_after_evaluation",
@@ -40,6 +41,7 @@
   "host_reason_texts": [
     "No visible assistant evidence is available yet.",
     "The turn ended on a question to the user that has not been answered.",
-    "No durable assistant end-of-turn receipt was available."
+    "No durable assistant end-of-turn receipt was available.",
+    "The run reached its step limit before finishing."
   ]
 }

@@ -109,7 +109,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 管理员可在 **设置 → 模型 → 添加模型** 中选择厂商，仅填写 **API Key** 和
 **模型 ID**。后端预置 OpenAI、Anthropic、DeepSeek、百炼/通义千问、火山/豆包、
-Moonshot/Kimi、智谱/Z.AI 和 MiniMax 的端点、认证与适配器，地域和 Coding Plan
+Moonshot/Kimi、智谱/Z.AI、MiniMax 和阶跃星辰（StepFun）的端点、认证与适配器，地域和 Coding Plan
 使用明确区分的选项。模型 ID 不受内置枚举限制；内部名称自动生成且保持稳定。
 新模型默认启用，保存后自动刷新聊天及 Agent 的模型选择器，无需重启 Gateway。
 
@@ -433,6 +433,10 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
+渠道不支持发送附件时，原回复会直接说明。部分或全部上传失败时，只要平台仍允许回复，DeerFlow 会补一条汇总提示，列出未发出的文件；全部成功时不重复确认。文件继续保留在 DeerFlow 会话中，回复窗口过期只记录失败，不自动切换为主动通知。
+
+`channels/store.json` 含无效 UTF-8 字节时，采用与 JSON 格式损坏相同的恢复方式：SQL 迁移记录警告并跳过，保留原文件，让渠道可以继续启动；memory 后端的 JSON 存储记录警告并从空状态开始，在下次写入时替换该文件。
+
 DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ 或 Buzz。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
 | 渠道 | 传输方式 | 上手难度 |
@@ -460,8 +464,6 @@ channels:
   # 可选：所有移动端渠道共用的全局 session 默认值
   session:
     assistant_id: lead_agent  # 也可以填自定义 agent 名；渠道层会自动转换为 lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false
@@ -710,6 +712,18 @@ DeerFlow 2.0 不再是一个需要你自己拼装的 framework。它是一个开
 
 ## 核心特性
 
+### Token 用量统计
+
+点击侧边栏的 **Token 用量**（`/workspace/usage`），查看近 7/30 天的用量、
+每日输入/输出 Token、各模型的缓存命中输入 Token，以及支持失败筛选和分页的
+运行记录。运行记录包含所有日期，不受图表所选周期限制。
+
+此功能需要 `runs:read` 权限和 SQLite 或 PostgreSQL 数据库，静态演示不提供统计。
+数据来自已持久化的服务商用量；运行过程中或服务商未返回用量时可能不完整，不能
+作为服务商账单。缓存命中 Token 已包含在输入 Token 中。每日分桶使用浏览器当前
+UTC 偏移，并按运行的创建日期归属。页面复用现有 `/api/console` 接口，保留服务端
+价格配置及可选的费用、币种字段。
+
 ### Skills 与 Tools
 
 Skills 是 DeerFlow 能做“几乎任何事”的关键。
@@ -741,6 +755,16 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 对接 WeKnora v0.8.3，使用知识库/文档范围选择器和共享检索引用。
 需显式配置 DeerFlow 用户到 WeKnora 工作空间的凭据绑定；资源授权仍由 WeKnora 执行。
 安装与配置步骤见扩展目录中的英文指南。
+
+可选的[知识平台扩展](examples/deerflow-extension-knowledge-platform/README.md)
+提供连接策略、多层级空间、成员和显式资源共享。空间内管理调用仍需现有管理员与
+Provider 授权。默认关闭，不包含管理页面，也不改变聊天检索的全局权限。
+
+可选的[知识入库与处理扩展](examples/deerflow-extension-knowledge-management/README.md)
+通过 WeKnora 提供管理员授权的文件、网址和手工文本入库、处理状态查询、重新处理与取消。
+解析、索引及可选的 Wiki/图谱生成由上游负责。扩展默认关闭，需明确配置资源与操作授权，
+不包含管理页面。Provider 无关的 API 由离线契约测试覆盖；真实入库、GLM-5.3/BGE
+联调、浏览器引用回放及已知限制见[验收报告](examples/deerflow-extension-knowledge-management/VALIDATION.md)。
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
@@ -806,13 +830,16 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 /goal finish the implementation and make all tests pass
 /goal              # 查看当前激活的 goal
 /goal clear        # 清除它
+/goal from-chat    # 仅 IM：根据当前对话生成 goal
 ```
+
+在受支持的 IM 渠道里，`/goal from-chat [提示]` 会从当前对话中归纳 goal，而不是把文字当成目标本身。它会保留对话中已经约定的约束和停止条件，展示保存后的目标，并只启动一次 run。命令后的可选提示用于补充约束，不需要重述完整目标。如果对话不足以形成清楚的目标，则不会保存或启动任何内容，回复会说明原因；如果助手还在等你回答，回复会先请你回复。
 
 每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。同一个 checkpoint 会把这次达成记为 `goal_outcome`，保留到下一次修改 goal。
 
 重新生成此前的回答时，会沿用当前对话的 goal 和已用续跑预算，不会恢复已清除或已达成的旧 goal。重放历史 checkpoint 时会移除旧回答的达成记录，避免把它当作新回答已经达成的证明。
 
-Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为什么停下，并在 goal 达成后显示「目标已达成」提示；设置了 goal 时不能编辑最后一条消息。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
+Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为什么停下，并在 goal 达成后显示「目标已达成」提示；设置了 goal 时不能编辑最后一条消息。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 IM 里，`/goal` 还会说明 goal 是否在进行中、自动续跑为什么停下，或者 goal 已达成（保留到下一次修改 goal），并使用绑定账号在网页界面中选择的语言（未设置时用 `channel_connections.notification_locale`）。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
 ### 手动上下文压缩
 
@@ -829,6 +856,11 @@ Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为�
 在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
 
 ### Sub-Agents
+
+显式后台 `batch_task` 可用 `depends_on` 声明同批条目的前置关系，前置工作完成后即可继续，
+无需等待无关任务。用户已要求后续汇总或交付时，可用可选的 `continuation` 登记一次主 Agent 接续；
+启用 Goal 时仍由 Goal 负责续跑。执行、取消、授权和恢复范围见
+[批次依赖与完成接续说明](backend/docs/BATCH_CONTINUATION.md)。
 
 Sub-agent 是一种执行优化，而不是遇到复杂任务时的默认选择。
 
@@ -1004,7 +1036,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
-- 当 `channel_connections.enabled: true` 时，定时任务通知会发送到任务所有者已绑定、且支持主动推送的 IM 应用（outbox + 投递 worker），目前只有企业微信支持；设置页会在每个应用上标明是否发送，其它应用不会收到通知。每次执行最多发一条消息，内容可能是：一次运行完成、出错或未达成目标，连续 3 次未达成目标后自动暂停，由智能体暂停（停止条件已满足），或任务已结束（`max_runs` 次运行全部完成、已到 `end_at`）；同时发生多件事时，以暂停或结束为准，并在同一条消息里说明最后一次运行的结果。单次任务只发它那次运行的结果。消息与执行结果在同一个数据库事务中入队，因此崩溃或租约失效后恢复的执行也只通知一次。消息内容可以单独读懂，使用你在网页界面中选择的语言（未设置时用 `channel_connections.notification_locale`）：任务标题、发生了什么、智能体有回复时附一行结果，最后是“在 DeerFlow 的定时任务页查看详情。”，不含任何 ID 或链接。单纯的手动「立即运行」试跑和被中断的运行不通知；没有跑完一次运行就结束的执行记录（启动失败、排队超时、因重启而中断）也不通知。渠道/传输宕机时会停车且不耗尽重试，最长约一天；平台拒绝大约重试 15 分钟后落为 `failed`。等待期间被你解绑的身份不会再收到推送：该条投递直接落为 `failed`。
+- 当 `channel_connections.enabled: true` 时，定时任务通知会发送到任务所有者已绑定、且支持主动推送的 IM 应用（outbox + 投递 worker），目前支持企业微信（WeCom）、飞书/Lark、微信和 QQ 私聊（渠道清单见[定时任务指南](docs/guide/scheduled-tasks.md)）；设置页会在每个应用上标明是否发送，其它应用不会收到通知。每次执行最多发一条消息，内容可能是：一次运行完成、出错或未达成目标，连续 3 次未达成目标后自动暂停，由智能体暂停（停止条件已满足），或任务已结束（`max_runs` 次运行全部完成、已到 `end_at`）；同时发生多件事时，以暂停或结束为准，并在同一条消息里说明最后一次运行的结果。单次任务只发它那次运行的结果。消息与执行结果在同一个数据库事务中入队，因此崩溃或租约失效后恢复的执行也只通知一次。消息内容可以单独读懂，使用你在网页界面中选择的语言（未设置时用 `channel_connections.notification_locale`）：任务标题、发生了什么、智能体有回复时附一行结果，最后是“在 DeerFlow 的定时任务页查看详情。”，不含任何 ID 或链接。单纯的手动「立即运行」试跑和被中断的运行不通知；没有跑完一次运行就结束的执行记录（启动失败、排队超时、因重启而中断）也不通知。渠道/传输宕机时会停车且不耗尽重试，最长约一天；平台拒绝大约重试 15 分钟后落为 `failed`。等待期间被你解绑的身份不会再收到推送：该条投递直接落为 `failed`。
 - 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
 
 **通过 API 筛选执行历史**
@@ -1209,7 +1241,7 @@ Docker 部署栈默认只把入口端口发布在 `127.0.0.1` 上，本地 `make
 
 ### Script workflows（可选扩展）
 
-[script workflows 扩展](examples/deerflow-extension-workflows/README.md) 借助完整的 AgentRuns、后台启动、有界并行执行、进度、结果保留和取消能力，提供可检查的 JavaScript 编排。该扩展默认禁用，需要 POSIX Gateway 和运营者授权的 Agent 引用。带版本的定义、保留的步骤输出、运行中进程的暂停/恢复，以及经过认证的人工检查点，共同支撑分阶段的检查报告。确认操作会绑定精确的保留输出或所捕获文件的版本（SHA-256）；预览和下游读取使用同一份不可变字节。每个子运行都会为其解析出的指令、模型、工具和 Skills 保留由主机生成的组装证据。取消一个可恢复的工作流时，即使发起取消的浏览器断开连接，也会继续进行子运行的清理。Gateway 重启后，登录并选择**恢复工作流**，借助保留的结果和精确版本的批准来恢复兼容的运行。不确定的子运行准入需要进行对账；它们永远不会被自动重试。恢复要求运行时/配置保持不变，且 Gateway 存储是持久化的。多 Gateway 故障转移仍处于第 4 阶段；暂不设置硬性的费用上限。工作流截止时间与子运行观察超时会和不确定的准入分开上报。已接受的启动在检查刷新失败时仍保留其请求身份，并提供单独的重试检查操作。其中包含一个可运行的示例、安装步骤，以及面向其他 Python/CPU 组合的 QuickJS 源码构建前提。
+[script workflows 扩展](examples/deerflow-extension-workflows/README.md) 借助完整的 AgentRuns、后台启动、有界并行执行、进度、结果保留和取消能力，提供可检查的 JavaScript 编排。该扩展默认禁用，需要 POSIX Gateway 和运营者授权的 Agent 引用。带版本的定义、保留的步骤输出、运行中进程的暂停/恢复，以及经过认证的人工检查点，共同支撑分阶段的检查报告。确认操作会绑定精确的保留输出或所捕获文件的版本（SHA-256）；预览和下游读取使用同一份不可变字节。每个子运行都会为其解析出的指令、模型、工具和 Skills 保留由主机生成的组装证据。取消一个可恢复的工作流时，即使发起取消的浏览器断开连接，也会继续进行子运行的清理。Gateway 重启后，登录并选择**恢复工作流**，借助保留的结果和精确版本的批准来恢复兼容的运行。不确定的子运行准入需要进行对账；它们永远不会被自动重试。恢复要求运行时/配置保持不变，且 Gateway 存储是持久化的。多 Gateway 部署分为两种模式：可选的共享 PostgreSQL 支持跨 Gateway 控制，以及租约过期后经会话授权的接管（含子运行准入隔离与共享限额）；SQLite 仍为单 Gateway。双 Gateway 故障测试与会话授权接管见[部署验收与投递边界](examples/deerflow-extension-workflows/README.md#deployed-acceptance-and-delivery-boundary)和[Skills & Tools 指南](docs/guide/skills-and-tools.md)；暂不设置硬性的费用上限。工作流截止时间与子运行观察超时会和不确定的准入分开上报。已接受的启动在检查刷新失败时仍保留其请求身份，并提供单独的重试检查操作。其中包含一个可运行的示例、安装步骤，以及面向其他 Python/CPU 组合的 QuickJS 源码构建前提。
 
 ## 许可证
 

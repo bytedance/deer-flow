@@ -5,18 +5,20 @@ import { CheckIcon, StarIcon } from "lucide-react";
 import {
   type KeyboardEvent,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
-import {
-  projectModelChoices,
-  type ModelChoiceProjection,
-} from "@/core/models/favorites";
+import { filterModels, projectRecentModels } from "@/core/models/catalog";
+import { projectModelChoices } from "@/core/models/favorites";
+import { rememberModel, useRecentModels } from "@/core/models/recent";
 import { type Model } from "@/core/models/types";
 import { useModelFavorites } from "@/core/models/use-model-favorites";
 import { cn } from "@/lib/utils";
@@ -35,10 +37,6 @@ type FocusedControl = {
   modelName: string;
   kind: "model" | "favorite";
 };
-
-function orderedModels(projection: ModelChoiceProjection): readonly Model[] {
-  return [...projection.favorites, ...projection.others];
-}
 
 function ModelDetails({ model }: { model: Model }) {
   return (
@@ -60,6 +58,25 @@ export function ModelPickerContent({
   const { t } = useI18n();
   const { user, isLoading } = useAuth();
   const favorites = useModelFavorites(user?.id ?? null);
+  const recentNames = useRecentModels(user?.id ?? null);
+  const [query, setQuery] = useState("");
+  const [provider, setProvider] = useState("");
+  useEffect(() => {
+    if (provider && !models.some((model) => model.provider === provider)) {
+      setProvider("");
+    }
+  }, [models, provider]);
+  const filteredModels = useMemo(
+    () => filterModels(models, query, provider),
+    [models, query, provider],
+  );
+  const providerNames = [
+    ...new Set(
+      models
+        .map((model) => model.provider)
+        .filter((name): name is string => !!name),
+    ),
+  ];
   const modelButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const favoriteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingFavoriteFocusRef = useRef<string | null>(null);
@@ -67,10 +84,43 @@ export function ModelPickerContent({
   const wasOpenRef = useRef(false);
 
   const projection = useMemo(
-    () => projectModelChoices(models, favorites.names),
-    [favorites.names, models],
+    () => projectModelChoices(filteredModels, favorites.names),
+    [favorites.names, filteredModels],
   );
-  const visibleModels = useMemo(() => orderedModels(projection), [projection]);
+  const recentModels = projectRecentModels(
+    filteredModels,
+    recentNames,
+    favorites.names,
+  );
+  const otherModels = projection.others.filter(
+    (model) => !recentModels.some((recent) => recent.name === model.name),
+  );
+  const groups = [
+    {
+      key: "favorites",
+      heading: t.modelPicker.favorites,
+      models: projection.favorites,
+    },
+    { key: "recent", heading: t.modelPicker.recent, models: recentModels },
+    ...(providerNames.length > 1
+      ? [...new Set(otherModels.map((model) => model.provider ?? ""))].map(
+          (name) => ({
+            key: `provider:${name}`,
+            heading: name || t.modelPicker.otherModels,
+            models: otherModels.filter(
+              (model) => (model.provider ?? "") === name,
+            ),
+          }),
+        )
+      : [
+          {
+            key: "others",
+            heading: t.modelPicker.otherModels,
+            models: otherModels,
+          },
+        ]),
+  ];
+  const visibleModels = groups.flatMap((group) => group.models);
 
   const focusInitialModel = useCallback(() => {
     const preferredModel =
@@ -198,7 +248,10 @@ export function ModelPickerContent({
                       kind: "model",
                     };
                   }}
-                  onClick={() => onModelSelect(model.name)}
+                  onClick={() => {
+                    if (!isLoading) rememberModel(user?.id ?? null, model.name);
+                    onModelSelect(model.name);
+                  }}
                   onKeyDown={(event) => handleRowKeyDown(event, model.name)}
                 >
                   <ModelDetails model={model} />
@@ -266,15 +319,51 @@ export function ModelPickerContent({
           focusInitialModel();
         }}
       >
+        <div className="shrink-0 space-y-2 border-b p-2">
+          <Input
+            aria-label={t.modelPicker.search}
+            placeholder={t.modelPicker.search}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                modelButtonRefs.current
+                  .get(visibleModels[0]?.name ?? "")
+                  ?.focus();
+              }
+            }}
+          />
+          {(providerNames.length > 1 || provider !== "") && (
+            <select
+              aria-label={t.modelPicker.provider}
+              className="bg-background w-full rounded border px-2 py-1 text-xs"
+              value={provider}
+              onChange={(event) => setProvider(event.target.value)}
+            >
+              <option value="">{t.modelPicker.allProviders}</option>
+              {providerNames.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
         <div className="min-h-0 overflow-x-hidden overflow-y-auto py-0.5">
           {visibleModels.length === 0 ? (
             <div className="text-muted-foreground py-6 text-center text-sm">
-              {t.modelPicker.noModels}
+              {query || provider
+                ? t.modelPicker.noResults
+                : t.modelPicker.noModels}
             </div>
           ) : (
             <>
-              {renderGroup(t.modelPicker.favorites, projection.favorites)}
-              {renderGroup(t.modelPicker.otherModels, projection.others)}
+              {groups.map((group) => (
+                <div key={group.key}>
+                  {renderGroup(group.heading, group.models)}
+                </div>
+              ))}
             </>
           )}
         </div>

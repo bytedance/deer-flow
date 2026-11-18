@@ -31,8 +31,11 @@ async def test_postgres_auto_create_retry_drains_provisional_engine_dispose_acro
     monkeypatch.setattr(engine_mod, "create_async_engine", lambda *args, **kwargs: engine)
     monkeypatch.setattr(engine_mod, "async_sessionmaker", lambda *args, **kwargs: object())
 
+    class MissingDatabaseError(Exception):
+        sqlstate = "3D000"
+
     async def fail_bootstrap(*args, **kwargs) -> None:
-        raise RuntimeError("database does not exist")
+        raise MissingDatabaseError('database "deerflow" does not exist')
 
     async def fake_auto_create(_url: str) -> None:
         return None

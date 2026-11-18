@@ -2156,7 +2156,7 @@ class TestEnsureAgent:
 
         routing_arg = mock_build_middlewares.call_args.kwargs.get("mcp_routing_middleware")
         assert isinstance(routing_arg, McpRoutingMiddleware)
-        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == ["postgres_query"]
+        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == []
 
     def test_mcp_routing_middleware_absent_when_tool_search_disabled(self, client, mock_app_config):
         """No routing middleware is built on the embedded path when tool_search is off."""
@@ -3086,6 +3086,147 @@ class TestMemoryManagement:
         assert "data" in result
 
 
+class TestNamedAgentMemoryManagement:
+    """A named client must manage the same bucket its agent reads and writes.
+
+    ``MemoryMiddleware`` and the memory tools both pass ``agent_name``, so
+    leaving it out of the management calls wrote facts to the user's default
+    bucket while the agent looked in its own — the fact was stored but never
+    recalled (#8142).
+    """
+
+    @pytest.fixture
+    def named_client(self, client):
+        client._agent_name = "buyer"
+        return client
+
+    def test_get_memory_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.get_memory()
+        assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_reload_memory_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.reload_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.reload_memory()
+        assert mock_mgr.reload_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_reload_memory_fallback_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.reload_memory.side_effect = NotImplementedError("reload not supported")
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.reload_memory()
+        assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_import_memory_writes_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.import_memory.return_value = {"version": "1.0", "facts": []}
+        imported = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.import_memory(imported)
+        assert mock_mgr.import_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_clear_memory_clears_only_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.clear_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.clear_memory()
+        assert mock_mgr.clear_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_create_memory_fact_writes_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.create_fact.return_value = ({"version": "1.0", "facts": []}, "fact_new")
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.create_memory_fact("My preferred office paper size is A5.", category="preference")
+        assert mock_mgr.create_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_delete_memory_fact_targets_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.delete_fact.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.delete_memory_fact("fact_123")
+        assert mock_mgr.delete_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_update_memory_fact_targets_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.update_fact.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.update_memory_fact("fact_123", "Use A4")
+        assert mock_mgr.update_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_backend_that_ignores_agent_scope_refuses_the_call(self, named_client):
+        """Noop-style backends accept ``agent_name`` and return normally while
+        ignoring it, so forwarding the scope alone would report success while
+        editing the user's default bucket. The capability flag must stop the
+        call before the backend sees it."""
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = False
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError):
+                named_client.get_memory()
+            with pytest.raises(NotImplementedError):
+                named_client.create_memory_fact("anything")
+        mock_mgr.get_memory.assert_not_called()
+        mock_mgr.create_fact.assert_not_called()
+
+    def test_backend_without_the_flag_refuses_the_call(self, named_client):
+        """A backend that predates the capability flag never advertises it."""
+        mock_mgr = MagicMock(spec=["get_memory", "create_fact"])
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError):
+                named_client.reload_memory()
+        mock_mgr.get_memory.assert_not_called()
+
+    def test_unnamed_client_keeps_the_default_bucket(self, client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            client.get_memory()
+        assert "agent_name" not in mock_mgr.get_memory.call_args.kwargs
+
+
+class TestNamedAgentMemoryScopeEndToEnd:
+    """Write through a named client, read back through the agent's own path."""
+
+    def test_fact_written_by_named_client_is_in_the_agents_bucket(self, mock_app_config, tmp_path):
+        from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+        token = set_current_user(SimpleNamespace(id="alice"))
+        try:
+            with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+                named = DeerFlowClient(agent_name="buyer")
+            with patch("deerflow.agents.memory.get_memory_manager", return_value=manager):
+                named.create_memory_fact("My preferred office paper size is A5.", category="preference")
+
+                # The agent's own path: MemoryMiddleware injects through
+                # get_context(agent_name=...), so a fact it cannot see there is
+                # never recalled.
+                agent_context = manager.get_context("alice", agent_name="buyer")
+                default_bucket = manager.get_memory(user_id="alice")
+
+            assert "A5" in agent_context
+            assert default_bucket["facts"] == []
+        finally:
+            reset_current_user(token)
+            manager.close()
+
+
 # ---------------------------------------------------------------------------
 # Uploads
 # ---------------------------------------------------------------------------
@@ -3235,13 +3376,20 @@ class TestUploads:
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
             ):
-                client.upload_files("thread-1", [authored])
+                result = client.upload_files("thread-1", [authored])
 
             from deerflow.utils.file_outline import extract_outline_for_file
 
-            assert resolve_companion(uploads_dir / "a.pdf") is None
-            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], [])
-            assert extract_outline_for_file(uploads_dir / "a_1.md")[0] == [{"title": "My notes", "line": 1}]
+            # Same-name uploads can no longer clobber an earlier file in place
+            # (issue #3750): the authored copy lands under the next free
+            # suffix, and the a.pdf companion record stays valid because its
+            # markdown was never destroyed.
+            assert result["files"][0]["filename"] == "a_1_1.md"
+            assert resolve_companion(uploads_dir / "a.pdf") == uploads_dir / "a_1.md"
+            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            assert (uploads_dir / "a_1_1.md").read_text(encoding="utf-8") == "# My notes"
+            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], ["FROM:a.pdf"])
+            assert extract_outline_for_file(uploads_dir / "a_1_1.md")[0] == [{"title": "My notes", "line": 1}]
 
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.
@@ -5378,7 +5526,7 @@ class TestUploadDuplicateFilenames:
             assert companion.read_bytes() == source.read_bytes()
         assert len(list(uploads_dir.iterdir())) == 4
 
-    def test_sequential_upload_keeps_replacement_behavior(self, client, tmp_path):
+    def test_sequential_upload_preserves_existing_file_and_reports_claimed_name(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
         first = tmp_path / "first" / "data.txt"
@@ -5392,9 +5540,14 @@ class TestUploadDuplicateFilenames:
             client.upload_files("t-dup", [first])
             result = client.upload_files("t-dup", [second])
 
-        assert result["files"][0]["filename"] == "data.txt"
-        assert (uploads_dir / "data.txt").read_bytes() == b"second"
-        assert len(list(uploads_dir.iterdir())) == 1
+        info = result["files"][0]
+        assert info["filename"] == "data_1.txt"
+        assert info["original_filename"] == "data.txt"
+        assert info["virtual_path"] == "/mnt/user-data/uploads/data_1.txt"
+        assert info["artifact_url"].endswith("/uploads/data_1.txt")
+        assert (uploads_dir / "data.txt").read_bytes() == b"first"
+        assert (uploads_dir / "data_1.txt").read_bytes() == b"second"
+        assert len(list(uploads_dir.iterdir())) == 2
 
     def test_duplicate_filenames_auto_renamed(self, client):
         """Two files with same basename → second gets _1 suffix."""

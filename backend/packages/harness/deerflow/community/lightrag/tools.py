@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Literal
@@ -129,7 +130,8 @@ async def _search(query: str, *, with_sources: bool = False) -> str | tuple[str,
     if not query:
         return "Error: query must not be empty."
 
-    settings, error = _settings_or_error()
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    settings, error = await asyncio.to_thread(_settings_or_error)
     if settings is None:
         return error or "Error: Invalid LightRAG settings for knowledge_search; check config.yaml."
 

@@ -1,6 +1,98 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
+  sharing: {
+    title: string;
+    description: string;
+    scope: string;
+    expiry: string;
+    hour: string;
+    day: string;
+    week: string;
+    month: string;
+    create: string;
+    working: string;
+    link: string;
+    copy: string;
+    copied: string;
+    links: string;
+    noLinks: string;
+    revoke: string;
+    revoked: string;
+    expired: string;
+    expires: string;
+    loading: string;
+    failed: string;
+    unavailable: string;
+    conflict: string;
+    tooLarge: string;
+    readOnly: string;
+    fork: string;
+    forking: string;
+    missing: string;
+    retry: string;
+    artifacts: string;
+    download: string;
+    preview: string;
+    close: string;
+    you: string;
+    assistant: string;
+    tool: string;
+    noPreview: string;
+    previewNote: string;
+    previewLimited: string;
+  };
+  usage: {
+    title: string;
+    description: string;
+    reportingNote: string;
+    period: string;
+    last7Days: string;
+    last30Days: string;
+    refresh: string;
+    tokens: string;
+    runs: string;
+    inputTokens: string;
+    outputTokens: string;
+    cachedTokens: string;
+    daily: string;
+    dailyDetails: string;
+    models: string;
+    noUsage: string;
+    unknown: string;
+    timezoneNote: string;
+    date: string;
+    model: string;
+    noModels: string;
+    noRuns: string;
+    recentRuns: string;
+    recentRunsHint: string;
+    status: string;
+    allStatuses: string;
+    pending: string;
+    running: string;
+    success: string;
+    error: string;
+    timeout: string;
+    interrupted: string;
+    cancelled: string;
+    unknownStatus: string;
+    previous: string;
+    next: string;
+    page: (page: number) => string;
+    started: string;
+    duration: string;
+    conversation: string;
+    untitled: string;
+    details: string;
+    loadFailed: string;
+    retry: string;
+    forbidden: string;
+    unavailable: string;
+    databaseRequired: string;
+    staticUnavailable: string;
+    loading: string;
+  };
   // Locale meta
   locale: {
     localName: string;
@@ -26,8 +118,31 @@ export interface Translations {
     catalogEntry: string;
     catalogHint: string;
     installationGuide: string;
+    detail: {
+      guide: string;
+      gettingStarted: string;
+      requirements: string;
+      loaded: string;
+      loadedHint: string;
+      tools: string;
+      pages: string;
+      management: string;
+      readyHint: string;
+      disabledHint: string;
+      failedHint: string;
+      noPageHint: string;
+      guideHint: string;
+      technicalDetails: string;
+      package: string;
+      namespace: string;
+      refresh: string;
+      refreshHint: string;
+    };
     catalog: Record<
+      | "officePreview"
+      | "workspaceSearch"
       | "workflows"
+      | "reportSections"
       | "agentTeams"
       | "bookmarks"
       | "context"
@@ -35,9 +150,19 @@ export interface Translations {
       | "screening"
       | "retrieval"
       | "knowledge"
+      | "knowledgeManagement"
+      | "knowledgePlatform"
+      | "knowledgeCenter"
+      | "skillEvolution"
       | "weknora"
+      | "lightrag"
       | "example",
-      { title: string; description: string }
+      {
+        title: string;
+        description: string;
+        gettingStarted?: { title: string; description: string }[];
+        requirements?: string[];
+      }
     >;
     pageUnavailable: string;
     pageUnavailableHint: string;
@@ -143,6 +268,7 @@ export interface Translations {
     more: string;
     search: string;
     loadMore: string;
+    scrollToBottom: string;
     showingOf: (loaded: number, total: number) => string;
     download: string;
     thinking: string;
@@ -176,6 +302,13 @@ export interface Translations {
     showBrowser: string;
   };
 
+  browserStream: {
+    connecting: string;
+    disconnected: string;
+    handshakeTimeout: string;
+    connectionFailed: string;
+  };
+
   skillUsage: {
     used: string;
     title: string;
@@ -204,6 +337,11 @@ export interface Translations {
   home: {
     docs: string;
     blog: string;
+    searchDocs: string;
+    searchDocsLabel: string;
+    searchNoResults: string;
+    searchLoadFailed: string;
+    searchLoading: string;
   };
 
   // Welcome
@@ -222,6 +360,19 @@ export interface Translations {
     linkCopied: string;
   };
 
+  artifactSelection: {
+    rewrite: string;
+    instructions: string;
+    exactRequired: string;
+    review: string;
+    original: string;
+    replacement: string;
+    apply: string;
+    applied: string;
+    changed: string;
+    limit: string;
+  };
+
   artifactEditing: {
     unsaved: string;
     saving: string;
@@ -236,6 +387,12 @@ export interface Translations {
   };
 
   artifactPreview: {
+    preparingDownload: string;
+    retryDownload: string;
+    downloadFailed: string;
+    downloadRequested: string;
+    retry: string;
+    unavailable: string;
     loadingPreview: string;
     resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
@@ -274,6 +431,12 @@ export interface Translations {
   };
 
   modelPicker: {
+    search: string;
+    provider: string;
+    allProviders: string;
+    noResults: string;
+    recent: string;
+
     title: string;
     favorites: string;
     otherModels: string;
@@ -417,6 +580,7 @@ export interface Translations {
       waitingForYou: string;
       waiting: string;
       paused: string;
+      waitingApproval: string;
       autoContinuedOnce: string;
       autoContinuedMany: string;
       details: string;
@@ -433,10 +597,13 @@ export interface Translations {
         noProgress: string;
         tokenCapped: string;
         loopCapped: string;
+        recursionCapped: string;
         missingEvidence: string;
         runFailed: string;
         needsInputCard: string;
         needsInputReply: string;
+        needsApproval: string;
+        needsApprovalReload: string;
         external: string;
         unchecked: string;
         unknown: string;
@@ -468,6 +635,22 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    runInputMode: string;
+    queueMode: string;
+    steerMode: string;
+    queueModeHelp: string;
+    steerModeHelp: string;
+    runInputSend: string;
+    runInputTextOnly: string;
+    runInputUnavailable: string;
+    stopRun: string;
+    runInputQueued: string;
+    runInputSteering: string;
+    runInputUnapplied: string;
+    runInputRetry: string;
+    runInputCancel: string;
+    runInputDispatching: string;
+    runInputReplayUnavailable: string;
     stopStreamingUnavailable: string;
     startTurnUnavailable: string;
   };
@@ -557,7 +740,15 @@ export interface Translations {
     viewTrash: string;
     documentsLoadFailed: string;
     threadFilesLoadFailed: string;
-    interimMemoryNotice: string;
+    memoryTitle: string;
+    memoryAutoExtract: string;
+    memoryDescription: string;
+    memoryEmpty: string;
+    memoryPromote: string;
+    memoryPromoted: string;
+    memorySaveFirst: string;
+    memoryLoadFailed: string;
+    memoryActionFailed: string;
   };
 
   // Trash view (Projects Phase 2)
@@ -662,6 +853,8 @@ export interface Translations {
     label: string;
     title: string;
     description: string;
+    followUpPending: string;
+    followUpStopped: string;
     workerUnavailable: string;
     empty: string;
     emptyHint: string;
@@ -673,6 +866,18 @@ export interface Translations {
     cancel: string;
     retryItem: string;
     exportResults: string;
+    viewResult: string;
+    resultTitle: string;
+    resultDescription: string;
+    report: string;
+    evidence: string;
+    noEvidence: string;
+    acceptance: string;
+    noReport: string;
+    loadResultFailed: string;
+    truncated: string;
+    omittedEvidence: (count: number) => string;
+    pagesLabel: string;
     viewItems: string;
     hideItems: string;
     itemsFailed: string;
@@ -998,6 +1203,7 @@ export interface Translations {
         noProgress: string;
         tokenCapped: string;
         loopCapped: string;
+        recursionCapped: string;
         evaluatorFailed: string;
         noDurableEndOfTurn: string;
         threadChanged: string;
@@ -1220,6 +1426,7 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    streamServerError: (status: number) => string;
     outlineLabel: string;
     outlineAttachmentFallback: string;
   };
@@ -1382,6 +1589,23 @@ export interface Translations {
       confirmed: string;
       retry: string;
     };
+    /** The `/connect <code>` dialog for apps linked by messaging their bot. */
+    bindingCode: {
+      description: (provider: string) => string;
+      loading: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      expiresAt: (time: string) => string;
+      waiting: (provider: string) => string;
+      connected: (provider: string) => string;
+      done: string;
+      expired: string;
+      newCode: string;
+      failed: string;
+      tooManyCodes: string;
+      retry: string;
+    };
     saveAndConnect: string;
     saveChanges: string;
     descriptions: Record<string, string>;
@@ -1405,6 +1629,9 @@ export interface Translations {
   // Tool calls
   toolCalls: {
     details: string;
+    failed: string;
+    scheduleTaskPending: string;
+    stopScheduledTaskPending: string;
     toolName: string;
     callId: string;
     input: string;
@@ -1465,10 +1692,57 @@ export interface Translations {
     requiredA11yLabel: string;
     selectPlaceholder: string;
     answeredValue: (value: string) => string;
+    approval: {
+      modeLabel: string;
+      modeAsk: string;
+      modeAuto: string;
+      modeFull: string;
+      askDescription: string;
+      autoDescription: string;
+      fullDescription: string;
+      approveThread: string;
+      grantScope: string;
+      editArguments: string;
+      fullArguments: string;
+      invalidArguments: string;
+      revokeGrants: string;
+      grantsRevoked: string;
+      childApproval: string;
+      title: string;
+      description: string;
+      waiting: string;
+      loading: string;
+      loadFailed: string;
+      reload: string;
+      approve: string;
+      reject: string;
+      approveAll: string;
+      rejectAll: string;
+      submitDecisions: string;
+      reasonLabel: string;
+      reasonPlaceholder: string;
+      submitFailed: string;
+      submitTimeout: string;
+      featureDisabled: string;
+      noPending: string;
+    };
   };
 
   // Uploads
   uploads: {
+    status: {
+      pending: string;
+      uploading: string;
+      uploaded: string;
+      failed: string;
+      cancelled: string;
+    };
+    cancelUpload: string;
+    retryUpload: string;
+    notReady: string;
+    attachment: string;
+    image: string;
+    removeAttachment: (filename: string) => string;
     uploading: string;
     uploadingFiles: string;
     limitsHint: (
@@ -1531,6 +1805,37 @@ export interface Translations {
   };
 
   // Shortcuts
+  workspaceSearch: {
+    title: string;
+    description: string;
+    placeholder: string;
+    open: string;
+    all: string;
+    threads: string;
+    messages: string;
+    includeArchived: string;
+    archived: string;
+    recent: string;
+    searching: string;
+    indexing: string;
+    unavailable: string;
+    unsupported: string;
+    error: string;
+    empty: string;
+    more: string;
+    retry: string;
+    hint: string;
+    user: string;
+    assistant: string;
+    context: string;
+    returnToLatest: string;
+    loadingContext: string;
+    messageUnavailable: string;
+    matchedMessage: string;
+    earlier: string;
+    later: string;
+    untitled: string;
+  };
   shortcuts: {
     searchActions: string;
     noResults: string;
@@ -1546,6 +1851,30 @@ export interface Translations {
     title: string;
     description: string;
     models: {
+      connectionSettings: string;
+      importTitle: string;
+      importDescription: string;
+      savedConnection: string;
+      newConnection: string;
+      fetchModels: string;
+      searchModels: string;
+      selectVisible: string;
+      clearSelection: string;
+      alreadyConfigured: string;
+      noCatalogResults: string;
+      catalogTruncated: string;
+      discovery_unsupported: string;
+      discovery_failed: string;
+      importUncertain: string;
+      importStopped: string;
+      stopImport: string;
+      closeCatalog: string;
+      catalogCount: (
+        visible: number,
+        total: number,
+        selected: number,
+      ) => string;
+      testAndAdd: (count: number) => string;
       title: string;
       description: string;
       adminOnly: string;
@@ -2036,6 +2365,9 @@ export interface Translations {
       sso_account_exists: string;
       sso_not_allowed: string;
       account_disabled: string;
+      invalid_email: string;
+      password_too_short: string;
+      registration_password_too_short: string;
     };
   };
 }

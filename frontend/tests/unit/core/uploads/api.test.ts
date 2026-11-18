@@ -94,6 +94,18 @@ describe("uploads api", () => {
     expect(error.message).toBe("Upload failed");
   });
 
+  test("uses the upload fallback when an unsuccessful response omits the message", async () => {
+    const error = await uploadError(
+      jsonResponse(200, {
+        success: false,
+        files: [],
+        skipped_files: ["report.pdf"],
+      }),
+    );
+
+    expect(error.message).toBe("Upload failed");
+  });
+
   test("preserves string error details", async () => {
     const error = await uploadError(
       jsonResponse(413, { detail: "File exceeds the upload limit" }),

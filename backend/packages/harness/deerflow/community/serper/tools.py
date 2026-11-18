@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
@@ -45,13 +46,7 @@ def _get_api_key(tool_name: str, *, extras: Mapping[str, object] | None = None) 
     if extras is None:
         config = get_app_config().get_tool_config(tool_name)
         extras = config.model_extra if config is not None else {}
-    api_key = extras.get("api_key")
-    if isinstance(api_key, str) and api_key.strip():
-        return api_key.strip()
-    env_key = os.getenv("SERPER_API_KEY")
-    if isinstance(env_key, str) and env_key.strip():
-        return env_key.strip()
-    return None
+    return resolve_api_key(extras.get("api_key")) or resolve_api_key(os.getenv("SERPER_API_KEY"))
 
 
 def _count_for_request(value: object) -> int:
@@ -428,13 +423,13 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     if include or exclude:
         organic = [result for result in organic if _matches_domain_scope(result.get("link"), include, exclude)]
 
-    # Search result links are returned verbatim (not passed through
-    # _safe_public_url): they are surfaced as citations for the model to read,
-    # not fetched/downloaded by this tool, unlike image_search image URLs.
+    # Search result links go through _safe_public_url like image URLs, so a
+    # loopback or metadata-service address never reaches the model as a
+    # citation, even though this tool does not fetch it (#7036).
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("link", ""),
+            "url": _safe_public_url(r.get("link")),
             "content": r.get("snippet", ""),
         }
         for r in organic[:max_results]

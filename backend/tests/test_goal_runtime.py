@@ -366,12 +366,29 @@ def test_format_visible_conversation_keeps_a_long_request_whole_when_it_fits():
     assert lines[1] == f"User: {request}"
 
 
+def test_format_visible_conversation_uses_spare_budget_for_long_user_input_at_the_cap():
+    request = "Review the supplied data. " + "x" * 5000 + " IMPORTANT SOURCE ROW: 314159 "
+    request += "y" * (10000 - len(request))
+    answer = "The result is " + "a" * (goal.MAX_GOAL_CONVERSATION_CHARS - len(f"User: {request}\n\nAssistant: The result is  done.")) + " done."
+    assert len(f"User: {request}\n\nAssistant: {answer}") == goal.MAX_GOAL_CONVERSATION_CHARS
+
+    for text in (answer, answer.replace("The result", "The  result", 1)):
+        formatted = goal.format_visible_conversation([HumanMessage(content=request), AIMessage(content=text)])
+        lines = _evidence_lines(formatted)
+        # Crossing the cap by one character must not discard most of the input
+        # while leaving room unused. Preserve the selected recent answer too.
+        assert "IMPORTANT SOURCE ROW: 314159" in lines[0]
+        assert len(lines[0]) >= 9900
+        assert lines[-1] == f"Assistant: {text}"
+        assert len(formatted) >= goal.MAX_GOAL_CONVERSATION_CHARS - 64
+
+
 def test_format_visible_conversation_shortens_a_request_that_does_not_fit():
     request = "Build the table. " + "r" * 5000
     lines = _evidence_lines(goal.format_visible_conversation(_report_run(request)))
 
     assert lines[0].startswith("User: Build the table. ") and lines[0].endswith(" more chars]")
-    assert len(lines[0]) < goal.MAX_GOAL_REQUEST_CHARS + 40
+    assert len(lines[0]) < len(f"User: {request}")
 
 
 def test_format_visible_conversation_marks_the_cut_when_no_request_is_in_the_window():
@@ -464,6 +481,28 @@ def test_make_goal_continuation_message_is_hidden_from_ui():
     assert "Tests have not run" in message.content
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "answer", "extra", "retryable"),
+    [
+        ({"finish_reason": "stop"}, '{"satisfied":', {}, True),
+        ({"stop_reason": "end_turn"}, '{"satisfied": "yes"}', {}, True),
+        ({"status": "completed", "finish_reason": "length"}, '{"satisfied":', {}, False),
+        ({"finish_reason": "content_filter"}, "refused", {}, False),
+        ({"stop_reason": "refusal"}, "refused", {}, False),
+        ({}, '{"satisfied":', {}, False),
+        ({"finish_reason": "stop"}, "", {"refusal": "Not allowed"}, False),
+        ({"finish_reason": "stop"}, [{"type": "refusal", "refusal": "Not allowed"}], {}, False),
+    ],
+)
+async def test_evaluator_format_retry_requires_a_normal_completion(metadata, answer, extra, retryable):
+    model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content=answer, response_metadata=metadata, additional_kwargs=extra)))
+    with pytest.raises(ValueError) as error:
+        await goal.evaluate_goal_completion(goal.build_goal_state("Report"), [HumanMessage(content="Report"), AIMessage(content="Done")], model=model)
+    assert isinstance(error.value, goal.GoalEvaluationFormatError) is retryable
+    model.ainvoke.assert_awaited_once()
+
+
 def test_evaluate_goal_completion_uses_non_thinking_model(monkeypatch):
     fake_model = MagicMock()
     fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": true, "reason": "Done", "evidence_summary": "Done"}'))
@@ -519,6 +558,17 @@ def test_evaluate_goal_completion_shows_tool_evidence_to_the_evaluator():
     assert "use blocker needs_user_input" in system_message.content
     assert 'Tool result (write_file): "OK"' in human_message.content
     assert 'Tool result (present_files): "Successfully presented files"' in human_message.content
+
+
+def test_evaluator_does_not_treat_async_registration_as_completion():
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": false, "blocker": "external_wait", "reason": "The result is still pending", "evidence_summary": "Registered only"}'))
+
+    asyncio.run(goal.evaluate_goal_completion(goal.build_goal_state("Produce and deliver the final report"), _file_task_messages(), model=fake_model))
+
+    system_message, _ = fake_model.ainvoke.await_args.args[0]
+    assert "Registering a Batch, job, task, or scheduled continuation is not evidence that the objective is complete" in system_message.content
+    assert "actual requested result or artifact must exist or be delivered" in system_message.content
 
 
 def test_evaluate_goal_completion_injects_langfuse_metadata(monkeypatch):
@@ -783,3 +833,34 @@ def test_parse_goal_command_set_trims_and_preserves_objective():
     assert goal.parse_goal_command("  finish the work  ") == goal.GoalCommand("set", "finish the work")
     # A multi-word objective that merely starts with an alias is a set, not a clear.
     assert goal.parse_goal_command("clear the build cache") == goal.GoalCommand("set", "clear the build cache")
+
+
+def test_parse_goal_command_from_chat_without_guidance():
+    assert goal.parse_goal_command("from-chat") == goal.GoalCommand("from_chat", "")
+    assert goal.parse_goal_command("  from-chat  ") == goal.GoalCommand("from_chat", "")
+
+
+def test_parse_goal_command_from_chat_with_guidance():
+    assert goal.parse_goal_command("from-chat focus on the vendor total") == goal.GoalCommand("from_chat", "focus on the vendor total")
+    # Guidance keeps its inner spacing and is trimmed at the edges.
+    assert goal.parse_goal_command("from-chat   keep  both totals ") == goal.GoalCommand("from_chat", "keep  both totals")
+
+
+def test_parse_goal_command_from_chat_is_case_insensitive():
+    for form in ("FROM-CHAT", "From-Chat", "  FrOm-ChAt  hint"):
+        command = goal.parse_goal_command(form)
+        assert command.kind == "from_chat"
+
+
+def test_parse_goal_command_from_chat_exact_token_only():
+    # Longer or glued tokens are literal objectives, not the from-chat mode.
+    assert goal.parse_goal_command("from-chatting is fun") == goal.GoalCommand("set", "from-chatting is fun")
+    assert goal.parse_goal_command("from-chatx") == goal.GoalCommand("set", "from-chatx")
+    assert goal.parse_goal_command("build from-chat reports") == goal.GoalCommand("set", "build from-chat reports")
+
+
+def test_parse_goal_command_existing_forms_unchanged_with_from_chat():
+    # The three pre-existing forms keep their exact semantics.
+    assert goal.parse_goal_command("") == goal.GoalCommand("status")
+    assert goal.parse_goal_command("clear") == goal.GoalCommand("clear")
+    assert goal.parse_goal_command("ship it") == goal.GoalCommand("set", "ship it")

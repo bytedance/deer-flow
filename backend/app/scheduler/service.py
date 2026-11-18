@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
@@ -30,7 +29,7 @@ from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
-from deerflow.scheduler.schedules import next_run_at
+from deerflow.scheduler.schedules import pauses_unschedulable, should_advance_schedule_cursor, stored_next_run_at
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -451,11 +450,31 @@ class ScheduledTaskService:
             else:
                 await self._reconcile_active_state(now=now)
         else:
-            await self._task_run_repo.recover_expired_launch_claims(
-                error=_LEASE_RECOVERY_ERROR,
-                now=now,
-            )
-        await self._expire_waiting_runs(now=now)
+            try:
+                await self._task_run_repo.recover_expired_launch_claims(
+                    error=_LEASE_RECOVERY_ERROR,
+                    now=now,
+                )
+            except Exception:
+                # Like the reconciliation below: a failed recovery pass must
+                # not keep every other due task from being admitted.
+                logger.exception("Failed to recover expired scheduled launch claims")
+            try:
+                finalized = await self._task_repo.reconcile_terminal_runs(now=now)
+                if finalized:
+                    logger.info("Finalized %d scheduled occurrence(s) from terminal durable runs", finalized)
+            except Exception:
+                # The pass already isolates per-occurrence failures; a remaining
+                # failure (e.g. the candidate query) must not skip admission or
+                # queue draining for this poll.
+                logger.exception("Failed to reconcile terminal scheduled runs")
+        try:
+            await self._expire_waiting_runs(now=now)
+        except Exception:
+            # A failed timeout sweep must not skip queue draining or this
+            # poll's due-task admission. Individual rows are also isolated by
+            # expire_queued_runs; this guard covers the candidate query/session.
+            logger.exception("Failed to expire queued scheduled runs")
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
         # persisted even when all execution slots are busy; claim_queued_run()
@@ -467,13 +486,35 @@ class ScheduledTaskService:
             limit=self._max_concurrent_runs,
         )
         for task in claimed:
-            await self.dispatch_task(task, now=now, trigger="scheduled")
+            try:
+                await self.dispatch_task(task, now=now, trigger="scheduled")
+            except Exception:
+                # A per-record failure inside one task's dispatch must not abort
+                # the rest of this poll's claimed batch: every claimed task
+                # already holds a lease, and the next tick would skip them the
+                # same way. Claim-level store failures stay loud above the loop.
+                logger.exception(
+                    "Scheduled task %s: dispatch failed; continuing with the claimed batch",
+                    task.get("id"),
+                )
 
     @staticmethod
     def _is_overlap_conflict(exc: Exception) -> bool:
         if isinstance(exc, ConflictError):
             return True
-        return isinstance(exc, HTTPException) and exc.status_code == 409
+        # ``start_run`` converts a run-manager admission conflict into this
+        # typed HTTP 409. Other 409s (idempotency-key mismatch, thread or
+        # assistant drift) are permanent launch failures; retrying them would
+        # keep the occurrence queued until the queue timeout.
+        #
+        # Keep the import local to avoid changing the scheduler module's
+        # load-time import graph. The scheduler is wired by the Gateway, where
+        # ``app.gateway.services`` is already loaded, so this lookup is
+        # guaranteed; do not make it optional without moving the
+        # classification to a dependency that is always importable here.
+        from app.gateway.services import BusyThreadConflict
+
+        return isinstance(exc, BusyThreadConflict)
 
     @staticmethod
     def _task_status_for_failure(task: dict[str, Any], *, trigger: str) -> str:
@@ -504,6 +545,45 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
+    @staticmethod
+    def _next_run_at_after_launch(
+        task: dict[str, Any],
+        *,
+        trigger: str,
+        now: datetime,
+    ) -> tuple[datetime | str | None, str | None]:
+        """Keep a recurring task's cadence when a manual trial launches.
+
+        A manual run is an extra trial and must not consume the task's next
+        scheduled occurrence. One-time tasks retain their existing boundary
+        semantics, so only recurring manual launches keep the stored value.
+        The second value is why a stored schedule no longer computes; the
+        launch bookkeeping then pauses the task instead of raising out of the
+        poll (see ``_unschedulable_outcome``).
+        """
+        if not should_advance_schedule_cursor(task["schedule_type"], trigger=trigger):
+            return task.get("next_run_at"), None
+        return stored_next_run_at(
+            task["schedule_type"],
+            task["schedule_spec"],
+            task["timezone"],
+            now=now,
+        )
+
+    @staticmethod
+    def _unschedulable_outcome(
+        task: dict[str, Any],
+        *,
+        status: str,
+        last_error: str | None,
+        schedule_error: str | None,
+    ) -> tuple[str, str | None]:
+        """The status and ``last_error`` to write, pausing an unschedulable task."""
+        if not pauses_unschedulable(task["schedule_type"], status, schedule_error):
+            return status, last_error
+        logger.warning("Paused scheduled task %s: %s", task["id"], schedule_error)
+        return "paused", schedule_error
+
     async def dispatch_task(
         self,
         task: dict[str, Any],
@@ -528,20 +608,21 @@ class ScheduledTaskService:
             # surface as HTTP 500 on manual trigger and, in the poller, abort
             # the rest of the claimed batch every cycle while the task itself
             # is never marked with last_error.
-            task_status = self._task_status_for_failure(task, trigger=trigger)
+            next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+            task_status, last_error = self._unschedulable_outcome(
+                task,
+                status=self._task_status_for_failure(task, trigger=trigger),
+                last_error=str(exc),
+                schedule_error=schedule_error,
+            )
             await self._task_repo.update_after_launch(
                 task["id"],
                 status=task_status,
-                next_run_at=next_run_at(
-                    task["schedule_type"],
-                    task["schedule_spec"],
-                    task["timezone"],
-                    now=now,
-                ),
+                next_run_at=next_at,
                 last_run_at=now,
                 last_run_id=None,
                 last_thread_id=execution_thread_id,
-                last_error=str(exc),
+                last_error=last_error,
                 increment_run_count=False,
                 expected_lease_owner=expected_lease_owner,
             )
@@ -608,6 +689,10 @@ class ScheduledTaskService:
             "task_id": task["id"],
             "thread_id": execution_thread_id,
             "trigger": trigger,
+            # Freeze the admitted occurrence time in the synthetic row: the
+            # provenance below must be identical if this launch is retried at a
+            # later now, or start_run's idempotency key sees a different request.
+            "scheduled_for": now,
         }
         return await self._attempt_queued_run(task, queued, now=now)
 
@@ -625,6 +710,7 @@ class ScheduledTaskService:
         queued: dict[str, Any],
         *,
         now: datetime,
+        created_after: datetime | None = None,
     ) -> dict[str, Any]:
         """Turn one queued occurrence into a live run under its own trace scope.
 
@@ -633,9 +719,17 @@ class ScheduledTaskService:
         sharing one id across a whole poll cycle. A manual trigger arrives
         inside a Gateway request and keeps that request's trace instead, so
         the launched run stays correlated with the call that asked for it.
+
+        ``created_after`` applies the queue-age cutoff when retrying a row
+        from the waiting queue. A freshly admitted row has not waited.
         """
         with ensure_trace_context():
-            return await self._launch_queued_occurrence(task, queued, now=now)
+            return await self._launch_queued_occurrence(
+                task,
+                queued,
+                now=now,
+                created_after=created_after,
+            )
 
     async def _launch_queued_occurrence(
         self,
@@ -643,6 +737,7 @@ class ScheduledTaskService:
         queued: dict[str, Any],
         *,
         now: datetime,
+        created_after: datetime | None = None,
     ) -> dict[str, Any]:
         task_run_id = queued["id"]
         execution_thread_id = queued["thread_id"]
@@ -654,9 +749,16 @@ class ScheduledTaskService:
             lease_seconds=self._lease_seconds,
             global_max_concurrent_runs=self._max_concurrent_runs,
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+            created_after=created_after,
         )
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
+
+        # Every claim increments attempt_count. Late bookkeeping from this
+        # attempt must carry that generation: after lease expiry the same
+        # process can reclaim the occurrence, so the lease owner alone cannot
+        # distinguish the two attempts.
+        claim_attempt = int(claimed["attempt_count"]) if claimed.get("attempt_count") is not None else None
 
         # Track whether _launch_run has produced a live run. A bookkeeping
         # failure after launch must retain the non-terminal slot so a later
@@ -695,13 +797,13 @@ class ScheduledTaskService:
             launch_succeeded = True
             launched_run_id = result["run_id"]
             launched_thread_id = result["thread_id"]
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
+            next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+            task_status, last_error = self._unschedulable_outcome(
+                task,
+                status=self._task_status_for_launch(task, trigger=trigger, next_at=next_at),
+                last_error=None,
+                schedule_error=schedule_error,
             )
-            task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
             await self._record_launched_run(
                 task_run_id=task_run_id,
                 task_id=task["id"],
@@ -715,7 +817,7 @@ class ScheduledTaskService:
                 last_run_at=now,
                 last_run_id=launched_run_id,
                 last_thread_id=launched_thread_id,
-                last_error=None,
+                last_error=last_error,
                 increment_run_count=True,
                 task_run_id=task_run_id,
                 # Same race as the run-row write above: a fast-failing run's
@@ -731,19 +833,25 @@ class ScheduledTaskService:
             }
         except Exception as exc:
             if not launch_succeeded and self._is_overlap_conflict(exc):
-                await self._task_run_repo.requeue_claimed_run(
+                requeue_kwargs = {
+                    "lease_owner": self._lease_owner,
+                    "error": str(exc),
+                }
+                # Omit the generation keyword entirely for legacy/custom repos:
+                # passing None would break implementations that predate the
+                # optional fence and do not accept the argument.
+                if claim_attempt is not None:
+                    requeue_kwargs["expected_attempt_count"] = claim_attempt
+                requeued = await self._task_run_repo.requeue_claimed_run(
                     task_run_id,
-                    lease_owner=self._lease_owner,
-                    error=str(exc),
+                    **requeue_kwargs,
                 )
+                if not requeued:
+                    logger.warning(
+                        "Scheduled task-run %s lost its launch claim before requeue bookkeeping; leaving recovery-owned state unchanged",
+                        task_run_id,
+                    )
                 return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
-
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
 
             if launch_succeeded:
                 # _launch_run succeeded, so a run is live even though
@@ -755,7 +863,13 @@ class ScheduledTaskService:
                 # if the DB is still down the row stays "queued" -- still
                 # active, still holding the slot -- so we log and still report
                 # the run as launched so callers know a run is in flight.
-                task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
+                next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+                task_status, last_error = self._unschedulable_outcome(
+                    task,
+                    status=self._task_status_for_launch(task, trigger=trigger, next_at=next_at),
+                    last_error=None,
+                    schedule_error=schedule_error,
+                )
                 try:
                     await self._record_launched_run(
                         task_run_id=task_run_id,
@@ -785,7 +899,7 @@ class ScheduledTaskService:
                         # on a task whose run is actively running; the real
                         # terminal outcome is written by handle_run_completion.
                         # The transient itself is logged above.
-                        last_error=None,
+                        last_error=last_error,
                         increment_run_count=True,
                         task_run_id=task_run_id,
                         protect_terminal=True,
@@ -806,12 +920,17 @@ class ScheduledTaskService:
 
             # _launch_run itself failed (or a step before it did): no live run
             # was created, so it is safe to release the active slot.
+            fail_kwargs = {
+                "task_id": task["id"],
+                "lease_owner": self._lease_owner,
+                "error": str(exc),
+                "now": now,
+            }
+            if claim_attempt is not None:
+                fail_kwargs["expected_attempt_count"] = claim_attempt
             finalized = await self._task_run_repo.fail_launching_run(
                 task_run_id,
-                task_id=task["id"],
-                lease_owner=self._lease_owner,
-                error=str(exc),
-                now=now,
+                **fail_kwargs,
             )
             if not finalized:
                 logger.warning(
@@ -836,8 +955,10 @@ class ScheduledTaskService:
         one the run row shows once the launch is accounted.
         """
         trigger = queued["trigger"]
-        scheduled_for = _as_utc(queued.get("scheduled_for")) if trigger == "scheduled" else None
-        scheduled_for = scheduled_for or now
+        # Use the occurrence's admitted time for every trigger. A manual trial
+        # retried by the queue drain must reproduce the first request's origin;
+        # falling back to the retry clock changes start_run's idempotent input.
+        scheduled_for = _as_utc(queued.get("scheduled_for")) or now
         run_number = None
         number_lookup = getattr(self._task_run_repo, "run_number", None)
         if trigger == "scheduled" and callable(number_lookup):
@@ -946,31 +1067,52 @@ class ScheduledTaskService:
         queued_rows = await self._task_run_repo.list_queued_runs(
             limit=max(16, self._max_concurrent_runs * 4),
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+            created_after=now - timedelta(seconds=self._queue_timeout_seconds),
         )
         for queued in queued_rows:
-            await self._task_repo.release_queued_admission_lease(queued["task_id"])
-            task = await self._task_repo.get_internal(queued["task_id"])
-            if task is None:
-                await self._task_run_repo.update_status(
-                    queued["id"],
-                    status="interrupted",
-                    error=RUN_ERROR_DELETED_WHILE_QUEUED,
-                    finished_at=now,
+            try:
+                await self._drain_queued_run(queued, now=now)
+            except Exception:
+                # A storage failure on one occurrence must not leave every
+                # later queued row and this poll's due tasks undispatched. The
+                # failed row keeps its queue/lease state for the next recovery
+                # pass, and queue_timeout still bounds how long it can wait.
+                logger.exception(
+                    "Failed to drain scheduled occurrence %s; continuing with the remaining queue",
+                    queued.get("id"),
                 )
-                continue
-            # Pausing suppresses automatic occurrences, but a manual trigger is
-            # an explicit request and has always been allowed to run without
-            # resuming the schedule. A later pause still cancels an already
-            # queued manual row atomically in pause_with_queue_cancellation().
-            if task.get("status") == "paused" and queued["trigger"] != "manual":
-                await self._task_run_repo.update_status(
-                    queued["id"],
-                    status="interrupted",
-                    error=RUN_ERROR_PAUSED_WHILE_QUEUED,
-                    finished_at=now,
-                )
-                continue
-            await self._attempt_queued_run(task, queued, now=now)
+
+    async def _drain_queued_run(self, queued: dict[str, Any], *, now: datetime) -> None:
+        await self._task_repo.release_queued_admission_lease(queued["task_id"])
+        task = await self._task_repo.get_internal(queued["task_id"])
+        if task is None:
+            await self._task_run_repo.update_status(
+                queued["id"],
+                status="interrupted",
+                error=RUN_ERROR_DELETED_WHILE_QUEUED,
+                finished_at=now,
+            )
+            return
+        # Pausing suppresses automatic occurrences, but a manual trigger is
+        # an explicit request and has always been allowed to run without
+        # resuming the schedule. A later pause still cancels an already
+        # queued manual row atomically in pause_with_queue_cancellation().
+        if task.get("status") == "paused" and queued["trigger"] != "manual":
+            await self._task_run_repo.update_status(
+                queued["id"],
+                status="interrupted",
+                error=RUN_ERROR_PAUSED_WHILE_QUEUED,
+                finished_at=now,
+            )
+            return
+        # The timeout sweep may have failed for this row. Enforce the same
+        # cutoff in the atomic claim so cleanup retries cannot start it.
+        await self._attempt_queued_run(
+            task,
+            queued,
+            now=now,
+            created_after=now - timedelta(seconds=self._queue_timeout_seconds),
+        )
 
     async def _expire_waiting_runs(self, *, now: datetime) -> None:
         await self._task_run_repo.expire_queued_runs(

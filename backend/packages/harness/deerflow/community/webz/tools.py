@@ -10,7 +10,9 @@ from typing import Literal
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ def _normalize(payload: object, count: int) -> list[dict]:
             }
             if any(not isinstance(value, str) for value in result.values()):
                 raise ValueError("Invalid article fields")
+            result["url"] = safe_public_result_url(result["url"])
         except ValueError:
             logger.warning("Skipping malformed Webz result at index %d", index)
             continue
@@ -110,9 +113,7 @@ async def web_search_tool(
 
     # Lazy configuration resolution can read files; keep it off the event loop.
     options = await asyncio.to_thread(_options)
-    key = options.get("api_key")
-    key = key.strip() if isinstance(key, str) else ""
-    key = key or os.getenv("WEBZ_API_KEY", "").strip()
+    key = resolve_api_key(options.get("api_key")) or resolve_api_key(os.getenv("WEBZ_API_KEY"))
     if not key:
         return json.dumps({"error": "Webz API key is missing; configure api_key or WEBZ_API_KEY"})
     count = _count(max_results if max_results is not None else options.get("max_results", 5))
@@ -133,7 +134,7 @@ async def web_search_tool(
     if filters:
         body["filters"] = filters
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        async with await asyncio.to_thread(httpx.AsyncClient, timeout=30.0, follow_redirects=False) as client:
             response = await client.post(
                 "https://api.webz.io/api/news/context",
                 headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},

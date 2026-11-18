@@ -145,7 +145,7 @@ class BuzzSeenEventStore:
             # crash mid-write must never truncate the store (a truncated store
             # would fail open into replay on the next start, which is
             # recoverable — but there is no reason to accept even that).
-            fh = tempfile.NamedTemporaryFile(mode="w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8")
+            fh = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent, suffix=".tmp", delete=False)
             json.dump(payload, fh)
             fh.close()
             Path(fh.name).replace(path)

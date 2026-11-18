@@ -1,3 +1,4 @@
+import type { AIMessage, Message, ToolMessage } from "@langchain/langgraph-sdk";
 import {
   afterEach,
   beforeEach,
@@ -372,6 +373,271 @@ describe("artifact URL helpers", () => {
         "/mnt/user-data/outputs/image.png",
       ]),
     ).toBe("https://example.com/image.png");
+  });
+
+  test("resolveRelativeArtifactURL returns null when it cannot resolve", async () => {
+    const { isRelativeArtifactReference, resolveRelativeArtifactURL } =
+      await loadFreshArtifactUtils();
+    const artifacts = [
+      "/mnt/user-data/outputs/report.md",
+      "/mnt/user-data/outputs/a/dup.md",
+      "/mnt/user-data/outputs/b/dup.md",
+    ];
+
+    expect(
+      resolveRelativeArtifactURL("./report.md#s1", "thread-1", artifacts),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/report.md#s1",
+    );
+    expect(resolveRelativeArtifactURL("dup.md", "thread-1", artifacts)).toBe(
+      null,
+    );
+    expect(resolveRelativeArtifactURL("none.md", "thread-1", artifacts)).toBe(
+      null,
+    );
+    expect(
+      resolveRelativeArtifactURL("../report.md", "thread-1", artifacts),
+    ).toBe(null);
+
+    expect(isRelativeArtifactReference("report.md")).toBe(true);
+    expect(isRelativeArtifactReference("./a/b.md?x=1")).toBe(true);
+    for (const href of [
+      "../report.md",
+      "/workspace/chats/x",
+      "/mnt/user-data/outputs/report.md",
+      "https://example.com/report.md",
+      "mailto:a@example.com",
+      "#section",
+      "?q=1",
+      "",
+    ]) {
+      expect(isRelativeArtifactReference(href)).toBe(false);
+    }
+  });
+
+  test("collectThreadArtifactPaths adds present_files paths missing from state", async () => {
+    const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+    const state = ["/mnt/user-data/outputs/a.md"];
+    const messages = [
+      { type: "human", id: "h", content: "go" },
+      {
+        type: "ai",
+        id: "a1",
+        content: "",
+        tool_calls: [
+          {
+            id: "p1",
+            name: "present_files",
+            args: {
+              filepaths: [
+                "/mnt/user-data/outputs/a.md",
+                "/mnt/user-data/outputs/b.zip",
+                "outputs/relative-is-ignored.md",
+              ],
+            },
+          },
+        ],
+      },
+    ] as Parameters<typeof collectThreadArtifactPaths>[1];
+
+    // Reopened thread: the /history head carries no artifacts.
+    expect(collectThreadArtifactPaths([], messages)).toEqual([
+      "/mnt/user-data/outputs/a.md",
+      "/mnt/user-data/outputs/b.zip",
+    ]);
+    expect(collectThreadArtifactPaths(state, messages)).toEqual([
+      "/mnt/user-data/outputs/a.md",
+      "/mnt/user-data/outputs/b.zip",
+    ]);
+    // Without present_files the state array is returned as-is.
+    expect(collectThreadArtifactPaths(state, [messages[0]!])).toBe(state);
+  });
+
+  describe("shared artifacts in thread history", () => {
+    const origin = "source-thread";
+    const sha256 = "a".repeat(64);
+    const outputs = "/mnt/user-data/outputs";
+    const receipt = `Successfully presented shared artifact; origin_thread_id=${origin}; sha256=${sha256}`;
+
+    function handoff(id: string, path: string) {
+      return {
+        id,
+        name: "present_shared_artifact",
+        args: { path, origin_thread_id: origin, sha256 },
+      };
+    }
+
+    function result(
+      toolCallId: string,
+      fields: Partial<ToolMessage> = {},
+    ): ToolMessage {
+      return {
+        type: "tool",
+        tool_call_id: toolCallId,
+        content: receipt,
+        ...fields,
+      };
+    }
+
+    test("restores only handoffs with their own confirmed receipt", async () => {
+      const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+      const delivered = `${outputs}/lesson.pptx`;
+      const messages: Message[] = [
+        {
+          type: "ai",
+          content: "",
+          tool_calls: [
+            handoff("delivered", delivered),
+            handoff("failed", `${outputs}/failed.pptx`),
+            handoff("pending", `${outputs}/pending.pptx`),
+            handoff("wrong-hash", `${outputs}/wrong-hash.pptx`),
+            handoff("error-status", `${outputs}/error-status.pptx`),
+            handoff("ambiguous", `${outputs}/ambiguous.pptx`),
+            handoff("ambiguous", `${outputs}/ambiguous-other.pptx`),
+          ],
+        },
+        // History can serialize unnamed results with null. / 历史回执的名称可能为 null。
+        { ...result("delivered"), name: null } as unknown as ToolMessage,
+        result("failed", { content: "Error: Source artifact changed" }),
+        result("unrelated"),
+        result("wrong-hash", {
+          content: receipt.replace(sha256, "b".repeat(64)),
+        }),
+        result("error-status", { status: "error" }),
+        result("ambiguous"),
+      ];
+
+      expect(collectThreadArtifactPaths([], messages)).toEqual([delivered]);
+      expect(collectThreadArtifactPaths([delivered], messages)).toEqual([
+        delivered,
+      ]);
+    });
+
+    test("restores a handoff once with identical success receipts", async () => {
+      const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+      const delivered = `${outputs}/report.md`;
+      const success = result("duplicate", {
+        id: "receipt-1",
+        name: "present_shared_artifact",
+        status: "success",
+        additional_kwargs: { deerflow_tool_meta: { status: "success" } },
+      });
+      const messages: Message[] = [
+        {
+          type: "ai",
+          content: "",
+          tool_calls: [handoff("duplicate", delivered)],
+        },
+        success,
+        { ...success, id: "receipt-2" },
+      ];
+
+      expect(collectThreadArtifactPaths([], messages)).toEqual([delivered]);
+    });
+
+    test.each([
+      ["an explicit error", { status: "error" }],
+      [
+        "different receipt text",
+        { content: receipt.replace(origin, "other-thread") },
+      ],
+      ["a different tool name", { name: "present_files" }],
+      [
+        "an unknown status",
+        { status: "pending" } as unknown as Partial<ToolMessage>,
+      ],
+      [
+        "error metadata",
+        { additional_kwargs: { deerflow_tool_meta: { status: "error" } } },
+      ],
+      [
+        "partial success metadata",
+        {
+          additional_kwargs: {
+            deerflow_tool_meta: { status: "partial_success" },
+          },
+        },
+      ],
+      ["malformed metadata", { additional_kwargs: { deerflow_tool_meta: {} } }],
+    ] satisfies [string, Partial<ToolMessage>][])(
+      "skips a handoff when a matching receipt has %s",
+      async (_reason, fields) => {
+        const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+        const messages: Message[] = [
+          {
+            type: "ai",
+            content: "",
+            tool_calls: [handoff("conflicting", `${outputs}/report.md`)],
+          },
+          result("conflicting", { id: "receipt-1", status: "success" }),
+          result("conflicting", {
+            id: "receipt-2",
+            status: "success",
+            ...fields,
+          }),
+        ];
+
+        expect(collectThreadArtifactPaths([], messages)).toEqual([]);
+      },
+    );
+
+    test("skips a handoff without a matching receipt", async () => {
+      const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+      const messages: Message[] = [
+        {
+          type: "ai",
+          content: "",
+          tool_calls: [handoff("pending", `${outputs}/pending.md`)],
+        },
+        result("unrelated"),
+      ];
+
+      expect(collectThreadArtifactPaths([], messages)).toEqual([]);
+    });
+
+    test("keeps reused call IDs scoped to their assistant occurrence", async () => {
+      const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+      const delivered = `${outputs}/first.md`;
+      const first: AIMessage = {
+        type: "ai",
+        content: "",
+        tool_calls: [handoff("reused", delivered)],
+      };
+      const second: AIMessage = {
+        type: "ai",
+        content: "",
+        tool_calls: [handoff("reused", `${outputs}/second.md`)],
+      };
+      const messages = [
+        first,
+        result("reused", { id: "first-receipt" }),
+        result("reused", { id: "retried-receipt" }),
+        second,
+        result("reused", { content: "Error: Destination already exists" }),
+      ];
+
+      expect(collectThreadArtifactPaths([], messages)).toEqual([delivered]);
+    });
+
+    test("restores the canonical output path and rejects escapes", async () => {
+      const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+      const messages: Message[] = [
+        {
+          type: "ai",
+          content: "",
+          tool_calls: [
+            handoff("canonicalized", `${outputs}//notes/../report%20one.md`),
+            handoff("escape", `${outputs}/../outside.md`),
+          ],
+        },
+        result("canonicalized"),
+        result("escape"),
+      ];
+
+      expect(collectThreadArtifactPaths([], messages)).toEqual([
+        `${outputs}/report%20one.md`,
+      ]);
+    });
   });
 
   test("builds encoded write-file URLs without undefined query parameters", async () => {

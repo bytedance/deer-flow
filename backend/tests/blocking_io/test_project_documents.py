@@ -206,3 +206,27 @@ async def test_conversion_publish_path_dispatches_off_the_loop(tmp_path, monkeyp
         assert "_cached_char_count" in calls
     finally:
         await close_engine()
+
+
+async def test_tool_search_dispatches_off_the_loop(tmp_path, monkeypatch) -> None:
+    """The content tier of ``search_project_documents`` validates the original
+    (``_content_intact``), resolves serving paths, samples text
+    (``is_text_file_by_content``) and reads the scan window
+    (``_read_text_window``) — all through the offload."""
+    from deerflow.projects.tools import _search_project_documents_impl
+
+    monkeypatch.setattr("deerflow.projects.tools._resolve_search_budgets", lambda: (100_000, 1_000_000))
+    calls = _spy_offload(monkeypatch)
+    env = await _make_env(tmp_path, monkeypatch)
+    try:
+        staged = await stage_document_bytes(env.paths, user_id=_USER, project_id=env.project_id, chunks=[b"needle in the haystack"], max_bytes=1 << 20)
+        await add_staged_document(env.docs, env.paths, user_id=_USER, project_id=env.project_id, name="hay.txt", staged=staged)
+        calls.clear()
+        payload = json.loads(await _search_project_documents_impl(_runtime(env.project_id), query="needle", limit=10))
+        assert payload["results"] and payload["results"][0]["matched"] == "content"
+        assert "_content_intact" in calls
+        assert "resolve_document_paths" in calls
+        assert "is_text_file_by_content" in calls
+        assert "_read_text_window" in calls
+    finally:
+        await close_engine()

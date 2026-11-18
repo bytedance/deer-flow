@@ -4,7 +4,7 @@ Resolves the multi-instance half of [#4189](https://github.com/bytedance/deer-fl
 
 | Producer | Write | Reads |
 |---|---|---|
-| Viewed images | `view_image_tool` → `ViewedImageData.blob_ref` plus compatibility `actual_path` | `ViewImageMiddleware._read_image_as_data_url`, gateway artifact routes, IM channels, `present_file_tool` |
+| Viewed images | `view_image_tool` → `ViewedImageData.blob_ref` plus compatibility `actual_path` | `ViewImageMiddleware._read_image_as_data_url`; thread artifact GET resolves a matching checkpoint-bound ref when the local file is absent; IM channels and `present_file_tool` retain local-path reads |
 | Externalized tool results | `ToolOutputBudgetMiddleware` → server-owned `tool-output` ref beside the virtual path | pre-model restoration into the current thread-data mount, then model `read_file` |
 
 On a single gateway both are correct. Behind a load balancer, the instance handling the read is frequently not the instance that wrote the file. The blob store replaces **"where on this machine"** with **"which content"**, so every instance that can reach the backing store resolves the same bytes.
@@ -21,7 +21,7 @@ On a single gateway both are correct. Behind a load balancer, the instance handl
 
 Reads **verify the digest**. A content-addressed store that silently returns wrong bytes is indistinguishable from a corrupt checkpoint, so it fails loudly instead.
 
-`kind` is validated by `validate_blob_kind` against `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (1-64 chars, no leading or trailing hyphen) at the contract level because it is also a path segment in the `local_fs` backend — traversal and separator surprises are ruled out once, not per backend, and the single validator is what a rejected producer sees.
+`validate_blob_kind` uses the Python regex `^(?=.{1,64}\Z)[a-z0-9]([a-z0-9-]*[a-z0-9])?\Z` and reports the same pattern in validation errors. A kind is 1–64 characters long and may contain lowercase ASCII letters, digits, and hyphens. It must start and end with a letter or digit. The `\Z` anchor requires the match to end at the last character, so trailing newlines are rejected. This grammar keeps `kind` safe as a path segment in the `local_fs` backend.
 
 ## Backend
 
@@ -62,10 +62,18 @@ The producer migrations are independently revertible:
 1. **Viewed images — migrated.** `ViewedImageData` carries an optional
    `blob_ref` while retaining `actual_path`; `view_image_tool` writes validated
    bytes when the store is enabled, and `ViewImageMiddleware` resolves the
-   digest-bound blob before the sandbox/local compatibility paths. The gateway
-   artifact routes and IM channels keep their local-path reads until they can be
-   exercised against a multi-instance deployment. Store initialization or write
-   failures return a generic tool error; read failures fall through to the
+   digest-bound blob before the sandbox/local compatibility paths. Thread
+   artifact GET also serves a checkpoint-bound image blob when the reader
+   Gateway lacks the local file; the reference is checked against the thread's
+   virtual path, digest, size, kind and MIME type. Blob fallback requires an
+   existing authorized thread record, including for trusted internal owner
+   requests. A deleted or untracked thread cannot expose retained checkpoint
+   blobs; legacy local-file artifact reads keep their existing access policy.
+   After authorization, a disabled-store check skips checkpoint access. Store
+   initialization/read failures retain the 404 response and log a warning with
+   the exception type only, without raw backend messages or tracebacks.
+   IM channels and `present_file_tool` still use local-path reads. Store initialization or write
+   failures return a generic tool error; model-read failures fall through to the
    validated sandbox/host compatibility paths.
 2. **Externalized tool results — migrated.** Host externalization stores the
    exact UTF-8 bytes as `kind="tool-output"` and checkpoints a versioned,

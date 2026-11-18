@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "knowledge-management",
+  "locales": {
+    "zh-CN": {
+      "title": "知识入库与处理",
+      "description": "导入文件、网址和文本，并查询、管理文档处理任务。",
+      "usage": [
+        {
+          "title": "连接已有管理入口",
+          "description": "由管理员通过知识中心或管理 API，选择已授权的知识库与操作。此扩展本身提供后台接口。"
+        },
+        {
+          "title": "导入并查询处理结果",
+          "description": "提交文件、网址或文本，保留返回的文档标识，再查询处理状态；可用操作由上游能力和权限共同决定。"
+        }
+      ],
+      "requirements": [
+        "管理员已配置 WeKnora 管理连接及明确的用户、知识库和操作授权。"
+      ]
+    },
+    "en-US": {
+      "title": "Knowledge ingestion and processing",
+      "description": "Import files, URLs and text, then inspect and manage document processing.",
+      "usage": [
+        {
+          "title": "Use an existing management entry",
+          "description": "Use Knowledge center or the management API to select an authorized knowledge base and operation. This extension provides backend endpoints."
+        },
+        {
+          "title": "Ingest and inspect processing",
+          "description": "Submit a file, URL or text, retain the returned document ID and query its status. Available operations depend on upstream capabilities and permissions."
+        }
+      ],
+      "requirements": [
+        "The administrator must configure a WeKnora management connection and explicit user, knowledge-base and operation grants."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge-management#readme"
+}

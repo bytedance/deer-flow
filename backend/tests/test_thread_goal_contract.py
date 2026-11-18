@@ -42,7 +42,7 @@ def test_stand_down_reason_codes_match_the_worker():
     }
     literals = set(re.findall(r'stand_down_reason\s*=\s*"([a-z_:]+)"', Path(worker.__file__).read_text(encoding="utf-8")))
     assert literals, "pattern no longer matches worker.py; update this test"
-    assert set(_CONTRACT["stand_down_reason_codes"]) == blocked | caps | literals | worker._GOAL_RUN_HARD_STOP_REASONS
+    assert set(_CONTRACT["stand_down_reason_codes"]) == blocked | caps | literals | worker._GOAL_RUN_HARD_STOP_REASONS | worker._GOAL_RUN_ERROR_STOP_REASONS
 
 
 def test_check_failure_codes_match_the_scheduled_tasks_page():

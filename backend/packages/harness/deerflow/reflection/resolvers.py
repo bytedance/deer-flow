@@ -44,6 +44,36 @@ def resolve_variable[T](
         module_path, variable_name = variable_path.rsplit(":", 1)
     except ValueError as err:
         raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name") from err
+    # A path carries exactly one colon. Without this check the split above
+    # misfiles the two realistic typos: a trailing colon yields an empty
+    # attribute name ("Module json does not define a  attribute/class"), and an
+    # extra colon leaves it inside the module part, where the failed import is
+    # reported as a missing dependency with an unusable `uv add json:loads`
+    # hint. Both are path mistakes, so they get the path-format message.
+    #
+    # A leading dot is the third shape: it is a relative import, and
+    # import_module raises TypeError ("the 'package' argument is required")
+    # rather than ImportError, so callers that catch ImportError -- every
+    # provider/extension/middleware loader -- would see an unhandled crash.
+    # These paths are absolute by construction, so reject it here too.
+    #
+    # Stray whitespace and a trailing dot are the fourth: they stay inside the
+    # ImportError contract but land in the missing-dependency branch, which
+    # then advertises a distribution named `json.` or `json ` -- text that
+    # cannot work, and where the space is invisible in the rendered hint. A
+    # dotted module path has neither, so the same format guidance applies.
+    # Whitespace is checked inside both halves (not just at the ends), because
+    # `"json :loads"` and `"json:attr\n"` each hide the typo on one side.
+    if (
+        not module_path
+        or not variable_name
+        or ":" in module_path
+        or module_path.startswith(".")
+        or module_path.endswith(".")
+        or any(character.isspace() for character in module_path)
+        or any(character.isspace() for character in variable_name)
+    ):
+        raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name")
 
     try:
         module = import_module(module_path)

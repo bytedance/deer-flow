@@ -752,12 +752,12 @@ class SlackChannel(Channel):
         thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
         state = await self._connection_repo.consume_oauth_state(provider="slack", state=code)
         if state is None:
-            await self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
+            await self._post_connection_reply(channel_id, await self._connect_reply_text("invalid_code"), thread_ts)
             return True
 
         user_id = str(event.get("user") or "")
         if not user_id or not team_id:
-            await self._post_connection_reply(channel_id, "Slack connection could not be completed from this message.", thread_ts)
+            await self._post_connection_reply(channel_id, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]), thread_ts)
             return True
 
         await self._connection_repo.upsert_connection(
@@ -771,7 +771,7 @@ class SlackChannel(Channel):
             },
             status="connected",
         )
-        await self._post_connection_reply(channel_id, "Slack connected to DeerFlow.", thread_ts)
+        await self._post_connection_reply(channel_id, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]), thread_ts)
         return True
 
     async def _post_connection_reply(self, channel_id: str, text: str, thread_ts: str | None = None) -> None:

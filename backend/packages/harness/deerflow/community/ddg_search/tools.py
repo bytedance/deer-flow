@@ -9,6 +9,7 @@ from langchain.tools import tool
 
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.search_time_range import DDGS_TIMELIMIT_BY_TIME_RANGE, SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -221,7 +222,7 @@ def web_search_tool(
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("href", r.get("link", "")),
+            "url": safe_public_result_url(r.get("href", r.get("link"))),
             "content": r.get("body", r.get("snippet", "")),
         }
         for r in results

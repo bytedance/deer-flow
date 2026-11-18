@@ -93,6 +93,21 @@ def test_cache_text_file_returns_a_complete_entry(tmp_path, scanner):
     assert Path(returned).name == hashlib.sha256(virtual_path.encode()).hexdigest()
 
 
+def test_cache_text_file_publishes_decoded_crlf_content_byte_exactly(tmp_path, scanner):
+    """A decoded CRLF snapshot must reach the cache verbatim on every host.
+
+    The default text-mode write translates ``\\n`` into ``os.linesep``, which
+    on native Windows turns ``\\r\\n`` content into ``\\r\\r\\n`` bytes -- the
+    cache is then served as the file's text with a spurious blank line.
+    """
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    returned = scanner._cache_text_file("a,b\r\n1,2\r\n", "/workspace/report.csv", cache_dir)
+
+    assert Path(returned).read_bytes() == b"a,b\r\n1,2\r\n"
+
+
 def test_cache_entry_survives_a_failed_publish(tmp_path, monkeypatch, scanner):
     """The real entry point: a failed publish must not damage the cached entry."""
     cache_dir = tmp_path / "cache"

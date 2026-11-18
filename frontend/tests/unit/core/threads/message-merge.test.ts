@@ -262,15 +262,15 @@ test("mergeMessages keeps live-only messages between shared anchors in place", (
   ]);
 });
 
-test("mergeMessages deduplicates tool messages by tool_call_id", () => {
+test("mergeMessages deduplicates copies of the same tool result by message id", () => {
   const oldTool = {
-    id: "tool-message-old",
+    id: "tool-message",
     type: "tool",
     tool_call_id: "call-1",
     content: "old",
   } as Message;
   const liveTool = {
-    id: "tool-message-live",
+    id: "tool-message",
     type: "tool",
     tool_call_id: "call-1",
     content: "live",
@@ -1674,7 +1674,7 @@ test("local turn order keeps an existing clarification card with its original tu
   const baselineIdentities = new Set([
     "message:previous-human",
     "message:previous-answer",
-    "tool:clarification-call",
+    "message:clarification-card",
   ]);
 
   // A live checkpoint tail can be woven after the newly persisted human
@@ -1738,7 +1738,7 @@ test("local turn order preserves relative order across displaced message sources
         currentStep,
       ],
       new Set(["message:previous-human", "message:baseline-answer"]),
-      new Set(["tool:history-only-call"]),
+      new Set(["message:history-only-card"]),
     ),
   ).toEqual([
     previousHuman,
@@ -1793,7 +1793,7 @@ test("current turn run id derivation selects only visible unconfirmed steps", ()
         confirmedHistoryStep,
       ],
       new Set(["message:baseline-step"]),
-      new Set(["tool:confirmed-history-call"]),
+      new Set(["message:confirmed-history-step"]),
     ),
   ).toEqual(new Set(["run-current"]));
   expect(
@@ -1823,7 +1823,7 @@ test("history-confirmed live cards are not derived as current-run steps", () => 
     run_id: "run-previous",
   } as Message;
   const baselineIdentities = new Set(["message:previous-human"]);
-  const historyIdentities = new Set(["tool:old-history-call"]);
+  const historyIdentities = new Set(["message:old-history-card"]);
   const currentTurnRunIds = getCurrentTurnRunIds(
     [oldHistoryCard],
     baselineIdentities,
@@ -1861,7 +1861,7 @@ test("local turn order repairs a displaced suffix when the human is first", () =
     restoreLocalTurnMessageOrder(
       [currentHuman, oldHistoryCard],
       new Set(),
-      new Set(["tool:old-history-call"]),
+      new Set(["message:old-history-card"]),
     ),
   ).toEqual([oldHistoryCard, currentHuman]);
 });
@@ -1986,7 +1986,7 @@ test("local turn order keeps the current run's persisted steps after the new hum
     "message:previous-human",
     "message:current-human",
     "message:current-step",
-    "tool:call-current",
+    "message:current-tool",
   ]);
 
   // The human already at its correct position, followed by its own steps.
@@ -2084,7 +2084,7 @@ test("local turn order restores a clarification card that only canonical history
   const historyIdentities = new Set([
     "message:previous-human",
     "message:previous-answer",
-    "tool:clarification-call",
+    "message:clarification-card",
   ]);
 
   // The merged list has the card woven after the new human (from history).

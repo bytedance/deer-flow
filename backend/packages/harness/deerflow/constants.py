@@ -2,12 +2,26 @@
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
+# Framework-owned placeholder the tool-output budget middleware substitutes for
+# an elided ``write_file`` payload in the model-bound request (issue #5328), and
+# which ``write_file`` refuses to write back out (issue #7319). The model
+# occasionally imitates its own elided history and submits the placeholder as
+# content, leaving a ~200-byte deliverable; a rejection the model can act on is
+# better than a silent empty file. Rendering and rejection both derive from this
+# one string so the wording cannot drift out of sync with the guard.
+WRITE_ELISION_PLACEHOLDER_TEMPLATE = "[content elided: {chars} chars; this write_file call succeeded and the file was read or modified again afterwards, so the on-disk file is the current version; call read_file on its path to see it]"
+
 # Host-only per-run capability. Keep this dependency-free: the runtime worker
 # must not initialize the tool/subagent packages while importing this key.
 CONVERSATION_READER_CONTEXT_KEY = "__conversation_reader"
 CONVERSATION_TOOL_USE = "deerflow.tools.conversation:read_conversation"
 # The Gateway sizes reader pages by this tool's tool-output budget entry.
 CONVERSATION_TOOL_NAME = "read_conversation"
+
+# Only these tools' successful presentation paths count as verified delivery in
+# worker receipts and Gateway archive downloads. Keep the tuple ordered for
+# stable receipt projections.
+DELIVERY_PRESENTATION_TOOL_NAMES = ("present_files", "present_shared_artifact")
 
 # Hidden subdirectory (under a thread's outputs dir) that holds the browser
 # tools' per-step screenshots. These are transient live-progress frames, not

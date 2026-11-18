@@ -768,6 +768,49 @@ class TestRequiredSecretsParsing:
         assert by_name["EXPLICIT_REQUIRED"].optional is False
         assert by_name["REQUIRED_ONE"].optional is False
 
+    def test_duplicate_declarations_keep_first_position_and_required_wins(self, tmp_path):
+        from deerflow.skills.parser import parse_skill_file
+        from deerflow.skills.types import SkillCategory
+
+        # The required duplicate comes *after* an optional one: the secret must
+        # still be required, otherwise a caller that omits it never gets a
+        # missing-secret diagnostic (issue #7568).
+        skill_file = self._write_skill(
+            tmp_path,
+            "name: erp-report\ndescription: d\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: true\n  - ERP_TOKEN\n  - name: OTHER_TOKEN\n    optional: true",
+        )
+        skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
+        assert skill.required_secrets == (
+            SecretRequirement(name="ERP_TOKEN", optional=False),
+            SecretRequirement(name="OTHER_TOKEN", optional=True),
+        )
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            [{"name": "ERP_TOKEN", "optional": True}, "ERP_TOKEN"],
+            ["ERP_TOKEN", {"name": "ERP_TOKEN", "optional": True}],
+            [{"name": "ERP_TOKEN", "optional": True}, {"name": " ERP_TOKEN ", "optional": False}],
+        ],
+    )
+    def test_duplicate_declaration_keeps_required(self, raw):
+        from deerflow.skills.parser import parse_required_secrets
+
+        requirements = parse_required_secrets([*raw, "OTHER_TOKEN"], Path("SKILL.md"))
+        assert requirements == (
+            SecretRequirement(name="ERP_TOKEN", optional=False),
+            SecretRequirement(name="OTHER_TOKEN", optional=False),
+        )
+
+    def test_optional_duplicates_stay_optional(self):
+        from deerflow.skills.parser import parse_required_secrets
+
+        requirements = parse_required_secrets(
+            [{"name": "ERP_TOKEN", "optional": True}, {"name": "ERP_TOKEN", "optional": True}],
+            Path("SKILL.md"),
+        )
+        assert requirements == (SecretRequirement(name="ERP_TOKEN", optional=True),)
+
     @pytest.mark.parametrize("value", ["false", "true", "no", 1, [], {}, None])
     def test_malformed_optional_fails_closed(self, value, caplog):
         from deerflow.skills.parser import parse_required_secrets
@@ -779,6 +822,24 @@ class TestRequiredSecretsParsing:
         assert requirements == (SecretRequirement(name="ERP_TOKEN", optional=False),)
         assert f"non-boolean optional value of type {type(value).__name__}" in caplog.text
         assert "required-secrets entry 'ERP_TOKEN' as required" in caplog.text
+
+    @pytest.mark.parametrize("value", ['"false"', '"true"', "1", "null"])
+    def test_malformed_optional_is_rejected_by_validation_too(self, value):
+        from deerflow.skills.frontmatter import split_skill_markdown
+        from deerflow.skills.parser import parse_required_secrets
+        from deerflow.skills.validation import validate_skill_frontmatter_text
+
+        # Export gates on this validation rule before it reads `optional`, which
+        # is why a malformed declaration is refused there instead of being
+        # coerced into optional=True; installation applies the same rule.
+        content = f"---\nname: erp-report\ndescription: d\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: {value}\n---\n"
+        valid, message, _ = validate_skill_frontmatter_text(content)
+        assert valid is False
+        assert "optional must be a boolean" in message
+
+        parts, error = split_skill_markdown(content)
+        assert error is None
+        assert parse_required_secrets(parts.metadata["required-secrets"], Path("SKILL.md")) == (SecretRequirement(name="ERP_TOKEN", optional=False),)
 
     def test_invalid_env_name_entry_is_dropped(self, tmp_path):
         from deerflow.skills.parser import parse_skill_file

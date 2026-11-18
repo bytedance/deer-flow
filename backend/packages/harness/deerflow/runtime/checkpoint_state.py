@@ -34,6 +34,28 @@ def _finish_state_mutation(_state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def validate_state_mutation_node(as_node: str) -> str:
+    """Return *as_node*, or raise ``ValueError`` when LangGraph refuses it as a node name.
+
+    :func:`build_state_mutation_graph` registers ``as_node`` as the graph's
+    only node, and LangGraph refuses ``__start__``, ``__end__``, its other
+    reserved names and any name containing a namespace separator (``|``) or
+    task separator (``:``). Callers that take the name from a client check it
+    here first, so a bad name is an input error and not a failed compile.
+    The reserved set is private to LangGraph; recheck this import when
+    upgrading LangGraph (verified against 1.2.9 and 1.2.14).
+    """
+    from langgraph._internal._constants import NS_END, NS_SEP, RESERVED
+    from langgraph.constants import END, START
+
+    if as_node in (START, END) or as_node in RESERVED:
+        raise ValueError(f"Node name {as_node!r} is reserved by LangGraph")
+    for character in (NS_SEP, NS_END):
+        if character in as_node:
+            raise ValueError(f"Node name must not contain {character!r}")
+    return as_node
+
+
 def build_state_mutation_graph(
     as_node: str,
     mode: CheckpointChannelMode,
@@ -114,6 +136,7 @@ class CheckpointStateAccessor:
     graph: Any
     checkpointer: Any
     mode: CheckpointChannelMode
+    direct_namespace: bool = False
 
     @classmethod
     def bind(
@@ -123,11 +146,12 @@ class CheckpointStateAccessor:
         *,
         store: Any | None = None,
         mode: CheckpointChannelMode = "full",
+        direct_namespace: bool = False,
     ) -> CheckpointStateAccessor:
         graph.checkpointer = checkpointer
         if store is not None:
             graph.store = store
-        return cls(graph=graph, checkpointer=checkpointer, mode=mode)
+        return cls(graph=graph, checkpointer=checkpointer, mode=mode, direct_namespace=direct_namespace)
 
     def _prepare_config(self, config: dict[str, Any]) -> dict[str, Any]:
         prepared = {
@@ -135,6 +159,15 @@ class CheckpointStateAccessor:
             "configurable": dict(config.get("configurable", {})),
             "metadata": dict(config.get("metadata", {})),
         }
+        if self.direct_namespace and prepared["configurable"].get("checkpoint_ns"):
+            # A state-only mutation graph has no subgraphs to delegate to. Bind
+            # the saver explicitly so LangGraph reads/writes this namespace on
+            # the graph itself, including when reading back an updated config.
+            # This private key is verified against LangGraph 1.2.9; recheck it
+            # when upgrading LangGraph because its internal location may move.
+            from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
+
+            prepared["configurable"][CONFIG_KEY_CHECKPOINTER] = self.checkpointer
         inject_checkpoint_mode(prepared, self.mode)
         return prepared
 

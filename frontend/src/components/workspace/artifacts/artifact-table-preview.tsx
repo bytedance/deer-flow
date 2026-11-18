@@ -19,6 +19,7 @@ import {
 import { useDelimitedPreview } from "@/core/artifacts/use-delimited-preview";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
+import { truncateToCodePoints } from "@/core/utils/text";
 
 const PAGE_SIZE = 50;
 const MAX_DATA_ROWS = 200;
@@ -184,9 +185,14 @@ function TablePreview({
                     </th>
                     {columns.map((column) => {
                       const value = row[column];
+                      // Count code points so a 120-code-point cell that ends in
+                      // an astral character stays inline instead of getting a
+                      // pointless expand control.
+                      const characters =
+                        value === undefined ? [] : Array.from(value);
                       const expandable =
                         value !== undefined &&
-                        (value.length > 120 || /[\r\n]/.test(value));
+                        (characters.length > 120 || /[\r\n]/.test(value));
                       return (
                         <td
                           key={column}
@@ -217,7 +223,7 @@ function TablePreview({
                                   setCopyStatus("");
                                 }}
                               >
-                                {value.slice(0, 120)}
+                                {truncateToCodePoints(value, 120)}
                               </button>
                             ) : (
                               <span className="whitespace-pre" title={value}>

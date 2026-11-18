@@ -304,9 +304,20 @@ test.describe("IM channels", () => {
     await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
     await sidebar.getByRole("button", { name: "Connect" }).click();
 
+    const dialog = page.getByRole("dialog", { name: "Connect Slack" });
     await expect(
-      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+      dialog.getByText("/connect abc123", { exact: true }),
     ).toBeVisible();
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"]);
+    await dialog.getByRole("button", { name: "Copy command" }).click();
+    await expect(
+      dialog.getByRole("button", { name: "Copied", exact: true }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      "/connect abc123",
+    );
     expect(slackConnectCalls).toBe(1);
   });
 
@@ -401,9 +412,14 @@ test.describe("IM channels", () => {
     await setupDialog.getByLabel("Bot token").fill("xoxb-ui");
     await setupDialog.getByRole("button", { name: "Save and connect" }).click();
 
-    await expect(setupDialog).toBeHidden();
+    // The binding step keeps the "Connect Slack" title; the form is gone.
+    await expect(page.getByLabel("Bot token")).toBeHidden();
+    const bindingDialog = page.getByRole("dialog", { name: "Connect Slack" });
     await expect(
-      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+      bindingDialog.getByText("/connect abc123", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      bindingDialog.getByRole("button", { name: "Copy command" }),
     ).toBeVisible();
     expect(slackConnectCalls).toBe(1);
   });

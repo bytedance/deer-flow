@@ -14,14 +14,19 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
+from sqlalchemy.orm import sessionmaker
 
+from deerflow.config.credentials_key import CredentialsCipher
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
 from deerflow.mcp.cache import reset_mcp_tools_cache
 from deerflow.mcp.oauth import get_initial_oauth_headers
+from deerflow.mcp.oauth_store import McpOAuthTokenStore, set_mcp_oauth_token_store
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 from deerflow.mcp.tasks import OrdinaryMcpTaskDriver, TaskReference, TaskStatus
 from deerflow.mcp.tasks import runtime as task_runtime
@@ -33,6 +38,8 @@ from deerflow.mcp.tasks.runtime import (
 )
 from deerflow.mcp.tools import get_mcp_tools
 from deerflow.mcp.user_config import load_user_mcp_config, personal_server_name, user_mcp_config_path
+from deerflow.persistence.base import Base
+from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow, SqlMcpOAuthTokenRepository
 
 
 class _Clock:
@@ -144,6 +151,34 @@ def task_config(tmp_path, monkeypatch):
     finally:
         set_mcp_task_submitter(None)
         set_mcp_task_config_snapshot(None)
+
+
+@pytest.fixture
+def shared_token_store(tmp_path):
+    """Install the Gateway's shared token store over a fresh SQLite database."""
+    engine = sa.create_engine(f"sqlite:///{(tmp_path / 'oauth-tokens.db').as_posix()}")
+    Base.metadata.create_all(engine, tables=[McpOAuthTokenRow.__table__])
+    session_factory = sessionmaker(engine, expire_on_commit=False)
+    store = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=CredentialsCipher.from_keys([Fernet.generate_key()]))
+    previous = set_mcp_oauth_token_store(store)
+    try:
+        yield session_factory
+    finally:
+        set_mcp_oauth_token_store(previous)
+        engine.dispose()
+
+
+@pytest.fixture(params=["process", "shared"])
+def token_persistence(request):
+    """Run a contract with tokens in process memory and with the shared store installed."""
+    if request.param == "shared":
+        request.getfixturevalue("shared_token_store")
+    return request.param
+
+
+def _stored_keys(session_factory) -> list[tuple[str, str, str]]:
+    with session_factory() as session:
+        return [tuple(row) for row in session.execute(sa.select(McpOAuthTokenRow.scope, McpOAuthTokenRow.owner_user_id, McpOAuthTokenRow.server_key).order_by(McpOAuthTokenRow.scope))]
 
 
 @pytest.mark.asyncio
@@ -347,7 +382,7 @@ async def test_cancelled_waiter_does_not_strand_shared_refresh_lock(task_config,
 
 
 @pytest.mark.asyncio
-async def test_task_runtime_reset_drops_rotated_oauth_state(task_config, rotating_server):
+async def test_task_runtime_reset_drops_rotated_oauth_state(task_config, rotating_server, token_persistence):
     _path, startup = task_config
     first = task_runtime.get_mcp_task_oauth_token_manager(ExtensionsConfig.from_file())
     assert await first.get_authorization_header("reports") == "Bearer access-1"
@@ -363,7 +398,39 @@ async def test_task_runtime_reset_drops_rotated_oauth_state(task_config, rotatin
 
 
 @pytest.mark.asyncio
-async def test_hot_reloadable_servers_do_not_reuse_task_oauth_state(task_config, rotating_server):
+async def test_task_runtime_restart_with_unchanged_seed_continues_the_stored_chain(task_config, rotating_server, shared_token_store):
+    _path, startup = task_config
+    first = task_runtime.get_mcp_task_oauth_token_manager(ExtensionsConfig.from_file())
+    assert await first.get_authorization_header("reports") == "Bearer access-1"
+    set_mcp_task_config_snapshot(None)
+    _Clock.current = _Clock.current + timedelta(seconds=300)
+    # The counterpart of the reset contract above: with the seed unchanged, a
+    # new Gateway lifetime continues from the stored rotation, not refresh-0.
+    set_mcp_task_config_snapshot(startup)
+    second = task_runtime.get_mcp_task_oauth_token_manager(ExtensionsConfig.from_file())
+    assert await second.get_authorization_header("reports") == "Bearer access-2"
+    assert rotating_server.refresh_requests == ["refresh-0", "refresh-1"]
+    assert _stored_keys(shared_token_store) == [("deployment", "", "reports")]
+
+
+@pytest.mark.asyncio
+async def test_hot_reloaded_server_with_unchanged_seed_continues_the_stored_chain(task_config, rotating_server, shared_token_store):
+    _path, startup = task_config
+    other = startup.mcp_servers["reports"].model_copy(deep=True)
+    other.task_toolsets = []
+    startup.mcp_servers["other"] = other
+    set_mcp_task_config_snapshot(startup)
+    first = task_runtime.get_mcp_task_oauth_token_manager(startup)
+    assert await first.get_authorization_header("other") == "Bearer access-1"
+    _Clock.current = _Clock.current + timedelta(seconds=300)
+    # A tool-cache reset builds a fresh manager for non-task servers.
+    second = task_runtime.get_mcp_task_oauth_token_manager(startup.model_copy(deep=True))
+    assert await second.get_authorization_header("other") == "Bearer access-2"
+    assert rotating_server.refresh_requests == ["refresh-0", "refresh-1"]
+
+
+@pytest.mark.asyncio
+async def test_hot_reloadable_servers_do_not_reuse_task_oauth_state(task_config, rotating_server, token_persistence):
     _path, startup = task_config
     other = startup.mcp_servers["reports"].model_copy(deep=True)
     other.task_toolsets = []
@@ -402,7 +469,7 @@ async def test_snapshot_and_oauth_sharing_follow_the_same_server_selection(task_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["discovery", "durable_call"])
-async def test_personal_connection_cannot_reuse_same_named_deployment_oauth(task_config, rotating_server, tmp_path, monkeypatch, operation):
+async def test_personal_connection_cannot_reuse_same_named_deployment_oauth(task_config, rotating_server, tmp_path, monkeypatch, operation, token_persistence):
     _path, startup = task_config
     monkeypatch.setattr("deerflow.mcp.user_config.get_paths", lambda: Paths(base_dir=tmp_path))
     personal = startup.mcp_servers["reports"].model_dump(mode="json")
@@ -429,3 +496,29 @@ async def test_personal_connection_cannot_reuse_same_named_deployment_oauth(task
     assert rotating_server.refresh_requests == ["refresh-0", "personal-seed"]
     assert rotating_server.calls[-1][1] == "Bearer access-2"
     assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_personal_connection_continues_its_rotated_chain_on_the_next_run(task_config, rotating_server, tmp_path, monkeypatch, shared_token_store):
+    _path, startup = task_config
+    monkeypatch.setattr("deerflow.mcp.user_config.get_paths", lambda: Paths(base_dir=tmp_path))
+    personal = startup.mcp_servers["reports"].model_dump(mode="json")
+    personal["oauth"]["refresh_token"] = "personal-seed"
+    personal["personal_public_network"] = True
+    path = user_mcp_config_path("user-1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": {"reports": personal}}), encoding="utf-8")
+    name = personal_server_name("user-1", "reports", personal)
+    rotating_server.refresh_token = "personal-seed"
+    set_mcp_task_submitter(SimpleNamespace())
+
+    # Discovery for one run builds its own manager ...
+    tools = await get_mcp_tools(load_user_mcp_config("user-1"), personal_user_id="user-1")
+    assert await tools[1].ainvoke({})
+    _Clock.current = _Clock.current + timedelta(seconds=300)
+    # ... and a later durable poll another one; both use the owner's row.
+    await McpTaskToolCaller(startup).call_tool(server_name=name, tool_name="status_report", arguments={"task_id": "remote-1"}, user_id="user-1", thread_id="thread-1", connection_scope="personal")
+
+    assert rotating_server.refresh_requests == ["personal-seed", "refresh-1"]
+    assert rotating_server.calls[-1][1] == "Bearer access-2"
+    assert _stored_keys(shared_token_store) == [("personal", "user-1", name)]

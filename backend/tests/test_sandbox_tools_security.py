@@ -470,6 +470,85 @@ def test_validate_local_tool_path_prioritizes_user_data_before_custom_mounts() -
             validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/../../etc/passwd", _THREAD_DATA, read_only=True)
 
 
+def test_volume_mount_config_normalizes_trailing_slashes() -> None:
+    """The provider strips trailing slashes when building mappings; the config must too.
+
+    Otherwise a natural ``container_path: /mnt/reports/`` spelling works at the
+    sandbox layer while every tool's path gate compares against the raw value
+    and rejects the mount with a confusing PermissionError.
+    """
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports/").container_path == "/mnt/reports"
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports//").container_path == "/mnt/reports"
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports").container_path == "/mnt/reports"
+
+
+@pytest.mark.parametrize("raw", ["/", "//", "///", ""])
+def test_volume_mount_config_rejects_the_container_root(raw: str) -> None:
+    """The container root and a blank value cannot be expressed in the path gates, so reject them at load.
+
+    On ``main`` an empty ``container_path`` made the gates match every absolute
+    path (``path == "" or path.startswith("/")``), letting one mount's
+    ``read_only`` flag silently apply to all paths.
+    """
+    from pydantic import ValidationError
+
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    with pytest.raises(ValidationError, match="container_path"):
+        VolumeMountConfig(host_path="/tmp/host", container_path=raw)
+
+
+def test_skills_config_normalizes_trailing_slashes() -> None:
+    """skills.container_path feeds the same as-is prefix comparison in _is_skills_path."""
+    from deerflow.config.skills_config import SkillsConfig
+
+    assert SkillsConfig(container_path="/mnt/skills/").container_path == "/mnt/skills"
+    assert SkillsConfig(container_path="/mnt/skills//").container_path == "/mnt/skills"
+    assert SkillsConfig().container_path == "/mnt/skills"
+
+
+@pytest.mark.parametrize("raw", ["/", "//", ""])
+def test_skills_config_rejects_the_container_root(raw: str) -> None:
+    from pydantic import ValidationError
+
+    from deerflow.config.skills_config import SkillsConfig
+
+    with pytest.raises(ValidationError, match="container_path"):
+        SkillsConfig(container_path=raw)
+
+
+def test_is_skills_path_accepts_prefix_declared_with_trailing_slash() -> None:
+    """A skills prefix configured as ``/mnt/skills/`` must keep gating skills paths."""
+    from deerflow.config.skills_config import SkillsConfig
+
+    prefix = SkillsConfig(container_path="/mnt/skills/").container_path
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value=prefix):
+        assert _is_skills_path("/mnt/skills/reporter/SKILL.md")
+        assert not _is_skills_path("/mnt/skillsmalformed/SKILL.md")
+
+
+def test_validate_local_tool_path_accepts_mount_declared_with_trailing_slash() -> None:
+    """A mount configured as ``/mnt/reports/`` must keep working for reads and writes."""
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [VolumeMountConfig(host_path="/tmp/host-reports", container_path="/mnt/reports/", read_only=False)]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=True)
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_honors_read_only_mount_declared_with_trailing_slash() -> None:
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [VolumeMountConfig(host_path="/tmp/host-reports", container_path="/mnt/reports/", read_only=True)]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=True)
+        with pytest.raises(PermissionError, match="read-only mount"):
+            validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=False)
+
+
 def test_validate_local_tool_path_rejects_bare_virtual_root() -> None:
     """The bare /mnt/user-data root without trailing slash is not a valid sub-path."""
     with pytest.raises(PermissionError, match="Only paths under"):
@@ -753,6 +832,35 @@ def test_replace_virtual_paths_in_command_does_not_rewrite_prefix_siblings(sibli
 
     assert result == f"cat {sibling}"
     assert "/tmp/deer-flow/threads/t1" not in result
+
+
+@pytest.mark.parametrize(
+    "embedded",
+    [
+        "http://localhost:2026/api/threads/abc/artifacts/mnt/user-data/outputs/report.html",
+        "https://example.com/mnt/user-data/outputs/a.txt",
+        "backup/mnt/user-data/outputs/a.txt",
+        "./mnt/user-data/outputs/a.txt",
+    ],
+)
+def test_replace_virtual_paths_in_command_does_not_rewrite_embedded_roots(embedded: str) -> None:
+    """The left-hand mirror of the prefix-sibling rule above.
+
+    ``/mnt/user-data`` inside a longer path or URL — notably DeerFlow's own
+    artifact URLs — is not a virtual path. Rewriting it splices the thread's host
+    directory into the URL, so the request misses and leaks the host layout.
+    """
+    result = replace_virtual_paths_in_command(f"curl -s {embedded}", _THREAD_DATA)
+
+    assert result == f"curl -s {embedded}"
+    assert "/tmp/deer-flow/threads/t1" not in result
+
+
+def test_replace_virtual_paths_in_command_still_rewrites_roots_that_start_a_path() -> None:
+    result = replace_virtual_paths_in_command("cat file:///mnt/user-data/outputs/a.txt --out=/mnt/user-data/outputs/b.txt", _THREAD_DATA)
+
+    assert "/mnt/user-data" not in result
+    assert result.count("/tmp/deer-flow/threads/t1/user-data/outputs/") == 2
 
 
 @pytest.mark.parametrize(
@@ -1136,6 +1244,30 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         # scan, so a multi-segment path stays rejected even after ``)``.
         ("awk '{print ($1)/etc/passwd}' /mnt/user-data/workspace/data.txt", "/etc/passwd"),
         ("awk 'BEGIN{x = 1 /etc/shadow}'", "/etc/shadow"),
+        # Shell path constructions never qualify for the division exemption.
+        ("echo $(pwd)/x", "/x"),
+        ("cp f $(mktemp -d)/etc", "/etc"),
+        ("(pwd)/x", "/x"),
+        ("x=(1 2)/y", "/y"),
+        ("echo ${HOME}/etc", "/etc"),
+        ("$(dirname /mnt/user-data/workspace/a.txt)/etc/passwd", "/etc/passwd"),
+        ("echo /2", "/2"),
+        ("ls /2", "/2"),
+        # A closer is not enough to identify division: these are shell paths.
+        ('cat "${REVIEW_ROOT}/2"', "/2"),
+        ('cat "$(printenv REVIEW_ROOT)/2"', "/2"),
+        ("cat ${ROOT}[x]/secret", "/secret"),
+        ("cat ${ROOT}[x]/2", "/2"),
+        ('cat $(printf %s "$ROOT" # f(\n)/secret', "/secret"),
+        ('cat $(printf %s "$ROOT" # $((\n)/2 # ))', "/2"),
+        # Interpreter arguments and string literals are not executable expressions.
+        ("python3 script.py 'x[0]/secret'", "/secret"),
+        ("python3 -c 'print(\")/2\")'", "/2"),
+        ('python3 -c \'print("""x")/2""")\'', "/2"),
+        ("node -e 'console.log(\"] /secret\")'", "/secret"),
+        ('node -e \'console.log(0)/*"*/; require("child_process").execSync("cat $(printenv ROOT)/2")\'', "/2"),
+        ("perl -e 'qx(cat ${ROOT}/2)'", "/2"),
+        ("eval python3 -c 'cat ${ROOT}/2'", "/2"),
         # An ``awk`` word that is an argument of another command is not a command.
         ("echo $(true) awk '{print $NF/2}'", "$NF/2"),
         ("echo >| awk '{print $NF/2}'", "$NF/2"),
@@ -1197,6 +1329,22 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "awk '{print ($NF+1)/2, $NF/2}' /mnt/user-data/workspace/data.txt",
         "awk '{print length($0)/2}' /mnt/user-data/workspace/data.txt",
         "awk '{a[$1]/=2; print a[$1]/2}' /mnt/user-data/workspace/data.txt",
+        # ``/`` after a closing paren/bracket/brace is division in other inline
+        # languages and in shell arithmetic too (#7444); the scanner verifies
+        # these expression contexts before granting an exemption.
+        "python3 -c 'xs=[1,2,3]; print(sum(xs)/len(xs))'",
+        "python3 -c 'print((3+4)/2)'",
+        "python3 -c 'import os; print(os.path.getsize(\"/mnt/user-data/workspace/a.bin\")/1024)'",
+        "node -e 'console.log((3+4)/2)'",
+        "perl -lane 'print $F[1]/2' /mnt/user-data/workspace/a.txt",
+        "perl -lane 'print $F[1]/$F[2]' /mnt/user-data/workspace/a.txt",
+        "python3 -c 'x=[1,2]; print(x[0]/n)'",
+        "echo $(( ${SIZE}/2 ))",
+        "bash -c 'echo $(( ${#arr}/2 ))'",
+        'echo "$(( (SIZE+1)/2 ))"',
+        "echo $((values[0]/2))",
+        "python3 -c 'print(sum([1,2])/len([1,2]))' && echo $(( ${SIZE}/2 ))",
+        "echo \"$(python3 -c 'print(sum([1,2])/len([1,2]))')\"",
         # The command word is found like the shell does: basename, after an
         # assignment prefix, inside ``$(...)``, before a comment.
         "/usr/bin/awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
@@ -1263,6 +1411,10 @@ def test_bash_tool_rejects_variable_prefixed_host_path_before_execution(monkeypa
         ('cat "$HOME/.ssh/id_rsa"', "Unsafe absolute paths in command: $HOME/.ssh/id_rsa"),
         ('CDPATH="$HOME" cd .ssh && cat $PWD/id_rsa', "Unsafe working directory change via CDPATH"),
         ('cat "$HOME/文档/id_rsa"', "Unsafe absolute paths in command: $HOME/文档/id_rsa"),
+        ('cat "${REVIEW_ROOT}/2"', "Unsafe absolute paths in command: /2"),
+        ('cat "$(printenv REVIEW_ROOT)/2"', "Unsafe absolute paths in command: /2"),
+        ("cat ${ROOT}[x]/secret", "Unsafe absolute paths in command: /secret"),
+        ('cat $(printf %s "$ROOT" # f(\n)/secret', "Unsafe absolute paths in command: /secret"),
     ],
 )
 def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Path, monkeypatch, command: str, rejected: str) -> None:
@@ -1273,7 +1425,14 @@ def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Pat
     (home / ".ssh" / "id_rsa").write_text("host-private-key")
     (home / "文档").mkdir()
     (home / "文档" / "id_rsa").write_text("host-private-key")
+    (home / "2").write_text("host-private-key", encoding="utf-8")
+    (home / "secret").write_text("host-private-key", encoding="utf-8")
+    glob_home = tmp_path / "homex"
+    glob_home.mkdir()
+    (glob_home / "secret").write_text("host-private-key", encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("ROOT", str(home))
+    monkeypatch.setenv("REVIEW_ROOT", str(home))
     thread_root = tmp_path / "threads" / "t1" / "user-data"
     thread_data = {f"{name}_path": str(thread_root / name) for name in ("workspace", "uploads", "outputs")}
     for path in thread_data.values():
@@ -1291,6 +1450,8 @@ def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Pat
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
     monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
 
+    # The real shell can read the synthetic file; the public tool must stop it.
+    assert "host-private-key" in sandbox.execute_command(command)
     result = bash_tool.func(runtime=runtime, description="read key", command=command)
 
     assert "host-private-key" not in result

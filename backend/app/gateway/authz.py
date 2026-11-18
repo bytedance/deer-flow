@@ -189,6 +189,12 @@ def _get_route_authorization_config() -> AuthorizationConfig:
 
     Falls back to a disabled config when AppConfig is not available (e.g. test
     environments without a config.yaml), preserving legacy all-permissions behavior.
+    ``get_app_config()`` stats and hashes ``config.yaml`` and
+    ``extensions_config.json`` on every call, so async request paths use
+    :func:`_route_authorization_config_async`, and call the synchronous
+    helpers that read it (``resolve_model_authorization``,
+    ``resolve_skill_authorization``, ``authorize_model_use``,
+    ``authorize_sandbox_for_request``) through ``asyncio.to_thread``.
     """
     from deerflow.config.app_config import get_app_config
 
@@ -196,6 +202,11 @@ def _get_route_authorization_config() -> AuthorizationConfig:
         return get_app_config().authorization
     except (FileNotFoundError, RuntimeError):
         return AuthorizationConfig()
+
+
+async def _route_authorization_config_async() -> AuthorizationConfig:
+    """Off-loop :func:`_get_route_authorization_config` for async request paths."""
+    return await asyncio.to_thread(_get_route_authorization_config)
 
 
 # --- Provider cache (W1/F1) ---
@@ -274,8 +285,10 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     When enabled, every registered ``resource:action`` permission is evaluated
     independently so a provider failure affects only the route being checked.
     Provider instances are cached per config signature (hot-reload safe).
+    The config is read in a worker: ``AuthMiddleware`` calls this for every
+    authenticated request.
     """
-    config = _get_route_authorization_config()
+    config = await _route_authorization_config_async()
     if config.enabled is not True:
         return list(_ALL_PERMISSIONS)
 
@@ -810,7 +823,7 @@ async def try_acquire_sandbox_for_request(
 
         user = await get_optional_user_from_request(request) if request is not None else None
         if user is not None:
-            authorize_sandbox_for_request(user, is_internal=_is_internal_caller(request, user), app_config=app_config)
+            await asyncio.to_thread(authorize_sandbox_for_request, user, is_internal=_is_internal_caller(request, user), app_config=app_config)
     except SandboxAuthorizationError:
         logger.info("Sandbox sync skipped: sandbox execution not permitted for this caller (thread_id=%s)", thread_id)
         return SandboxRequestLease(

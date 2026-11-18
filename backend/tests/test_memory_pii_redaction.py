@@ -105,6 +105,7 @@ def _flush_hook_call(monkeypatch, pii_config, messages):
     from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
 
     manager = MagicMock()
+    monkeypatch.setattr(hook_module, "get_memory_config", lambda: MemoryConfig(enabled=True))
     monkeypatch.setattr(hook_module, "get_memory_manager", lambda: manager)
     monkeypatch.setattr(hook_module, "resolve_runtime_user_id", lambda runtime: "u1")
     event = SummarizationEvent(
@@ -139,6 +140,26 @@ def test_compaction_flush_hook_untouched_without_config(monkeypatch):
 def test_compaction_flush_hook_untouched_when_disabled(monkeypatch):
     queued = _flush_hook_call(monkeypatch, PiiRedactionConfig(enabled=False), [HumanMessage("reach alice@example.com")])
     assert "alice@example.com" in queued[0].content
+
+
+def test_compaction_flush_hook_does_not_capture_when_memory_is_disabled(monkeypatch):
+    import deerflow.agents.memory.summarization_hook as hook_module
+    from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
+
+    manager_factory = MagicMock()
+    monkeypatch.setattr(hook_module, "get_memory_config", lambda: MemoryConfig(enabled=False))
+    monkeypatch.setattr(hook_module, "get_memory_manager", manager_factory)
+    event = SummarizationEvent(
+        messages_to_summarize=(HumanMessage("reach alice@example.com"),),
+        preserved_messages=(),
+        thread_id="thread-123",
+        agent_name="researcher",
+        runtime=None,
+    )
+
+    hook_module.memory_flush_hook(event, pii_redaction_config=PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
+
+    manager_factory.assert_not_called()
 
 
 def test_tool_call_args_redacted(monkeypatch):

@@ -56,10 +56,11 @@ from deerflow.integrations.lark_cli import (
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager, run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, host_owns_sandbox_shutdown
 from deerflow.skills.types import SkillCategory
 from deerflow.utils.file_io import await_drained
 
@@ -236,6 +237,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     """
 
     supports_agent_skill_isolation = True
+    supports_lazy_agent_skill_isolation = True
 
     # How long `_held_teardown_lease` waits for its heartbeat thread to exit
     # before deferring the final lease release to that (still-running) thread.
@@ -286,6 +288,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._acquire_epoch_counter = 0
         self._acquire_inflight: dict[str, int] = {}
         self._shutdown_called = False
+        # Unlike `_shutdown_called`, a failed teardown never reopens admission.
+        self._admission_closed = False
         self._cleanup_retry_ids: set[str] = set()
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
@@ -361,6 +365,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 provisioner_url=provisioner_url,
                 api_key=api_key,
                 max_shell_sessions=self._config.get("max_shell_sessions"),
+                max_bash_sessions=self._config.get("max_bash_sessions", 50),
                 required_shell_sessions=self._config.get("required_shell_sessions", 0),
             )
 
@@ -401,6 +406,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             AioSandbox._DEFAULT_HARD_TIMEOUT,
         )
         max_running_subagents = int(getattr(getattr(config, "subagent_runtime", None), "max_running", 3))
+        try:
+            max_bash_sessions = int(environment.get("AIO_BASH_MAX_SESSIONS", "50"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sandbox.environment.AIO_BASH_MAX_SESSIONS must be a positive integer") from exc
+        if max_bash_sessions <= 0:
+            raise ValueError("sandbox.environment.AIO_BASH_MAX_SESSIONS must be a positive integer")
+        # Explicitly configure the same budget used by client admission. Bash
+        # and persistent Shell have independent server-side session pools.
+        environment["AIO_BASH_MAX_SESSIONS"] = str(max_bash_sessions)
         required_shell_sessions = max_running_subagents + _SHELL_SESSION_HEADROOM
         configured_shell_sessions = environment.get("MAX_SHELL_SESSIONS")
         if configured_shell_sessions is None:
@@ -426,6 +440,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
             "environment": environment,
             "max_shell_sessions": max_shell_sessions,
+            "max_bash_sessions": max_bash_sessions,
             "required_shell_sessions": required_shell_sessions,
             "network": sandbox_config.network.model_dump(),
             "ownership": getattr(sandbox_config, "ownership", None),
@@ -1599,10 +1614,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         Handles SIGTERM, SIGINT, and SIGHUP (terminal close) to ensure
         sandbox containers are cleaned up even when the user closes the terminal.
+        A host that owns sandbox shutdown (the Gateway lifespan) keeps SIGTERM
+        and SIGINT: it drains in-flight runs before shutting the provider down,
+        and this synchronous teardown would run first on the event-loop thread.
+        SIGHUP keeps the fallback because uvicorn does not handle it.
         """
         self._original_sigterm = signal.getsignal(signal.SIGTERM)
         self._original_sigint = signal.getsignal(signal.SIGINT)
         self._original_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
+        signums = [] if host_owns_sandbox_shutdown() else [signal.SIGTERM, signal.SIGINT]
+        if hasattr(signal, "SIGHUP"):
+            signums.append(signal.SIGHUP)
 
         def signal_handler(signum, frame):
             try:
@@ -1622,10 +1644,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 signal.raise_signal(signum)
 
         try:
-            signal.signal(signal.SIGTERM, signal_handler)
-            signal.signal(signal.SIGINT, signal_handler)
-            if hasattr(signal, "SIGHUP"):
-                signal.signal(signal.SIGHUP, signal_handler)
+            for signum in signums:
+                signal.signal(signum, signal_handler)
         except ValueError:
             logger.debug("Could not register signal handlers (not main thread)")
 
@@ -1888,6 +1908,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.info("Warm-pool sandbox %s was claimed for teardown while publishing ownership; not reclaiming it", sandbox_id)
                 return None
             self._assert_warm_identity_available_locked(sandbox_id, key)
+            # Leave the entry warm for shutdown's own warm-pool teardown.
+            self._raise_if_shutting_down()
             warm_item = self._warm_pool.get(sandbox_id)
             if warm_item is None or warm_item[0] is not info:
                 # A different entry has not passed the reuse checks above.
@@ -1899,6 +1921,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 base_url=info.sandbox_url,
                 request_headers=info.request_headers,
                 default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+                max_bash_sessions=self._config.get("max_bash_sessions", 50),
                 lark_cli_broker=info.lark_cli_broker,
             )
             self._sandboxes[sandbox_id] = sandbox
@@ -1952,6 +1975,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             base_url=info.sandbox_url,
             request_headers=info.request_headers,
             default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+            max_bash_sessions=self._config.get("max_bash_sessions", 50),
             lark_cli_broker=info.lark_cli_broker,
         )
         # Ownership first, so a failure cannot leave a tracked-but-unowned sandbox.
@@ -1972,6 +1996,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     raise SandboxBeingDestroyedError(info.sandbox_id)
                 self._assert_active_identity_available_locked(info.sandbox_id, key)
                 self._assert_warm_identity_available_locked(info.sandbox_id, key)
+                self._raise_if_shutting_down()
                 # Active and warm are exclusive states, and only this insert can
                 # violate that: a warm entry for the same id is stale the moment
                 # the id becomes active. Leaving it there gives the container two
@@ -2012,6 +2037,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 base_url=info.sandbox_url,
                 request_headers=info.request_headers,
                 default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+                max_bash_sessions=self._config.get("max_bash_sessions", 50),
                 lark_cli_broker=info.lark_cli_broker,
             )
             key = self._thread_key(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else None
@@ -2025,6 +2051,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if key is not None:
                     self._assert_active_identity_available_locked(sandbox_id, key)
                     self._assert_warm_identity_available_locked(sandbox_id, key)
+                # A create that outlived shutdown's snapshot rolls back below.
+                self._raise_if_shutting_down()
                 # Same exclusivity rule as the discover path.
                 self._warm_pool.pop(sandbox_id, None)
                 self._warm_pool_identity.pop(sandbox_id, None)
@@ -2239,6 +2267,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     # ── Core: acquire / get / release / shutdown ─────────────────────────
 
+    def _raise_if_shutting_down(self) -> None:
+        """Refuse admission once shutdown began; safe with or without ``_lock`` held."""
+        if not getattr(self, "_admission_closed", False):
+            return
+        raise SandboxCapacityExceededError(
+            "Sandbox provider is shutting down; cannot acquire sandbox",
+            active=len(self._sandboxes),
+            warm=len(self._warm_pool),
+            replicas=int(self._config.get("replicas", DEFAULT_REPLICAS)),
+            retry_after_seconds=30.0,
+            reason="shutdown",
+        )
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
 
@@ -2254,6 +2295,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Returns:
             The ID of the acquired sandbox environment.
         """
+        self._raise_if_shutting_down()
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
             with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
@@ -2267,6 +2309,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         event loop and using async-native readiness polling for newly created
         sandboxes.
         """
+        self._raise_if_shutting_down()
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
             async with self._acquire_serializer.hold_async(self._thread_key(thread_id, effective_user_id)):
@@ -2281,6 +2324,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                  sandbox_id is deterministic from thread_id so no shared state file
                  is needed — any process can derive the same container name)
         """
+        # The serializer may have queued this caller before shutdown started.
+        self._raise_if_shutting_down()
         self._ensure_skills_projection(user_id)
         cached_id = self._reuse_in_process_sandbox(thread_id, user_id=user_id)
         if cached_id is not None:
@@ -2309,6 +2354,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     async def _acquire_internal_async(self, thread_id: str | None, *, user_id: str) -> str:
         """Async counterpart to ``_acquire_internal``."""
+        self._raise_if_shutting_down()
         await asyncio.to_thread(self._ensure_skills_projection, user_id)
         cached_id = await _run_started_acquire_worker(
             self._acquire_worker_executor,
@@ -2319,8 +2365,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if cached_id is not None:
             return cached_id
 
-        # Deterministic ID for thread-specific, random for anonymous
-        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id)
+        # Deterministic ID for thread-specific, random for anonymous. Deriving
+        # it checks the thread's skills_view on disk through Paths.base_dir, so
+        # it runs in a worker like the layers around it.
+        sandbox_id = await _run_started_acquire_worker(
+            self._acquire_worker_executor,
+            self._sandbox_id_for_thread,
+            thread_id,
+            user_id,
+        )
         if thread_id:
             key = self._thread_key(thread_id, user_id)
             with self._lock:
@@ -2946,6 +2999,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""
         with self._lock:
+            # Closed under the lock that guards every active/warm commit, so no
+            # acquire can install a sandbox after the snapshot below.
+            self._admission_closed = True
             if self._shutdown_called:
                 return
             self._shutdown_called = True

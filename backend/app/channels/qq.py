@@ -445,7 +445,7 @@ class QQChannel(Channel):
             self._replies.popitem(last=False)
         if code:
             state = await self._connection_repo.consume_oauth_state(provider="qq", state=code)
-            reply = "QQ connection code is invalid or expired."
+            reply_key, owner_user_id = "invalid_code", None
             if state is not None:
                 group_name = str(data.get("group_name") or "").strip() if group else ""
                 upsert_kwargs: dict[str, Any] = {}
@@ -460,14 +460,14 @@ class QQChannel(Channel):
                     status="connected",
                     **upsert_kwargs,
                 )
-                reply = "QQ connected to DeerFlow."
+                reply_key, owner_user_id = "connected", state["owner_user_id"]
             await self.send(
                 OutboundMessage(
                     channel_name="qq",
                     chat_id=chat_id,
                     thread_id="",
                     thread_ts=message_id,
-                    text=reply,
+                    text=await self._connect_reply_text(reply_key, owner_user_id=owner_user_id),
                 )
             )
             return

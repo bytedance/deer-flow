@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.file_signature import ConfigSignature, get_config_signature, read_config_with_signature
-from deerflow.config.runtime_paths import existing_project_file
+from deerflow.config.runtime_paths import existing_project_file, project_root
 from deerflow.constants import (
     DEFAULT_MCP_SESSION_INIT_TIMEOUT,
     MCP_TASK_NAME_MAX_LENGTH,
@@ -227,6 +227,7 @@ class McpServerConfig(BaseModel):
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
+    agent_auth: bool = Field(default=False, description="Require an administrator-granted agent identity for calls to this deployment HTTP server")
     user_auth: McpUserScopedAuthConfig | None = Field(
         default=None,
         description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
@@ -270,6 +271,18 @@ class McpServerConfig(BaseModel):
         description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
     )
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="after")
+    def _validate_agent_credentials(self) -> "McpServerConfig":
+        if self.agent_auth:
+            if self.type != "http":
+                raise ValueError("agent_auth requires an HTTP MCP server")
+            if self.user_auth is not None and self.user_auth.enabled:
+                raise ValueError("agent_auth and user_auth are mutually exclusive")
+            context_headers = self.headers_from_context
+            if context_headers is not None and context_headers.enabled and any(name.lower() == "authorization" for name in context_headers.headers):
+                raise ValueError("agent_auth conflicts with headers_from_context for Authorization")
+        return self
 
     @field_validator("headers")
     @classmethod
@@ -369,6 +382,10 @@ class ConfiguredMiddlewareSpec(BaseModel):
         default_factory=dict,
         description=("Keyword arguments passed to the middleware constructor. Values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON."),
     )
+    apply_to: Literal["both", "lead", "subagent"] = Field(
+        default="both",
+        description="Agent chain that loads this middleware. Omitted scope preserves both chains.",
+    )
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     @field_validator("class_path")
@@ -400,7 +417,7 @@ class ExtensionsConfig(BaseModel):
         description=(
             "AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. "
             "Each entry is a 'module.path:ClassName' string or an object with 'class' and optional "
-            "'kwargs'. kwargs values must be JSON types; YAML dates and timestamps are coerced to "
+            "'kwargs' and 'apply_to' (both, lead, or subagent; default both). kwargs values must be JSON types; YAML dates and timestamps are coerced to "
             "ISO strings."
         ),
     )
@@ -514,6 +531,18 @@ class ExtensionsConfig(BaseModel):
             # branches above, finding nothing here is the expected case, so
             # return None rather than raising.
             return None
+
+    @classmethod
+    def default_config_path(cls) -> Path:
+        """Where a writer creates ``extensions_config.json`` when none resolves.
+
+        The project root is the first location the fallback search of
+        :meth:`resolve_config_path` checks, so a file created here is the one
+        the next resolution — and every other writer — reads back. Only for
+        writers that create the file after ``resolve_config_path()`` returned
+        ``None``; the explicit and env-var modes never reach it.
+        """
+        return project_root() / "extensions_config.json"
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> "ExtensionsConfig":

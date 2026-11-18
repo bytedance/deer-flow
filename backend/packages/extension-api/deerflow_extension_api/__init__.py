@@ -7,7 +7,7 @@ extensions can therefore be released independently of the host.
 
 from __future__ import annotations
 
-from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY, AGENT_RUNS_RESOLVER_KEY, AgentRun, AgentRunError, AgentRuns, require_agent_runs, resolve_agent_runs
+from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY, AGENT_RUNS_RESOLVER_KEY, AgentRun, AgentRunError, AgentRuns, ExecutionFence, require_agent_runs, resolve_agent_runs
 from deerflow_extension_api.assembly import (
     AgentAssemblyDescriptor,
     AgentAssemblyObserver,
@@ -36,6 +36,7 @@ from deerflow_extension_api.contracts import (
     ExtensionService,
     HostPolicySnapshot,
     MiddlewareContributor,
+    ReadOnlyDict,
     SystemModelCallObserver,
     SystemModelRequest,
     SystemModelResult,
@@ -43,6 +44,7 @@ from deerflow_extension_api.contracts import (
     TaskInfo,
     TaskLifecycleContributor,
     TaskOutcome,
+    TaskStopDetail,
     extension,
 )
 from deerflow_extension_api.host_capabilities import HostCapabilityError
@@ -102,7 +104,7 @@ from deerflow_extension_api.state import ExtensionData
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.8"
+API_VERSION = "0.2.13"
 
 __all__ = [
     "AGENT_RUNS_CONTEXT_KEY",
@@ -110,6 +112,7 @@ __all__ = [
     "AgentRun",
     "AgentRunError",
     "AgentRuns",
+    "ExecutionFence",
     "require_agent_runs",
     "resolve_agent_runs",
     "ModelInvocationError",
@@ -173,6 +176,7 @@ __all__ = [
     "InvalidRunEvidenceCursor",
     "MessageProvenance",
     "MiddlewareContributor",
+    "ReadOnlyDict",
     "MiddlewareDescriptor",
     "MiddlewarePlacement",
     "Placement",
@@ -192,6 +196,7 @@ __all__ = [
     "TaskInfo",
     "TaskLifecycleContributor",
     "TaskOutcome",
+    "TaskStopDetail",
     "ToolDescriptor",
     "canonical_hash",
     "canonical_json",

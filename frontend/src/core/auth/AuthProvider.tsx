@@ -76,6 +76,8 @@ export function AuthProvider({
   const [isLoading, setIsLoading] = useState(false);
   // Logout and externally confirmed users supersede pending auth refreshes.
   const authRequestRef = React.useRef(0);
+  const authRefreshInFlightRef = React.useRef(false);
+  const reconnectPendingRef = React.useRef(false);
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
@@ -89,6 +91,8 @@ export function AuthProvider({
    */
   const applyUser = useCallback((next: User | null) => {
     authRequestRef.current++;
+    authRefreshInFlightRef.current = false;
+    reconnectPendingRef.current = false;
     setUser(next);
     setAuthKnown(true);
     setIsLoading(false);
@@ -101,6 +105,7 @@ export function AuthProvider({
   const refreshUser = useCallback(async () => {
     if (staticMode) return;
     const requestId = ++authRequestRef.current;
+    authRefreshInFlightRef.current = true;
 
     try {
       setIsLoading(true);
@@ -139,7 +144,10 @@ export function AuthProvider({
       setUser(null);
       setAuthKnown(false);
     } finally {
-      if (requestId === authRequestRef.current) setIsLoading(false);
+      if (requestId === authRequestRef.current) {
+        authRefreshInFlightRef.current = false;
+        setIsLoading(false);
+      }
     }
   }, [staticMode, pathname, router]);
 
@@ -157,6 +165,8 @@ export function AuthProvider({
   const logout = useCallback(async () => {
     // Immediately clear local state to prevent UI flicker
     authRequestRef.current++;
+    authRefreshInFlightRef.current = false;
+    reconnectPendingRef.current = false;
     setUser(null);
     setAuthKnown(true);
     setIsLoading(false);
@@ -190,27 +200,54 @@ export function AuthProvider({
   }, [staticMode, router]);
 
   /**
-   * Handle visibility change - refresh user when tab becomes visible again.
-   * Throttled to at most once per 60 s to avoid spamming the backend on rapid tab switches.
+   * Revalidate visible tabs, including unknown auth after a transport failure.
+   * Tab switches are throttled to 60 s; reconnect wakes unknown auth immediately.
    */
   const lastCheckRef = React.useRef(0);
+
+  useEffect(
+    () => () => {
+      reconnectPendingRef.current = false;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (staticMode) return;
 
-    const handleVisibilityChange = () => {
-      if (document.visibilityState !== "visible" || user === null) return;
+    const checkUser = (reconnecting = false) => {
+      if (user === null && authKnown) return;
+      if (reconnecting) reconnectPendingRef.current = true;
+      if (
+        document.visibilityState !== "visible" ||
+        authRefreshInFlightRef.current
+      )
+        return;
       const now = Date.now();
-      if (now - lastCheckRef.current < 60_000) return;
+      if (!reconnectPendingRef.current && now - lastCheckRef.current < 60_000)
+        return;
+      reconnectPendingRef.current = false;
       lastCheckRef.current = now;
       void refreshUser();
     };
+    const handleVisibilityChange = () => checkUser();
+    const handleOnline = () => {
+      if (!authKnown || authRefreshInFlightRef.current) checkUser(true);
+    };
+
+    // isLoading re-runs this effect when a failed request leaves auth unchanged.
+    if (reconnectPendingRef.current && !authRefreshInFlightRef.current) {
+      if (authKnown) reconnectPendingRef.current = false;
+      else checkUser();
+    }
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleOnline);
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleOnline);
     };
-  }, [staticMode, user, refreshUser]);
+  }, [staticMode, user, authKnown, isLoading, refreshUser]);
 
   const value: AuthContextType = {
     user,

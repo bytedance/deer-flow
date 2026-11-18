@@ -202,6 +202,34 @@ def test_personal_mcp_authority_spans_runtime_startup_and_shutdown():
     assert personal_access._admin_checker is previous
 
 
+def test_mcp_oauth_token_store_spans_runtime_startup_and_shutdown():
+    """Runs drain inside the runtime's exit; a refresh there must still reach the shared store."""
+    from deerflow.mcp import oauth_store
+
+    events = []
+    store = object()
+    previous = oauth_store.get_mcp_oauth_token_store()
+
+    @asynccontextmanager
+    async def checked_runtime(_app, _config):
+        assert oauth_store.get_mcp_oauth_token_store() is store
+        events.append("start")
+        try:
+            yield
+        finally:
+            assert oauth_store.get_mcp_oauth_token_store() is store
+            events.append("stop")
+
+    with (
+        patch(f"{__name__}._noop_langgraph_runtime", checked_runtime),
+        patch("app.gateway.mcp_oauth_tokens.build_mcp_oauth_token_store", return_value=store),
+    ):
+        asyncio.run(_run_lifespan_with_upload_staging_cleanup())
+
+    assert events == ["start", "stop"]
+    assert oauth_store.get_mcp_oauth_token_store() is previous
+
+
 async def _run_lifespan_with_mcp_task_config_snapshot() -> None:
     from app.gateway.app import lifespan
     from deerflow.config.extensions_config import ExtensionsConfig
@@ -929,3 +957,24 @@ def test_lifespan_detaches_the_outbox_when_the_delivery_worker_cannot_start() ->
 
     # Startup survives, and nothing keeps enqueueing rows that no worker would send.
     scheduled_service.detach_notification_outbox.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_delegated_restore_waits_for_agent_runs_host_installation(monkeypatch):
+    from app.gateway.deps import _agent_runs_host_after_install
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    installed = asyncio.Event()
+    # Extension services start before the AgentRuns host exists, so a restore
+    # issued during that window waits for the installation signal instead of
+    # failing the unattended recovery scan outright.
+    waiter = asyncio.create_task(_agent_runs_host_after_install(app, installed))
+    assert not waiter.done()
+    app.state.agent_runs_host = object()
+    installed.set()
+    assert await asyncio.wait_for(waiter, 1) is app.state.agent_runs_host
+    # A startup that never installs the host fails closed per record within
+    # the bounded budget; manual recovery stays available.
+    monkeypatch.setattr("app.gateway.deps._EXTENSION_RESTORE_READY_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(RuntimeError, match="Agent run host unavailable"):
+        await _agent_runs_host_after_install(SimpleNamespace(state=SimpleNamespace()), asyncio.Event())
