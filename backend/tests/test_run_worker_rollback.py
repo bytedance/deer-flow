@@ -1926,8 +1926,9 @@ async def test_run_agent_overrides_spoofed_pre_existing_message_ids_without_snap
     assert captured["pre_existing_message_ids"] == frozenset()
 
 
+@pytest.mark.parametrize("stream_modes", [["values"], ["values", "updates"]], ids=["values-only", "values+updates"])
 @pytest.mark.anyio
-async def test_run_agent_marks_llm_error_fallback_as_error_status():
+async def test_run_agent_marks_llm_error_fallback_as_error_status(stream_modes):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     bridge = SimpleNamespace(
@@ -1938,23 +1939,28 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
 
     class DummyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            # A real values stream emits the initial replayed state first, then
-            # the current run's output. Keep the stale fallback out of the
-            # initial boundary frame so only later messages can decide.
-            yield {"messages": []}
-            yield {
-                "messages": [
-                    AIMessage(
-                        content="The configured LLM provider is temporarily unavailable after multiple retries.",
-                        additional_kwargs={
-                            "deerflow_error_fallback": True,
-                            "error_type": "APIConnectionError",
-                            "error_reason": "transient",
-                            "error_detail": "Connection error.",
-                        },
-                    )
-                ]
-            }
+            frames = [
+                {"messages": []},
+                {
+                    "messages": [
+                        AIMessage(
+                            content="The configured LLM provider is temporarily unavailable after multiple retries.",
+                            additional_kwargs={
+                                "deerflow_error_fallback": True,
+                                "error_type": "APIConnectionError",
+                                "error_reason": "transient",
+                                "error_detail": "Connection error.",
+                            },
+                        )
+                    ]
+                },
+            ]
+            if isinstance(stream_mode, (list, tuple)):
+                for frame in frames:
+                    yield ("values", frame)
+            else:
+                for frame in frames:
+                    yield frame
 
     def factory(*, config):
         return DummyAgent()
@@ -1967,6 +1973,7 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
         agent_factory=factory,
         graph_input={},
         config={},
+        stream_modes=stream_modes,
     )
 
     fetched = await run_manager.get(record.run_id)
@@ -3413,8 +3420,9 @@ def test_collect_pre_existing_message_ids_handles_missing_pieces():
 
 
 @pytest.mark.parametrize("capture_fails", [False, True], ids=["capture-ok", "capture-failed"])
+@pytest.mark.parametrize("stream_modes", [["values"], ["values", "updates"]], ids=["values-only", "values+updates"])
 @pytest.mark.anyio
-async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run(capture_fails):
+async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run(capture_fails, stream_modes):
     """A stale fallback marker checkpointed by an earlier run on the same thread
     must NOT cause a successful current run to be reported as ``error``.
 
@@ -3478,13 +3486,21 @@ async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run(capture
             # Replay the prior fallback message (as LangGraph would when using
             # stream_mode="values") as an initial boundary frame, then emit a
             # fresh successful AIMessage.
-            yield {"messages": [stale_fallback]}
-            yield {
-                "messages": [
-                    stale_fallback,
-                    AIMessage(id="fresh-ok", content="Hello — the run succeeded."),
-                ]
-            }
+            frames = [
+                {"messages": [stale_fallback]},
+                {
+                    "messages": [
+                        stale_fallback,
+                        AIMessage(id="fresh-ok", content="Hello — the run succeeded."),
+                    ]
+                },
+            ]
+            if isinstance(stream_mode, (list, tuple)):
+                for frame in frames:
+                    yield ("values", frame)
+            else:
+                for frame in frames:
+                    yield frame
 
     def factory(*, config):
         return DummyAgent()
@@ -3497,6 +3513,7 @@ async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run(capture
         agent_factory=factory,
         graph_input={},
         config={},
+        stream_modes=stream_modes,
     )
 
     fetched = await run_manager.get(record.run_id)
