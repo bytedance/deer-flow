@@ -71,7 +71,13 @@ def _write_extended_todos(runtime: ToolRuntime, todos: list[ExtendedTodo]) -> Co
     return Command(
         update={
             "todos": todos,
-            "messages": [ToolMessage(f"Updated todo list to {todos}", tool_call_id=runtime.tool_call_id)],
+            "messages": [
+                ToolMessage(
+                    f"Updated todo list ({len(todos)} items).",
+                    tool_call_id=runtime.tool_call_id,
+                    additional_kwargs={"ui_hidden": True},
+                )
+            ],
         }
     )
 
