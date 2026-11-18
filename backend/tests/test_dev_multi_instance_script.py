@@ -607,6 +607,47 @@ def test_shell_script_rejects_unknown_commands(tmp_path):
     assert "Unknown command" in result.stderr
 
 
+_GATEWAY_LOGS = ("gateway-a.log", "gateway-b.log")
+_NGINX_LOGS = ("nginx.log", "nginx-error.log", "nginx-access.log")
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [((), _GATEWAY_LOGS), (("b",), ("gateway-b.log",)), (("nginx",), _NGINX_LOGS), (("all",), _GATEWAY_LOGS + _NGINX_LOGS)],
+    ids=["default", "b", "nginx", "all"],
+)
+def test_shell_script_logs_prints_the_selected_files(tmp_path, args, expected):
+    logs = tmp_path / "state" / "logs"
+    logs.mkdir(parents=True)
+    for name in _GATEWAY_LOGS + _NGINX_LOGS:
+        (logs / name).write_text(f"line from {name}\n", encoding="utf-8")
+    env = {**os.environ, "DEERFLOW_MI_STATE_DIR": str(tmp_path / "state")}
+
+    result = subprocess.run([require_script_bash(), str(SHELL_PATH), "logs", *args], capture_output=True, text=True, timeout=30, env=env)
+
+    assert result.returncode == 0, result.stderr
+    headers = [line.removeprefix("==> ").removesuffix(" <==") for line in result.stdout.splitlines() if line.startswith("==> ")]
+    assert [Path(header).name for header in headers] == list(expected)
+    for name in expected:
+        assert f"line from {name}" in result.stdout
+
+
+@pytest.mark.parametrize(("args", "expected"), [(("all",), _GATEWAY_LOGS), (("nginx",), ())], ids=["all", "nginx"])
+def test_shell_script_logs_skips_nginx_files_when_nginx_never_started(tmp_path, args, expected):
+    # start_nginx bails on a missing binary or busy port, leaving only Gateway logs.
+    logs = tmp_path / "state" / "logs"
+    logs.mkdir(parents=True)
+    for name in _GATEWAY_LOGS:
+        (logs / name).write_text(f"line from {name}\n", encoding="utf-8")
+    env = {**os.environ, "DEERFLOW_MI_STATE_DIR": str(tmp_path / "state")}
+
+    result = subprocess.run([require_script_bash(), str(SHELL_PATH), "logs", *args], capture_output=True, text=True, timeout=30, env=env)
+
+    assert result.returncode == 0, result.stderr
+    headers = [line.removeprefix("==> ").removesuffix(" <==") for line in result.stdout.splitlines() if line.startswith("==> ")]
+    assert [Path(header).name for header in headers] == list(expected)
+
+
 def test_makefile_exposes_harness_targets():
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
 

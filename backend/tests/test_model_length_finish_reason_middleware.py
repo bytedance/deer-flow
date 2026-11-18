@@ -21,6 +21,19 @@ def _runtime(run_id: str = "run-1"):
     return runtime
 
 
+def _assert_text_only_cap_preserved(result, original):
+    assert result is not None
+    replacement = result["messages"][0]
+    assert replacement.content == original.content
+    assert replacement.response_metadata == original.response_metadata
+    assert replacement.id == original.id
+    assert replacement.tool_calls == original.tool_calls
+    assert replacement.invalid_tool_calls == original.invalid_tool_calls
+    assert all(replacement.additional_kwargs[key] == value for key, value in original.additional_kwargs.items())
+    assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 0
+    assert "model_length_termination" not in original.additional_kwargs
+
+
 def test_finish_reason_length_records_stop_reason_without_rewriting_textual_tool_call():
     mw = ModelLengthFinishReasonMiddleware()
     runtime = _runtime()
@@ -33,7 +46,7 @@ def test_finish_reason_length_records_stop_reason_without_rewriting_textual_tool
 
     result = mw._apply({"messages": [msg]}, runtime)
 
-    assert result is None
+    _assert_text_only_cap_preserved(result, msg)
     assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
     assert msg.content.startswith('<tool_call><invoke name="write_file">')
     assert msg.tool_calls == []
@@ -60,7 +73,7 @@ def test_additional_kwargs_finish_reason_length_records_stop_reason():
         additional_kwargs={"finish_reason": "length"},
     )
 
-    assert mw._apply({"messages": [msg]}, runtime) is None
+    _assert_text_only_cap_preserved(mw._apply({"messages": [msg]}, runtime), msg)
     assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
 
 
@@ -72,7 +85,7 @@ def test_gemini_max_tokens_finish_reason_records_stop_reason():
         response_metadata={"finish_reason": "MAX_TOKENS"},
     )
 
-    assert mw._apply({"messages": [msg]}, runtime) is None
+    _assert_text_only_cap_preserved(mw._apply({"messages": [msg]}, runtime), msg)
     assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
 
 
@@ -84,7 +97,7 @@ def test_anthropic_max_tokens_stop_reason_records_stop_reason():
         response_metadata={"stop_reason": "max_tokens"},
     )
 
-    assert mw._apply({"messages": [msg]}, runtime) is None
+    _assert_text_only_cap_preserved(mw._apply({"messages": [msg]}, runtime), msg)
     assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
 
 
@@ -98,7 +111,7 @@ def test_length_cap_detection_logs_observability_fields(caplog):
     )
 
     with caplog.at_level(logging.INFO, logger=_MW_LOGGER):
-        assert mw._apply({"messages": [msg]}, runtime) is None
+        _assert_text_only_cap_preserved(mw._apply({"messages": [msg]}, runtime), msg)
 
     records = [record for record in caplog.records if record.message == "Provider model length cap detected"]
     assert len(records) == 1
@@ -327,7 +340,7 @@ def test_existing_stop_reason_is_not_overwritten(caplog):
     msg = AIMessage(content="partial", response_metadata={"finish_reason": "length"})
 
     with caplog.at_level(logging.INFO, logger=_MW_LOGGER):
-        assert mw._apply({"messages": [msg]}, runtime) is None
+        _assert_text_only_cap_preserved(mw._apply({"messages": [msg]}, runtime), msg)
 
     assert runtime.context["stop_reason"] == "token_capped"
     records = [record for record in caplog.records if record.message == "Provider model length cap detected"]

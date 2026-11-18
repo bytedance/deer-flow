@@ -92,6 +92,9 @@ class RunEventStore(abc.ABC):
        may add documented fields such as DbRunEventStore.user_id
     6. find_latest_ai_message_run_ids() returns the newest valid AI message
        event for each requested ID and performs no storage work for empty input
+    7. Mutable inputs and returned records are isolated from store-owned state,
+       including nested content and metadata. Mutating a write input, receipt,
+       or dict-returning list result cannot change stored records or later reads.
     """
 
     @abc.abstractmethod
@@ -106,14 +109,18 @@ class RunEventStore(abc.ABC):
         metadata: dict | None = None,
         created_at: str | None = None,
     ) -> dict:
-        """Write an event, auto-assign seq, return the complete record."""
+        """Write an event, assign seq, and return a detached record snapshot.
+
+        Mutating input content/metadata or the returned record, including nested
+        values, must not mutate stored state.
+        """
 
     @abc.abstractmethod
     async def put_batch(self, events: list[dict]) -> list[dict]:
         """Batch-write events. Used by RunJournal flush buffer.
 
-        Each dict's keys match put()'s keyword arguments.
-        Returns complete records with seq assigned.
+        Each dict's keys match put()'s keyword arguments. Returned records
+        are detached snapshots, and mutable inputs must not alias stored rows.
         """
 
     @abc.abstractmethod
@@ -135,7 +142,8 @@ class RunEventStore(abc.ABC):
         The check and write must be serialized with ordinary writers for the
         thread. Returns ``(record, created)``. This is the durability primitive
         used by terminal run receipts, whose recovery path may safely retry
-        after a worker crash.
+        after a worker crash. Both newly created and existing event receipts
+        are detached snapshots.
 
         Explicit ``user_id`` stamps the owner for contextless worker writes.
         Stores without user isolation accept it for interface parity. Existing
@@ -171,6 +179,8 @@ class RunEventStore(abc.ABC):
 
         When both cursors are supplied, return the first ``limit`` records in
         the exclusive window ``after_seq < seq < before_seq`` (ascending).
+        Each returned record is a detached snapshot; mutating nested values must
+        not alter stored state or later reads.
 
         ``user_id`` may be passed explicitly by request-independent callers;
         user-scoped backends must apply it according to their isolation model.
@@ -258,7 +268,8 @@ class RunEventStore(abc.ABC):
         ``metadata["task_id"]``). ``after_seq`` is a forward cursor returning the
         first ``limit`` records with seq > after_seq, so callers can page through
         a single subagent task's events without the run-wide ``limit`` truncating
-        the tail (#3779). ``user_id`` follows the same explicit-caller semantics
+        the tail (#3779). Returned records are detached snapshots, including nested
+        content and metadata. ``user_id`` follows the same explicit-caller semantics
         as :meth:`list_messages`.
         """
 
@@ -282,7 +293,8 @@ class RunEventStore(abc.ABC):
 
         When both cursors are supplied, return the first ``limit`` records in
         the exclusive window ``after_seq < seq < before_seq`` (ascending).
-        ``user_id`` follows the same explicit-caller semantics as
+        Returned records are detached snapshots, including nested content and
+        metadata. ``user_id`` follows the same explicit-caller semantics as
         :meth:`list_messages`.
         """
 

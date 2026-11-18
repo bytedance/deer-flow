@@ -13,7 +13,7 @@ from deerflow.models import openai_codex_provider as provider
 from deerflow.models.credential_loader import CodexCliCredential
 
 
-class EventStream(httpx.SyncByteStream):
+class EventStream(httpx.SyncByteStream, httpx.AsyncByteStream):
     def __init__(self, events: list[dict], tail_error: Exception | None = None):
         self.events = events
         self.tail_error = tail_error
@@ -30,6 +30,13 @@ class EventStream(httpx.SyncByteStream):
     def close(self) -> None:
         self.closed = True
 
+    async def __aiter__(self):
+        for chunk in self:
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.close()
+
 
 @pytest.fixture
 def model(monkeypatch):
@@ -40,6 +47,7 @@ def model(monkeypatch):
 @pytest.fixture
 def serve_events(monkeypatch):
     client_class = httpx.Client
+    async_client_class = httpx.AsyncClient
 
     def install(events: list[dict], *, tail_error: Exception | None = None, status_code: int = 200):
         stream = EventStream(events, tail_error)
@@ -51,6 +59,7 @@ def serve_events(monkeypatch):
 
         transport = httpx.MockTransport(handle)
         monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=transport, **kwargs))
+        monkeypatch.setattr(provider.httpx, "AsyncClient", lambda **kwargs: async_client_class(transport=transport, **kwargs))
         return stream, requests
 
     return install

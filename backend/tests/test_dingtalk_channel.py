@@ -7,9 +7,11 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from support.symlinks import symlink_or_skip
 
@@ -26,7 +28,7 @@ from app.channels.dingtalk import (
     _normalize_conversation_type,
     _parse_allowed_users,
 )
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
 
@@ -1427,7 +1429,6 @@ class TestCardMode:
         channel = DingTalkChannel(bus, config={})
         assert channel._card_template_id == ""
         assert channel._card_track_ids == {}
-        assert channel._card_repliers == {}
         assert channel._incoming_messages == {}
         assert channel._dingtalk_client is None
 
@@ -1767,7 +1768,7 @@ class TestCardMode:
 
         _run(go())
 
-    def test_card_replier_cleanup_on_final(self):
+    def test_card_track_cleanup_on_final(self):
         async def go():
             bus = MessageBus()
             channel = DingTalkChannel(bus, config={"card_template_id": "tpl_123"})
@@ -1777,7 +1778,6 @@ class TestCardMode:
 
             source_key = f"{_CONVERSATION_TYPE_P2P}:user_001::msg_001"
             channel._card_track_ids[source_key] = "track_001"
-            channel._card_repliers["track_001"] = MagicMock()
 
             msg = OutboundMessage(
                 channel_name="dingtalk",
@@ -1796,7 +1796,6 @@ class TestCardMode:
             await channel.send(msg)
 
             assert source_key not in channel._card_track_ids
-            assert "track_001" not in channel._card_repliers
 
         _run(go())
 
@@ -1828,15 +1827,195 @@ class TestCardMode:
 
         _run(go())
 
-    def test_stream_update_card_raises_without_replier(self):
-        async def go():
-            bus = MessageBus()
-            channel = DingTalkChannel(bus, config={"card_template_id": "tpl_123"})
+    def test_card_calls_use_the_channel_token_not_the_sdk_fetch(self, monkeypatch):
+        """Card requests send the channel's httpx token; the SDK never fetches one.
 
-            with pytest.raises(RuntimeError, match="No AICardReplier found"):
-                await channel._stream_update_card("nonexistent_track", "content")
+        dingtalk-stream's ``get_access_token()`` posts with ``requests`` and no
+        timeout, which on the Gateway loop would block every channel.
+        """
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+        from dingtalk_stream import card_replier
+        from support.local_sockets import LocalHttpServer
+
+        async def go():
+            async with LocalHttpServer(body={"accessToken": "tok-1", "expireIn": 7200}) as api:
+                base = api.url.removesuffix("/open")
+                monkeypatch.setattr("app.channels.dingtalk.DINGTALK_API_BASE", base)
+                monkeypatch.setattr(card_replier, "DINGTALK_OPENAPI_ENDPOINT", base)
+                channel = DingTalkChannel(MessageBus(), config={"card_template_id": "tpl_123"})
+                channel._client_id, channel._client_secret = "id", "secret"
+                sdk_client = MagicMock()
+                sdk_client.credential.client_id = "id"
+                sdk_client.get_access_token.side_effect = AssertionError("the SDK must not fetch a token")
+                channel._dingtalk_client = sdk_client
+                incoming = dingtalk_stream.ChatbotMessage()
+                incoming.conversation_type = _CONVERSATION_TYPE_P2P
+                incoming.sender_staff_id = "user_001"
+
+                track = await channel._create_and_deliver_card("Working on it...", chatbot_message=incoming)
+                assert track
+
+                # An expired channel token is refreshed before the streamed update.
+                channel._token_expires_at = 0.0
+                api.body = {"accessToken": "tok-2", "expireIn": 7200}
+                await channel._stream_update_card(track, "done", is_finalize=True)
+
+            sdk_client.get_access_token.assert_not_called()
+            assert [(method, path, headers.get("x-acs-dingtalk-access-token")) for method, path, headers in api.calls] == [
+                ("POST", "/v1.0/oauth2/accessToken", None),
+                ("POST", "/v1.0/card/instances/createAndDeliver", "tok-1"),
+                ("POST", "/v1.0/oauth2/accessToken", None),
+                ("PUT", "/v1.0/card/streaming", "tok-2"),
+            ]
+            assert api.requests[0] == {"appKey": "id", "appSecret": "secret"}
+            assert api.requests[3]["outTrackId"] == track
+            assert api.requests[3]["isFinalize"] is True
 
         _run(go())
+
+    @staticmethod
+    def _card_channel(monkeypatch, base: str) -> DingTalkChannel:
+        """A card-mode channel holding a valid token, so the API sees only card calls."""
+        monkeypatch.setattr("app.channels.dingtalk.DINGTALK_API_BASE", base)
+        # The SDK too, so card calls can never reach the real DingTalk API.
+        monkeypatch.setattr("dingtalk_stream.card_replier.DINGTALK_OPENAPI_ENDPOINT", base)
+        channel = DingTalkChannel(MessageBus(), config={"card_template_id": "tpl_123"})
+        channel._client_id = "robot_001"
+        channel._cached_token = "tok"
+        channel._token_expires_at = time.monotonic() + 3600
+        channel._dingtalk_client = MagicMock()
+        return channel
+
+    @staticmethod
+    def _incoming(conversation_type: str = _CONVERSATION_TYPE_P2P):
+        dingtalk_stream = pytest.importorskip("dingtalk_stream")
+        incoming = dingtalk_stream.ChatbotMessage()
+        incoming.conversation_type = conversation_type
+        incoming.sender_staff_id = "user_001"
+        incoming.conversation_id = "cid_001"
+        incoming.message_id = "msg_001"
+        return incoming
+
+    @staticmethod
+    async def _reply_turn(channel: DingTalkChannel, incoming) -> None:
+        """Running reply, one streamed chunk and the final answer, as the manager sends them."""
+        metadata = {"conversation_type": _CONVERSATION_TYPE_P2P, "sender_staff_id": "user_001", "conversation_id": "", "message_id": "msg_001"}
+        inbound = channel._make_inbound(chat_id="user_001", user_id="user_001", text="hello", metadata=metadata)
+        channel._incoming_messages[channel._make_card_source_key(inbound)] = incoming
+        await channel._send_running_reply("user_001", inbound)
+        for text, is_final in [("Partial", False), ("Final answer.", True)]:
+            await channel.send(OutboundMessage(channel_name="dingtalk", chat_id="user_001", thread_id="t1", text=text, is_final=is_final, thread_ts="msg_001", metadata=metadata))
+
+    @pytest.mark.parametrize("conversation_type", [_CONVERSATION_TYPE_P2P, _CONVERSATION_TYPE_GROUP], ids=["p2p", "group"])
+    @pytest.mark.parametrize("hosted", [False, True], ids=["direct", "hosted"])
+    def test_card_requests_match_the_sdk_request_bodies(self, monkeypatch, conversation_type, hosted):
+        """The channel sends the bodies dingtalk-stream's ``AICardReplier`` sends."""
+        from dingtalk_stream import card_replier
+        from dingtalk_stream.chatbot import HostingContext
+        from support.local_sockets import LocalHttpServer
+
+        incoming = self._incoming(conversation_type)
+        if hosted:
+            incoming.hosting_context = HostingContext()
+            incoming.hosting_context.user_id = "host_001"
+
+        async def go():
+            async with LocalHttpServer() as api:
+                base = api.url.removesuffix("/open")
+                monkeypatch.setattr(card_replier, "DINGTALK_OPENAPI_ENDPOINT", base)
+                sdk_client = MagicMock()
+                sdk_client.credential.client_id = "robot_001"
+                sdk_client.get_access_token.return_value = "tok"
+                sdk = card_replier.AICardReplier(sdk_client, incoming)
+                sdk_track = await sdk.async_create_and_deliver_card(card_template_id="tpl_123", card_data={"content": "Working on it..."})
+                await sdk.async_streaming(card_instance_id=sdk_track, content_key="content", content_value="done", append=False, finished=True, failed=False)
+
+                channel = self._card_channel(monkeypatch, base)
+                track = await channel._create_and_deliver_card("Working on it...", chatbot_message=incoming)
+                await channel._stream_update_card(track, "done", is_finalize=True)
+
+            assert [(method, path) for method, path, _ in api.calls] == [("POST", "/v1.0/card/instances/createAndDeliver"), ("PUT", "/v1.0/card/streaming")] * 2
+            sdk_create, sdk_stream, create, stream = api.requests
+            assert create.pop("outTrackId") == track
+            assert stream.pop("outTrackId") == track
+            sdk_create.pop("outTrackId")
+            sdk_stream.pop("outTrackId")
+            assert stream.pop("guid") != sdk_stream.pop("guid")
+            assert create == sdk_create
+            assert stream == sdk_stream
+
+        _run(go())
+
+    @pytest.mark.parametrize("failure", [403, 500, "unreachable"])
+    def test_failed_card_creation_still_delivers_the_reply(self, monkeypatch, failure):
+        """dingtalk-stream returns a card ID even when the API refused the card."""
+        from support.local_sockets import LocalHttpServer
+
+        async def deliver(base: str) -> DingTalkChannel:
+            channel = self._card_channel(monkeypatch, base)
+            channel._send_text_message_to_user = AsyncMock()
+            channel._send_p2p_message = AsyncMock()
+            await self._reply_turn(channel, self._incoming())
+            return channel
+
+        async def go():
+            if failure == "unreachable":
+                async with LocalHttpServer() as closed:
+                    base = closed.url.removesuffix("/open")
+                channel = await deliver(base)
+            else:
+                async with LocalHttpServer(status=failure, body={"code": "Forbidden.AccessDenied"}) as api:
+                    channel = await deliver(api.url.removesuffix("/open"))
+                assert [(method, path) for method, path, _ in api.calls] == [("POST", "/v1.0/card/instances/createAndDeliver")]
+
+            assert channel._card_track_ids == {}
+            channel._send_text_message_to_user.assert_awaited_once_with("robot_001", "user_001", "\u23f3 Working on it...")
+            # Without a card the streamed chunk is skipped and the final answer is sent once.
+            channel._send_p2p_message.assert_awaited_once_with("robot_001", "user_001", "Final answer.")
+
+        _run(go())
+
+    def test_failed_card_stream_still_delivers_the_final_reply(self, monkeypatch):
+        """The SDK's streaming call also logs a failure and returns."""
+        from support.local_sockets import LocalHttpServer
+
+        async def go():
+            async with LocalHttpServer() as api:
+                channel = self._card_channel(monkeypatch, api.url.removesuffix("/open"))
+                channel._send_text_message_to_user = AsyncMock()
+                channel._send_p2p_message = AsyncMock()
+                original_create = channel._create_and_deliver_card
+
+                async def create_then_refuse(*args, **kwargs):
+                    track = await original_create(*args, **kwargs)
+                    api.status = 403
+                    return track
+
+                channel._create_and_deliver_card = create_then_refuse
+                await self._reply_turn(channel, self._incoming())
+
+            assert [(method, path) for method, path, _ in api.calls] == [("POST", "/v1.0/card/instances/createAndDeliver")] + [("PUT", "/v1.0/card/streaming")] * 2
+            assert channel._card_track_ids == {}
+            channel._send_text_message_to_user.assert_not_awaited()
+            channel._send_p2p_message.assert_awaited_once_with("robot_001", "user_001", "Final answer.")
+
+        _run(go())
+
+    def test_stream_update_card_raises_when_the_channel_token_fails(self, monkeypatch):
+        """A token failure surfaces, so ``send`` falls back instead of dropping the update."""
+        http_client = MagicMock(side_effect=AssertionError("no card request without a token"))
+        monkeypatch.setattr("app.channels.dingtalk.httpx.AsyncClient", http_client)
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={"card_template_id": "tpl_123"})
+            channel._get_access_token = AsyncMock(side_effect=ValueError("bad token response"))
+
+            with pytest.raises(ValueError, match="bad token response"):
+                await channel._stream_update_card("track_001", "content", is_finalize=True)
+
+        _run(go())
+        http_client.assert_not_called()
 
     def test_stop_clears_card_state(self):
         async def go():
@@ -1845,14 +2024,12 @@ class TestCardMode:
             channel._running = True
             channel._dingtalk_client = MagicMock()
             channel._incoming_messages["key"] = MagicMock()
-            channel._card_repliers["track"] = MagicMock()
             channel._card_track_ids["source"] = "track"
 
             await channel.stop()
 
             assert channel._dingtalk_client is None
             assert channel._incoming_messages == {}
-            assert channel._card_repliers == {}
             assert channel._card_track_ids == {}
 
         _run(go())
@@ -3155,3 +3332,212 @@ class TestDingTalkDownloadGuardLogging:
 
         _run(go())
         assert any("inbound file download returned no content" in r.message and "photo.png" in r.message for r in caplog.records)
+
+
+class TestSendFileDeliveryVerification:
+    """``send_file`` must verify the recipient actually received the file.
+
+    DingTalk's P2P batch-send API returns HTTP 200 with ``processQueryKey``
+    even when the single recipient was rejected (``invalidStaffIdList``) or
+    flow-controlled (``flowControlledStaffIdList``).  The old code only
+    checked ``raise_for_status`` and always returned ``True``.
+    """
+
+    _STAFF_ID = "user_001"
+    _ROBOT = "robot_001"
+
+    def _make_channel(self) -> DingTalkChannel:
+        channel = DingTalkChannel(MessageBus(), config={})
+        channel._client_id = self._ROBOT
+        channel._upload_media = AsyncMock(return_value="media_001")
+        channel._get_access_token = AsyncMock(return_value="token_001")
+        return channel
+
+    def _make_msg(self, staff_id: str = _STAFF_ID, group: bool = False) -> OutboundMessage:
+        return OutboundMessage(
+            channel_name="dingtalk",
+            chat_id=staff_id,
+            thread_id="thread_001",
+            text="",
+            metadata={"conversation_type": _CONVERSATION_TYPE_GROUP if group else _CONVERSATION_TYPE_P2P},
+        )
+
+    def _make_attachment(self, size: int = 10) -> ResolvedAttachment:
+        return ResolvedAttachment(
+            virtual_path="/mnt/file.pdf",
+            actual_path=Path("/tmp/file.pdf"),
+            filename="file.pdf",
+            mime_type="application/pdf",
+            size=size,
+            is_image=False,
+        )
+
+    def _run_send(
+        self,
+        payload,
+        status: int = 200,
+        staff_id: str = _STAFF_ID,
+        group: bool = False,
+    ) -> tuple[bool, list[dict]]:
+        """Run ``send_file`` against a fake HTTP response; return (result, captured_requests)."""
+        from unittest.mock import patch
+
+        channel = self._make_channel()
+        msg = self._make_msg(staff_id=staff_id, group=group)
+        attachment = self._make_attachment()
+        captured: list[dict] = []
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def post(self, url, **kwargs):
+                captured.append(kwargs.get("json", {}))
+                request = httpx.Request("POST", url)
+                if isinstance(payload, json.JSONDecodeError):
+                    return httpx.Response(status, content=b"{", request=request)
+                return httpx.Response(status, json=payload, request=request)
+
+        with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+            result = _run(channel.send_file(msg, attachment))
+        return result, captured
+
+    # -- success paths -------------------------------------------------
+
+    def test_p2p_success_returns_true(self):
+        result, _ = self._run_send({"processQueryKey": "key_001"})
+        assert result is True
+
+    def test_group_success_returns_true(self):
+        result, _ = self._run_send({"processQueryKey": "key_001"}, group=True)
+        assert result is True
+
+    # -- partial delivery failures (the core bug) ---------------------
+
+    def test_p2p_invalid_recipient_returns_false(self):
+        """Target user in invalidStaffIdList -> not delivered."""
+        result, _ = self._run_send({"processQueryKey": "key_001", "invalidStaffIdList": [self._STAFF_ID]})
+        assert result is False
+
+    def test_p2p_flow_controlled_returns_false(self):
+        """Target user in flowControlledStaffIdList -> not delivered."""
+        result, _ = self._run_send({"processQueryKey": "key_001", "flowControlledStaffIdList": [self._STAFF_ID]})
+        assert result is False
+
+    def test_p2p_other_user_invalid_target_ok_returns_true(self):
+        """Another user in the failure list must not affect our target."""
+        result, _ = self._run_send({"processQueryKey": "key_001", "invalidStaffIdList": ["other_user"]})
+        assert result is True
+
+    def test_p2p_both_lists_target_in_one_returns_false(self):
+        """Target in flowControlled but not invalid -> still a failure."""
+        result, _ = self._run_send(
+            {
+                "processQueryKey": "key_001",
+                "invalidStaffIdList": ["someone_else"],
+                "flowControlledStaffIdList": [self._STAFF_ID],
+            }
+        )
+        assert result is False
+
+    # -- group chat is not affected by P2P failure lists --------------
+
+    def test_group_ignores_invalid_list(self):
+        """Group endpoint has no per-user failure lists; key check only."""
+        result, _ = self._run_send(
+            {"processQueryKey": "key_001", "invalidStaffIdList": [self._STAFF_ID]},
+            group=True,
+        )
+        assert result is True
+
+    # -- missing or blank processQueryKey ------------------------------
+
+    def test_missing_process_key_returns_false(self):
+        result, _ = self._run_send({})
+        assert result is False
+
+    def test_blank_process_key_returns_false(self):
+        result, _ = self._run_send({"processQueryKey": ""})
+        assert result is False
+
+    def test_whitespace_process_key_returns_false(self):
+        result, _ = self._run_send({"processQueryKey": "  "})
+        assert result is False
+
+    def test_app_error_response_returns_false(self):
+        """DingTalk app-level error (no processQueryKey) -> not delivered."""
+        result, _ = self._run_send({"code": "sendMessage.model.notMatch"})
+        assert result is False
+
+    # -- malformed responses -------------------------------------------
+
+    def test_array_response_returns_false(self):
+        """Non-dict JSON body (array) -> conservative failure."""
+        result, _ = self._run_send(["not", "a", "dict"])
+        assert result is False
+
+    def test_bad_json_returns_false(self):
+        """Unparseable JSON body -> conservative failure."""
+        result, _ = self._run_send(json.JSONDecodeError("err", "", 0))
+        assert result is False
+
+    # -- HTTP errors ---------------------------------------------------
+
+    def test_http_400_returns_false(self):
+        result, _ = self._run_send({}, status=400)
+        assert result is False
+
+    def test_http_500_returns_false(self):
+        result, _ = self._run_send({}, status=500)
+        assert result is False
+
+    # -- non-list failure list types (defensive) -----------------------
+
+    def test_non_list_invalid_list_returns_false(self):
+        """Malformed failure lists must not be mistaken for accepted delivery."""
+        result, _ = self._run_send({"processQueryKey": "key_001", "invalidStaffIdList": "user_001"})
+        assert result is False
+
+    # -- upload / size / cancel guardrails -----------------------------
+
+    def test_upload_media_returns_none_returns_false(self):
+        channel = self._make_channel()
+        channel._upload_media = AsyncMock(return_value=None)
+        msg = self._make_msg()
+        attachment = self._make_attachment()
+        result = _run(channel.send_file(msg, attachment))
+        assert result is False
+
+    def test_oversized_attachment_returns_false(self):
+        from app.channels.dingtalk import _MAX_UPLOAD_SIZE_BYTES
+
+        channel = self._make_channel()
+        msg = self._make_msg()
+        attachment = self._make_attachment(size=_MAX_UPLOAD_SIZE_BYTES + 1)
+        result = _run(channel.send_file(msg, attachment))
+        assert result is False
+
+    def test_cancelled_error_propagates(self):
+        """asyncio.CancelledError must not be swallowed by the except block."""
+        channel = self._make_channel()
+        channel._upload_media = AsyncMock(side_effect=asyncio.CancelledError())
+        msg = self._make_msg()
+        attachment = self._make_attachment()
+        with pytest.raises(asyncio.CancelledError):
+            _run(channel.send_file(msg, attachment))
+
+    # -- request payload verification ---------------------------------
+
+    def test_p2p_sends_target_in_user_ids(self):
+        _, captured = self._run_send({"processQueryKey": "key_001"}, staff_id="user_42")
+        assert captured[0]["userIds"] == ["user_42"]
+        assert captured[0]["robotCode"] == self._ROBOT
+        assert captured[0]["msgKey"] == "sampleFile"
+
+    def test_group_sends_conversation_id_not_user_ids(self):
+        _, captured = self._run_send({"processQueryKey": "key_001"}, staff_id="ignored", group=True)
+        assert "openConversationId" in captured[0]
+        assert "userIds" not in captured[0]

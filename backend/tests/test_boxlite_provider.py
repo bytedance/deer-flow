@@ -87,13 +87,7 @@ def _no_existing_boxlite_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep provider startup reconciliation isolated from the real SDK state."""
 
     class _EmptyRuntime:
-        def start(self):
-            return self
-
-        def stop(self):
-            pass
-
-        def list_info(self):
+        async def list_info(self):
             return []
 
     class _EmptyBoxlite:
@@ -101,7 +95,7 @@ def _no_existing_boxlite_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
         def default():
             return _EmptyRuntime()
 
-    monkeypatch.setattr("deerflow.community.boxlite.provider._import_sync_boxlite_runtime", lambda: _EmptyBoxlite)
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_boxlite_runtime", lambda: _EmptyBoxlite)
 
 
 def test_import_simplebox_missing_raises_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -443,26 +437,34 @@ def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
         lambda: _stub_config(),
     )
     stopped: list[str] = []
+    commands = []
+    monkeypatch.setitem(sys.modules, "boxlite", types.SimpleNamespace(ExecResult=types.SimpleNamespace))
 
     class _NativeBox:
-        def stop(self):
+        async def exec(self, command, args=None, env=None, tty=False, user=None, timeout_secs=None, cwd=None):
+            commands.append((command, args, env, timeout_secs, threading.get_ident()))
+
+            async def stream(*values):
+                for value in values:
+                    yield value
+
+            async def wait():
+                return types.SimpleNamespace(exit_code=0, error_message=None)
+
+            return types.SimpleNamespace(stdout=lambda: stream("ok\n" if args[-1] == "echo ok" else "restored\n"), stderr=lambda: stream(), wait=wait)
+
+        async def stop(self):
             stopped.append("adopted")
 
     class _Runtime:
-        def start(self):
-            return self
-
-        def stop(self):
-            pass
-
-        def list_info(self):
+        async def list_info(self):
             return [
                 types.SimpleNamespace(name="deer-flow-boxlite-adopted"),
                 types.SimpleNamespace(name="unrelated-box"),
                 types.SimpleNamespace(name=None),
             ]
 
-        def get(self, name):
+        async def get(self, name):
             if name == "deer-flow-boxlite-adopted":
                 return _NativeBox()
             raise AssertionError(f"unexpected box lookup: {name}")
@@ -472,13 +474,19 @@ def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
         def default():
             return _Runtime()
 
-    monkeypatch.setattr("deerflow.community.boxlite.provider._import_sync_boxlite_runtime", lambda: _Boxlite)
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_boxlite_runtime", lambda: _Boxlite)
 
     provider = BoxliteProvider()
 
     assert list(provider._warm_pool) == ["adopted"]
     adopted_box = provider._warm_pool["adopted"][0]
     assert adopted_box.id == "adopted"
+    assert provider._reclaim_warm_pool("adopted", ("user", "thread")) == "adopted"
+    assert adopted_box.execute_command("echo restored", env={"KEY": "value"}, timeout=2) == "restored\n"
+    assert commands == [
+        ("sh", ["-lc", "echo ok"], None, 5, provider._loop._thread.ident),
+        ("sh", ["-lc", "echo restored"], [("KEY", "value")], 2, provider._loop._thread.ident),
+    ]
 
     provider.shutdown()
     assert stopped == ["adopted"]

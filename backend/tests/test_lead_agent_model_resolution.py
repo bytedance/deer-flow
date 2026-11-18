@@ -292,6 +292,22 @@ def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatc
     assert len(prompt_calls) == 1
 
 
+def test_bootstrap_hitl_tools_fail_closed_without_resume_support(model_control_assembly):
+    from deerflow.approvals.middleware import ToolApprovalMiddleware
+
+    app_config, _strict, _fallback, _model_factory = model_control_assembly
+    app_config.hitl_approval.enabled = True
+    app_config.hitl_approval.tools = ["setup_agent"]
+    app_config.hitl_approval.max_actions = 7
+
+    assembly = lead_agent_module._make_lead_agent({"configurable": {"is_bootstrap": True}}, app_config=app_config)
+    hitl = next(middleware for middleware in assembly["middleware"] if isinstance(middleware, ToolApprovalMiddleware))
+    assert hitl.supports_resume is False
+    assert hitl.policy.max_actions == 7
+    # Real unresumable execution is exercised in test_tool_approval_runtime;
+    # this assembly test pins the bootstrap's gate and policy binding.
+
+
 def test_make_lead_agent_attaches_tracing_callbacks_at_graph_root(monkeypatch):
     """Regression guard: tracing handlers must be appended to
     ``config["callbacks"]`` (graph invocation root), and every in-graph

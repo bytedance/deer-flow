@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
+import sys
 import tempfile
 import threading
 from concurrent.futures import Future
@@ -702,7 +704,9 @@ class TestChannelManager:
 
         bus = MessageBus()
         store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-        manager = ChannelManager(bus=bus, store=store, langgraph_url="http://localhost:8001")
+        # An external Gateway keeps langgraph_sdk.get_client(); loopback hosts
+        # build a trust_env=False client and are covered by the run-client tests.
+        manager = ChannelManager(bus=bus, store=store, langgraph_url="http://gateway.example.com/api")
 
         with patch("langgraph_sdk.get_client") as get_client:
             get_client.return_value = object()
@@ -711,7 +715,7 @@ class TestChannelManager:
 
         get_client.assert_called_once()
         kwargs = get_client.call_args.kwargs
-        assert kwargs["url"] == "http://localhost:8001"
+        assert kwargs["url"] == "http://gateway.example.com/api"
         headers = kwargs["headers"]
         csrf_token = headers["X-CSRF-Token"]
         assert csrf_token
@@ -7507,6 +7511,58 @@ class TestExtractArtifacts:
         }
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"]
 
+    def test_multiple_calls_keep_presentation_order_and_deduplicate(self):
+        """A file presented twice in one turn is delivered once, in the order presented.
+
+        ``present_files`` relies on the ``merge_artifacts`` reducer, which keeps
+        first-presented order and drops repeats; the IM reply must match it.
+        """
+        from app.channels.manager import _extract_artifacts
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "chart then report"},
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [{"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/chart.png"]}}],
+                },
+                {"type": "tool", "name": "present_files", "content": "Successfully presented files"},
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md", "/mnt/user-data/outputs/chart.png"]}},
+                    ],
+                },
+                {"type": "tool", "name": "present_files", "content": "Successfully presented files"},
+                {"type": "ai", "content": "Done."},
+            ]
+        }
+
+        assert _extract_artifacts(result) == ["/mnt/user-data/outputs/chart.png", "/mnt/user-data/outputs/report.md"]
+
+    def test_single_call_with_repeated_path_delivers_it_once(self):
+        """``merge_artifacts`` also drops repeats inside one ``present_files`` call."""
+        from app.channels.manager import _extract_artifacts
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "send the chart"},
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/chart.png", "/mnt/user-data/outputs/report.md", "/mnt/user-data/outputs/chart.png"]}},
+                    ],
+                },
+                {"type": "tool", "name": "present_files", "content": "Successfully presented files"},
+                {"type": "ai", "content": "Done."},
+            ]
+        }
+
+        assert _extract_artifacts(result) == ["/mnt/user-data/outputs/chart.png", "/mnt/user-data/outputs/report.md"]
+
     def test_ignores_hidden_human_control_messages(self):
         """Hidden control messages should not hide current-turn present_files artifacts."""
         from app.channels.manager import _extract_artifacts
@@ -13871,6 +13927,88 @@ class TestHandleGoalCommand:
 
         _run(go())
 
+    @pytest.mark.parametrize(("args", "method", "verb"), [("do X", "PUT", "Set"), ("clear", "DELETE", "Clear")])
+    @pytest.mark.parametrize(
+        ("locale", "status", "payload", "busy"),
+        [
+            ("en-US", 409, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, True),
+            ("zh-CN", 409, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, True),
+            ("en-US", 401, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, False),
+            ("en-US", 403, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, False),
+            ("en-US", 500, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, False),
+            ("en-US", 409, {"detail": "private server diagnostic"}, False),
+            ("en-US", 409, {"detail": "Thread has a run in flight. {other_verb} the goal after the run finishes."}, False),
+            ("en-US", 409, {"detail": ["private server diagnostic"]}, False),
+            ("en-US", 409, ["private server diagnostic"], False),
+            ("en-US", 409, "not JSON: private server diagnostic", False),
+        ],
+    )
+    def test_goal_mutation_error_feedback(self, monkeypatch, args, method, verb, locale, status, payload, busy):
+        """Only known in-flight conflicts get actionable text, never raw Gateway errors."""
+        from dataclasses import replace
+
+        calls = []
+        if isinstance(payload, dict) and isinstance(payload.get("detail"), str):
+            payload = {"detail": payload["detail"].format(verb=verb, other_verb="Clear" if verb == "Set" else "Set")}
+
+        def respond(request):
+            calls.append(request)
+            return httpx.Response(status, text=payload) if isinstance(payload, str) else httpx.Response(status, json=payload)
+
+        real_async_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            "app.channels.manager.httpx.AsyncClient",
+            lambda **kw: real_async_client(transport=httpx.MockTransport(respond), **kw),
+        )
+
+        async def go():
+            resolver = SimpleNamespace(locale_for=AsyncMock(return_value=locale))
+            manager = self._make_manager(monkeypatch, thread_id="t-1", reply_locale=resolver)
+            chat = AsyncMock()
+            monkeypatch.setattr(manager, "_handle_chat", chat)
+            replies = []
+            manager.bus.subscribe_outbound(AsyncMock(side_effect=replies.append))
+            msg = replace(self._msg(f"/goal {args}"), owner_user_id="owner-1", connection_id="connection-1", thread_ts="reply-1")
+
+            await manager._handle_command(msg)
+
+            assert len(replies) == 1
+            reply = replies[0]
+            expected = "Failed to clear goal." if method == "DELETE" else "Failed to set goal."
+            if busy:
+                expected = "当前任务仍在运行，请等待结束后再修改目标。" if locale == "zh-CN" else "A task is still running. Wait for it to finish before changing the goal."
+            assert reply.text == expected
+            assert (reply.channel_name, reply.chat_id, reply.thread_id, reply.thread_ts, reply.connection_id, reply.owner_user_id) == ("slack", "C1", "t-1", "reply-1", "connection-1", "owner-1")
+            assert len(calls) == 1  # No retry or follow-up run on rejection.
+            assert calls[0].method == method
+            chat.assert_not_awaited()
+            resolver.locale_for.assert_awaited_once_with("owner-1")
+
+        _run(go())
+
+    @pytest.mark.parametrize("args", ["do X", "clear"])
+    def test_goal_mutation_cancellation_is_not_reported_as_failure(self, monkeypatch, args):
+        async def cancelled(request):
+            raise asyncio.CancelledError
+
+        real_async_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            "app.channels.manager.httpx.AsyncClient",
+            lambda **kw: real_async_client(transport=httpx.MockTransport(cancelled), **kw),
+        )
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            chat, reply = AsyncMock(), AsyncMock()
+            monkeypatch.setattr(manager, "_handle_chat", chat)
+            manager.bus.subscribe_outbound(reply)
+            with pytest.raises(asyncio.CancelledError):
+                await manager._handle_command(self._msg(f"/goal {args}"))
+            chat.assert_not_awaited()
+            reply.assert_not_awaited()
+
+        _run(go())
+
     @pytest.mark.parametrize(
         ("args", "method", "expected_reply"),
         [("finish the work", "PUT", None), ("clear", "DELETE", "Goal cleared.")],
@@ -14343,3 +14481,167 @@ class TestHumanInputResponseTranslation:
         message = _human_input_message_with_channel_response("hello", metadata={})
         assert message["content"] == "hello"
         assert "additional_kwargs" not in message
+
+
+@pytest.mark.parametrize(
+    ("gateway_url", "expected_trust_env"),
+    [
+        ("http://localhost:8001", False),
+        ("http://127.0.0.1:8001", False),
+        ("http://gateway.example.com", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_gateway_clients_do_not_proxy_local_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gateway_url: str,
+    expected_trust_env: bool,
+) -> None:
+    """Gateway calls are control-plane traffic and must bypass ``HTTP_PROXY``.
+
+    The Gateway runs next to the channel manager (``http://localhost:8001`` by
+    default). Inheriting the environment proxy for that hop produces a
+    proxy-generated error even though the Gateway is healthy -- the same
+    failure ``sandbox_http_trust_env`` already guards against for sandbox
+    control-plane calls.
+    """
+    from app.channels import manager as manager_module
+    from app.channels.manager import ChannelManager
+
+    seen_kwargs: list[dict[str, object]] = []
+
+    class _JsonResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True}
+
+    class RecordingClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            seen_kwargs.append(kwargs)
+
+        async def __aenter__(self) -> RecordingClient:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs: object) -> _JsonResponse:
+            return _JsonResponse()
+
+        async def put(self, url: str, **kwargs: object) -> _JsonResponse:
+            return _JsonResponse()
+
+    monkeypatch.setattr(manager_module.httpx, "AsyncClient", RecordingClient)
+
+    manager = ChannelManager(
+        bus=MessageBus(),
+        store=JsonChannelStore(path=tmp_path / "store.json"),
+        gateway_url=gateway_url,
+    )
+
+    await manager._fetch_gateway_json("/api/models")
+    await manager._goal_request("put", "thread-1", headers={}, json={"objective": "x"})
+
+    assert len(seen_kwargs) == 2, "both Gateway call sites should build a client"
+    assert all(kwargs.get("trust_env") is expected_trust_env for kwargs in seen_kwargs)
+
+
+@pytest.mark.parametrize("langgraph_url", ["http://localhost:8001/api", "http://127.0.0.1:8001/api"])
+def test_run_client_bypasses_env_proxy_for_local_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    langgraph_url: str,
+) -> None:
+    """``runs.wait`` submissions are control-plane traffic too.
+
+    ``langgraph_sdk.get_client()`` builds its own ``httpx.AsyncClient`` with
+    ``trust_env`` left at the default ``True`` and exposes no override, so a
+    loopback Gateway was still reached through ``HTTP_PROXY`` -- the exact hop
+    #7876 reports, and one the Gateway control-plane clients do not cover.
+    """
+    from app.channels import manager as manager_module
+
+    seen_kwargs: list[dict[str, object]] = []
+
+    class RecordingClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            seen_kwargs.append(kwargs)
+
+    monkeypatch.setattr(manager_module.httpx, "AsyncClient", RecordingClient)
+
+    client = manager_module._make_langgraph_client(langgraph_url, {"X-Internal": "1"})
+
+    assert len(seen_kwargs) == 1, "the SDK client must wrap the client we build"
+    client_kwargs = seen_kwargs[0]
+    assert client_kwargs["trust_env"] is False
+    assert client_kwargs["base_url"] == langgraph_url
+    headers = client_kwargs["headers"]
+    assert isinstance(headers, dict)
+    assert headers["X-Internal"] == "1"
+    assert headers["User-Agent"].startswith("langgraph-sdk-py/")
+    assert isinstance(client.http.client, RecordingClient)
+
+
+def test_run_client_keeps_stock_sdk_client_for_external_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An external Gateway keeps the SDK's own client, proxy settings included."""
+    import langgraph_sdk
+
+    from app.channels import manager as manager_module
+
+    calls: list[dict[str, object]] = []
+    sentinel = object()
+
+    def fake_get_client(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(langgraph_sdk, "get_client", fake_get_client)
+
+    client = manager_module._make_langgraph_client("http://gateway.example.com/api", {"X-Internal": "1"})
+
+    assert client is sentinel
+    assert calls == [{"url": "http://gateway.example.com/api", "headers": {"X-Internal": "1"}}]
+
+
+def test_channel_manager_builds_run_client_with_internal_auth_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run client carries the same internal auth and CSRF pair as control calls."""
+    from app.channels import manager as manager_module
+    from app.channels.manager import ChannelManager
+
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def fake_make_langgraph_client(base_url: str, headers: dict[str, str]) -> object:
+        calls.append((base_url, dict(headers)))
+        return object()
+
+    monkeypatch.setattr(manager_module, "_make_langgraph_client", fake_make_langgraph_client)
+
+    manager = ChannelManager(
+        bus=MessageBus(),
+        store=JsonChannelStore(path=tmp_path / "store.json"),
+        gateway_url="http://localhost:8001",
+    )
+    manager._get_client()
+
+    assert len(calls) == 1
+    base_url, headers = calls[0]
+    assert base_url == manager_module.DEFAULT_LANGGRAPH_URL
+    assert manager_module.CSRF_HEADER_NAME in headers
+
+
+def test_importing_channel_manager_loads_no_sandbox_provider_stack() -> None:
+    """The proxy policy must not drag the sandbox package into every Gateway boot."""
+    code = "import sys\nimport app.channels.manager\nprint(','.join(sorted(name for name in sys.modules if name.startswith('deerflow.community.aio_sandbox'))))\n"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "", "ChannelManager import pulled in the sandbox provider stack"

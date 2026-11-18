@@ -14,7 +14,7 @@ Middleware sees each model and tool call inside an agent. The four contributions
 | `TaskLifecycleContributor`   | `registry.task_lifecycle()`      | Start and stop of every lead run and subagent | async, awaited | The task store         |
 | `SystemModelCallObserver`    | `registry.system_model_observer()` | After each DeerFlow-owned model call   | async         | The task store, or detached |
 | `AgentAssemblyObserver`      | `registry.agent_assembly_observer()` | At the end of every agent construction | **sync**      | The app store only       |
-| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | After each summarization          | async, fire-and-forget | Detached         |
+| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | After each summarization          | async, fire-and-forget | The task store, or detached |
 
 All the examples on this page come from one extension that registers all four:
 
@@ -63,6 +63,10 @@ Both hooks share the 3-second notification budget described in [Runtime Model](/
 | `parent_task_id` | `None`                                     | The parent run id, which is the lead task's `task_id`      |
 | `agent_name`     | The assistant or custom agent id           | The subagent name, such as `general-purpose`              |
 | `resumed`        | `False`                                    | `False`                                                   |
+| `metadata`       | A read-only copy of the run's metadata     | Empty                                                     |
+| `stop`           | `None` at start; a `TaskStopDetail` at stop | `None` at start; a `TaskStopDetail` at stop             |
+
+For a scheduled run, `metadata` carries `scheduled_task_id`, `scheduled_task_run_id` and `scheduled_trigger`, so an observer can tell it from an interactive run.
 
 <Callout type="info">
   `resumed` is part of the contract but the current host never sets it to
@@ -82,6 +86,23 @@ A subagent whose executor has no `run_id`, which happens under a standalone Lang
 | `failed`    | Anything else, such as `error`                     | Anything else, including timeouts         |
 
 The mapping is deliberately conservative. A subagent that hit its token or turn budget can still be `completed`.
+
+### TaskStopDetail
+
+`info.stop` carries the detail behind the outcome. The host decides a lead run's status after the graph has ended (a model that fails after retries ends the graph normally), so callback-based tracing cannot see it; `on_task_stop` runs after the host has tried to persist it.
+
+| Field          | Lead run                                                                 | Subagent                                                  |
+| -------------- | ------------------------------------------------------------------------ | --------------------------------------------------------- |
+| `status`       | The run status: `success`, `error`, `timeout`, `interrupted` or `waiting_for_input` | `completed`, `failed`, `cancelled` or `timed_out` |
+| `error`        | The short error message stored on the run, if any                        | The execution's error message, if any                     |
+| `goal_verdict` | A read-only copy of the goal evaluator's verdict when a goal was evaluated | `None`                                                  |
+| `persisted`    | `False` when the host could not confirm the terminal write               | `True`                                                    |
+
+`waiting_for_input` is a resumable pause, not a terminal failure: the run stopped for an approval or a question to the user, and its outcome is the coarse `failed`. Read `stop.status` to tell the two apart; answering the request starts a new run with its own start and stop.
+
+With `persisted=False`, the run store rejected the terminal write or the worker lost ownership of the run. `status` is then the worker's staged status, and the stored run may still say `running` or carry another worker's result. Release your per-task state as usual, but do not report the status as final.
+
+A scheduled run with a goal objective counts as unmet when its status is `success` but `goal_verdict` is missing or not `satisfied`. `stop` is set only on the `info` passed to `on_task_stop`; the `TaskInfo` in the task store keeps `stop=None`. `stop` and `metadata` are excluded from equality and hashing, so the stop `info` finds state you stored under the start `info`. Both are `ReadOnlyDict` snapshots: nested mappings are read-only and lists become tuples, and `dataclasses.asdict()` and `json.dumps()` work on them.
 
 ### Example
 
@@ -312,10 +333,13 @@ Summarization replaces many messages with one summary. Afterwards, nothing in st
 | `output_content_hash`     | `canonical_hash` of the summary text                           |
 | `compacted_message_count` | How many messages were removed                                 |
 | `kept_message_count`      | How many messages were kept                                    |
+| `task_id`                 | The task the compaction happened in, or `None` outside a task  |
+| `run_id`                  | That task's run, or `None`                                     |
+| `thread_id`               | That task's thread, or `None`                                  |
 
 To match an event against messages you hold, hash exactly the same way: `canonical_hash(message.content)`, passing the content itself. Never stringify it first, because multimodal content is a list of dicts and `str()` depends on key order. Do not try to rediscover the summary later by hashing what the model is shown: the prompt carries a bounded, escaped rendering of the summary, whose hash will not match `output_content_hash`.
 
-The notification is fire-and-forget. It is dispatched to the notification loop without blocking the model turn, and the observer receives a **detached** store, because there is no live task at that call site. When no compaction observer is registered, the host skips the hashing pass too.
+The notification is fire-and-forget. It is dispatched to the notification loop without blocking the model turn. Inside a lead run or subagent, the observer receives that task's store, and `task_id`, `run_id`, and `thread_id` are copied from the `TaskInfo` the host keeps in it, so you can key a compaction on `(thread_id, run_id)` instead of matching hashes. A manual `/compact` runs outside any task, so the observer receives a **detached** store and the three ids are `None`. A subagent started without a parent run passes its own store but has no `TaskInfo`, so its ids are `None` too. When no compaction observer is registered, the host skips the hashing pass too.
 
 ### Example
 
@@ -323,12 +347,13 @@ The notification is fire-and-forget. It is dispatched to the notification loop w
 class CompactionLogger:
     async def on_context_compacted(self, app_store: ExtensionData, task_store: ExtensionData, event: CompactionEvent) -> None:
         logger.info(
-            "%s v%s folded %d message(s) into summary %s, kept %d",
+            "%s v%s folded %d message(s) into summary %s, kept %d (run %s)",
             event.transform_kind,
             event.transform_version,
             event.compacted_message_count,
             event.output_content_hash[:12],
             event.kept_message_count,
+            event.run_id or "none",
         )
 ```
 

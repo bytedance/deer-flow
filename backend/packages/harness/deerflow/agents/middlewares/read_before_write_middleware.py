@@ -314,7 +314,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             name=tool_name,
             status="error",
         )
-        return stamp_exception_meta(message, f"{exc.__class__.__name__}: {detail}")
+        return stamp_exception_meta(message, exc)
 
     # -- locking ---------------------------------------------------------
 

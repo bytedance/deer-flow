@@ -508,3 +508,28 @@ test("still recovers a different active run after an earlier run finishes", asyn
   expect(streamMockState.joinStream).toHaveBeenCalledWith("run-next");
   unmount();
 });
+
+test("exposes the active run's server start until that run finishes", async () => {
+  apiMockState.listRuns.mockResolvedValue([
+    { ...ACTIVE_RUN, created_at: "2026-11-04T08:00:00.250000+00:00" },
+  ]);
+  const { result, rerender, unmount } = renderThread();
+  await flushFrames();
+
+  expect(result.current.activeRunStartedAt).toBe(
+    Date.UTC(2026, 10, 4, 8, 0, 0, 250),
+  );
+
+  // The cached runs list can still say "running" after the stream finishes.
+  apiMockState.listRuns.mockImplementation(() => new Promise(() => undefined));
+  act(() => {
+    streamMockState.options?.onFinish?.(
+      { values: { artifacts: [], messages: [], title: "Done" } },
+      ACTIVE_RUN_META,
+    );
+  });
+  rerender({ activeThreadId: "thread-1" });
+
+  expect(result.current.activeRunStartedAt).toBeNull();
+  unmount();
+});

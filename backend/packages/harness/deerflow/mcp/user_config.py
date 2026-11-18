@@ -60,7 +60,10 @@ def load_user_mcp_config(user_id: str) -> ExtensionsConfig:
     for name, definition in raw.get("mcpServers", {}).items():
         runtime_name = personal_server_name(user_id, name, definition)
         servers[runtime_name] = {**definition, "tool_name_prefix": True}
-    return ExtensionsConfig.model_validate({"mcpServers": servers})
+    config = ExtensionsConfig.model_validate({"mcpServers": servers})
+    if any(server.agent_auth for server in config.mcp_servers.values()):
+        raise ValueError("agent_auth is available only for deployment MCP servers")
+    return config
 
 
 def _file_signature(path: Path) -> _FileSignature:

@@ -1,6 +1,6 @@
 {
   "name": "deer-flow-frontend",
-  "version": "2.2.0-dev",
+  "version": "2.3.0-dev",
   "private": true,
   "type": "module",
   "scripts": {
@@ -129,6 +129,10 @@
   },
   "ct3aMetadata": {
     "initVersion": "7.40.0"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=10.26.2"
   },
   "packageManager": "pnpm@10.26.2"
 }

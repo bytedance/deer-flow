@@ -226,9 +226,9 @@ def test_routing_preserves_searched_tools_on_legacy_checkpoint_resume(use_async)
     resumed = invoke(None)
 
     assert "mcp_calc" not in bound[0]
-    assert {"mcp_calc", "mcp_other"} <= set(bound[1])
-    assert resumed["promoted"]["turn_id"] == "user-1"
-    assert set(resumed["promoted"]["names"]) == {"mcp_calc", "mcp_other"}
+    assert "mcp_calc" in bound[1]
+    assert "mcp_other" not in bound[1]
+    assert resumed["promoted"]["names"] == ["mcp_calc"]
     result = next(message for message in resumed["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "calc-1")
     assert result.status == "success"
     assert result.content == "1+1"

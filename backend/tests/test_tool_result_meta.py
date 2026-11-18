@@ -33,15 +33,42 @@ def _meta(msg: ToolMessage) -> dict[str, object]:
     return msg.additional_kwargs[TOOL_META_KEY]
 
 
-# ---------------------------------------------------------------------------
-# Already-stamped messages are not overwritten
-
-
 def test_existing_meta_is_preserved():
     existing = {"status": "success", "source": "custom"}
     msg = _make_msg("hello", kwargs={TOOL_META_KEY: existing})
     result = normalize_tool_message(msg)
     assert result.additional_kwargs[TOOL_META_KEY] is existing
+
+
+def test_legacy_read_file_error_prefix_is_classified_as_failure():
+    msg = ToolMessage(content="Error: File not found: /workspace/missing.txt", tool_call_id="read", name="read_file")
+
+    meta = _meta(normalize_tool_message(msg))
+
+    assert meta["status"] == "error"
+    assert meta["error_type"] == "unknown"
+    assert meta["source"] == "tool_return"
+
+
+def test_stamped_read_file_success_may_start_with_error_prefix():
+    metadata = {
+        "status": "success",
+        "error_type": None,
+        "recoverable_by_model": True,
+        "recommended_next_action": "continue",
+        "source": "tool_return",
+    }
+    msg = ToolMessage(
+        content="Error: is an example shown in this document.",
+        tool_call_id="read",
+        name="read_file",
+        additional_kwargs={TOOL_META_KEY: metadata},
+    )
+
+    result = normalize_tool_message(msg)
+
+    assert _meta(result) is metadata
+    assert _meta(result)["status"] == "success"
 
 
 @pytest.mark.parametrize("name", ["bash", "bash_tool"])
@@ -123,21 +150,17 @@ def test_native_bash_exit_is_stamped_before_receipt(monkeypatch, command, output
     assert result.additional_kwargs["deerflow_tool_receipt"]["status"] == status
 
 
-# ---------------------------------------------------------------------------
-# Error prefix (tool_return path)
-
-
 @pytest.mark.parametrize(
     "snippet,expected_type",
     [
-        ("Error: 401 unauthorized", "auth"),
-        ("Error: permission denied for path", "permission"),
-        ("Error: 429 rate limit exceeded", "rate_limited"),
-        ("Error: connection timeout", "transient"),
-        ("Error: tool not configured", "config"),
-        ("Error: no results found for query", "no_results"),
-        ("Error: file not found", "not_found"),
-        ("Error: internal error 500", "internal"),
+        ("Error: 401 unauthorized", "unknown"),
+        ("Error: permission denied for path", "unknown"),
+        ("Error: 429 rate limit exceeded", "unknown"),
+        ("Error: connection timeout", "unknown"),
+        ("Error: tool not configured", "unknown"),
+        ("Error: no results found for query", "unknown"),
+        ("Error: file not found", "unknown"),
+        ("Error: internal error 500", "unknown"),
         ("Error: something completely unexpected happened", "unknown"),
     ],
 )
@@ -155,54 +178,42 @@ def test_auth_error_is_unrecoverable_and_stop():
     msg = _make_msg("Error: invalid api key", status="error")
     result = normalize_tool_message(msg)
     m = _meta(result)
-    assert m["recoverable_by_model"] is False
-    assert m["recommended_next_action"] == "stop"
+    assert m["recoverable_by_model"] is True
+    assert m["recommended_next_action"] == "try_alternative"
 
 
-def test_no_api_key_is_config_not_auth():
-    # Distinguish "missing key" (config) from "wrong key" (auth):
-    # - auth rule keyword: "invalid api key"  (key provided but rejected)
-    # - config rule keyword: "no api key"      (key not set at all)
-    # The two phrases do not overlap, so rule order does not affect this particular
-    # case.  This test documents the semantic distinction — a missing API key is a
-    # configuration issue, not an authentication failure.
+def test_missing_key_prose_does_not_infer_config_or_auth():
     msg = _make_msg("Error: no api key configured", status="error")
     result = normalize_tool_message(msg)
     m = _meta(result)
-    assert m["error_type"] == "config", "missing API key is a config issue, not auth"
-    assert m["recommended_next_action"] == "stop"
-    assert m["recoverable_by_model"] is False
+    assert m["error_type"] == "unknown"
+    assert m["recommended_next_action"] == "try_alternative"
+    assert m["recoverable_by_model"] is True
 
 
 def test_rate_limited_error_suggests_summarize():
     msg = _make_msg("Error: rate limited", status="error")
     result = normalize_tool_message(msg)
     m = _meta(result)
-    assert m["recommended_next_action"] == "summarize"
-    assert m["recoverable_by_model"] is False
+    assert m["recommended_next_action"] == "try_alternative"
+    assert m["recoverable_by_model"] is True
 
 
-def test_no_results_suggests_rewrite_query():
+def test_no_results_prose_does_not_prescribe_rewrite():
     msg = _make_msg("Error: no results found", status="error")
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["recoverable_by_model"] is True
-    assert m["recommended_next_action"] == "rewrite_query"
+    assert m["recommended_next_action"] == "try_alternative"
 
 
-# ---------------------------------------------------------------------------
-# Non-standard error path (status="error", no "Error:" prefix)
-
-
-def test_nonstd_error_status_classifies_from_content():
-    # Tools that return status="error" without the "Error:" prefix are tool_return, not exception.
-    # Actual exceptions are pre-stamped by stamp_exception_meta and exit normalize_tool_message early.
+def test_nonstd_error_status_does_not_classify_from_content():
     msg = _make_msg("ConnectionError: connection refused", status="error")
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
     assert m["source"] == "tool_return"
-    assert m["error_type"] == "transient"
+    assert m["error_type"] == "unknown"
 
 
 def test_nonstd_error_status_timeout_content():
@@ -210,27 +221,20 @@ def test_nonstd_error_status_timeout_content():
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["source"] == "tool_return"
-    assert m["error_type"] == "transient"
+    assert m["error_type"] == "unknown"
 
 
 def test_nonstd_error_status_json_classifies_from_error_field():
-    # When status="error" and content is JSON, classification must use only the "error"
-    # field value — not keywords that appear in other fields like "query".
     content = '{"error": "api limit exceeded", "query": "connection test timeout"}'
     msg = _make_msg(content, status="error")
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
     assert m["source"] == "tool_return"
-    # "connection" and "timeout" in query must not trigger transient; the error field
-    # "api limit exceeded" doesn't match any rule → unknown.
     assert m["error_type"] == "unknown"
 
 
 def test_nonstd_error_status_json_no_error_key_is_unknown():
-    # JSON with no 'error' key must NOT be classified from other field values.
-    # Previously, {"message": "connection refused"} would be passed to _classify_error_text
-    # and match the transient rule via "connection"; now the full JSON is treated as unknown.
     content = '{"message": "connection refused"}'
     msg = _make_msg(content, status="error")
     result = normalize_tool_message(msg)
@@ -240,7 +244,6 @@ def test_nonstd_error_status_json_no_error_key_is_unknown():
 
 
 def test_nonstd_error_status_json_no_error_key_with_dangerous_field_is_unknown():
-    # {"user_id": 401} previously triggered auth stop; must now be unknown.
     content = '{"user_id": 401, "action": "login"}'
     msg = _make_msg(content, status="error")
     result = normalize_tool_message(msg)
@@ -250,20 +253,16 @@ def test_nonstd_error_status_json_no_error_key_with_dangerous_field_is_unknown()
     assert m["recommended_next_action"] != "stop", "spurious 401 in non-error field must not trigger stop"
 
 
-def test_nonstd_error_status_non_json_content_still_classified():
-    # Plain text (not JSON) with status="error" must still be classified from content.
+def test_nonstd_error_status_non_json_content_stays_unknown():
     content = "connection refused: remote host unreachable"
     msg = _make_msg(content, status="error")
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
-    assert m["error_type"] == "transient"
+    assert m["error_type"] == "unknown"
 
 
 def test_json_error_field_dict_is_serialized_not_repr():
-    # FastAPI-style: {"error": [{"loc": ["body"], "msg": "missing required field"}]}
-    # str() would produce Python repr containing 'missing required' → config → stop.
-    # json.dumps produces a clean JSON string that should not spuriously match.
     import json as _json
 
     error_val = [{"loc": ["body"], "msg": "missing required field"}]
@@ -272,25 +271,16 @@ def test_json_error_field_dict_is_serialized_not_repr():
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
-    # The JSON-serialized error list contains "missing required field" which IS in the config rule.
-    # This is correct classification (the validation error IS a config-class problem).
-    # The key requirement is that we're classifying from the error field value, not repr noise.
-    assert m["error_type"] == "config"
+    assert m["error_type"] == "unknown"
 
 
-def test_no_results_success_response_is_partial_success():
-    # Tools that return status="success" with "no results found" content must be treated as
-    # partial_success so ToolProgressMiddleware can detect stagnation.
+def test_no_results_prose_preserves_success_status():
     for phrase in ("no results found", "No Content Found here", "no images found for query"):
         msg = _make_msg(phrase, status="success")
         result = normalize_tool_message(msg)
         m = _meta(result)
-        assert m["status"] == "partial_success", f"expected partial_success for: {phrase!r}"
-        assert m["recommended_next_action"] == "rewrite_query"
-
-
-# ---------------------------------------------------------------------------
-# Partial success detection
+        assert m["status"] == "success", f"expected success for: {phrase!r}"
+        assert m["recommended_next_action"] == "continue"
 
 
 def test_partial_markers_detected():
@@ -298,31 +288,24 @@ def test_partial_markers_detected():
         msg = _make_msg(f"Here are some {marker} from the search.", status="success")
         result = normalize_tool_message(msg)
         m = _meta(result)
-        assert m["status"] == "partial_success", f"expected partial_success for: {marker}"
-        assert m["recommended_next_action"] == "rewrite_query"
+        assert m["status"] == "success", f"expected success for: {marker}"
+        assert m["recommended_next_action"] == "continue"
 
 
 def test_short_terse_success_is_not_partial():
-    # "Ok." is a valid, complete success response from mutation tools like write_file/str_replace.
-    # partial_success is now gated only on _PARTIAL_MARKERS, not content length.
+    # Mutation tools can legitimately return a short acknowledgment.
     msg = _make_msg("Ok.", status="success")
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "success"
-    assert m["source"] == "content_analysis"
+    assert m["source"] == "tool_return"
 
 
 def test_empty_content_is_not_partial():
-    # Empty content has no partial markers, so it falls through to success.
     msg = _make_msg("", status="success")
     result = normalize_tool_message(msg)
     m = _meta(result)
-    # Empty content falls through to success (no partial markers)
     assert m["status"] == "success"
-
-
-# ---------------------------------------------------------------------------
-# Success path
 
 
 def test_substantial_content_is_success():
@@ -331,13 +314,9 @@ def test_substantial_content_is_success():
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "success"
-    assert m["source"] == "content_analysis"
+    assert m["source"] == "tool_return"
     assert m["recommended_next_action"] == "continue"
     assert m["error_type"] is None
-
-
-# ---------------------------------------------------------------------------
-# ToolResultMeta dataclass round-trip
 
 
 def test_tool_result_meta_from_dict():
@@ -350,15 +329,9 @@ def test_tool_result_meta_from_dict():
     assert meta.recommended_next_action == "continue"
 
 
-# ---------------------------------------------------------------------------
-# stamp_exception_meta
-
-
 def test_stamp_exception_meta_classifies_from_exc_info_not_content():
-    # Content says "no results" but exc_info says "connection refused" —
-    # stamp_exception_meta must use exc_info, producing transient, not no_results.
     msg = _make_msg("Error: no results found", status="error")
-    result = stamp_exception_meta(msg, "ConnectionError: connection refused")
+    result = stamp_exception_meta(msg, ConnectionError("connection refused"))
     m = _meta(result)
     assert m["source"] == "exception"
     assert m["error_type"] == "transient"
@@ -367,7 +340,7 @@ def test_stamp_exception_meta_classifies_from_exc_info_not_content():
 def test_stamp_exception_meta_overwrites_existing_meta():
     pre_existing = {TOOL_META_KEY: {"source": "tool_return", "error_type": "unknown"}}
     msg = _make_msg("Error: no results found", status="error", kwargs=pre_existing)
-    result = stamp_exception_meta(msg, "PermissionError: access denied")
+    result = stamp_exception_meta(msg, PermissionError("access denied"))
     m = _meta(result)
     assert m["source"] == "exception"
     assert m["error_type"] == "permission"
@@ -375,13 +348,9 @@ def test_stamp_exception_meta_overwrites_existing_meta():
 
 def test_stamp_exception_meta_preserves_other_additional_kwargs():
     msg = _make_msg("irrelevant", status="error", kwargs={"subagent_status": "running"})
-    result = stamp_exception_meta(msg, "TimeoutError: timed out")
+    result = stamp_exception_meta(msg, TimeoutError("timed out"))
     assert result.additional_kwargs["subagent_status"] == "running"
     assert TOOL_META_KEY in result.additional_kwargs
-
-
-# ---------------------------------------------------------------------------
-# normalize_tool_result handles Command wrappers
 
 
 def test_normalize_tool_result_passthrough_command():
@@ -397,17 +366,13 @@ def test_normalize_tool_result_stamps_tool_message():
     assert TOOL_META_KEY in result.additional_kwargs
 
 
-# ---------------------------------------------------------------------------
-# JSON-wrapped error detection
-
-
 def test_normalize_json_error_config_classified_as_error():
     content = '{"error": "BRAVE_SEARCH_API_KEY is not configured", "query": "test"}'
     msg = _make_msg(content)
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
-    assert m["error_type"] == "config"
+    assert m["error_type"] == "unknown"
     assert m["source"] == "tool_return"
 
 
@@ -417,7 +382,7 @@ def test_normalize_json_error_no_results_classified_correctly():
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
-    assert m["error_type"] == "no_results"
+    assert m["error_type"] == "unknown"
     assert m["recoverable_by_model"] is True
 
 
@@ -451,7 +416,7 @@ def test_normalize_json_error_with_leading_whitespace():
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
-    assert m["error_type"] == "no_results"
+    assert m["error_type"] == "unknown"
 
 
 def test_normalize_json_numeric_error_classified_correctly():
@@ -460,7 +425,7 @@ def test_normalize_json_numeric_error_classified_correctly():
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
-    assert m["error_type"] == "not_found"
+    assert m["error_type"] == "unknown"
 
 
 def test_normalize_json_zero_error_not_treated_as_error():
@@ -482,7 +447,7 @@ def test_normalize_json_false_error_not_treated_as_error():
 def test_normalize_json_boolean_true_error_classified_as_unknown():
     """Boolean True in the error field means 'an error occurred' and must be classified.
 
-    str(True) = "True" which matches no keyword rule, so the result is error/unknown.
+    A boolean error flag supplies no category, so the result is error/unknown.
     This is intentional: a boolean True error is a real error with no further detail.
     """
     content = '{"error": true, "query": "test"}'
@@ -490,13 +455,9 @@ def test_normalize_json_boolean_true_error_classified_as_unknown():
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
-    assert m["error_type"] == "unknown"  # str(True)="True" matches no keyword rule
+    assert m["error_type"] == "unknown"
     assert m["recoverable_by_model"] is True
     assert m["recommended_next_action"] == "try_alternative"
-
-
-# ---------------------------------------------------------------------------
-# M2 regression: semantic-zero error strings must NOT be treated as errors
 
 
 @pytest.mark.parametrize(
@@ -521,44 +482,26 @@ def test_normalize_json_semantic_zero_error_string_not_treated_as_error(error_va
     assert m["status"] != "error", f'error="{error_value}" should not be treated as an error; got status={m["status"]!r}'
 
 
-# ---------------------------------------------------------------------------
-# Numeric keyword word-boundary matching (_match_keyword)
-
-
 @pytest.mark.parametrize(
     "content, expected_error_type",
     [
-        # Positive: numeric code at a word boundary → correct classification
-        ("Error: HTTP 500 Internal Server Error", "internal"),
-        ("Error: returned status 500", "internal"),
-        ("Error: 401 Unauthorized", "auth"),
-        ("Error: 404 Not Found", "not_found"),
-        # Negative: numeric code embedded inside a longer token → must resolve to "unknown".
-        # Use exact "unknown" assertions so any future rule additions that accidentally
-        # absorb these strings are caught (a broad exclusion list would miss new matches).
+        ("Error: HTTP 500 Internal Server Error", "unknown"),
+        ("Error: returned status 500", "unknown"),
+        ("Error: 401 Unauthorized", "unknown"),
+        ("Error: 404 Not Found", "unknown"),
         ("Error: took 500ms to respond", "unknown"),
         ("Error: query returned 4010 rows", "unknown"),
         ("Error: batch 401A failed", "unknown"),
         ("Error: response contained 5000 items", "unknown"),
     ],
 )
-def test_numeric_keyword_word_boundary(content: str, expected_error_type: str):
-    """Numeric HTTP codes must match only at word boundaries to avoid false positives.
-
-    '500ms', '4010', '401A', '5000' must not trigger internal/auth/not_found rules.
-    Negative cases assert exactly 'unknown' so future rule additions that accidentally
-    absorb these strings are caught — a broad exclusion-list assertion would not be.
-    """
+def test_numeric_codes_in_prose_do_not_determine_error_type(content: str, expected_error_type: str):
+    """HTTP-looking prose and embedded numbers are diagnostic text only."""
     msg = _make_msg(content, status="error")
     result = normalize_tool_message(msg)
     m = _meta(result)
     assert m["status"] == "error"
     assert m["error_type"] == expected_error_type, f"{content!r} → expected {expected_error_type!r}, got {m['error_type']!r}"
-
-
-# ---------------------------------------------------------------------------
-# Structured subagent_status failures (delegated task Command results)
-#
 
 
 @pytest.mark.parametrize(
@@ -576,7 +519,7 @@ def test_subagent_failure_statuses_stamp_error(subagent_status: str):
     m = _meta(result)
     assert m["status"] == "error"
     assert m["source"] == "tool_return"
-    assert m["error_type"] == "transient"
+    assert m["error_type"] == ("transient" if subagent_status in {"timed_out", "polling_timed_out"} else "unknown")
     assert result.additional_kwargs["subagent_status"] == subagent_status
 
 

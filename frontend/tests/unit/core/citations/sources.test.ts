@@ -1042,4 +1042,30 @@ describe("formatCitationMarkdownReference", () => {
       "[Paper A](https://example.com/a)",
     );
   });
+
+  it("escapes brackets in the title so the copied link keeps its label", () => {
+    const [source] = extractCitationSources(
+      "Evidence [citation:Paper A](https://example.com/a).",
+    );
+
+    expect(
+      formatCitationMarkdownReference({
+        ...source!,
+        title: "Why ] matters [draft",
+      }),
+    ).toBe("[Why \\] matters \\[draft](https://example.com/a)");
+  });
+
+  it("wraps a URL with parentheses so the destination stays intact", () => {
+    const [source] = extractCitationSources(
+      "Evidence [citation:Paper A](https://example.com/a).",
+    );
+
+    expect(
+      formatCitationMarkdownReference({
+        ...source!,
+        url: "https://example.com/a)b(c",
+      }),
+    ).toBe("[Paper A](<https://example.com/a)b(c>)");
+  });
 });

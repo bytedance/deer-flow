@@ -9,6 +9,7 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
+from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow
 
 _MISSING = object()
 
@@ -348,6 +349,92 @@ async def test_retry_item_in_running_batch_keeps_batch_schedulable(tmp_path) -> 
     claimed = await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=10)
     assert len(claimed) == 3
     assert failed["id"] in {item["id"] for item in claimed}
+
+
+async def _fail_first_item(repo: SubagentBatchRepository, now: datetime) -> dict:
+    failed = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    assert await repo.finalize_item(
+        failed["id"],
+        lease_owner="worker-1",
+        succeeded=False,
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        error="permanent",
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now,
+    )
+    return failed
+
+
+async def _assert_cancel_kept(repo: SubagentBatchRepository, failed: dict, now: datetime) -> None:
+    items = await repo.list_items("batch-1", user_id="user-1")
+    retried = next(item for item in items if item["id"] == failed["id"])
+    assert retried["status"] == "failed"
+    assert retried["error"] == "permanent"
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "cancelled"
+    assert batch["completed_at"] is not None
+    assert batch["counts"]["pending"] == 0
+    assert await repo.claim_items(now=now, lease_owner="worker-2", lease_seconds=60, limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_retry_item_does_not_reopen_cancelled_batch(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=3, max_live=3, max_running=3, max_attempts=1)
+    now = datetime.now(UTC)
+    failed = await _fail_first_item(repo, now)
+    cancelled = await repo.cancel_batch("batch-1", user_id="user-1")
+    assert cancelled is not None and cancelled["status"] == "cancelled"
+
+    assert await repo.retry_item("batch-1", failed["id"], user_id="user-1") is None
+
+    await _assert_cancel_kept(repo, failed, now + timedelta(seconds=1))
+
+
+class _CancelAfterItemRead:
+    """Session proxy that commits a cancel between ``retry_item``'s reads and its write."""
+
+    def __init__(self, session, cancel) -> None:
+        self._session = session
+        self._cancel = cancel
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    async def __aenter__(self):
+        await self._session.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return await self._session.__aexit__(*exc_info)
+
+    async def get(self, entity, ident, **kwargs):
+        row = await self._session.get(entity, ident, **kwargs)
+        if entity is SubagentBatchItemRow:
+            await self._cancel()
+        return row
+
+
+@pytest.mark.asyncio
+async def test_retry_item_does_not_reopen_batch_cancelled_after_its_read(tmp_path) -> None:
+    # SQLite ignores FOR UPDATE, so the cancel can commit after retry_item has
+    # read the batch as running. (On PostgreSQL the row lock blocks the cancel.)
+    repo = await _repo(tmp_path)
+    await _create(repo, count=3, max_live=3, max_running=3, max_attempts=1)
+    now = datetime.now(UTC)
+    failed = await _fail_first_item(repo, now)
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "running"
+    sessions = get_session_factory()
+    racing = SubagentBatchRepository(lambda: _CancelAfterItemRead(sessions(), lambda: repo.cancel_batch("batch-1", user_id="user-1")))
+
+    assert await racing.retry_item("batch-1", failed["id"], user_id="user-1") is None
+
+    await _assert_cancel_kept(repo, failed, now + timedelta(seconds=1))
 
 
 @pytest.mark.asyncio

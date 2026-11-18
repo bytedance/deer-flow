@@ -27,7 +27,8 @@
       "preapproved_file_sha256s": [
         "sha256:ea2521ba41c8fd16b2900758c890bb6c6d2b4b01da10b4a860facb8587ed0bde",
         "sha256:f86a5c9a3339ae90ffd59635201d09f2c8019dc35b72e517228d31d6b3e1912c",
-        "sha256:bd7bc409540265f91eac3f2c82e104b6db0e0aeb12b3aa7ef4d79116cff8791b"
+        "sha256:bd7bc409540265f91eac3f2c82e104b6db0e0aeb12b3aa7ef4d79116cff8791b",
+        "sha256:9de295d782b3d8e88b03c2489ea2bac64c894bab1f88302ce68b8fc61f72c535"
       ],
       "reason": "Required Claude CLI invocation uses a fixed executable, an argv list, captured output streams, and shell=False.",
       "expires_on": "2027-02-28"

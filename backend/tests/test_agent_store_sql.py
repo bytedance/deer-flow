@@ -54,6 +54,16 @@ def test_display_name_is_config_data_not_storage_identity(store):
     assert store.get_soul("reviewer", user_id="u1") == "Soul"
 
 
+def test_stored_null_description_reads_as_empty(store):
+    """One null description must not 500 the owner's whole agent list."""
+    store.create("broken", {"name": "broken", "description": None}, "Soul", user_id="u1")
+    store.create("healthy", {"name": "healthy", "description": "fine"}, "Soul", user_id="u1")
+
+    assert store.get("broken", user_id="u1").description == ""
+    assert {cfg.name: cfg.description for cfg in store.list(user_id="u1")} == {"broken": "", "healthy": "fine"}
+    assert {cfg.name: cfg.description for _, cfg in store.list_all()} == {"broken": "", "healthy": "fine"}
+
+
 def test_name_is_stored_lowercase_and_excluded_from_document(store):
     store.create("Mixed", {"name": "Mixed", "description": "d"}, "s", user_id="u1")
     # Stored lowercase (matches the on-disk layout), and the JSON document does

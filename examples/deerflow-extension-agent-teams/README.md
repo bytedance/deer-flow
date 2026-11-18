@@ -5,8 +5,9 @@ shared record. Each member gets its own persistent conversation, bound to its
 Custom Agent name. Ordinary Agent configuration, tools, skills, memory,
 checkpoints and approval rules remain in effect. There is no mandatory supervisor.
 
-Requires DeerFlow's native mention-provider and full Agent run-control contracts
-(`deerflow-extension-api >= 0.2.5`). This package is opt-in, with no core team
+Requires DeerFlow's native mention-provider, host-stamped executing Run identity
+and artifact snapshot/import contracts
+(`deerflow-extension-api >= 0.2.11`). This package is opt-in, with no core team
 feature or frontend rebuild.
 
 ## Install
@@ -61,7 +62,9 @@ same database; it cannot dispatch through its actions or middleware.
    recipient, and shows peer handoffs and return status. It updates automatically
    while visible, preserving unsent drafts, expanded details and approval input.
    Unchanged revisions return a small response. Task details open the full member
-   conversation or cancel an active task. Files stay in the original conversation.
+   conversation or cancel an active task. Registered files have retained versions
+   that can be downloaded or attached to another member's task; source files stay
+   in the original conversation.
 7. When a task or its result receipt needs input, expand its details. An ordinary
    clarification shows its question and accepts a text answer, submitted as a
    human message. A graph interrupt instead requires inspection in the member
@@ -79,6 +82,74 @@ same database; it cannot dispatch through its actions or middleware.
 
 A new authenticated native mention can also reconnect its team. Existing queued
 jobs then continue under that caller's current delegated capability.
+
+## Register and hand off files
+
+While executing a team request, a member can call `register_team_artifact` with
+`team_id`, a stable `request_id`, a short `name` and a regular file `path` under
+`/mnt/user-data/outputs/`. The returned `artifact_id` and numeric `version`
+identify a **pending** declaration. The service captures its bytes only after
+the producing request ends successfully and the host can reserve the idle source
+conversation. Registration checks the host-stamped running Run and its plugin
+execution key, including when admission acknowledgement is lost. Capture checks
+the producing checkpoint again inside that reservation; a later turn fails the
+declaration instead of supplying its bytes. It saves the content, SHA-256, size and member/task/run provenance
+in the plugin database. Registration records the file selected by that member;
+it does not prove that the run originally created it or that its contents passed
+independent verification.
+
+For a later revision, register with a new `request_id` and the existing
+`artifact_id`. Each version is immutable; source edits and deletion do not change
+saved bytes. An identical registration retry returns the same declaration/version,
+including after capture. Reusing its request ID with different arguments fails.
+
+Attach exact versions to the optional `artifacts` argument of `send_member`:
+
+```json
+{"team_id":"...","member_id":"...","request_id":"review-report","text":"Review the report","artifacts":[{"artifact_id":"...","version":1}]}
+```
+
+A task referencing a pending version waits without occupying an active slot.
+After capture, the host imports those retained bytes into the recipient's own
+uploads directory **before** admitting its Agent. The task input includes each
+copy's path, SHA-256, size and source. Import retries use the same content-addressed
+copy; they never replace a recipient-edited file. New runs verify local and remote
+copies under durable run admission, before Agent execution. Frozen inputs keep
+their original paths and versions and still require this check. Admission retries
+first reconcile their execution key, so an already admitted Run is not rechecked
+against files it may have edited itself. Failed/cancelled producers fail pending
+declarations, and unavailable attachments fail the receiving task instead of
+starting it with a missing file. Ready files created by a peer are also attached
+to its automatic result receipt, making them available to the requester.
+
+`list_team_artifacts` lists versions with optional `artifact_id`/`job_id` filters.
+Pages default to eight, accept `limit` from 1 to 20 and return `next_offset`;
+continue with the same filters. Declarations append in registration order, so
+new arrivals do not shift earlier offsets. `read_team_artifact` reads a specified
+`artifact_id`/`version` in base64 chunks; follow its byte `next_offset` until null.
+Both tools require the owning user's current member conversation and work without
+reconnect. Read responses, including metadata, stay within 24,000 UTF-8 JSON bytes.
+
+The **Team files** panel shows pending, saved and failed versions with their
+source. Download reads the same retained bytes. Select up to four saved versions
+to attach them to the next task; selection and the message draft survive updates.
+Source conversations remain accessible through the existing navigation control.
+
+Remote capture and imports use authorized sandbox leases and bounded POSIX
+snapshots, with no symlink traversal or replacement of existing files. E2B and
+Tenki use their configured sandbox home; BoxLite, OpenSandbox and AIO use
+`/mnt/user-data`. Remote images need `python3` with its standard library.
+Custom sandbox adapters must declare `artifact_root`; unsupported capture is
+rejected during registration. Mounted providers retain host filesystem capture.
+
+Limits are four declarations/attachments per task, 20 retained versions per team,
+2 MiB per file and 64 MiB of file content per owner across teams. Pending/failed
+versions still consume a version slot; start another team at its capacity. Deleting
+a finished team removes its plugin snapshots, while source conversations and
+already imported recipient copies remain. File capture/import requires POSIX and
+a persistent plugin database; non-mounted sandbox providers receive the bytes
+through the host's ordinary authorized sandbox lease. Existing human-input and
+task-completion rules still apply; registration itself is not file-content verification.
 
 ## Maintain team public state
 
@@ -202,8 +273,10 @@ own teams. Sharing a host conversation does **not** share its team's private dat
 - Each team has its own execution/control lock and background worker. Slow host
   calls in one team do not hold another team's create, send, cancel, resume,
   delete or reconnect operations, nor stop its background polling. Operations
-  within the same team remain serialized, with a ten-second timeout per job
-  advancement. Shutdown cancels and drains all workers before releasing the
+  within the same team remain serialized, with a ten-second budget for ordinary
+  job advancement. Each artifact import or capture pauses that budget and has
+  its own 25-minute maximum for the bounded remote snapshot protocol (up to
+  43 chunks with 30-second command timeouts). Shutdown cancels and drains all workers before releasing the
   database service lock.
 - Each conversation is serialized, including result receipts targeting a source
   shared across teams. The first unfinished job retains the conversation until

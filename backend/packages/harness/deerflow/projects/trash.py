@@ -200,6 +200,8 @@ def _sweep_project_documents_dir(documents_dir: Path, *, protected: set[Path], c
     24-hour guard; a row's namespace (active or trashed, even after restore
     re-pointed it to another project) is protected in full (§8.3). Empty
     parents are rmdir'd best-effort. Nothing younger is ever collected.
+    ``documents_dir`` must be resolved, like the protected namespaces it is
+    compared against.
     """
     staging = documents_dir / ".staging"
     if staging.is_dir():
@@ -266,7 +268,11 @@ def _reconcile_storage(paths: Paths, *, user_id: str | None, rows: list[dict], g
         for project_dir in sorted(projects_root.iterdir()):
             documents_dir = project_dir / "documents"
             if documents_dir.is_dir():
-                _sweep_project_documents_dir(documents_dir, protected=protected_by_user.get(uid, set()), cutoff_ts=cutoff_ts, report=report)
+                # Protected namespaces come from ``project_document_path``, which
+                # resolves symlinks. Walking an unresolved root through a
+                # symlinked ``.deer-flow``, ``users/`` or ``projects/`` would match
+                # none of them and collect live originals as orphans.
+                _sweep_project_documents_dir(documents_dir.resolve(), protected=protected_by_user.get(uid, set()), cutoff_ts=cutoff_ts, report=report)
 
 
 def _parse_iso(value: object) -> datetime | None:

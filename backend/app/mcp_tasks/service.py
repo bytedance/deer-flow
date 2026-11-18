@@ -1689,11 +1689,60 @@ class McpTaskService:
             _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
         )
 
+    def _log_pending_compensation_tasks(self, *, reason: str) -> None:
+        pending_count = sum(not task.done() for task in self._compensation_tasks)
+        if pending_count:
+            logger.warning(
+                "%s; %d MCP compensation task(s) remain in the background",
+                reason,
+                pending_count,
+            )
+
+    async def _drain_compensation_tasks(self, *, deadline: float) -> None:
+        """Drain service-owned compensation work before Gateway dependencies close."""
+        loop = asyncio.get_running_loop()
+        while self._compensation_tasks:
+            tasks = tuple(self._compensation_tasks)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            # Run completion callbacks before taking the next snapshot. A
+            # handoff may finish one task while registering another.
+            await asyncio.sleep(0)
+
+        self._log_pending_compensation_tasks(
+            reason="MCP compensation drain reached its deadline",
+        )
+
+    async def _drain_compensation_tasks_preserving_cancellation(self, *, deadline: float) -> None:
+        """Finish the bounded drain before propagating caller cancellation."""
+        drain_task = asyncio.create_task(
+            self._drain_compensation_tasks(deadline=deadline),
+            name="deerflow-mcp-compensation-drain",
+        )
+        try:
+            await asyncio.shield(drain_task)
+        except asyncio.CancelledError:
+            await wait_for_task_until(drain_task, deadline=deadline)
+            if drain_task.done():
+                drain_task.result()
+            raise
+
     async def stop(self) -> None:
+        loop = asyncio.get_running_loop()
         task = self._task
         if task is None:
+            await self._drain_compensation_tasks_preserving_cancellation(
+                deadline=loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            )
             return
-        loop = asyncio.get_running_loop()
         if self._stopping_task is not task:
             self._stopping_task = task
             self._stop_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
@@ -1710,9 +1759,19 @@ class McpTaskService:
         except asyncio.CancelledError:
             if not await wait_for_task_until(task, deadline=deadline):
                 self._log_stop_timeout(task)
+                self._log_pending_compensation_tasks(
+                    reason="MCP task poller cleanup reached its deadline before compensation drain could start",
+                )
+            else:
+                await self._drain_compensation_tasks_preserving_cancellation(deadline=deadline)
             raise
         if task not in done:
             self._log_stop_timeout(task)
+            self._log_pending_compensation_tasks(
+                reason="MCP task poller cleanup reached its deadline before compensation drain could start",
+            )
+            return
+        await self._drain_compensation_tasks_preserving_cancellation(deadline=deadline)
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():

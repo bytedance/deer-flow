@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -116,9 +117,13 @@ class MemoryStreamBridge(StreamBridge):
     # -- StreamBridge API ------------------------------------------------------
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
+        data = deepcopy(data)
         stream = self._get_or_create_stream(run_id)
-        entry = StreamEvent(id=self._next_id(run_id), event=event, data=data)
         async with stream.condition:
+            # Cleanup or END may win the Condition after this producer captures the generation.
+            if stream.retired or stream.ended:
+                return
+            entry = StreamEvent(id=self._next_id(run_id), event=event, data=data)
             stream.events.append(entry)
             if len(stream.events) > self._maxsize:
                 overflow = len(stream.events) - self._maxsize
@@ -130,6 +135,8 @@ class MemoryStreamBridge(StreamBridge):
     async def publish_end(self, run_id: str) -> None:
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
+            if stream.retired or stream.ended:
+                return
             stream.ended = True
             stream.condition.notify_all()
 
@@ -191,7 +198,8 @@ class MemoryStreamBridge(StreamBridge):
             if entry is END_SENTINEL:
                 yield END_SENTINEL
                 return
-            yield entry
+            # Consumers identify sentinels with `is`; never deep-copy them.
+            yield deepcopy(entry) if isinstance(entry, StreamEvent) and entry is not HEARTBEAT_SENTINEL else entry
             if should_stop:
                 return
 

@@ -1822,3 +1822,64 @@ def test_embedded_upload_retries_claim_collision(tmp_path, monkeypatch, channel_
     advertised = "/mnt/user-data/uploads/report_2.pdf"
     assert advertised in result.text
     assert synced == ([] if mounted else [(advertised, payload)])
+
+
+class TestWecomMediaSizeLimits:
+    """WeCom's aibot media upload accepts images up to 10 MB.
+
+    The adapter used to cap images at 2 MB — the *voice* limit in the same
+    protocol — and silently skipped anything larger before uploading it, so a
+    2-10 MB chart never reached the user. See
+    https://developer.work.weixin.qq.com/document/path/101917
+    """
+
+    @staticmethod
+    def _channel():
+        from types import SimpleNamespace
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), {})
+        channel._ws_client = SimpleNamespace(reply=AsyncMock())
+        channel._upload_media_ws = AsyncMock(return_value="media-1")
+        return channel
+
+    def test_image_above_two_megabytes_reaches_the_uploader(self, tmp_path):
+        channel = self._channel()
+        msg = _file_reply(tmp_path, channel_name="wecom")
+        channel._ws_frames[msg.thread_ts] = {"body": {"msgid": msg.thread_ts}}
+        channel._ws_stream_ids[msg.thread_ts] = "stream-1"
+
+        path = tmp_path / "chart.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        attachment = ResolvedAttachment(
+            "/mnt/user-data/outputs/chart.png",
+            path,
+            "chart.png",
+            "image/png",
+            5 * 1024 * 1024,
+            True,
+        )
+
+        assert _run(channel.send_file(msg, attachment)) is True
+        channel._upload_media_ws.assert_awaited_once()
+
+    def test_image_above_the_platform_limit_is_still_skipped(self, tmp_path):
+        channel = self._channel()
+        msg = _file_reply(tmp_path, channel_name="wecom")
+        channel._ws_frames[msg.thread_ts] = {"body": {"msgid": msg.thread_ts}}
+        channel._ws_stream_ids[msg.thread_ts] = "stream-1"
+
+        path = tmp_path / "huge.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        attachment = ResolvedAttachment(
+            "/mnt/user-data/outputs/huge.png",
+            path,
+            "huge.png",
+            "image/png",
+            11 * 1024 * 1024,
+            True,
+        )
+
+        assert _run(channel.send_file(msg, attachment)) is False
+        channel._upload_media_ws.assert_not_awaited()

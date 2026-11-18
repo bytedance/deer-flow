@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from app.gateway.deps import require_admin_user
 from app.gateway.mcp_oauth_tokens import forget_unconfigured_mcp_oauth_tokens
 from app.gateway.persistent_writes import run_drained_write
+from app.gateway.secret_masking import MASKED_VALUE, mask_secret_values, normalize_config_key
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpRoutingConfig,
@@ -457,6 +458,7 @@ class McpServerConfigResponse(BaseModel):
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
+    agent_auth: bool = Field(default=False, description="Require an administrator-granted agent credential on this deployment HTTP server")
     user_auth: McpUserScopedAuthConfigResponse | None = Field(default=None, description="Per-user credential injection for MCP HTTP/SSE servers")
     headers_from_context: McpContextHeadersConfigResponse | None = Field(default=None, description="Per-request credential injection for MCP HTTP/SSE servers: map header names to config.context.secrets keys")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
@@ -552,29 +554,19 @@ class McpCacheResetResponse(BaseModel):
     message: str = Field(description="Human-readable reset status")
 
 
-_MASKED_VALUE = "***"
+_MASKED_VALUE = MASKED_VALUE
 _SENSITIVE_EXTRA_KEY_RE = re.compile(
     r"(^|_)(api_key|apikey|access_key|private_key|client_secret|secret|token|password|passwd|credential|credentials|authorization|bearer)(_|$)",
     re.IGNORECASE,
 )
 
 
-def _normalize_config_key(key: str) -> str:
-    with_boundaries = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", key)
-    with_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", with_boundaries)
-    return re.sub(r"[^a-z0-9]+", "_", with_boundaries.lower()).strip("_")
-
-
 def _is_sensitive_extra_key(key: str) -> bool:
-    return bool(_SENSITIVE_EXTRA_KEY_RE.search(_normalize_config_key(key)))
+    return bool(_SENSITIVE_EXTRA_KEY_RE.search(normalize_config_key(key)))
 
 
 def _mask_sensitive_extra_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _MASKED_VALUE if _is_sensitive_extra_key(str(key)) else _mask_sensitive_extra_value(nested) for key, nested in value.items()}
-    if isinstance(value, list):
-        return [_mask_sensitive_extra_value(item) for item in value]
-    return value
+    return mask_secret_values(value, _is_sensitive_extra_key)
 
 
 def _contains_masked_sensitive_extra_value(key: str, value: Any) -> bool:
@@ -1115,6 +1107,9 @@ def _merge_preserving_secrets(
     }
     if preserve_omitted_fields and "user_auth" not in incoming.model_fields_set:
         update["user_auth"] = existing.user_auth
+    # Changing an ordinary field must not silently remove credential enforcement.
+    if "agent_auth" not in incoming.model_fields_set:
+        update["agent_auth"] = existing.agent_auth
     if preserve_omitted_fields and "headers_from_context" not in incoming.model_fields_set:
         update["headers_from_context"] = existing.headers_from_context
     if preserve_omitted_fields and "routing" not in incoming.model_fields_set:

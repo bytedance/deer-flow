@@ -29,6 +29,50 @@ function step(message_index: number): SubtaskStep {
 }
 
 describe("computeNextSubtask", () => {
+  it("backfills missing indices without replacing live text or structured arguments", () => {
+    const live = {
+      ...step(2),
+      kind: "ai" as const,
+      text: "Complete reasoning",
+      tool_calls: [{ name: "write_file", args: { content: "Complete file" } }],
+    };
+    const history = [
+      step(1),
+      {
+        ...live,
+        text: "Complete",
+        truncated: true,
+        tool_calls: [{ name: "write_file", args: '{"content":"Complete' }],
+      },
+    ];
+    const previous = baseTask({ steps: [live, step(3)] });
+
+    const { next } = computeNextSubtask(
+      previous,
+      { id: "t1", steps: history },
+      { stepSource: "history" },
+    );
+
+    expect(next.steps).toEqual([step(1), live, step(3)]);
+    expect(previous.steps).toEqual([live, step(3)]);
+  });
+
+  it("accepts history without existing steps and lets subsequent live updates replace it", () => {
+    const historical = { ...step(1), text: "prefix", truncated: true };
+    const { next: restored } = computeNextSubtask(
+      baseTask(),
+      { id: "t1", steps: [historical] },
+      { stepSource: "history" },
+    );
+    expect(restored.steps).toEqual([historical]);
+
+    const { next } = computeNextSubtask(restored, {
+      id: "t1",
+      steps: [step(1)],
+    });
+    expect(next.steps).toEqual([step(1)]);
+  });
+
   it("merges step deltas into the provided previous, preserving both", () => {
     const previous = baseTask({ steps: [step(1), step(2)] });
 

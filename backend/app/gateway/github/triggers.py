@@ -81,6 +81,11 @@ def _comment_body(event: str, payload: dict[str, Any]) -> str:
 
 def _author_login(event: str, payload: dict[str, Any]) -> str | None:
     """Login of the human who triggered the event, for ``allow_authors``."""
+    # Object authors need not be the actor on edits, labels, or dismissals.
+    # Keep the object fallback for payloads without a sender identity.
+    sender_login = (payload.get("sender") or {}).get("login")
+    if isinstance(sender_login, str):
+        return sender_login
     if event in ("issue_comment", "pull_request_review_comment"):
         login = (payload.get("comment") or {}).get("user", {}).get("login")
     elif event == "pull_request":

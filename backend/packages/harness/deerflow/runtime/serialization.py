@@ -10,29 +10,47 @@ Consumers: ``deerflow.runtime.runs.worker`` (SSE publishing) and
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
 def serialize_lc_object(obj: Any) -> Any:
-    """Recursively serialize a LangChain object to a JSON-serialisable dict."""
+    """Recursively serialize a LangChain object to a JSON-serialisable dict.
+
+    Non-finite floats (``NaN`` / ``inf`` / ``-inf``) are normalized to ``None``.
+    They are not valid JSON (RFC 8259) and reach this serializer from ordinary
+    runtime data — e.g. ``json.loads("1e400")`` yields ``inf`` for a tool parsing
+    external JSON, or a provider logprob of ``-inf`` for a zero-probability token.
+    Left untouched they break both display paths that share this serializer: the
+    SSE wire (``format_sse`` / the Redis bridge encode with the lenient default,
+    emitting bare ``NaN`` / ``Infinity`` tokens the ``langgraph-sdk`` / useStream
+    decoder rejects) and the REST surface (Starlette's ``JSONResponse`` uses
+    ``allow_nan=False`` and raises, turning a thread read into HTTP 500). This is
+    a display/wire normalization only; persisted checkpoint state is never routed
+    through here.
+    """
     if obj is None:
         return None
-    if isinstance(obj, (str, int, float, bool)):
+    # ``bool`` is a subclass of ``int``, so it passes through unchanged here.
+    if isinstance(obj, (str, int)):
         return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
         return {k: serialize_lc_object(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [serialize_lc_object(item) for item in obj]
-    # Pydantic v2
+    # Pydantic v2 — recurse so non-finite floats nested in the dump (e.g. a
+    # message's ``response_metadata``) are normalized too, not returned raw.
     if hasattr(obj, "model_dump"):
         try:
-            return obj.model_dump()
+            return serialize_lc_object(obj.model_dump())
         except Exception:
             pass
     # Pydantic v1 / older objects
     if hasattr(obj, "dict"):
         try:
-            return obj.dict()
+            return serialize_lc_object(obj.dict())
         except Exception:
             pass
     # Interrupt is a __slots__ class — no model_dump/dict/__dict__, so it
@@ -124,10 +142,22 @@ def serialize_channel_values_for_api(channel_values: dict[str, Any]) -> dict[str
 
 
 def serialize_messages_tuple(obj: Any) -> Any:
-    """Serialize a messages-mode tuple ``(chunk, metadata)``."""
+    """Serialize a messages-mode tuple ``(chunk, metadata)``.
+
+    The metadata dict rides the same wire as the chunk, so it goes through the
+    same canonical serializer: a non-finite float in metadata (LangGraph merges
+    caller-supplied run metadata, which can carry one) would otherwise reach
+    ``format_sse`` / the Redis bridge encode and emit a bare ``NaN`` /
+    ``Infinity`` token the SSE decoder rejects. Real LangGraph metadata also
+    contains tuples (``langgraph_triggers`` / ``langgraph_path``); they become
+    lists here, their JSON wire shape anyway.
+    """
     if isinstance(obj, tuple) and len(obj) == 2:
         chunk, metadata = obj
-        return [serialize_lc_object(chunk), metadata if isinstance(metadata, dict) else {}]
+        return [
+            serialize_lc_object(chunk),
+            serialize_lc_object(metadata) if isinstance(metadata, dict) else {},
+        ]
     return serialize_lc_object(obj)
 
 

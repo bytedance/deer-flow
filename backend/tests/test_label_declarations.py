@@ -1,8 +1,11 @@
-"""Offline checks of the triage workflow's literal label declarations."""
+"""Offline checks of the triage workflow's label declarations and area rules."""
 
 from __future__ import annotations
 
 import importlib.util
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -193,3 +196,108 @@ def test_every_real_applied_label_is_enforced(files, capsys, label):
     triage.write_text((REPO_ROOT / ".github/workflows/triage.yml").read_text(encoding="utf-8"), encoding="utf-8")
     assert checker.main() == 1
     assert f"  - {label}\n" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Workflow replay requires Node.js")
+def test_pr_area_labels_cover_backend_packages():
+    harness = "backend/packages/harness"
+    deerflow = REPO_ROOT / harness / "deerflow"
+    specific_areas = {
+        "agents": "area:agents",
+        "subagents": "area:agents",
+        "reflection": "area:agents",
+        "sandbox": "area:sandbox",
+        "skills": "area:skills",
+        "mcp": "area:mcp",
+    }
+    cases = [
+        ([f"{harness}/pyproject.toml", "backend/uv.lock"], {"area:backend", "area:deps"}),
+        (["backend/packages/extension-api/deerflow_extension_api/__init__.py"], {"area:backend"}),
+        ([f"{harness}/deerflow/__init__.py"], {"area:backend"}),
+        ([f"{harness}/deerflow/agents_extra/example.py"], {"area:backend"}),
+        (
+            ["frontend/src/example.tsx", f"{harness}/deerflow/agents/example.py", f"{harness}/deerflow/community/README.md"],
+            {"area:frontend", "area:agents", "area:backend", "area:docs"},
+        ),
+    ]
+    for directory in sorted(deerflow.iterdir()):
+        if directory.is_dir() and directory.name != "__pycache__":
+            path = directory.relative_to(REPO_ROOT).as_posix()
+            area = specific_areas.get(directory.name, "area:backend")
+            cases.append(([f"{path}/example.py"], {area}))
+
+    for (paths, expected), labels in zip(cases, replay_area_labels([paths for paths, _ in cases]), strict=True):
+        assert sorted(labels) == sorted(expected), paths
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Workflow replay requires Node.js")
+def test_pr_area_labels_cover_the_helm_chart():
+    """A chart-only change is release/deploy tooling, so it must carry an area.
+
+    ``deploy/`` holds the Helm chart and nothing else: ``scripts/bump_version.sh``
+    rewrites its versions, and ``scripts/verify_versions.sh`` plus the chart
+    workflow gate its rendering. A PR that touches the chart and its
+    ``backend/tests/test_helm_*.py`` proves nothing about the product areas, so
+    before this rule it matched no entry at all and arrived with no area label
+    (for example #8123, which reached merge with only its size and risk labels).
+    """
+    cases = [
+        (
+            ["deploy/helm/deer-flow/templates/nginx-deployment.yaml", "backend/tests/test_helm_image_pull_secrets.py"],
+            {"area:ci"},
+        ),
+        (["deploy/helm/deer-flow/Chart.yaml"], {"area:ci"}),
+        (["deploy/helm/deer-flow/README.md", "deploy/helm/deer-flow/values.yaml"], {"area:ci", "area:docs"}),
+    ]
+
+    for (paths, expected), labels in zip(cases, replay_area_labels([paths for paths, _ in cases]), strict=True):
+        assert sorted(labels) == sorted(expected), paths
+
+
+def replay_area_labels(changes: list[list[str]]) -> list[list[str]]:
+    """Run the workflow's own ``AREA_RULES`` over each path list, using Node.
+
+    The area labels are produced by JavaScript inside the workflow, so a Python
+    copy of the rules would only prove itself. The workflow body is evaluated
+    with a stub client that records the ``addLabels`` batches instead.
+    """
+    scripts = checker.workflow_scripts(checker.TRIAGE_WORKFLOW.read_text(encoding="utf-8"))
+    (script,) = (source for source in scripts if "const AREA_RULES =" in source)
+    result = subprocess.run(
+        [
+            "node",
+            "-e",
+            """
+const { readFileSync } = require('node:fs');
+const { script, changes } = JSON.parse(readFileSync(0, 'utf8'));
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const applyLabels = new AsyncFunction('github', 'context', 'core', script);
+
+async function replay(paths) {
+  const labels = [];
+  const github = {
+    paginate: (list) => list(),
+    rest: {
+      pulls: { listFiles: () => paths.map(filename => ({ filename })) },
+      issues: {
+        listLabelsOnIssue: () => [],
+        addLabels: (request) => { labels.push(...request.labels); },
+      },
+    },
+  };
+  const context = { repo: { owner: 'test', repo: 'test' }, payload: { pull_request: { number: 1 }, action: 'synchronize' } };
+  await applyLabels(github, context, { info() {} });
+  return labels.filter(label => label.startsWith('area:'));
+}
+
+Promise.all(changes.map(replay)).then(labels => console.log(JSON.stringify(labels)));
+""",
+        ],
+        input=json.dumps({"script": script, "changes": changes}),
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)

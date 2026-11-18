@@ -14,6 +14,7 @@ on:
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
       - 'examples/deerflow-extension-bookmarks/**'
+      - 'examples/deerflow-extension-office-preview/**'
       - '.github/workflows/e2e-tests.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -28,6 +29,7 @@ on:
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
       - 'examples/deerflow-extension-bookmarks/**'
+      - 'examples/deerflow-extension-office-preview/**'
       - '.github/workflows/e2e-tests.yml'
 
 concurrency:
@@ -41,6 +43,15 @@ jobs:
   e2e-tests:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
+    # Keep the image version aligned with frontend/pnpm-lock.yaml. Browsers and
+    # OS libraries are installed together, without per-shard CDN downloads.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --ipc=host
+    env:
+      # The host tool cache can contain Python built for a newer OpenSSL than
+      # this image. uv's standalone Python carries compatible runtime libraries.
+      UV_PYTHON_PREFERENCE: only-managed
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -51,21 +62,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # The bookmark browser test starts the real Python action/router fixture.
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
           # Keep aligned with backend/Dockerfile and other backend workflows.
           version: "0.11.1"
 
+      - name: Install container-compatible Python
+        run: uv python install 3.12
+
       - name: Install backend dependencies (bookmark plugin gateway)
         working-directory: backend
-        run: uv sync --locked
+        run: |
+          uv sync --locked
+          uv run --no-sync python -c 'import ssl, sqlite3'
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -82,9 +92,20 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright Chromium
+      # Playwright collects the resource suite before selecting a shard. Its
+      # synthetic Office fixtures use JSZip from the extension's locked install.
+      - name: Install Office preview test dependencies
+        working-directory: examples/deerflow-extension-office-preview
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify Playwright Chromium
         working-directory: frontend
-        run: npx playwright install chromium --with-deps
+        id: chromium
+        run: >-
+          node --input-type=module -e
+          'import { chromium } from "@playwright/test";
+          const browser = await chromium.launch();
+          await browser.close();'
 
       - name: Run E2E tests
         working-directory: frontend
@@ -100,7 +121,7 @@ jobs:
 
       - name: Run auth recovery E2E tests
         # Keep auth coverage unsharded and run it even if the first shard fails.
-        if: ${{ !cancelled() && matrix.shard == 1 }}
+        if: ${{ !cancelled() && matrix.shard == 1 && steps.chromium.outcome == 'success' }}
         working-directory: frontend
         run: >-
           pnpm exec playwright test -c playwright.auth.config.ts

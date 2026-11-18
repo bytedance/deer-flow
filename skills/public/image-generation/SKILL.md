@@ -53,6 +53,10 @@ Parameters:
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
 
+## Optional Templates
+
+Templates are examples for matching requests. Preserve the user's subject, characters, panel count, layout and style; do not import an example's content into unrelated images. Read only the relevant template.
+
 ## Character Generation Example
 
 User request: "Create a Tokyo street style woman character in 1990s"
@@ -150,6 +154,14 @@ Read the following template file only when matching the user request.
 - [Doraemon Comic](templates/doraemon.md)
 
 ## Output Handling
+
+Gemini image data is base64-decoded before the output directory or
+file is created. If decoding fails, an existing output image is preserved and no
+empty output file is left behind.
+
+The legacy MiniMax `/v1/image_generation` writer opens the destination before
+decoding. If decoding fails, it can leave an empty file or erase an existing
+image. Use a fresh `--output-file` path when you need to keep the previous image.
 
 After generation:
 

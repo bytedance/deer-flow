@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from exa_py import Exa
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url
 from deerflow.config import get_app_config
 
@@ -82,7 +83,12 @@ def _get_exa_client(tool_name: str = "web_search") -> Exa:
 
 
 def _build_exa_client(extra: dict, base_url: str | None) -> Exa:
-    kwargs = {"api_key": extra.get("api_key")}
+    api_key = resolve_api_key(extra.get("api_key")) or resolve_api_key(os.getenv("EXA_API_KEY"))
+    # The SDK re-reads EXA_API_KEY unstripped when api_key is None and sends "" as
+    # is, so a missing or blank key fails here, before any request.
+    if api_key is None:
+        raise ValueError("Exa API key must be set in the tool config or EXA_API_KEY")
+    kwargs = {"api_key": api_key}
     if base_url:
         kwargs["base_url"] = base_url
     return Exa(**kwargs)

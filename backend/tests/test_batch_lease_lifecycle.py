@@ -308,17 +308,31 @@ async def test_each_scheduler_claim_has_a_fresh_ownership_generation(repository,
 
 
 @pytest.mark.asyncio
-async def test_recovery_does_not_overwrite_a_renewal_after_its_expiry_read(repository, monkeypatch):
+@pytest.mark.parametrize("batch_paused", [False, True])
+async def test_recovery_does_not_overwrite_a_renewal_after_its_expiry_read(repository, monkeypatch, batch_paused):
     await create_batch(repository)
     now = datetime.now(UTC)
     item = (await repository.claim_items(now=now, lease_owner="live-worker", lease_seconds=10, limit=1))[0]
+    if batch_paused:
+        await repository.pause_batch("batch-lease-test", user_id="user-1")
     paused, release = asyncio.Event(), asyncio.Event()
     original = AsyncSession.execute
     recovery = None
+    recovery_update_rowcounts = []
 
     async def execute(session, statement, *args, **kwargs):
         result = await original(session, statement, *args, **kwargs)
-        if asyncio.current_task() is recovery and not paused.is_set() and getattr(statement, "is_select", False) and "lease_expires_at <" in str(statement):
+        if asyncio.current_task() is recovery and getattr(statement, "is_update", False) and statement.table.name == SubagentBatchItemRow.__tablename__:
+            recovery_update_rowcounts.append(result.rowcount)
+        if (
+            asyncio.current_task() is recovery
+            and not paused.is_set()
+            and getattr(statement, "is_select", False)
+            and "lease_expires_at <" in str(statement)
+            and any(getattr(column, "table", None) is SubagentBatchItemRow.__table__ for column in statement.selected_columns)
+        ):
+            # The parent SELECT also contains the expiry predicate via EXISTS.
+            # Park only after the expired item itself has been read.
             paused.set()
             await release.wait()
         return result
@@ -332,6 +346,7 @@ async def test_recovery_does_not_overwrite_a_renewal_after_its_expiry_read(repos
     finally:
         release.set()
         claimed = await asyncio.wait_for(recovery, 3)
+    assert recovery_update_rowcounts == [0], "recovery must attempt an item update and reject the renewed lease"
     assert claimed == []
     assert await row_snapshot(repository, item["id"]) == expected
 

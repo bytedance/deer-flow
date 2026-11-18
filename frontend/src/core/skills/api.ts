@@ -1,6 +1,7 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
+import { isErrorDetailRecord, readSkillErrorDetail } from "./error-detail";
 import type { Skill, SkillLoadDiagnostic } from "./type";
 
 // Keep this in lockstep with `_MAX_SKILL_ARCHIVE_UPLOAD_BYTES` in
@@ -93,26 +94,16 @@ export function formatSkillSecurityFindings(
 }
 
 async function readErrorDetail(response: Response): Promise<SkillErrorDetail> {
-  const data = (await response.json().catch(() => ({}))) as {
-    detail?:
-      | string
-      | {
-          message?: unknown;
-          skill_name?: unknown;
-          findings?: unknown;
-        };
-  };
-  if (typeof data.detail === "string") {
-    return { message: data.detail, findings: [] };
+  const detail = await readSkillErrorDetail(response);
+  if (typeof detail === "string") {
+    return { message: detail, findings: [] };
   }
-  if (typeof data.detail?.message === "string") {
+  if (isErrorDetailRecord(detail) && typeof detail.message === "string") {
     return {
-      message: data.detail.message,
+      message: detail.message,
       skillName:
-        typeof data.detail.skill_name === "string"
-          ? data.detail.skill_name
-          : undefined,
-      findings: parseSecurityFindings(data.detail.findings),
+        typeof detail.skill_name === "string" ? detail.skill_name : undefined,
+      findings: parseSecurityFindings(detail.findings),
     };
   }
   return {

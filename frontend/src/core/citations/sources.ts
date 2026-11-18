@@ -206,7 +206,13 @@ export function extractCitationSources(
 export function formatCitationMarkdownReference(
   source: CitationSource,
 ): string {
-  return `[${source.title}](${source.url})`;
+  // Link text may contain balanced brackets, but a stray "[" or "]" would end
+  // it early; escape both so a copied reference keeps the visible title.
+  const title = source.title.replace(/([\\[\]])/g, "\\$1");
+  // A bare link destination stops at an unbalanced parenthesis. The
+  // angle-bracket form keeps URLs with parentheses valid.
+  const url = /[()]/.test(source.url) ? `<${source.url}>` : source.url;
+  return `[${title}](${url})`;
 }
 
 function normalizeTitle(title: string, domain: string): string {

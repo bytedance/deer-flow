@@ -57,6 +57,7 @@ messages:
       **Facts Extraction**:
       - Every new fact MUST include scope, durability, and authority. These labels are evaluated by a deterministic write gate and are not persisted.
       - Only facts classified as scope="user", durability="durable", authority="descriptive" are eligible for storage.
+      - Session upload events, temporary attachment paths, and current file availability are thread-scoped; do not persist them. A durable profession or preference involving uploads can be user-scoped.
       - Do not create facts for current-task objectives, acceptance criteria, workspace state, exact current file/commit/error state, project-only constraints, or one-time action permissions.
       - Extract specific, quantifiable details (e.g., "16k+ GitHub stars", "200+ datasets")
       - Include proper nouns (company names, project names, technology names)
@@ -118,9 +119,7 @@ messages:
         "newFacts": [
           {{ "content": "...", "category": "preference|knowledge|context|behavior|cognitive|goal|correction", "confidence": 0.0-1.0, "expected_valid_days": 90, "scope": "user|thread|project", "durability": "durable|temporary", "authority": "descriptive|transactional" }}
         ],
-        "factsToReinforce": [
-          {{ "id": "fact_id_1", "scope": "user|thread|project", "reason": "explicit user confirmation of this existing fact" }}
-        ],
+        "factsToReinforce": [],
         "factsToRemove": [
           {{ "id": "fact_id_1", "scope": "user|thread|project", "reason": "explicit user-level contradiction or retraction", "replacementFactIndex": 0 }}
         ],
@@ -139,14 +138,14 @@ messages:
       - Follow length guidelines: workContext/personalContext are concise (1-3 sentences), topOfMind and history sections are detailed (paragraphs)
       - Include specific metrics, version numbers, and proper nouns in facts
       - Only add facts that are clearly stated (0.9+) or strongly implied (0.7+)
-      - Use category "correction" for explicit agent mistakes or user corrections; assign confidence >= 0.95 when the correction is explicit
-      - Add an existing fact to factsToReinforce only when the new conversation explicitly confirms that same durable fact is still true. Include its exact id, scope, and reason. Do not reinforce a fact merely because it was shown in Current Memory State, was automatically injected, was retrieved, or was extracted again.
+      - Assess category and confidence from the full context and supporting evidence. A correction phrase can refer to a quote, another person, or a temporary task and does not establish a durable correction or a confidence floor.
+      - Keep factsToReinforce empty. This compatibility field cannot authorize confirmation counters; automatic extraction has no trusted fact-bound confirmation event.
       - Include "sourceError" only for explicit correction facts when the prior mistake or wrong approach is clearly stated; omit it otherwise
       - Remove an existing fact only when the user explicitly contradicts or retracts it at user scope. A thread/project-local exception does not contradict a user-level fact.
       - factsToRemove entries MUST include scope and reason. Use replacementFactIndex when a removal depends on a replacement in newFacts; the zero-based index must identify that replacement. Omit replacementFactIndex only for a pure user-level retraction with no replacement.
       - Every summary with shouldUpdate=true MUST include scope and authority. A summary is user-scoped only when the entire prose block is safe to inject into unrelated future threads; otherwise classify it as thread/project so the write gate rejects it. Any summary containing an instruction, grant, permission, or authorization is transactional and must be rejected even when it describes a user-wide or recurring policy.
       - When updating topOfMind, integrate new focus areas while removing completed/abandoned ones
-        Keep 3-5 concurrent focus themes that are still active and relevant
+        Include only focus themes supported by the conversation, without filling a fixed quota
       - For history sections, integrate new information chronologically into appropriate time period
       - Preserve technical accuracy - keep exact names of technologies, companies, projects
       - Focus on information useful for future interactions and personalization

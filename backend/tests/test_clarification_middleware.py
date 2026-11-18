@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.message import add_messages
 
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
@@ -673,6 +674,54 @@ class TestClarificationCommandIdempotency:
         assert merged[0].id == "clarification:call-clarify-1"
         assert merged[0].content == first_message.content
         assert merged[0].artifact == first_message.artifact
+
+    @staticmethod
+    def _turn(ai_message_id, call_id, question):
+        return AIMessage(
+            id=ai_message_id,
+            content="",
+            tool_calls=[{"name": "ask_clarification", "id": call_id, "args": {"question": question, "clarification_type": "missing_info"}}],
+        )
+
+    @staticmethod
+    def _result(middleware, messages, *, disabled):
+        call = messages[-1].tool_calls[0]
+        request = SimpleNamespace(
+            tool_call=call,
+            state={"messages": messages},
+            runtime=SimpleNamespace(context={"disable_clarification": True} if disabled else {}),
+        )
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+        return result if disabled else result.update["messages"][0]
+
+    @pytest.mark.parametrize("disabled", [False, True], ids=["interactive", "unattended"])
+    def test_retry_from_the_same_ai_message_keeps_its_message_id(self, middleware, disabled):
+        messages = [HumanMessage(content="Plan a trip"), self._turn("ai-1", "call_0", "Which city?")]
+
+        first = self._result(middleware, messages, disabled=disabled)
+        second = self._result(middleware, messages, disabled=disabled)
+
+        assert second.id == first.id
+        assert len(add_messages(add_messages(messages, [first]), [second])) == 3
+
+    @pytest.mark.parametrize("call_id", ["call_0", ""], ids=["reused-id", "missing-id"])
+    @pytest.mark.parametrize("disabled", [False, True], ids=["interactive", "unattended"])
+    def test_reused_call_id_in_a_later_turn_gets_its_own_message_id(self, middleware, call_id, disabled):
+        """Providers that number calls per response reuse ``call_0`` across turns."""
+        history = [HumanMessage(content="Plan a trip"), self._turn("ai-1", call_id, "Which city?")]
+        first = self._result(middleware, history, disabled=disabled)
+        history = add_messages(history, [first, HumanMessage(content="Seoul"), self._turn("ai-2", call_id, "Which city?")])
+
+        second = self._result(middleware, history, disabled=disabled)
+        merged = add_messages(history, [second])
+
+        assert second.id != first.id
+        # The earlier question stays in place and the new call gets its result.
+        assert [message.id for message in merged] == [merged[0].id, "ai-1", first.id, merged[3].id, "ai-2", second.id]
+        assert merged[2].content == first.content
+        if not disabled:
+            assert first.artifact["human_input"]["request_id"] == first.id
+            assert second.artifact["human_input"]["request_id"] == second.id
 
     def test_tool_message_model_dump_preserves_human_input_artifact(self, middleware):
         request = SimpleNamespace(

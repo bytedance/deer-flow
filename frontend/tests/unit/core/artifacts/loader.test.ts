@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import {
   ARTIFACT_PREVIEW_MAX_BYTES,
   loadArtifactContent,
+  loadArtifactContentFromToolCall,
 } from "@/core/artifacts/loader";
 
 describe("loadArtifactContent", () => {
@@ -188,5 +189,48 @@ describe("loadArtifactContent", () => {
     // is not a 64-hex digest the UI treats it as non-editable (no 422 on save).
     expect(typeof loaded.sha256).toBe("string");
     expect(loaded.sha256).toHaveLength(8);
+  });
+});
+
+describe("loadArtifactContentFromToolCall", () => {
+  type ToolCallThread = Parameters<
+    typeof loadArtifactContentFromToolCall
+  >[0]["thread"];
+
+  const thread = {
+    messages: [
+      {
+        type: "ai",
+        id: "ai-1",
+        tool_calls: [
+          {
+            id: "call-1",
+            name: "str_replace",
+            args: {
+              path: "/mnt/user-data/outputs/report.md",
+              content: "patched",
+            },
+          },
+        ],
+      },
+    ],
+  } as unknown as ToolCallThread;
+
+  it("returns undefined instead of throwing for a malformed write-file URL", () => {
+    expect(
+      loadArtifactContentFromToolCall({ url: "write-file://[", thread }),
+    ).toBeUndefined();
+    expect(
+      loadArtifactContentFromToolCall({ url: "write-file:%E0%A4%A", thread }),
+    ).toBeUndefined();
+  });
+
+  it("reads non-write_file tool output through the parsed coordinates", () => {
+    expect(
+      loadArtifactContentFromToolCall({
+        url: "write-file:/mnt/user-data/outputs/report.md?message_id=ai-1&tool_call_id=call-1",
+        thread,
+      }),
+    ).toBe("patched");
   });
 });

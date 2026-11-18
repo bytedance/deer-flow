@@ -7,6 +7,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -174,4 +175,17 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Parsed here rather than inside main(): the wizard tests call main()
+    # in-process, whose argv must not reach argparse. It also keeps --help from
+    # entering the prompts, which on an existing config.yaml leads to the
+    # "reconfigure?" question and rewrites the operator's configuration.
+    parser = argparse.ArgumentParser(
+        prog="python scripts/setup_wizard.py",
+        description=(
+            "DeerFlow interactive setup wizard (make setup): prompts for the LLM "
+            "provider, web search/fetch and sandbox settings, then writes "
+            "config.yaml and .env. Takes no arguments."
+        ),
+    )
+    parser.parse_args()
     sys.exit(main())

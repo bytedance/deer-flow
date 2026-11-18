@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 
 from app.gateway.conversation_reader import read_visible_message_page
+from app.gateway.csrf_middleware import _normalize_origin, _request_origin
 from deerflow.constants import CONVERSATION_TOOL_NAME, CONVERSATION_TOOL_USE
 from deerflow.utils.llm_text import strip_think_blocks
 from deerflow.utils.thread_id import validate_thread_id
@@ -43,13 +44,20 @@ _BUDGET_TOO_SMALL = {
 }
 
 
-def _source_id(reference: str, request_url: str) -> str:
-    """URLs are same-origin local selectors, never network fetch targets."""
+def _source_id(reference: str, request_origin: str | None) -> str:
+    """URLs are local selectors on this DeerFlow's host, never network fetch targets.
+
+    *request_origin* is the origin the client addressed, as the CSRF check
+    resolves it (forwarded host and port included). Only the host and port are
+    compared, not the scheme: behind a TLS proxy Gateway can see ``http`` for a
+    browser's ``https`` link, because uvicorn ignores ``X-Forwarded-Proto``
+    from an untrusted peer and a local nginx resends its own scheme.
+    """
     if "://" not in reference:
         return validate_thread_id(reference)
     parsed = urlsplit(reference)
-    origin = urlsplit(request_url)
-    if parsed.scheme not in {"http", "https"} or (parsed.scheme, parsed.netloc) != (origin.scheme, origin.netloc) or parsed.query or parsed.fragment:
+    origin = _normalize_origin(f"{parsed.scheme}://{parsed.netloc}")
+    if origin is None or request_origin is None or urlsplit(origin).netloc != urlsplit(request_origin).netloc or parsed.query or parsed.fragment:
         raise ValueError("Use a thread ID or a conversation URL from this DeerFlow origin")
     match = re.fullmatch(r"/workspace/(?:agents/[^/]+/)?chats/([^/]+)", parsed.path)
     if match is None:
@@ -57,16 +65,39 @@ def _source_id(reference: str, request_url: str) -> str:
     return validate_thread_id(match.group(1))
 
 
-def _visible_text(row: dict) -> tuple[str, str] | None:
+def _visible_text(row: dict, *, thread_id: str | None = None) -> tuple[str, str] | None:
     message = row.get("content")
-    if not isinstance(message, dict):
+    if not isinstance(message, Mapping):
         return None
     role = message.get("type") or message.get("role")
+    if not isinstance(role, str):
+        return None
     role = {"human": "user", "ai": "assistant"}.get(role, role)
-    extra = message.get("additional_kwargs") or {}
+    extra = message.get("additional_kwargs")
+    if extra is None:
+        extra = {}
+    elif not isinstance(extra, Mapping):
+        logger.warning(
+            "Ignoring malformed message additional_kwargs for thread %s at row seq %s: expected a mapping, got %s",
+            thread_id or "<unknown>",
+            row.get("seq", "<unknown>"),
+            type(extra).__name__,
+        )
+        extra = {}
     if role not in {"user", "assistant"} or extra.get("hide_from_ui") or message.get("name") == "summary":
         return None
-    if str((row.get("metadata") or {}).get("caller", "")).startswith(("middleware:", "subagent:")):
+    metadata = row.get("metadata")
+    if metadata is None:
+        metadata = {}
+    elif not isinstance(metadata, Mapping):
+        logger.warning(
+            "Ignoring malformed conversation metadata for thread %s at row seq %s: expected a mapping, got %s",
+            thread_id or "<unknown>",
+            row.get("seq", "<unknown>"),
+            type(metadata).__name__,
+        )
+        metadata = {}
+    if str(metadata.get("caller", "")).startswith(("middleware:", "subagent:")):
         return None
     content = message.get("content")
     if role == "user" and isinstance(extra.get("original_user_content"), str):
@@ -158,7 +189,8 @@ def prepare_conversation_reader(
     if auth is None or not auth.is_authenticated or not auth.has_permission("runs", "read") or not user_id:
         raise HTTPException(status_code=403, detail="Permission denied: runs:read")
     try:
-        ids = tuple(dict.fromkeys(_source_id(reference, str(request.url)) for reference in references))
+        request_origin = _request_origin(request)
+        ids = tuple(dict.fromkeys(_source_id(reference, request_origin) for reference in references))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return _prepare_owner_bound_conversation_reader(ids, user_id=user_id, run_context=run_context, run_manager=run_manager, app_config=app_config)
@@ -228,7 +260,7 @@ def _prepare_owner_bound_conversation_reader(
         found: dict[int, tuple[str, str, int]] = {}
 
         def include_target(row: dict) -> bool:
-            parsed = _visible_text(row) if row["seq"] == message_seq else None
+            parsed = _visible_text(row, thread_id=thread_id) if row["seq"] == message_seq else None
             if parsed is None:
                 return False
             role, text = parsed
@@ -273,7 +305,7 @@ def _prepare_owner_bound_conversation_reader(
         parsed_text: dict[int, tuple[str, str]] = {}
 
         def include_message(row: dict) -> bool:
-            parsed = _visible_text(row)
+            parsed = _visible_text(row, thread_id=thread_id)
             if parsed is None:
                 return False
             role, text = parsed

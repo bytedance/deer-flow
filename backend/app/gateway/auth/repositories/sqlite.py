@@ -316,11 +316,12 @@ class SQLiteUserRepository(UserRepository):
             row = await session.get(UserRow, user_id)
             if row is None:
                 raise UserNotFoundError(f"User {user_id} no longer exists")
-            if row.system_role == "admin" and system_role != "admin":
+            if row.system_role == "admin" and not row.disabled and system_role != "admin":
                 # Count ACTIVE admins only: a disabled admin cannot
                 # authenticate, so counting them would let "disable B, then
                 # demote self" (or a combined role+disable request) strand
                 # the deployment with zero usable management credentials.
+                # Demoting an already disabled admin removes no active admin.
                 active_admins = await session.scalar(select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin", UserRow.disabled.is_(False)))
                 if active_admins is None or active_admins <= 1:
                     raise LastAdminRemainsError("cannot demote the last remaining admin")
@@ -405,7 +406,16 @@ class SQLiteUserRepository(UserRepository):
             row.oauth_id = user.oauth_id
             row.needs_setup = user.needs_setup
             row.token_version = user.token_version
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                # The caller's email pre-check cannot see an insert or update
+                # of the same address that commits before this one. Report the
+                # lost race the way create_user does; any other violation
+                # propagates unchanged.
+                if _is_email_violation(exc):
+                    raise ValueError(f"Email already registered: {user.email}") from exc
+                raise
         return user
 
     async def count_users(self) -> int:

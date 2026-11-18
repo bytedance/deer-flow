@@ -109,7 +109,8 @@ return to the bottom with `PageDown`.
 `/help` `/new` `/clear` `/goal` `/resume` `/threads` (`/switch`) `/model` `/skills` `/tools`
 `/mcp` `/memory` `/uploads` `/usage` `/config` `/quit`, plus
 `/<skill-name> task` to activate any enabled skill for the current turn (same
-semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers.
+semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers, which
+show thread titles and model names exactly as written, square brackets included.
 
 `/clear` removes the current transcript rows from the terminal display only; it keeps the active thread and persisted conversation intact. During an active run, `/new` and `/clear` ask you to wait for the run to finish instead of resetting in-flight display state.
 
@@ -131,7 +132,8 @@ Press `Ctrl+C` again to quit at once; the unfinished step is then not saved.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
-`/goal clear` to clear it.
+`/goal clear` to clear it. `/goal from-chat` is an IM entry point for now; the
+TUI reports that it is not supported and points to `/goal <condition>`.
 
 ## Architecture
 
