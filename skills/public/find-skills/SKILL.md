@@ -85,7 +85,12 @@ Learn more: https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practic
 
 ### Step 4: Install the Skill
 
-If the user wants to proceed, use the `install-skill.sh` script to install the skill and automatically link it to the project:
+Choose the installation path matching your execution environment:
+
+- **Inside an isolated DeerFlow sandbox workspace**: `scripts/install-skill.sh` only works inside a host DeerFlow repository checkout (it looks for `deer-flow.code-workspace` and cannot write into mounted `/mnt/skills/` directories).
+  - If the `skill_manage` tool is available (skill evolution enabled), create or update the skill files under your per-user skill storage (`/mnt/skills/custom/<skill-name>/`). Note that `skill_manage` writes text files and supporting files individually; it does not unpack `.skill` archives atomically or preserve arbitrary binary assets.
+  - To import a `.skill` archive, use an authorized administrator Gateway upload/install flow (`POST /api/skills/install` or `POST /api/skills/install/upload`) rather than editing sandbox files manually.
+- **In a host DeerFlow repository checkout** (with `deer-flow.code-workspace` in an ancestor directory): use `install-skill.sh` to install the skill globally and link it into `<repo>/skills/custom/`:
 
 ```bash
 bash /path/to/skill/scripts/install-skill.sh <owner/repo@skill-name>
@@ -97,7 +102,7 @@ For example, if the user wants to install `vercel-react-best-practices`:
 bash /path/to/skill/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
 ```
 
-The script will install the skill globally to `skills/custom/`
+The script installs the skill globally and links it to the host checkout's `skills/custom/` directory.
 
 ## Common Skill Categories
 

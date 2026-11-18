@@ -30,16 +30,21 @@ find_project_root() {
       echo "$dir"
       return 0
     fi
-    dir="$(dirname "$dir")"
+    local parent
+    parent="$(dirname "$dir")"
+    if [[ "$parent" == "$dir" ]]; then
+      break
+    fi
+    dir="$parent"
   done
   echo ""
   return 1
 }
 
-PROJECT_ROOT=$(find_project_root)
+PROJECT_ROOT=$(find_project_root || true)
 
 if [[ -z "$PROJECT_ROOT" ]]; then
-  echo "Error: Could not find project root (deer-flow.code-workspace not found)"
+  echo "Error: Could not find DeerFlow repository root (deer-flow.code-workspace not found). install-skill.sh only runs from a host repository checkout; inside an isolated DeerFlow workspace use skill_manage (when skill evolution is enabled) or the Gateway custom-skill import flow for .skill archives." >&2
   exit 1
 fi
 
