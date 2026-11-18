@@ -144,7 +144,7 @@ redis 客户端是惰性导入的；缺少可选依赖时构造 redis 后端会�
 | 写入失败 | `checkpoint history cache write failed; skipping: %s` | 跳过该次写入，下次读取直接重算 |
 | 线程清理失败 | `checkpoint history cache thread purge failed; cached entries may remain: %s` | 源数据已删除。残余键只有设置了 TTL 才会过期 |
 
-TTL 是防泄漏网而非正确性机制，因为条目不可变、没有任何读取依赖它。`ttl_seconds: 0` 表示彻底关闭过期，此时孤儿键只依赖 redis 的 `maxmemory` 策略。清理失败是已删除线程的历史残留下来的唯一途径，且只残留到 TTL 到期。
+TTL 是防泄漏网而非正确性机制，因为条目不可变、没有任何读取依赖它。`ttl_seconds: 0` 表示彻底关闭过期，此时孤儿键只依赖 redis 的 `maxmemory` 策略。清理失败是已删除线程的历史残留下来的唯一途径；残余键会在配置的 TTL 到期后过期，若 `ttl_seconds: 0`，则需由运维处理。
 
 ## stats
 

@@ -156,7 +156,7 @@ Every redis failure is performance-only. The source of truth has already been up
 | Write fails | `checkpoint history cache write failed; skipping: %s` | The write is skipped; the next read simply recomputes |
 | Thread purge fails | `checkpoint history cache thread purge failed; cached entries may remain: %s` | The source delete already happened. Residual keys expire only if they have a TTL |
 
-The TTL is a leak safety net, not a correctness mechanism, because entries are immutable and no read depends on them. `ttl_seconds: 0` opts out of expiry entirely, so orphaned keys then rely on the redis `maxmemory` policy alone. A failed purge is the only way a deleted thread's history lingers, and only until the TTL.
+The TTL is a leak safety net, not a correctness mechanism, because entries are immutable and no read depends on them. `ttl_seconds: 0` opts out of expiry entirely, so orphaned keys then rely on the redis `maxmemory` policy alone. A failed purge is the only way a deleted thread's history lingers; residual keys expire at the configured TTL, or remain operator-managed when `ttl_seconds: 0`.
 
 ## Stats
 
