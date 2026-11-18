@@ -1716,10 +1716,13 @@ async def run_agent(
             against that baseline.
             """
             nonlocal fallback_boundary_ids
-            if mode != "values" or not snapshot_capture_failed or checkpointer is None:
+            if not snapshot_capture_failed or checkpointer is None or mode not in {"values", "updates"}:
                 return pre_existing_message_ids
             if fallback_boundary_ids is None:
-                fallback_boundary_ids = _collect_pre_existing_message_ids(chunk)
+                frame_ids = _collect_message_ids_deep(chunk)
+                if not frame_ids:
+                    return None
+                fallback_boundary_ids = frame_ids
                 return None
             return pre_existing_message_ids | fallback_boundary_ids
 
@@ -4015,6 +4018,34 @@ def _collect_pre_existing_message_ids(values: Any) -> set[str]:
     if not isinstance(messages, (list, tuple)):
         return set()
     return {message_id for message in messages if (message_id := _message_id(message)) is not None}
+
+
+def _collect_message_ids_deep(value: Any) -> set[str]:
+    """Collect message IDs from values or nested updates frames."""
+    ids: set[str] = set()
+    seen: set[int] = set()
+
+    def walk(obj: Any) -> None:
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+        if isinstance(obj, dict):
+            message_id = _message_id(obj)
+            if message_id is not None:
+                ids.add(message_id)
+            for item in obj.values():
+                walk(item)
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                walk(item)
+        else:
+            message_id = _message_id(obj)
+            if message_id is not None:
+                ids.add(message_id)
+
+    walk(value)
+    return ids
 
 
 def _unpack_stream_item(

@@ -3522,6 +3522,79 @@ async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run(capture
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
+@pytest.mark.parametrize("stream_modes", [["updates"], ["values", "updates"]], ids=["updates-only", "values+updates"])
+@pytest.mark.anyio
+async def test_run_agent_ignores_replayed_fallback_in_updates_frame(tmp_path, stream_modes):
+    from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    stale_fallback = AIMessage(
+        id="stale-update-fallback",
+        content="Old failure.",
+        additional_kwargs={
+            "deerflow_error_fallback": True,
+            "error_type": "IndexError",
+            "error_reason": "transient",
+            "error_detail": "list index out of range",
+        },
+    )
+
+    class MinimalCheckpointer:
+        async def aget_tuple(self, _config):
+            return None
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            raise RuntimeError("snapshot capture failed")
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            history = ThreadDataMiddleware(base_dir=str(tmp_path)).before_agent(
+                {"messages": [stale_fallback]},
+                SimpleNamespace(context={"thread_id": "thread-1", "user_id": "user-1"}),
+            )
+            frames = [
+                ("updates", {"ThreadDataMiddleware.before_agent": history}),
+                (
+                    "updates",
+                    {"model": {"messages": [AIMessage(id="fresh-update", content="The run succeeded.")]}},
+                ),
+            ]
+            if "values" in stream_modes:
+                frames.insert(
+                    1,
+                    (
+                        "values",
+                        {"messages": [stale_fallback, AIMessage(id="fresh-value", content="The run succeeded.")]},
+                    ),
+                )
+            for mode, frame in frames:
+                if isinstance(stream_mode, (list, tuple)):
+                    yield (mode, frame)
+                elif mode == "updates":
+                    yield frame
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=MinimalCheckpointer()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=stream_modes,
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+
+
 class _FakeCheckpointTuple:
     """Minimal stand-in for ``CheckpointTuple`` used by ``_ensure_interrupted_title``."""
 
