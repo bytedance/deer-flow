@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -262,6 +264,49 @@ def test_reload_folds_from_newest_snapshot(server):
     # A warm cache picks up the snapshot after truncation on a plain load.
     assert [fact["id"] for fact in cached.load(AGENT, user_id="alice")["facts"]] == ["fact_snap"]
     assert [fact["id"] for fact in _storage(server).load(AGENT, user_id="alice")["facts"]] == ["fact_snap"]
+
+
+def test_reads_do_not_wait_unbounded_behind_a_stalled_writer(server, monkeypatch):
+    """A writer stuck on a blackholed connection holds the scope lock; reads wait at most the timeout for it."""
+    from deerflow_extension_kurrentdb.memory import KurrentdbMemoryReadError, KurrentdbMemoryStorage
+
+    timeout = 0.2
+    monkeypatch.setenv("KURRENTDB_TIMEOUT_SECONDS", str(timeout))
+    client = server.sync_client()
+    seeded = KurrentdbMemoryStorage(DeerMemConfig(), client_factory=lambda: client)
+    assert seeded.save({"facts": [_fact("fact_1", "one")]}, AGENT, user_id="alice", expected_revision=0) is True
+
+    entered, release = threading.Event(), threading.Event()
+    append = client.append_to_stream
+
+    def stalled_append(stream_name, **kwargs):
+        if stream_name == ALICE_STREAM:
+            entered.set()
+            release.wait(10)  # far longer than the timeout: the partition outlasts many deadlines
+        return append(stream_name, **kwargs)
+
+    storage = KurrentdbMemoryStorage(DeerMemConfig(), client_factory=lambda: client)
+    assert storage.load(AGENT, user_id="alice")["facts"]
+    monkeypatch.setattr(client, "append_to_stream", stalled_append)
+    writer = threading.Thread(target=storage.save, args=({"facts": []}, AGENT), kwargs={"user_id": "alice"}, daemon=True)
+    writer.start()
+    try:
+        assert entered.wait(5)
+        for read in (lambda: storage.load(AGENT, user_id="alice"), lambda: storage.reload(AGENT, user_id="alice"), lambda: storage.get_fact("fact_1", user_id="alice", agent_name=AGENT)):
+            started = time.monotonic()
+            with pytest.raises(KurrentdbMemoryReadError) as caught:
+                read()
+            assert isinstance(caught.value, MemoryReadError)
+            assert time.monotonic() - started < timeout * 5
+        started = time.monotonic()
+        assert storage.get_fact_usage(agent_name=AGENT, user_id="alice") == {}
+        storage.record_fact_accesses(["fact_1"], agent_name=AGENT, user_id="alice")
+        assert time.monotonic() - started < timeout * 10
+    finally:
+        release.set()
+        writer.join(5)
+    assert not writer.is_alive()
+    assert storage.load(AGENT, user_id="alice")["facts"] == []
 
 
 def test_two_instances_read_after_write(server):

@@ -20,10 +20,11 @@ resulting state carrying the intent id, then the sidecar boundary and ``$tb`` on
 the sidecar and primary streams. Before every primary write the open deletions of
 that scope are completed (``recover_deletions`` does the same at startup).
 
-``load()`` serves a per-scope cache but checks the stream head on every call and
-folds only the new events; ``reload()`` re-reads from the newest snapshot. DeerMem
-calls storage from timer threads, so each scope's cache and writes are guarded by
-a per-scope lock.
+``load()`` and ``reload()`` serve a per-scope cache but check the stream head on
+every call and fold only the new events; a head behind the cache or a truncation
+re-reads from the newest snapshot. DeerMem calls storage from timer threads, so
+each scope's cache and writes are guarded by a per-scope lock; reads wait at most
+one timeout for it, so a write stuck on an unreachable server cannot hold them.
 
 The sidecars (fact usage, eviction evidence, extraction watermarks; see
 ``sidecars``) live in the scope's memory-meta stream and are best-effort, as in
@@ -134,6 +135,22 @@ class KurrentdbMemoryStorage(MemoryStorage):
     def _scope_lock(self, stream: str) -> threading.RLock:
         with self._locks_guard:
             return self._scope_locks.setdefault(stream, threading.RLock())
+
+    @contextlib.contextmanager
+    def _read_lock(self, stream: str) -> Iterator[None]:
+        """The scope lock for a read, waited for at most the timeout.
+
+        A writer holds the lock across several sequential calls, each with its own
+        deadline; a read must not queue behind all of them while KurrentDB is
+        unreachable, so it gives up with ``KurrentdbMemoryReadError`` instead.
+        """
+        lock = self._scope_lock(stream)
+        if not lock.acquire(timeout=self._timeout):
+            raise KurrentdbMemoryReadError(f"Timed out after {self._timeout}s waiting for a write to {stream!r} to finish")
+        try:
+            yield
+        finally:
+            lock.release()
 
     # --- deletions ----------------------------------------------------------------
 
@@ -259,7 +276,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
 
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         stream = self._stream(agent_name, user_id)
-        with self._scope_lock(stream):
+        with self._read_lock(stream):
             return self._refresh(stream).to_document(agent_name)
 
     def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
@@ -538,7 +555,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
         if agent_name is None:
             raise ValueError("agent_name is required to get a fact")
         stream = self._stream(agent_name, user_id)
-        with self._scope_lock(stream):
+        with self._read_lock(stream):
             fact = self._refresh(stream).agent_facts(agent_name).get(str(fact_id))
         return copy.deepcopy(fact)
 
@@ -579,7 +596,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
     def _meta_view(self, primary: str, meta: str, what: str) -> SidecarState | None:
         """The sidecars without any open intent's records, or ``None`` (logged) when they cannot be read."""
         try:
-            with self._scope_lock(meta):
+            with self._read_lock(meta):
                 state = self._refresh_meta(meta)
             return state.filtered(self._intents_provider(primary))
         except Exception:
@@ -634,7 +651,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
         """Usage of the agent's current facts (a late access append for a deleted fact is dropped)."""
         primary, meta = self._meta_scope(agent_name, user_id)
         try:
-            with self._scope_lock(primary):
+            with self._read_lock(primary):
                 facts = set(self._refresh(primary).agent_facts(agent_name))
         except Exception:
             logger.warning("Reading %r to filter fact usage failed; treating usage as empty", primary, exc_info=True)
@@ -661,12 +678,12 @@ class KurrentdbMemoryStorage(MemoryStorage):
         now = accessed_at or datetime.now(UTC)
         primary, meta = self._meta_scope(agent_name, user_id)
         try:
-            with self._scope_lock(primary):
+            with self._read_lock(primary):
                 state = self._refresh(primary)
                 existing = [fact_id for fact_id in unique_ids if fact_id in state.agent_facts(agent_name)]
                 if not existing:
                     return
-                with self._scope_lock(meta):
+                with self._read_lock(meta):
                     self._meta_append(meta, sidecars.FACTS_ACCESSED, {"agent": agent_name, "revision": state.revision, "factIds": existing, "at": sidecars.iso_z(now)})
         except Exception:
             logger.warning("Recording memory fact accesses in %r failed", meta, exc_info=True)
