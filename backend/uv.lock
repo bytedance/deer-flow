@@ -530,6 +530,22 @@ wheels = [
 ]
 
 [[package]]
+name = "boxd"
+version = "0.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "httpx" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1d/37/ad184af822d5b1c8171330986aef06e521d0e3dd0c0c47b3c37f5a1a85b7/boxd-0.3.2.tar.gz", hash = "sha256:03aa9471d1ddd663a379655b19bc7a1f20b6199a5aadfb51238889552450bd75", size = 308049, upload-time = "2026-11-13T01:14:49.059Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7e/f0/badded7811ce0c26841e0a6145c98413189a138dc2edca2eb61f9abf5787/boxd-0.3.2-py3-none-any.whl", hash = "sha256:b78c9609ea8bbad942a27447718902744ce8904bed2185c79283eea2bfd72c42", size = 199336, upload-time = "2026-11-13T01:14:47.777Z" },
+]
+
+[[package]]
 name = "boxlite"
 version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1030,6 +1046,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+boxd = [
+    { name = "boxd" },
+]
 boxlite = [
     { name = "boxlite" },
 ]
@@ -1075,6 +1094,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29" },
     { name = "beautifulsoup4", specifier = ">=4.12" },
+    { name = "boxd", marker = "extra == 'boxd'", specifier = ">=0.3.2" },
     { name = "boxlite", marker = "extra == 'boxlite'", specifier = ">=0.9.7" },
     { name = "croniter", specifier = ">=6.0.0" },
     { name = "cryptography", specifier = ">=50.0.0" },
@@ -1128,7 +1148,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.8.0" },
     { name = "tzdata", specifier = ">=2025.1" },
 ]
-provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "monocle", "browser", "memory-zh"]
+provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "boxd", "monocle", "browser", "memory-zh"]
 
 [[package]]
 name = "defusedxml"

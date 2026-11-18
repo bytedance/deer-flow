@@ -1781,6 +1781,67 @@ Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
 implemented, so `replicas` is a per-Gateway-process soft cap.
 
+**boxd Machine Sandbox** (runs each sandbox as an isolated [boxd](https://boxd.sh?ref=deer-flow) machine):
+
+```yaml
+sandbox:
+   use: deerflow.community.boxd_sandbox:BoxdSandboxProvider
+   boxd_api_key: $BOXD_API_KEY        # falls back to the BOXD_API_KEY env var
+   # org: my-org                      # optional; the key's own org when omitted
+   # region: fra                      # optional; fra or nyc
+   # vcpu: 2                          # optional; 1, 2, 4 or 8 (memory 4G, 8G, 16G or 32G follows)
+   # from_snapshot: my-snapshot       # optional; start machines from a prepared snapshot
+   # auto_suspend_timeout: 300        # optional; idle seconds before a machine goes to standby
+   # ready_timeout: 120               # seconds to wait for a new machine to boot
+   # name_prefix: deer-flow-          # machine names are <prefix><scope>-<random suffix>
+   # labels:                          # extra labels on every machine
+   #    team: research
+   replicas: 3                        # active + warm cap per gateway process
+   idle_timeout: 600                  # warm seconds before the machine is deleted; 0 disables
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional SDK before selecting this provider:
+
+```bash
+pip install "deerflow-harness[boxd]"
+```
+
+Each `(user_id, thread_id)` scope gets its own Ubuntu machine, created with
+`isolated: true`, so it joins no private network and holds no boxd
+credentials. The API key stays in the Gateway. Machines carry the labels
+`deer-flow: sandbox` and `deer-flow-scope: <scope id>`, so you can find them in
+the boxd console or with the CLI. The provider creates `/mnt/user-data` and the
+skills root (`skills.container_path`) as real directories on the machine, so
+shell commands and file tools use the same paths.
+
+A new machine for a thread receives the thread's uploads, workspace and outputs
+files and the skills projection before `acquire()` returns, each as one archive
+of at most 5,000 files and 128 MiB; files past that limit are skipped with a
+warning, and a failed transfer deletes the machine and raises. An Agent with a
+skill policy gets its own skills projection, and the machine sees only what was
+uploaded. Work outside `/mnt/user-data` is lost when the idle reaper deletes a
+machine. At the end of a turn, release copies
+`/mnt/user-data/outputs` back to the thread's output directory (bounded by file
+count, bytes and one shared 120-second deadline), then parks the machine in an
+in-process warm pool. A stopped machine's output copy is skipped until a normal
+sandbox call restarts it. The same scope reclaims it after a health check;
+the idle reaper deletes it after
+`idle_timeout`. Shutdown deletes every machine the provider tracks and can be
+retried when a delete fails.
+Machines discovered after a failed create use the same tracked deletion retries.
+
+Commands run through `bash -lc`. Per-call environment variables travel as exec
+options, never inside the command string. The command deadline (the caller's
+timeout, else `bash_command_timeout`) is enforced in the machine, so a command
+that runs over it ends with `Exit Code: 124` and keeps its partial output. A
+stopped machine is started on the next call; a command that hit the stopped
+machine is not repeated and returns an error. Machines in standby or
+hibernation wake on the call. Downloads are restricted to `/mnt/user-data` and
+capped while streaming. Like the other remote providers, `replicas` is a
+per-Gateway-process soft cap.
+
 Choose between local execution or Docker-based isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):
