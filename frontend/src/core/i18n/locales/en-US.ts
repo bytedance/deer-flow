@@ -178,6 +178,7 @@ export const enUS: Translations = {
       },
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
+      trajectory: bundledCopy("deerflow-extension-trajectory", "en-US"),
       context: bundledCopy("deerflow-extension-jev-context", "en-US"),
       classify: bundledCopy("deerflow-extension-jev-classify", "en-US"),
       screening: bundledCopy("deerflow-extension-jev-screening", "en-US"),
