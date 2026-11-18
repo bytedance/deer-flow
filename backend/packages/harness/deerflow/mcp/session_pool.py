@@ -150,7 +150,7 @@ async def _finish_session_cleanup(
             await asyncio.wait_for(asyncio.shield(cleanup), timeout=remaining)
         except asyncio.CancelledError:
             cancelled = True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "Timed out waiting for disconnected MCP session cleanup for server '%s' after %.1fs; teardown remains supervised",
                 server_name,
