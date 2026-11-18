@@ -3232,7 +3232,8 @@ def grep_tool(
 
     Args:
         pattern: The string or regex pattern to search for.
-        path: The **absolute** file or root directory to search.
+        path: The **absolute** file or root directory to search. Naming a file
+            searches it at any size; a directory walk skips files over 1 MB.
         description: Optional short explanation of this search shown in the UI.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.
