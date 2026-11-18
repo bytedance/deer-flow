@@ -26,7 +26,8 @@ delete, so ``seq`` bookkeeping survives them:
   deleted run owned the top numbers
 - A thread with no stream, or nothing to delete, is a no-op that reads once and never
   writes an intent. Run events have no derived (sidecar) steps; canonical cleanup
-  of session streams is a separate obligation, not part of this store
+  of session streams is a separate obligation (``canonical.cleanup``), queued in
+  the thread's emission chain after a deletion and run by the recovery service
 
 Reads stream the thread backwards (``read_stream``) and stop as soon as the query is
 answered, and at the newest boundary at the latest, so a long thread is never sent
@@ -70,6 +71,7 @@ from .._client import async_client_factory
 from .._fence import FENCE_EVENT_TYPE, AmbiguousAppendError, asettle_append
 from .._naming import RUN_EVENTS_PREFIX, run_events_stream
 from .._settings import load_settings
+from ..canonical import cleanup as canonical_cleanup
 from ..canonical import emitter as canonical_emitter
 from ..canonical import mapping as canonical_mapping
 from ..deletions import AsyncDeletionEngine, DeletionConflict, DerivedStep, Intent
@@ -275,7 +277,8 @@ def _window(items: list[dict], *, limit: int, before_seq: int | None, after_seq:
 
 
 class KurrentRunEventStore(RunEventStore):
-    def __init__(self, config: Any, *, client_factory: Callable[[], Awaitable[Any]] | None = None) -> None:
+    def __init__(self, config: Any, *, client_factory: Callable[[], Awaitable[Any]] | None = None, clock: Callable[[], float] | None = None) -> None:
+        """``clock`` (wall-clock seconds, default ``time.time``) times canonical cleanup verification."""
         self._config = config
         settings = load_settings()
         self._timeout = settings.timeout
@@ -286,6 +289,7 @@ class KurrentRunEventStore(RunEventStore):
         self._engines: dict[int, tuple[Any, AsyncDeletionEngine]] = {}
         self._canonical_chains = canonical_emitter.AsyncChains()
         self._canonical = canonical_emitter.AsyncCanonicalEmitter(lambda: self._client_factory(), self._engine, timeout=self._timeout)
+        self._cleaner = canonical_cleanup.AsyncCanonicalCleaner(lambda: self._client_factory(), self._engine, timeout=self._timeout, clock=clock)
 
     def _lock_for(self, thread_id: str) -> asyncio.Lock:
         lock = self._locks.get(thread_id)
@@ -443,9 +447,32 @@ class KurrentRunEventStore(RunEventStore):
                 await self._canonical.emit(canonical_mapping.session_stream(thread_id), canonical_events, primary=run_events_stream(thread_id), deadline=deadline, opening=opening)
 
         self._canonical_chains.submit(thread_id, emit)
+        self._kick_canonical_cleanup(thread_id, deleted=False)
+
+    def _kick_canonical_cleanup(self, thread_id: str, *, deleted: bool) -> None:
+        """Queue the thread's pending canonical cleanups behind its emissions, after a deletion or after a
+        write while one is pending (cached indexes, no I/O); never raises and never awaited by the caller."""
+        if not self._canonical_enabled:
+            return
+        stream = run_events_stream(thread_id)
+        try:
+            if not deleted and (self._cleaner.backing_off(stream) or not any(engine.has_pending_canonical(stream) for _client, engine in list(self._engines.values()))):
+                return
+            self._canonical_chains.submit(thread_id, lambda: self._cleaner.run(stream=stream, verify=False))
+        except Exception:
+            logger.warning("Scheduling the canonical cleanup of %r failed", stream, exc_info=True)
+
+    async def run_canonical_obligations(self) -> canonical_cleanup.PassReport | None:
+        """One pass over every open run-event canonical cleanup and due verification (recovery service); never raises.
+
+        ``None`` when canonical events are off.
+        """
+        if not self._canonical_enabled:
+            return None
+        return await self._cleaner.run()
 
     async def flush_canonical(self) -> None:
-        """Wait for this loop's queued canonical emissions (tests, shutdown)."""
+        """Wait for this loop's queued canonical emissions and cleanups (tests, shutdown)."""
         await self._canonical_chains.flush()
 
     async def _notify(self, thread_id: str, records: list[dict], drafts: list[_Draft]) -> None:
@@ -683,6 +710,7 @@ class KurrentRunEventStore(RunEventStore):
                     conflict = exc
                     continue
                 self._remember_head(thread_id, head + len(events), high_water + 1)
+                self._kick_canonical_cleanup(thread_id, deleted=True)
                 return len(removed)
             assert conflict is not None
             raise conflict

@@ -60,6 +60,7 @@ from .._client import sync_client_factory
 from .._fence import AmbiguousAppendError, settle_append
 from .._naming import memory_meta_stream, memory_meta_stream_of, memory_stream
 from .._settings import load_settings
+from ..canonical import cleanup as canonical_cleanup
 from ..canonical import emitter as canonical_emitter
 from ..canonical import mapping as canonical_mapping
 from ..deletions import DeletionConflict, DeletionEngine, DeletionError, DerivedStep, Intent
@@ -103,10 +104,11 @@ class _Recorded(NamedTuple):
 
 
 class KurrentdbMemoryStorage(MemoryStorage):
-    def __init__(self, config: DeerMemConfig, *, client_factory: Callable[[], Any] | None = None, intents_provider: IntentsProvider | None = None):
+    def __init__(self, config: DeerMemConfig, *, client_factory: Callable[[], Any] | None = None, intents_provider: IntentsProvider | None = None, clock: Callable[[], float] | None = None):
         """``intents_provider(primary_stream)`` returns the criteria of the open, primary-committed
         deletion intents of that memory stream; sidecar reads drop every record they match.
-        It defaults to the deletion engine's ``open_intents_for``.
+        It defaults to the deletion engine's ``open_intents_for``. ``clock`` (wall-clock
+        seconds, default ``time.time``) times canonical cleanup verification.
         """
         self._config = config
         self._intents_provider = intents_provider if intents_provider is not None else self._open_intent_criteria
@@ -121,6 +123,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
         self._canonical_enabled = self._settings.canonical_events
         self._canonical_queue = canonical_emitter.BackgroundQueue()
         self._canonical = canonical_emitter.CanonicalEmitter(self._client, self._engine, timeout=self._timeout)
+        self._cleaner = canonical_cleanup.CanonicalCleaner(self._client, self._engine, timeout=self._timeout, clock=clock)
 
     # --- scope ------------------------------------------------------------------
 
@@ -363,6 +366,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
             new_events = []
             committed = self._commit_destructive(stream, state, plan, user_id=user_id)
         self._schedule_canonical(stream, state, plan, committed, new_events, user_id=user_id)
+        self._kick_canonical_cleanup(stream, deleted=plan.criteria is not None)
         return committed
 
     # --- canonical events ---------------------------------------------------------
@@ -412,6 +416,28 @@ class KurrentdbMemoryStorage(MemoryStorage):
             if event.id in own_ids:
                 return event.stream_position + 1
         return None
+
+    def _kick_canonical_cleanup(self, stream: str, *, deleted: bool) -> None:
+        """Queue the scope's pending canonical cleanups behind its emissions, after a deletion or after a
+        write while one is pending (cached index, no I/O); never raises and never runs on the caller's thread."""
+        if not self._canonical_enabled:
+            return
+        try:
+            engine = self._engine_instance
+            if not deleted and (engine is None or self._cleaner.backing_off(stream) or not engine.has_pending_canonical(stream)):
+                return
+            self._canonical_queue.submit(lambda: self._cleaner.run(stream=stream, verify=False))
+        except Exception:
+            logger.warning("Scheduling the canonical cleanup of %r failed", stream, exc_info=True)
+
+    def run_canonical_obligations(self) -> canonical_cleanup.PassReport | None:
+        """One pass over every open memory canonical cleanup and due verification (recovery service); never raises.
+
+        ``None`` when canonical events are off.
+        """
+        if not self._canonical_enabled:
+            return None
+        return self._cleaner.run()
 
     def flush_canonical(self, timeout: float | None = None) -> bool:
         """Wait for queued canonical emissions (tests, shutdown); ``False`` when ``timeout`` ran out first."""

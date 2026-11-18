@@ -225,11 +225,13 @@ def test_fact_retained_on_create_and_update(server):
     _create(storage, _fact("g1", "Global fact"), user_id=None)
     assert storage.flush_canonical(timeout=5)
 
+    # Every emission, in commit order (the deletion's canonical cleanup has since rewritten the stream without f2).
+    emitted = [json.loads(event.data) for event in server._streams[ALICE_CANONICAL].events if "deerflow.intent_id" not in json.loads(event.metadata)]
+    assert [item["fact"] for item in emitted] == ["Prefers tea", "Lives in Oslo", "Prefers green tea", "Plays chess"]
     decoded = _decoded(server, ALICE_CANONICAL)
-    assert [type_name for type_name, _, _ in decoded] == ["FactRetained"] * 4
+    assert [type_name for type_name, _, _ in decoded] == ["FactRetained"] * 3
     assert [(message.fact, metadata["deerflow.fact_id"], metadata["deerflow.fact_revision"]) for _, message, metadata in decoded] == [
         ("Prefers tea", "f1", 1),
-        ("Lives in Oslo", "f2", 1),
         ("Prefers green tea", "f1", 2),
         ("Plays chess", "f3", 1),
     ]
@@ -548,6 +550,6 @@ async def test_consumer_deserializes_every_event(server):
             metadata = json.loads(event.metadata)
             assert metadata["$schema_version"] == metadata["schema_version"] == SCHEMA_VERSION and isinstance(metadata["deerflow.origin"], int)
             counted += 1
-    assert counted == 3 + 5  # three fact versions; the recreated session: SessionStarted + four messages of r3
+    assert counted == 2 + 5  # two fact versions survive f2's cleanup; the recreated session: SessionStarted + four messages of r3
     assert {metadata.get("deerflow.run_id") for _, _, metadata in _decoded(server, T1_CANONICAL)} == {None, "r3"}
     assert not [task for task in asyncio.all_tasks() if task.get_name().startswith(WORKER_THREAD)]  # no emission task left behind

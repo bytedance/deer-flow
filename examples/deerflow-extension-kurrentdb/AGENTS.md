@@ -55,5 +55,15 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   only schema event types. The global memory scope emits nothing, an
   upsert that keeps a fact's content emits nothing, and a thread is one session:
   `SessionStarted` only opens a newly created session stream (no per-run events)
+- **Canonical cleanup is a separate obligation (`canonical/cleanup.py`).** It
+  starts only once the intent's primary boundary is present, selects survivors
+  against every primary-committed intent of the stream, appends copies (fresh
+  ids, `deerflow.intent_id`) at the head it read or soft-deletes with that head,
+  and reselects on a conflict. `CanonicalCleanupDone` is followed by verification
+  after `MAX_LIFETIME_SECONDS` plus one timeout; only `CanonicalCleanupVerified`
+  closes it. Stores kick it after their own writes; `KurrentRecoveryService`
+  (`service.py`, registered by `install()`) recovers primary sides at start,
+  bounded, and runs every obligation in the background. Never run it on a
+  caller's path
 - **Test against `backend/tests/kurrentdb_fake.py`.** When the live suite shows
   a divergence, fix the fake first, then the code

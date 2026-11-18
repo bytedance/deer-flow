@@ -11,9 +11,13 @@ derived from the intent, so any process can finish it:
    ``expected_position + 1``
 3. run the derived steps (the memory sidecar boundary): each is idempotent and
    returns the position of its own boundary in its stream (or ``None``)
-4. canonical cleanup: not here (``CanonicalCleanup*`` events are defined for it).
-   Live canonical emitters read ``committed_intents_for`` (open or done, never
-   abandoned) to suppress stale deliveries, and record one that slipped through
+4. canonical cleanup: a separate, non-blocking obligation run by
+   ``canonical.cleanup`` once the boundary is proven present. Its progress is in
+   this index too: ``CanonicalCleanupDone{head, done_at}``, ``CanonicalCleanupReopened``
+   (a stale delivery slipped through; the cleanup runs again) and
+   ``CanonicalCleanupVerified`` (closed). ``canonical_obligations`` lists the open
+   ones; live emitters read ``committed_intents_for`` (open or done, never
+   abandoned) to suppress stale deliveries and record one that slipped through
    with ``reopen_canonical``
 5. raise ``$tb`` on every derived stream, then on the primary stream, to their
    boundaries: only ever raised, written with the metadata stream's expected version
@@ -78,6 +82,8 @@ OPS = frozenset({"delete_facts", "clear_agent", "clear_all", "delete_run", "dele
 TB_ATTEMPTS = 5
 
 BoundaryStatus = Literal["present", "superseded", "missing", "truncated"]
+#: Where an intent's canonical cleanup stands: run it, verify it, or nothing left to do.
+CanonicalState = Literal["pending", "done", "verified"]
 
 
 class DeletionError(Exception):
@@ -158,6 +164,13 @@ def index_event(event_type: str, intent_id: str, **extra: Any) -> NewEvent:
     return NewEvent(id=uuid.uuid5(uuid.UUID(intent_id), event_type), type=event_type, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), content_type="application/json")
 
 
+def canonical_event(event_type: str, intent_id: str, generation: int, **extra: Any) -> NewEvent:
+    """A ``CanonicalCleanupDone`` / ``CanonicalCleanupVerified``; ``generation`` (the intent's canonical events so far) keeps one after a reopen distinct."""
+    data = {"intent_id": intent_id, **extra}
+    event_id = uuid.uuid5(uuid.UUID(intent_id), f"{event_type}/{generation}")
+    return NewEvent(id=event_id, type=event_type, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), content_type="application/json")
+
+
 def reopened_event(intent_id: str, key: str) -> NewEvent:
     """``CanonicalCleanupReopened``: one per stale delivery (``key`` names it), so repeated reopens are distinct events."""
     data = {"intent_id": intent_id, "key": key}
@@ -189,13 +202,21 @@ def _parse_intent(data: Any) -> Intent | None:
 
 @dataclass
 class IndexState:
-    """The fold of the deletions index: every intent in index order, and which are closed."""
+    """The fold of the deletions index: every intent in index order, and which are closed.
+
+    ``canonical_open`` holds the intents whose canonical cleanup is not verified
+    (and that are not abandoned), kept incrementally so listing the canonical
+    obligations never walks every intent ever recorded.
+    """
 
     position: int | None = None
     intents: dict[str, Intent] = field(default_factory=dict)
     closed: set[str] = field(default_factory=set)
     abandoned: set[str] = field(default_factory=set)
     canonical: dict[str, list[str]] = field(default_factory=dict)
+    canonical_done: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canonical_open: set[str] = field(default_factory=set)
+    order: dict[str, int] = field(default_factory=dict)
 
     def apply(self, recorded: Any) -> None:
         if self.position is not None and recorded.stream_position <= self.position:
@@ -213,16 +234,44 @@ class IndexState:
             if intent is None:
                 logger.warning("Ignoring malformed DeletionIntended at position %s", recorded.stream_position)
                 return
-            self.intents.setdefault(intent_id, intent)
+            if intent_id not in self.intents:
+                self.intents[intent_id] = intent
+                self.order[intent_id] = recorded.stream_position
+                if intent_id not in self.abandoned and self.canonical_state(intent_id) != "verified":
+                    self.canonical_open.add(intent_id)
         elif recorded.type in (DELETION_DONE, DELETION_ABANDONED):
             self.close(recorded.type, intent_id)
         else:
             self.canonical.setdefault(intent_id, []).append(recorded.type)
+            if recorded.type == CANONICAL_CLEANUP_DONE:
+                self.canonical_done[intent_id] = data
+            if recorded.type == CANONICAL_CLEANUP_VERIFIED:
+                self.canonical_open.discard(intent_id)
+            elif intent_id in self.intents and intent_id not in self.abandoned:
+                self.canonical_open.add(intent_id)
 
     def close(self, event_type: str, intent_id: str) -> None:
         self.closed.add(intent_id)
         if event_type == DELETION_ABANDONED:
             self.abandoned.add(intent_id)
+            self.canonical_open.discard(intent_id)
+
+    def canonical_state(self, intent_id: str) -> CanonicalState:
+        """``pending`` until a cleanup is done (or again after a reopen), then ``done`` until verified."""
+        history = self.canonical.get(intent_id) or []
+        last = history[-1] if history else None
+        if last == CANONICAL_CLEANUP_DONE:
+            return "done"
+        if last == CANONICAL_CLEANUP_VERIFIED:
+            return "verified"
+        return "pending"
+
+    def canonical_generation(self, intent_id: str) -> int:
+        return len(self.canonical.get(intent_id) or ())
+
+    def canonical_obligations(self) -> list[Intent]:
+        """Intents (any stream, not abandoned) whose canonical cleanup is unverified, in index order."""
+        return [self.intents[intent_id] for intent_id in sorted(self.canonical_open, key=lambda intent_id: self.order.get(intent_id, -1))]
 
     def canonical_candidates(self, stream: str) -> tuple[list[Intent], list[Intent]]:
         """``(done, open)`` intents of ``stream``, abandoned ones left out; done intents' boundaries are committed."""
@@ -244,6 +293,15 @@ class IndexState:
                 break
             earlier.append(other)
         return earlier
+
+
+@dataclass(frozen=True)
+class CanonicalObligation:
+    """An intent whose canonical cleanup must run (``pending``) or be verified (``done``; ``done_data`` is its latest ``CanonicalCleanupDone``)."""
+
+    intent: Intent
+    state: CanonicalState
+    done_data: dict[str, Any] | None
 
 
 def boundary_status(recorded: Iterable[Any], intent: Intent) -> BoundaryStatus:
@@ -361,6 +419,30 @@ class DeletionEngine:
     def reopen_canonical(self, intent: Intent, key: str) -> None:
         """Record a stale canonical delivery for ``intent``: its canonical cleanup must run again."""
         self._append_index(reopened_event(intent.intent_id, key))
+
+    def canonical_obligations(self) -> list[CanonicalObligation]:
+        """The unverified canonical cleanups of intents this engine owns whose primary boundary is committed, in index order."""
+        with self._lock:
+            index = self._refresh_index()
+            listed = [(intent, index.canonical_state(intent.intent_id), index.canonical_done.get(intent.intent_id), intent.intent_id in index.closed) for intent in index.canonical_obligations()]
+        obligations = []
+        for intent, state, done_data, closed in listed:
+            if self._derive(intent) is None or (not closed and self._status(intent) != "present"):
+                continue
+            obligations.append(CanonicalObligation(intent, state, done_data))
+        return obligations
+
+    def has_pending_canonical(self, stream: str) -> bool:
+        """From the cached index only (no I/O): whether a cleanup of ``stream`` is pending."""
+        with self._lock:
+            index = self._index
+            return any(index.intents[intent_id].primary_stream == stream and index.canonical_state(intent_id) == "pending" for intent_id in index.canonical_open)
+
+    def record_canonical(self, event_type: str, intent: Intent, **extra: Any) -> None:
+        """Append ``CanonicalCleanupDone`` or ``CanonicalCleanupVerified`` for ``intent``."""
+        with self._lock:
+            generation = self._index.canonical_generation(intent.intent_id)
+        self._append_index(canonical_event(event_type, intent.intent_id, generation, **extra))
 
     # --- $tb -----------------------------------------------------------------------
 
@@ -535,6 +617,23 @@ class AsyncDeletionEngine:
 
     async def reopen_canonical(self, intent: Intent, key: str) -> None:
         await self._append_index(reopened_event(intent.intent_id, key))
+
+    async def canonical_obligations(self) -> list[CanonicalObligation]:
+        index = await self._refresh_index()
+        obligations = []
+        for intent in index.canonical_obligations():
+            closed = intent.intent_id in index.closed
+            if self._derive(intent) is None or (not closed and await self._status(intent) != "present"):
+                continue
+            obligations.append(CanonicalObligation(intent, index.canonical_state(intent.intent_id), index.canonical_done.get(intent.intent_id)))
+        return obligations
+
+    def has_pending_canonical(self, stream: str) -> bool:
+        index = self._index
+        return any(index.intents[intent_id].primary_stream == stream and index.canonical_state(intent_id) == "pending" for intent_id in index.canonical_open)
+
+    async def record_canonical(self, event_type: str, intent: Intent, **extra: Any) -> None:
+        await self._append_index(canonical_event(event_type, intent.intent_id, self._index.canonical_generation(intent.intent_id), **extra))
 
     async def raise_truncate_before(self, stream: str, position: int) -> None:
         for _ in range(TB_ATTEMPTS):

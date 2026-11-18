@@ -128,8 +128,10 @@ def test_install_registers_store_and_service():
         install(registry, {})
     built = registry.build()
     assert [(owner, name) for owner, (name, _factory) in built.run_event_store_factories] == [("kurrentdb", "kurrent")]
-    # Ledger ruling R1: the recovery service is registered in Task 13.
     assert callable(built.run_event_store_factories[0][1][1])
+    # Ledger ruling R1: install also registers the deletion recovery service (it neither connects nor reads settings yet).
+    assert [(owner, type(service).__name__) for owner, service in built.services] == [("kurrentdb", "KurrentRecoveryService")]
+    assert callable(built.services[0][1].start) and callable(built.services[0][1].stop)
     assert deerflow_extension_kurrentdb.install is install
 
     class _Refusing:
