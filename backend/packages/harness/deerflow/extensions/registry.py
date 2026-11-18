@@ -20,6 +20,7 @@ from deerflow_extension_api import (
     ExtensionData,
     ExtensionService,
     MiddlewareContributor,
+    RunEventStoreFactory,
     SystemModelCallObserver,
     TaskLifecycleContributor,
 )
@@ -29,6 +30,10 @@ from deerflow_extension_api.plugins import BrowserAssets, BrowserModule, PluginC
 from deerflow.extensions.model_access import ModelInvocationScope, ModelInvocationService
 
 _Entry = tuple[str, Any]
+
+
+#: Run-event backends the core owns; extensions cannot shadow them.
+_BUILTIN_RUN_EVENT_STORES = frozenset({"memory", "db", "jsonl"})
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,7 @@ class LoadedExtensions:
     plugins: tuple[tuple[str, PluginContribution], ...] = ()
     knowledge_providers: tuple[tuple[str, tuple[str, Any]], ...] = ()
     workspace_search_providers: tuple[tuple[str, Any], ...] = ()
+    run_event_store_factories: tuple[tuple[str, tuple[str, RunEventStoreFactory]], ...] = ()
     documentation: tuple[tuple[str, dict], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
@@ -89,6 +95,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._plugins: list[_Entry] = []
         self._knowledge_providers: list[_Entry] = []
         self._workspace_search_providers: list[_Entry] = []
+        self._run_event_stores: list[_Entry] = []
         self._current_source: str | None = None
         self._model_access: ModelInvocationScope | None = None
 
@@ -173,6 +180,14 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._knowledge_providers.append((self._source(), (name, provider)))
         return True
 
+    def run_event_store(self, name: str, factory: RunEventStoreFactory) -> bool:
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name) or name in _BUILTIN_RUN_EVENT_STORES:
+            return False
+        if any(existing == name for _, (existing, _) in self._run_event_stores):
+            return False
+        self._run_event_stores.append((self._source(), (name, factory)))
+        return True
+
     def task_lifecycle(self, contributor: TaskLifecycleContributor) -> None:
         self._task_lifecycle.append((self._source(), contributor))
 
@@ -218,6 +233,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             self._plugins,
             self._knowledge_providers,
             self._workspace_search_providers,
+            self._run_event_stores,
         ):
             bucket[:] = [entry for entry in bucket if entry[0] != source]
 
@@ -234,6 +250,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._plugins),
             len(self._knowledge_providers),
             len(self._workspace_search_providers),
+            len(self._run_event_stores),
         )
 
     def rollback_to(self, mark: tuple[int, ...]) -> None:
@@ -255,6 +272,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 self._plugins,
                 self._knowledge_providers,
                 self._workspace_search_providers,
+                self._run_event_stores,
             ),
             mark,
             strict=True,
@@ -274,6 +292,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             plugins=tuple(self._plugins),
             knowledge_providers=tuple(self._knowledge_providers),
             workspace_search_providers=tuple(self._workspace_search_providers),
+            run_event_store_factories=tuple(self._run_event_stores),
             has_middleware_contributors=bool(self._middlewares),
             has_task_lifecycle=bool(self._task_lifecycle),
             has_system_model_observers=bool(self._system_model_observers),

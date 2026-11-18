@@ -72,6 +72,7 @@ hook directory, so they never run a developer's or CI's Git hooks.
 - **`extensions/ordering.py` owns the ordering invariants** and validates the final
   composed chain. Contributed middleware declares a semantic placement; it is
   composed at one final point.
+- **Run-event store factories are only collected here.** Built-in, duplicate or bad names return False
 - **A failing extension does not fail the run.** Contributed middleware is wrapped
   by `IsolatedMiddleware`, and observer failures are contained per observer.
 - **Cancellation is the exception.** A genuine cancellation of the run propagates
