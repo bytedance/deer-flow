@@ -267,6 +267,11 @@ class ExtensionService(Protocol):
         return None
 
 
+#: Builds a run-event store from the frozen ``run_events`` config object.
+#: Both sides stay ``Any`` so this package depends on neither the harness nor Pydantic.
+RunEventStoreFactory = Callable[[Any], Any]
+
+
 # --- Registration surface ---------------------------------------------------
 
 
@@ -296,6 +301,14 @@ class ExtensionRegistry(Protocol):
 
     def workspace_search(self, provider: Any) -> bool:
         """Register one WorkspaceSearchProvider; False on hosts without search."""
+        return False
+
+    def run_event_store(self, name: str, factory: RunEventStoreFactory) -> bool:
+        """Register a run-event store backend selectable as ``run_events.backend: <name>``.
+
+        ``factory`` receives the frozen ``run_events`` config object and returns
+        a store. False means the host does not support this contribution.
+        """
         return False
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:

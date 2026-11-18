@@ -440,8 +440,18 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     """Every additive contract slice bumps both gates together."""
     from importlib.metadata import version
 
-    assert API_VERSION == "0.2.13"
+    assert API_VERSION == "0.2.14"
     assert API_VERSION == version("deerflow-extension-api")
+
+
+def test_registry_protocol_run_event_store_defaults_to_false():
+    from deerflow_extension_api import ExtensionRegistry, RunEventStoreFactory
+
+    class _Minimal(ExtensionRegistry):
+        pass
+
+    factory: RunEventStoreFactory = lambda config: object()  # noqa: E731
+    assert _Minimal().run_event_store("kurrent", factory) is False
 
 
 def test_extension_service_contract_is_public_and_defaults_to_noop():

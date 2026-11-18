@@ -35,6 +35,7 @@ class FakeRegistry:
         self.system_model_observers: list[Any] = []
         self.agent_assembly_observers: list[Any] = []
         self.context_compaction_observers: list[Any] = []
+        self.run_event_stores: list[tuple[str, Any]] = []
         self.services: list[Any] = []
         self.contributed_routers: list[Any] = []
 
@@ -48,6 +49,10 @@ class FakeRegistry:
 
     def workspace_search(self, provider: Any) -> bool:
         self.workspace_search_providers.append(provider)
+        return True
+
+    def run_event_store(self, name: str, factory: Any) -> bool:
+        self.run_event_stores.append((name, factory))
         return True
 
     def middlewares(self, contributor: Any) -> None:

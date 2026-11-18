@@ -37,6 +37,7 @@ from deerflow_extension_api.contracts import (
     HostPolicySnapshot,
     MiddlewareContributor,
     ReadOnlyDict,
+    RunEventStoreFactory,
     SystemModelCallObserver,
     SystemModelRequest,
     SystemModelResult,
@@ -104,7 +105,7 @@ from deerflow_extension_api.state import ExtensionData
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.13"
+API_VERSION = "0.2.14"
 
 __all__ = [
     "AGENT_RUNS_CONTEXT_KEY",
@@ -170,6 +171,7 @@ __all__ = [
     "ExtensionInstall",
     "ExtensionPrincipal",
     "ExtensionRegistry",
+    "RunEventStoreFactory",
     "ExtensionRuntimeDeps",
     "ExtensionService",
     "HostPolicySnapshot",
