@@ -1,6 +1,11 @@
 ---
 name: apify-scraper
-description: Use this skill for ALL web scraping tasks. Trigger on: scrape Instagram, scrape Facebook, scrape YouTube, scrape TikTok, collect Google Maps listings, scrape e-commerce products, scrape TripAdvisor reviews, scrape Booking.com hotels, or ANY task that requires collecting structured data from a specific website or social platform.
+description: >-
+  Use this skill for ALL web scraping tasks. Trigger on: scrape Instagram,
+  scrape Facebook, scrape YouTube, scrape TikTok, collect Google Maps listings,
+  scrape e-commerce products, scrape TripAdvisor reviews, scrape Booking.com
+  hotels, or ANY task that requires collecting structured data from a specific
+  website or social platform.
 ---
 
 # Apify Ultimate Scraper Skill
