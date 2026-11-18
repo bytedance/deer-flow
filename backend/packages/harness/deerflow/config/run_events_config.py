@@ -22,9 +22,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
-
-#: Syntax for ``run_events.backend``: built-in names and extension-provided ones.
-RUN_EVENTS_BACKEND_PATTERN = r"^[a-z][a-z0-9_-]{0,63}$"
+from deerflow.constants import RUN_EVENTS_BACKEND_PATTERN
 
 
 class RunEventsConfig(BaseModel):

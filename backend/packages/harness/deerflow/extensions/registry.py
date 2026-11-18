@@ -27,13 +27,10 @@ from deerflow_extension_api import (
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
 from deerflow_extension_api.plugins import BrowserAssets, BrowserModule, PluginContribution
 
+from deerflow.constants import BUILTIN_RUN_EVENT_BACKENDS, RUN_EVENTS_BACKEND_PATTERN
 from deerflow.extensions.model_access import ModelInvocationScope, ModelInvocationService
 
 _Entry = tuple[str, Any]
-
-
-#: Run-event backends the core owns; extensions cannot shadow them.
-_BUILTIN_RUN_EVENT_STORES = frozenset({"memory", "db", "jsonl"})
 
 
 @dataclass(frozen=True)
@@ -181,7 +178,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         return True
 
     def run_event_store(self, name: str, factory: RunEventStoreFactory) -> bool:
-        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name) or name in _BUILTIN_RUN_EVENT_STORES:
+        if not isinstance(name, str) or not re.fullmatch(RUN_EVENTS_BACKEND_PATTERN, name) or name in BUILTIN_RUN_EVENT_BACKENDS:
             return False
         if any(existing == name for _, (existing, _) in self._run_event_stores):
             return False

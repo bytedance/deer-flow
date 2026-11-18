@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from deerflow.constants import BUILTIN_RUN_EVENT_BACKENDS
 from deerflow.runtime.events.store.base import RunEventStore, RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
 if TYPE_CHECKING:
     from deerflow.extensions.registry import LoadedExtensions
-
-#: Backends the core builds itself; every other name is extension-provided.
-BUILTIN_RUN_EVENT_BACKENDS = ("memory", "db", "jsonl")
-
 
 def make_run_event_store(config=None, *, extensions: LoadedExtensions | None = None) -> RunEventStore:
     """Create a RunEventStore based on run_events.backend configuration.
