@@ -8,6 +8,11 @@ Run with a server up, for instance::
     KURRENTDB_LIVE_CONNECTION_STRING='kurrentdb://127.0.0.1:2113?tls=false' \\
         uv run --frozen pytest tests/test_kurrentdb_extension_live.py -q
 
+The brief's image is amd64-only and segfaults under qemu on arm64 hosts (also with
+``DOTNET_EnableWriteXorExecute=0``); there the suite was run on the arm64 build
+``kurrentplatform/kurrentdb:26.2.0-experimental-arm64-10.0-noble`` with the same
+flags. Rerun on amd64 with the image above when one is at hand.
+
 Two parts:
 
 - ``test_server_*``: the stream semantics the in-memory fake (``kurrentdb_fake``)
@@ -96,10 +101,11 @@ SETTLE_SECONDS = 2.0
 def _settled(read: Callable[[], Any], until: Callable[[Any], bool] = lambda _value: True) -> Any:
     """``read()`` once it stops raising ``NotFoundError`` and ``until`` holds, within ``SETTLE_SECONDS``.
 
-    Divergence from the fake (not modelled there): appending to a soft-deleted stream
-    commits the events, then lowers ``$tb`` in a separate metadata write, so for a few
-    milliseconds reads may still report the stream as deleted (``NotFoundError``,
-    ``get_current_version`` -> ``NO_STREAM``). Appends always check the real head.
+    Appending to a soft-deleted stream commits the events, then lowers ``$tb`` in a
+    separate metadata write, so for a few milliseconds reads may still report the
+    stream as deleted (``NotFoundError``, ``get_current_version`` -> ``NO_STREAM``);
+    the fake models it only on request (``lag_recreations``). Appends always check the
+    real head.
     """
     deadline = time.monotonic() + SETTLE_SECONDS
     while True:
@@ -729,5 +735,30 @@ async def test_live_recovery_finishes_an_open_deletion(live_client, _own_deletio
         assert [kind for kind in _index_kinds(live_client, _own_deletions_index) if kind.startswith("Deletion")] == ["DeletionIntended", "DeletionDone"]
         await store.flush_canonical()
         await recovering.flush_canonical()
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_live_back_to_back_emissions_after_a_thread_deletion_all_land(live_client, _own_deletions_index):
+    """Puts right after a thread deletion: the first recreates the session stream, the next ones
+    are emitted while reads may still see it deleted; every canonical event must land."""
+    thread = _unique("thread")
+    client = await _async_client()
+    try:
+        store = _store(client)
+        for round_number in range(3):
+            await store.put(thread_id=thread, run_id=f"r{round_number}", event_type="ai_message", category="message", content=f"before {round_number}")
+            await store.flush_canonical()
+            assert await store.delete_by_thread(thread) == (1 if round_number == 0 else 5)
+            await store.flush_canonical()
+            with pytest.raises(NotFoundError):
+                live_client.get_stream(agent_session_stream(thread))
+            texts = [f"after {round_number}.{index}" for index in range(4)]
+            for text in texts:
+                await store.put(thread_id=thread, run_id=f"a{round_number}", event_type="ai_message", category="message", content=text)
+            await store.flush_canonical()
+            assert _session(live_client, thread) == [("SessionStarted", None)] + [("AssistantTextGenerated", text) for text in texts]
+        assert (await store.run_canonical_obligations()).failed == 0
     finally:
         await client.close()

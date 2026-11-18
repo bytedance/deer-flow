@@ -36,10 +36,13 @@ the same checks on this fake and on the server:
   metadata again), raises ``StreamIsDeletedError`` with ``EXISTS`` and
   ``WrongCurrentVersionError`` with another int
 
-Not modelled: after an append recreates a soft-deleted stream, the server lowers
-``$tb`` in a separate write, so for a few milliseconds reads may still report the
-stream as deleted (``NotFoundError``; ``get_current_version`` -> ``NO_STREAM``). An
-append is always checked against the real head, so a second recreation is rejected.
+Recreation read lag (off by default): after an append recreates a soft-deleted
+stream, the server lowers ``$tb`` in a separate write, so for a few milliseconds
+reads may still report the stream as deleted (``NotFoundError``;
+``get_current_version`` -> ``NO_STREAM``). An append is always checked against the
+real head, so a second recreation is rejected. ``lag_recreations(reads)`` makes
+every later recreation look deleted to the next ``reads`` reads of that stream;
+``lag_recreations(0)`` turns it off and ends any lag in progress.
 
 Failure injection, per method name:
 
@@ -202,6 +205,8 @@ class FakeKurrentDB:
         self._unavailable: BaseException | None = None
         self.calls: list[Call] = []
         self.read_responses: list[FakeReadResponse] = []
+        self._recreation_lag = 0
+        self._lagging: dict[str, int] = {}
 
     # --- clients and failure injection ----------------------------------
 
@@ -227,6 +232,12 @@ class FakeKurrentDB:
                 del queue[index]
                 return item
         return None
+
+    def lag_recreations(self, reads: int) -> None:
+        """Model the server's read lag after a recreation: the next ``reads`` reads still see the stream deleted."""
+        self._recreation_lag = reads
+        if reads == 0:
+            self._lagging.clear()
 
     def set_unavailable(self, exc: BaseException | None) -> None:
         self._unavailable = exc
@@ -261,6 +272,9 @@ class FakeKurrentDB:
         """The stream when it exists and is not soft-deleted."""
         stream = self._streams.get(name)
         if stream is None or not stream.events or self._tb(stream) == DELETED_TB:
+            return None
+        if self._lagging.get(name, 0) > 0:
+            self._lagging[name] -= 1  # a read during the recreation lag
             return None
         return stream
 
@@ -312,6 +326,8 @@ class FakeKurrentDB:
         stream = self._streams[name]
         if deleted:
             self._write_metadata(name, {**stream.metadata[-1], "$tb": last + 1})
+            if self._recreation_lag:
+                self._lagging[name] = self._recreation_lag
         now = datetime.datetime.now(datetime.UTC)
         for offset, event in enumerate(batch):
             position = self._next_commit_position()

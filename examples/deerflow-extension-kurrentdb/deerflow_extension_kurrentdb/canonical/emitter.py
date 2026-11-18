@@ -11,7 +11,8 @@ twin) never raises. Each attempt:
 2. append the rest at the canonical stream's current head (when the stream does
    not exist yet, preceded by ``opening(pending)``, e.g. a session's ``SessionStarted``) (an expected version,
    never ``StreamState.ANY``); a conflict re-reads the head and retries, up to
-   ``APPEND_ATTEMPTS`` in all
+   ``APPEND_ATTEMPTS`` in all. A rejection at ``NO_STREAM`` retries at the head the
+   server reported instead (``_proven_head``), since reads lag a recreation briefly
 3. **post-check** (also after an append whose outcome is unknown): if an intent
    covering an appended event became primary-committed meanwhile, append
    ``CanonicalCleanupReopened`` to the deletions index, so that intent's canonical
@@ -95,6 +96,22 @@ def _head(value: Any) -> int | StreamState:
     return StreamState.NO_STREAM if isinstance(value, StreamState) else int(value)
 
 
+def _proven_head(error: WrongCurrentVersionError, tried: int | StreamState) -> int | None:
+    """The head to retry at without re-reading it, when a rejection proves the stream is live there.
+
+    An append at ``NO_STREAM`` to a missing or soft-deleted stream succeeds, so its
+    rejection with an int ``actual_version`` means the stream exists at that head, even
+    while reads still report it deleted: right after a recreation the server lowers
+    ``$tb`` in a separate write, and for a few milliseconds ``get_current_version``
+    answers ``NO_STREAM`` (live-confirmed). Re-reading then would conflict on every
+    attempt. Any other rejection re-reads the head.
+    """
+    actual = getattr(error, "actual_version", None)
+    if tried is StreamState.NO_STREAM and isinstance(actual, int) and not isinstance(actual, bool):
+        return actual
+    return None
+
+
 class CanonicalEmitter:
     """Sync emitter; ``client()`` and ``engine()`` are called lazily, in the emitting thread."""
 
@@ -114,6 +131,7 @@ class CanonicalEmitter:
         if not pending:
             return "empty"
         engine = self._engine()
+        proven: int | None = None
         for _attempt in range(APPEND_ATTEMPTS):
             if _remaining(deadline) <= 0:
                 logger.warning("Canonical emission to %r outlived its %ss lifetime; dropped", stream, MAX_LIFETIME_SECONDS)
@@ -122,17 +140,21 @@ class CanonicalEmitter:
             if not pending:
                 return "suppressed"
             client = self._client()
-            try:
-                head = _head(client.get_current_version(stream, timeout=min(self._timeout, max(_remaining(deadline), 0.001))))
-            except NotFoundError:
-                head = StreamState.NO_STREAM
+            if proven is not None:
+                head, proven = proven, None
+            else:
+                try:
+                    head = _head(client.get_current_version(stream, timeout=min(self._timeout, max(_remaining(deadline), 0.001))))
+                except NotFoundError:
+                    head = StreamState.NO_STREAM
             remaining = _remaining(deadline)
             if remaining <= 0:
                 continue
             batch = _with_opening(pending, head, opening)
             try:
                 client.append_to_stream(stream, events=[event.new_event() for event in batch], current_version=head, timeout=min(self._timeout, remaining))
-            except WrongCurrentVersionError:
+            except WrongCurrentVersionError as error:
+                proven = _proven_head(error, head)
                 continue
             except Exception:
                 logger.warning("Canonical append to %r has an unknown outcome; checking for stale deliveries", stream, exc_info=True)
@@ -175,6 +197,7 @@ class AsyncCanonicalEmitter:
             return "empty"
         client = await self._client()
         engine = self._engine(client)
+        proven: int | None = None
         for _attempt in range(APPEND_ATTEMPTS):
             if _remaining(deadline) <= 0:
                 logger.warning("Canonical emission to %r outlived its %ss lifetime; dropped", stream, MAX_LIFETIME_SECONDS)
@@ -182,17 +205,21 @@ class AsyncCanonicalEmitter:
             pending = _keep(pending, await engine.committed_intents_for(primary))
             if not pending:
                 return "suppressed"
-            try:
-                head = _head(await client.get_current_version(stream, timeout=min(self._timeout, max(_remaining(deadline), 0.001))))
-            except NotFoundError:
-                head = StreamState.NO_STREAM
+            if proven is not None:
+                head, proven = proven, None
+            else:
+                try:
+                    head = _head(await client.get_current_version(stream, timeout=min(self._timeout, max(_remaining(deadline), 0.001))))
+                except NotFoundError:
+                    head = StreamState.NO_STREAM
             remaining = _remaining(deadline)
             if remaining <= 0:
                 continue
             batch = _with_opening(pending, head, opening)
             try:
                 await client.append_to_stream(stream, events=[event.new_event() for event in batch], current_version=head, timeout=min(self._timeout, remaining))
-            except WrongCurrentVersionError:
+            except WrongCurrentVersionError as error:
+                proven = _proven_head(error, head)
                 continue
             except Exception:
                 logger.warning("Canonical append to %r has an unknown outcome; checking for stale deliveries", stream, exc_info=True)

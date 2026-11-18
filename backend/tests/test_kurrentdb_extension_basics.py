@@ -465,6 +465,28 @@ def test_fake_assumes_tb_past_the_last_event_breaks_get_current_version():
     assert [e.stream_position for e in client.get_stream("s")] == [2]
 
 
+def test_fake_models_the_recreation_read_lag_on_request():
+    """Live-confirmed: right after a recreation, reads may still see the stream deleted,
+    while appends check the real head (a second NO_STREAM recreation is rejected)."""
+    server = FakeKurrentDB()
+    client = server.sync_client()
+    client.append_to_stream("s", events=[_event(n=0)], current_version=StreamState.NO_STREAM)
+    client.delete_stream("s", current_version=0)
+    server.lag_recreations(2)
+    client.append_to_stream("s", events=[_event(n=1)], current_version=StreamState.NO_STREAM)
+    assert client.get_current_version("s") is StreamState.NO_STREAM
+    with pytest.raises(NotFoundError):
+        client.get_stream("s")
+    with pytest.raises(WrongCurrentVersionError) as second:
+        client.append_to_stream("s", events=[_event(n=2)], current_version=StreamState.NO_STREAM)
+    assert second.value.actual_version == 1
+    assert client.get_current_version("s") == 1  # the lag is over after two reads
+    client.delete_stream("s", current_version=1)
+    client.append_to_stream("s", events=[_event(n=3)], current_version=StreamState.NO_STREAM)
+    server.lag_recreations(0)  # ends the lag in progress
+    assert [json.loads(e.data)["n"] for e in client.get_stream("s")] == [3]
+
+
 def test_fake_failure_injection_lost_ack_and_late_commit():
     server = FakeKurrentDB()
     client = server.sync_client()

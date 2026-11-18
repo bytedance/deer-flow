@@ -422,6 +422,46 @@ async def test_no_survivor_soft_delete_conflicts_with_valid_live_append(server, 
 # --- stale deliveries --------------------------------------------------------------
 
 
+# --- recreation read lag ------------------------------------------------------------
+
+
+async def test_session_emissions_right_after_a_recreation_ride_out_the_read_lag(server, clock):
+    """Right after a soft-deleted stream is recreated, reads still see it deleted for a while
+    (live-confirmed); an emission rejected at NO_STREAM retries at the head the server reported."""
+    from deerflow_extension_kurrentdb.canonical.emitter import APPEND_ATTEMPTS
+
+    store = _store(server, clock=clock)
+    await _say(store, "before", "r1")
+    await store.flush_canonical()
+    assert await store.delete_by_thread("t1") == 1
+    await store.flush_canonical()
+    assert _events(server, T1_CANONICAL) == []
+    server.lag_recreations(APPEND_ATTEMPTS * 2)  # every head re-read of one emission still sees the stream deleted
+    await _say(store, "first after", "r2")  # recreates the session stream
+    await _say(store, "second after", "r3")  # back to back: its head reads lag behind the recreation
+    await store.flush_canonical()
+    server.lag_recreations(0)
+    assert [text for _, _, text in _session(server)] == [None, "first after", "second after"]
+    _assert_consumable(server)
+
+
+def test_memory_emissions_right_after_a_recreation_ride_out_the_read_lag(server, clock):
+    from deerflow_extension_kurrentdb.canonical.emitter import APPEND_ATTEMPTS
+
+    storage = _storage(server, clock=clock)
+    _create(storage, _fact("f1", "Doomed"))
+    assert storage.flush_canonical(timeout=5)
+    storage.clear_all(user_id="alice")
+    assert storage.flush_canonical(timeout=5)
+    assert _events(server, ALICE_CANONICAL) == []
+    server.lag_recreations(APPEND_ATTEMPTS * 2)
+    _create(storage, _fact("f2", "First after"))
+    _create(storage, _fact("f3", "Second after"))
+    assert storage.flush_canonical(timeout=5)
+    server.lag_recreations(0)
+    assert _facts(server) == ["First after", "Second after"]
+
+
 async def test_emitter_paused_past_soft_delete_is_removed_by_reopen(server, clock):
     hooked = AsyncHooked(server.async_client(), "get_current_version", T1_CANONICAL)
     store = _store(server, hooked, clock=clock)

@@ -50,7 +50,9 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   `deerflow.origin` in event metadata; deterministic ids). Emit through
   `canonical/emitter.py`: queued in commit order (memory: `BackgroundQueue`,
   run events: `AsyncChains`), pre-check against `committed_intents_for`, append
-  with an expected version, post-check and `reopen_canonical`, all within
+  with an expected version (after a rejection at `NO_STREAM`, retry at the
+  server-reported head: reads lag a recreation of a soft-deleted stream for a few
+  milliseconds), post-check and `reopen_canonical`, all within
   `MAX_LIFETIME_SECONDS` of the commit. Never fence a canonical stream: it holds
   only schema event types. The global memory scope emits nothing, an
   upsert that keeps a fact's content emits nothing, and a thread is one session:
