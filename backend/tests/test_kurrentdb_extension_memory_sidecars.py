@@ -222,10 +222,13 @@ def test_delete_one_fact_keeps_other_usage(server, tmp_path):
     cold = _storage(server, config)
     assert set(cold.get_fact_usage(agent_name=AGENT, user_id="alice")) == {"fact_1"}
     assert cold.get_extraction_watermark("thread-1", agent_name=AGENT, user_id="alice") == ["msg-1", "hello"]
-    # DeerMem's follow-up metadata clear of the same ids adds nothing: that deletion already covers them.
-    server.calls.clear()
+    # Evidence about fact_2 appended after its deletion (stamped at the deletion's cutoff) is
+    # still removed by DeerMem's follow-up metadata clear of the same id.
+    storage.record_capacity_eviction(_decision(["fact_2"]), max_facts=5, agent_name=AGENT, user_id="alice", occurred_at=T0)
+    assert "fact_2" in [item["factId"] for record in _storage(server, config).get_eviction_audit(agent_name=AGENT, user_id="alice") for item in record["evicted"]]
     storage.clear_fact_metadata(agent_name=AGENT, user_id="alice", fact_ids=["fact_2"])
-    assert server.calls_to("append_to_stream") == []
+    for reader in (storage, _storage(server, config)):
+        assert "fact_2" not in [item["factId"] for record in reader.get_eviction_audit(agent_name=AGENT, user_id="alice") for item in record["evicted"]]
     # A selected-fact clear that no deletion covers is a deletion of its own (the fact stays).
     head = server.sync_client().get_current_version(ALICE_STREAM)
     storage.clear_fact_metadata(agent_name=AGENT, user_id="alice", fact_ids=["fact_1"])

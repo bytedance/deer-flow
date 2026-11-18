@@ -51,8 +51,9 @@ cd .. && docker compose -f docker/docker-compose.kurrentdb.yaml config -q
   deletion stays hidden; records carry the primary revision they were written
   under so a deletion's `cutoff` spares later records
 - **A sidecar-only clear is a deletion too.** `clear_fact_metadata` (a whole
-  agent, or selected fact ids unless the `delete_facts` deletion at the primary
-  head already covers them) and `clear_all` of an already-empty scope write a
+  agent or selected fact ids, also right after those facts' `delete_facts`
+  deletion: an append in between is stamped at its cutoff) and `clear_all` of an
+  already-empty scope write a
   `clear_metadata` intent and a primary boundary that keeps the state (the revision moves, so
   later records survive the cutoff); no record revision distinguishes a late
   append from a later one otherwise. `clear_metadata` covers no canonical event
