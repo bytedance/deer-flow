@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -886,6 +887,7 @@ class TestAgentsAPI:
         assert response.status_code == 404
         assert agent_client.get("/api/agents").json()["agents"] == []
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="nul/con are Windows device names, so this legacy agent could only have been created on POSIX")
     @pytest.mark.parametrize("name", ["nul", "con"])
     def test_legacy_reserved_device_name_agent_stays_editable(self, agent_client, tmp_path, name):
         """An agent an older release stored under a reserved name must stay editable.
@@ -908,6 +910,7 @@ class TestAgentsAPI:
         # The edit must land on the existing record, not fork a second one.
         assert agent_client.get("/api/agents").json()["agents"][0]["name"] == name
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="nul/con are Windows device names, so this legacy agent could only have been created on POSIX")
     @pytest.mark.parametrize("name", ["nul", "con"])
     def test_legacy_reserved_device_name_agent_still_deletable(self, agent_client, tmp_path, name):
         """The same legacy agent must also remain removable, not just editable."""
