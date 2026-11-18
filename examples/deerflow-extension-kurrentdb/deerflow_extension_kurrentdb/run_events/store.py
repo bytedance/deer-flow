@@ -5,11 +5,19 @@ Event schema (every event's data and metadata are JSON):
 - ``deerflow.run-events.RunEvent``: data is the full record envelope (``thread_id``,
   ``run_id``, ``event_type``, ``category``, ``content``, ``metadata``, ``seq``,
   ``created_at``); metadata is ``{"user_id": <owner or null>}``. ``user_id`` is
-  recorded, never used to filter: the store is not user-scoped, like memory/JSONL
+  recorded, never used to filter: the store is not user-scoped, like memory/JSONL.
+  A deletion's copies of surviving events add ``"survivor": true``
 - ``deerflow.run-events.RunsCompacted`` / ``deerflow.run-events.ThreadCleared``:
   deletion boundaries, data ``{"seq_high_water": int, ...}``. Reads fold from the
   newest boundary forward; events before it are gone (written by deletions)
 - ``deerflow.Fence``: written only to settle an ambiguous append; ignored by reads
+
+Reads stream the thread backwards (``read_stream``) and stop as soon as the query is
+answered, and at the newest boundary at the latest, so a long thread is never sent
+in full for a tail page, a lookup that resolves near the head, or the next ``seq``.
+The next ``seq`` follows from the newest non-survivor event (its ``seq`` is above any
+boundary's high water); only when every event since the newest boundary is a
+survivor copy does the walk go down to that boundary for its ``seq_high_water``.
 
 Writes run under a per-thread ``asyncio.Lock`` and append with the expected stream
 head, so ``seq`` (``seq.next_seq``) is strictly increasing and a writer in another
@@ -30,8 +38,9 @@ import json
 import logging
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing, asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -93,21 +102,32 @@ class _Draft:
     owner: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class _Snapshot:
-    records: list[dict]
-    head: int | StreamState
-    next_seq: int | None  # None: the stream exists but nothing is readable, so the high water is unknown
+@dataclass(slots=True)
+class _Walk:
+    """What a newest-first walk learned besides the records it yielded."""
+
+    head: int | StreamState | None = None  # the stream head (any event type); None until an event arrives
+    missing: bool = False
+    high_water: int | None = None  # set when the walk reached the newest boundary
+    exhausted: bool = False  # the walk reached the boundary or the start of the readable stream
+    seqs: list[int] = field(default_factory=list)
 
 
-def encode_record(record: Mapping[str, Any], *, user_id: str | None) -> NewEvent:
-    """The ``RunEvent`` for a complete record (with ``seq``); deletions reuse it for survivors."""
+def encode_record(record: Mapping[str, Any], *, user_id: str | None, survivor: bool = False) -> NewEvent:
+    """The ``RunEvent`` for a complete record (with ``seq``).
+
+    Deletions write their copies of surviving events with ``survivor=True``: a survivor's
+    ``seq`` may sit below its boundary's high water, so it never fixes the next ``seq``.
+    """
     data = {field: record[field] for field in _RECORD_FIELDS}
+    metadata: dict[str, Any] = {"user_id": user_id}
+    if survivor:
+        metadata["survivor"] = True
     return NewEvent(
         id=uuid.uuid4(),
         type=RUN_EVENT_TYPE,
         data=json.dumps(data, default=str, ensure_ascii=False).encode("utf-8"),
-        metadata=json.dumps({"user_id": user_id}, ensure_ascii=False).encode("utf-8"),
+        metadata=json.dumps(metadata, ensure_ascii=False).encode("utf-8"),
     )
 
 
@@ -140,24 +160,45 @@ def _decode_boundary(event) -> int:
     return high_water
 
 
-def _fold(recorded: Sequence[Any]) -> _Snapshot:
-    """Fold a backwards read (newest first) down to the newest boundary."""
-    newest_first: list[dict] = []
-    high_water = 0
-    for event in recorded:
-        if event.type == FENCE_EVENT_TYPE:
-            continue
-        if event.type in BOUNDARY_EVENT_TYPES:
-            high_water = _decode_boundary(event)
-            break
-        if event.type != RUN_EVENT_TYPE:
-            raise _corrupt(event, "unknown event type")
-        newest_first.append(_decode_record(event))
-    records = newest_first[::-1]
-    seqs = [record["seq"] for record in records]
-    if any(later <= earlier for earlier, later in zip(seqs, seqs[1:])):
-        raise KurrentRunEventStoreCorruption(f"{recorded[0].stream_name}: seq is not strictly increasing")
-    return _Snapshot(records=records, head=recorded[0].stream_position, next_seq=next_seq(high_water, seqs))
+def _is_survivor(event) -> bool:
+    if not event.metadata:
+        return False
+    try:
+        metadata = json.loads(event.metadata)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _corrupt(event, f"undecodable metadata: {exc}") from exc
+    if not isinstance(metadata, dict):
+        raise _corrupt(event, "metadata is not an object")
+    return metadata.get("survivor") is True
+
+
+async def _walk(response: Any, walk: _Walk) -> AsyncIterator[tuple[dict, bool]]:
+    """Yield ``(record, survivor)`` newest first, down to the newest boundary; fences are skipped."""
+    try:
+        async for event in response:
+            if walk.head is None:
+                walk.head = event.stream_position
+            if event.type == FENCE_EVENT_TYPE:
+                continue
+            if event.type in BOUNDARY_EVENT_TYPES:
+                walk.high_water = _decode_boundary(event)
+                walk.exhausted = True
+                return
+            if event.type != RUN_EVENT_TYPE:
+                raise _corrupt(event, "unknown event type")
+            record = _decode_record(event)
+            if walk.seqs and record["seq"] >= walk.seqs[-1]:
+                raise _corrupt(event, "seq is not strictly increasing")
+            walk.seqs.append(record["seq"])
+            yield record, _is_survivor(event)
+    except NotFoundError:
+        walk.missing = True
+    walk.exhausted = True
+
+
+async def _nothing() -> AsyncIterator[tuple[dict, bool]]:
+    return
+    yield
 
 
 def _advance(head: int | StreamState, count: int) -> int:
@@ -220,29 +261,74 @@ class KurrentRunEventStore(RunEventStore):
 
     # --- reads -----------------------------------------------------------
 
-    async def _read(self, client: Any, thread_id: str) -> _Snapshot:
-        """One backwards read of the whole stream (down to ``$tb``), folded from the newest boundary."""
-        stream = run_events_stream(thread_id)
+    @asynccontextmanager
+    async def _scan(self, thread_id: str, client: Any = None) -> AsyncIterator[tuple[AsyncIterator[tuple[dict, bool]], _Walk]]:
+        """One streaming backwards read; leaving the block stops it, so nothing older is sent."""
+        if client is None:
+            client = await self._client_factory()
+        walk = _Walk()
         try:
-            recorded = await client.get_stream(stream, backwards=True, timeout=self._timeout)
+            response = await client.read_stream(run_events_stream(thread_id), backwards=True, timeout=self._timeout)
         except NotFoundError:
-            return _Snapshot(records=[], head=StreamState.NO_STREAM, next_seq=1)
-        if recorded:
-            return _fold(recorded)
-        head = await client.get_current_version(stream, timeout=self._timeout)
-        return _Snapshot(records=[], head=head, next_seq=1 if head is StreamState.NO_STREAM else None)
+            walk.missing = walk.exhausted = True
+            yield _nothing(), walk
+            return
+        async with response:
+            async with aclosing(_walk(response, walk)) as records:
+                yield records, walk
 
-    async def _records(self, thread_id: str) -> list[dict]:
-        client = await self._client_factory()
-        return (await self._read(client, thread_id)).records
+    async def _tail(self, thread_id: str, keep: Callable[[dict], bool], *, limit: int, before_seq: int | None, after_seq: int | None, first: bool) -> list[dict]:
+        """Records ``keep`` accepts in ``(after_seq, before_seq)``: the first ``limit`` when ``first``, else the last ``limit``."""
+        if limit <= 0:
+            return []
+        picked: list[dict] = []
+        async with self._scan(thread_id) as (records, _walk_state):
+            async for record, _survivor in records:
+                seq = record["seq"]
+                if after_seq is not None and seq <= after_seq:
+                    break  # seq only decreases from here
+                if before_seq is not None and seq >= before_seq:
+                    continue
+                if not keep(record):
+                    continue
+                picked.append(record)
+                if not first and len(picked) >= limit:
+                    break
+        picked.reverse()
+        return picked[:limit] if first else picked
+
+    async def _head(self, client: Any, thread_id: str, existing: Callable[[dict], bool] | None) -> tuple[int | StreamState, int, dict | None]:
+        """``(head, next seq, existing record)`` from one walk that stops as early as it can."""
+        fresh_top: int | None = None
+        async with self._scan(thread_id, client) as (records, walk):
+            async for record, survivor in records:
+                if existing is not None and existing(record):
+                    return walk.head, 0, record
+                if not survivor and fresh_top is None:
+                    fresh_top = record["seq"]
+                    if existing is None:
+                        break  # a non-survivor's seq is above every boundary's high water
+        if fresh_top is not None:
+            upcoming = fresh_top + 1
+        else:
+            upcoming = next_seq(walk.high_water or 0, walk.seqs)
+        if walk.head is not None:
+            return walk.head, upcoming, None
+        if walk.missing:
+            return StreamState.NO_STREAM, 1, None
+        stream = run_events_stream(thread_id)
+        head = await client.get_current_version(stream, timeout=self._timeout)
+        if head is StreamState.NO_STREAM:
+            return head, 1, None
+        raise KurrentRunEventStoreCorruption(f"{stream}: the stream exists but nothing is readable, so the next seq is unknown")
 
     # --- writes ------------------------------------------------------------
 
-    async def _write(self, thread_id: str, drafts: list[_Draft], *, existing: Callable[[list[dict]], dict | None] | None = None) -> tuple[list[dict], dict | None]:
+    async def _write(self, thread_id: str, drafts: list[_Draft], *, existing: Callable[[dict], bool] | None = None) -> tuple[list[dict], dict | None]:
         """Append ``drafts`` as one atomic append; the caller holds the thread's lock.
 
-        With ``existing``, the stream is read on every attempt and a record it returns
-        is handed back instead of writing. Raises ``_GroupFailed`` with the proven outcome.
+        With ``existing``, the stream is read on every attempt and the newest record it
+        accepts is handed back instead of writing. Raises ``_GroupFailed`` with the proven outcome.
         """
         stream = run_events_stream(thread_id)
         try:
@@ -254,14 +340,9 @@ class KurrentRunEventStore(RunEventStore):
             try:
                 cached = None if existing is not None else self._heads.get(thread_id)
                 if cached is None:
-                    snapshot = await self._read(client, thread_id)
-                    if existing is not None:
-                        found = existing(snapshot.records)
-                        if found is not None:
-                            return [], found
-                    if snapshot.next_seq is None:
-                        raise KurrentRunEventStoreCorruption(f"{stream}: the stream exists but nothing is readable, so the next seq is unknown")
-                    head, upcoming = snapshot.head, snapshot.next_seq
+                    head, upcoming, found = await self._head(client, thread_id, existing)
+                    if found is not None:
+                        return [], found
                 else:
                     head, upcoming = cached
             except Exception as exc:
@@ -376,8 +457,8 @@ class KurrentRunEventStore(RunEventStore):
     ):
         draft = _draft(run_id=run_id, event_type=event_type, category=category, content=content, metadata=metadata, created_at=created_at, owner=_owner(user_id))
 
-        def existing(records: list[dict]) -> dict | None:
-            return next((record for record in records if record["run_id"] == run_id and record["event_type"] == event_type), None)
+        def existing(record: dict) -> bool:
+            return record["run_id"] == run_id and record["event_type"] == event_type
 
         async with self._lock_for(thread_id):
             if lifecycle_guard is not None and not await lifecycle_guard():
@@ -394,72 +475,73 @@ class KurrentRunEventStore(RunEventStore):
     # --- read API ------------------------------------------------------------
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
-        messages = [record for record in await self._records(thread_id) if record["category"] == "message"]
-        return _window(messages, limit=limit, before_seq=before_seq, after_seq=after_seq)
+        return await self._tail(thread_id, lambda record: record["category"] == "message", limit=limit, before_seq=before_seq, after_seq=after_seq, first=after_seq is not None)
 
     async def find_latest_ai_message_run_ids(self, thread_id: str, message_ids: set[str], *, user_id: str | None | _AutoSentinel = AUTO) -> dict[str, str]:
         pending = normalize_message_ids(message_ids)
         if not pending:
             return {}
         result: dict[str, str] = {}
-        for record in reversed(await self._records(thread_id)):
-            match = match_ai_message_run_id(record, pending)
-            if match is None:
-                continue
-            message_id, run_id = match
-            result[message_id] = run_id
-            pending.discard(message_id)
-            if not pending:
-                break
+        async with self._scan(thread_id) as (records, _walk_state):
+            async for record, _survivor in records:
+                match = match_ai_message_run_id(record, pending)
+                if match is None:
+                    continue
+                message_id, run_id = match
+                result[message_id] = run_id
+                pending.discard(message_id)
+                if not pending:
+                    break
         return result
 
     async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
-        events = [record for record in await self._records(thread_id) if record["run_id"] == run_id]
-        if event_types is not None:
-            events = [record for record in events if record["event_type"] in event_types]
-        if task_id is not None:
-            events = [record for record in events if (record.get("metadata") or {}).get("task_id") == task_id]
-        if after_seq is not None:
-            events = [record for record in events if record["seq"] > after_seq]
-        return events[:limit] if limit > 0 else []
+        def keep(record: dict) -> bool:
+            if record["run_id"] != run_id or (event_types is not None and record["event_type"] not in event_types):
+                return False
+            return task_id is None or (record.get("metadata") or {}).get("task_id") == task_id
+
+        return await self._tail(thread_id, keep, limit=limit, before_seq=None, after_seq=after_seq, first=True)
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
-        messages = [record for record in await self._records(thread_id) if record["run_id"] == run_id and record["category"] == "message"]
-        return _window(messages, limit=limit, before_seq=before_seq, after_seq=after_seq)
+        return await self._tail(thread_id, lambda record: record["run_id"] == run_id and record["category"] == "message", limit=limit, before_seq=before_seq, after_seq=after_seq, first=after_seq is not None)
 
     async def get_last_visible_ai_seq_by_run(self, thread_id, run_ids, *, user_id: str | None | _AutoSentinel = AUTO):
         wanted = set(run_ids)
         if not wanted:
             return {}
         result: dict[str, int] = {}
-        for record in reversed(await self._records(thread_id)):
-            run_id = record["run_id"]
-            if run_id not in wanted or run_id in result:
-                continue
-            caller = str((record.get("metadata") or {}).get("caller", ""))
-            if record["category"] == "message" and record["event_type"] in _VISIBLE_AI_EVENT_TYPES and not caller.startswith("middleware:"):
-                result[run_id] = record["seq"]
-                if len(result) == len(wanted):
-                    break
+        async with self._scan(thread_id) as (records, _walk_state):
+            async for record, _survivor in records:
+                run_id = record["run_id"]
+                if run_id not in wanted or run_id in result:
+                    continue
+                caller = str((record.get("metadata") or {}).get("caller", ""))
+                if record["category"] == "message" and record["event_type"] in _VISIBLE_AI_EVENT_TYPES and not caller.startswith("middleware:"):
+                    result[run_id] = record["seq"]
+                    if len(result) == len(wanted):
+                        break
         return result
 
     async def count_messages(self, thread_id):
-        return sum(1 for record in await self._records(thread_id) if record["category"] == "message")
+        count = 0
+        async with self._scan(thread_id) as (records, _walk_state):
+            async for record, _survivor in records:
+                count += record["category"] == "message"
+        return count
 
     async def get_message_seqs(self, thread_id, identities, *, user_id: str | None | _AutoSentinel = AUTO):
         wanted = set(identities)
         if not wanted:
             return {}
         found: dict[str, int] = {}
-        for record in await self._records(thread_id):
-            if record["category"] != "message" or not isinstance(record["content"], dict):
-                continue
-            identity = message_identity(record["content"])
-            # Earliest seq wins: a message re-persisted later keeps its first position.
-            if identity in wanted and identity not in found:
-                found[identity] = record["seq"]
-                if len(found) == len(wanted):
-                    break
+        async with self._scan(thread_id) as (records, _walk_state):
+            async for record, _survivor in records:
+                if record["category"] != "message" or not isinstance(record["content"], dict):
+                    continue
+                identity = message_identity(record["content"])
+                # Earliest seq wins: walking newest first, an older copy overwrites a newer one.
+                if identity in wanted:
+                    found[identity] = record["seq"]
         return found
 
     # --- deletions -----------------------------------------------------------

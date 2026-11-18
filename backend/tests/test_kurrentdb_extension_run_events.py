@@ -514,18 +514,66 @@ async def test_user_id_accepted_ignored_for_isolation_and_recorded_in_metadata(s
     assert await store.get_last_visible_ai_seq_by_run("t1", {"r1"}, user_id="x") == {"r1": 6}
 
 
-@pytest.mark.anyio
-async def test_large_thread_lookup_single_read(store, server):
+async def _large_thread(store, server) -> int:
+    """seq 1 is an old AI target, then 3 000 noise events, then the newest AI message ``other``."""
     await store.put(**_ev(run_id="old", event_type="llm.ai.response", content={"type": "ai", "id": "target"}))
     for chunk in range(3):
-        await store.put_batch([_ev(run_id="noise", event_type="llm.ai.response", content={"type": "ai", "id": f"noise-{chunk}-{index}"}) for index in range(1000)])
+        await store.put_batch([_ev(run_id="noise", event_type="llm.ai.response", category="trace" if index % 2 else "message", content={"type": "ai", "id": f"noise-{chunk}-{index}"}) for index in range(1000)])
     await store.put(**_ev(run_id="new", event_type="llm.ai.response", content={"type": "ai", "id": "other"}))
     server.calls.clear()
+    server.read_responses.clear()
+    return 3002
 
-    assert await store.find_latest_ai_message_run_ids("t1", {"target", "other", "missing"}) == {"target": "old", "other": "new"}
-    reads = server.calls_to("get_stream")
+
+def _one_streaming_read(server) -> list[int]:
+    reads = server.calls_to("read_stream")
     assert len(server.calls) == len(reads) == 1
-    assert reads[0].kwargs["backwards"] is True
+    assert reads[0].kwargs["backwards"] is True and reads[0].kwargs["timeout"] == TIMEOUT
+    assert len(server.read_responses) == 1
+    return server.read_responses[0].yielded
+
+
+@pytest.mark.anyio
+async def test_large_thread_lookup_single_read(store, server):
+    total = await _large_thread(store, server)
+    assert await store.find_latest_ai_message_run_ids("t1", {"other"}) == {"other": "new"}
+    assert _one_streaming_read(server) == [total - 1]  # stops at the newest match, the oldest events are never sent
+
+    server.calls.clear()
+    server.read_responses.clear()
+    # An exhaustive lookup (a missing id) is still one read, down to the start of the live stream.
+    assert await store.find_latest_ai_message_run_ids("t1", {"target", "other", "missing"}) == {"target": "old", "other": "new"}
+    assert len(_one_streaming_read(server)) == total
+
+
+@pytest.mark.anyio
+async def test_large_thread_tail_reads_stop_early(store, server):
+    total = await _large_thread(store, server)
+    page = await store.list_messages("t1", limit=5)
+    assert [m["seq"] for m in page] == [total - 8, total - 6, total - 4, total - 2, total]
+    assert min(_one_streaming_read(server)) >= total - 9
+
+    server.calls.clear()
+    server.read_responses.clear()
+    page = await store.list_messages("t1", after_seq=total - 4, limit=50)
+    assert [m["seq"] for m in page] == [total - 2, total]
+    assert min(_one_streaming_read(server)) >= total - 5
+
+    server.calls.clear()
+    server.read_responses.clear()
+    assert await store.get_last_visible_ai_seq_by_run("t1", {"new"}) == {"new": total}
+    assert _one_streaming_read(server) == [total - 1]
+
+
+@pytest.mark.anyio
+async def test_large_thread_next_seq_lookup_reads_only_the_newest_event(store, server):
+    total = await _large_thread(store, server)
+    cold = _store(server)
+    server.calls.clear()
+    server.read_responses.clear()
+    assert (await cold.put(**_ev()))["seq"] == total + 1
+    assert [call.method for call in server.calls] == ["read_stream", "append_to_stream"]
+    assert server.read_responses[0].yielded == [total - 1]
 
 
 @pytest.mark.anyio
@@ -568,14 +616,14 @@ def _boundary(event_type: str, seq_high_water: int) -> NewEvent:
 
 @pytest.mark.anyio
 async def test_reads_fold_from_the_newest_boundary(store, server):
-    from deerflow_extension_kurrentdb.run_events import RUNS_COMPACTED_EVENT_TYPE, THREAD_CLEARED_EVENT_TYPE
+    from deerflow_extension_kurrentdb.run_events import RUNS_COMPACTED_EVENT_TYPE, THREAD_CLEARED_EVENT_TYPE, encode_record
 
     for index in range(4):
         await store.put(**_ev(run_id=f"r{index}", content=f"m{index + 1}"))
     raw = server.sync_client()
     survivor = _raw(server)[1]  # r1, seq 2
     # delete_by_run(r3) as Task 11 writes it: the boundary, then copies of every survivor, in one append.
-    copies = [NewEvent(id=uuid.uuid4(), type=event.type, data=event.data, metadata=event.metadata) for event in _raw(server) if json.loads(event.data)["run_id"] != "r3"]
+    copies = [encode_record(json.loads(event.data), user_id=None, survivor=True) for event in _raw(server) if json.loads(event.data)["run_id"] != "r3"]
     raw.append_to_stream(T1, events=[_boundary(RUNS_COMPACTED_EVENT_TYPE, 4), *copies], current_version=3)
     assert [m["content"] for m in await _store(server).list_messages("t1")] == ["m1", "m2", "m3"]
     assert json.loads(survivor.data)["seq"] == 2

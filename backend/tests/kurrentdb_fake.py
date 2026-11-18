@@ -35,6 +35,10 @@ Failure injection, per method name:
 - ``set_unavailable(exc)``: every call raises ``exc`` until cleared with ``None``
 
 ``calls`` records every client call for assertions about read patterns.
+``read_stream`` hands out events one at a time like the real streaming read
+(``NotFoundError`` surfaces on the first iteration, as the server reports it in
+the response); ``read_responses`` keeps every response and its ``yielded``
+stream positions, so tests can assert how much of a stream a reader consumed.
 """
 
 from __future__ import annotations
@@ -88,6 +92,78 @@ class PendingCommit:
         self._apply = None
 
 
+class FakeReadResponse:
+    """A streaming read (``AbstractReadResponse``): iterator and context manager; ``stop()`` ends it."""
+
+    def __init__(self, events: tuple[RecordedEvent, ...], error: BaseException | None = None) -> None:
+        self._events = events
+        self._error = error
+        self._index = 0
+        self.yielded: list[int] = []
+        self.stopped = False
+
+    def __iter__(self) -> FakeReadResponse:
+        return self
+
+    def __next__(self) -> RecordedEvent:
+        if self.stopped:
+            raise StopIteration
+        if self._error is not None:
+            error, self._error = self._error, None
+            self.stopped = True
+            raise error
+        if self._index >= len(self._events):
+            self.stopped = True
+            raise StopIteration
+        event = self._events[self._index]
+        self._index += 1
+        self.yielded.append(event.stream_position)
+        return event
+
+    def __enter__(self) -> FakeReadResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.stop()
+
+    def stop(self, *, cancel: bool = False) -> None:
+        self.stopped = True
+
+
+class FakeAsyncReadResponse:
+    """Async twin of ``FakeReadResponse`` (``AbstractAsyncReadResponse``); each event yields to the loop once."""
+
+    def __init__(self, response: FakeReadResponse) -> None:
+        self._response = response
+
+    @property
+    def yielded(self) -> list[int]:
+        return self._response.yielded
+
+    @property
+    def stopped(self) -> bool:
+        return self._response.stopped
+
+    def __aiter__(self) -> FakeAsyncReadResponse:
+        return self
+
+    async def __anext__(self) -> RecordedEvent:
+        await asyncio.sleep(0)
+        try:
+            return next(self._response)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def __aenter__(self) -> FakeAsyncReadResponse:
+        return self
+
+    async def __aexit__(self, *args: object, **kwargs: Any) -> None:
+        await self.stop(timeout=5)
+
+    async def stop(self, *, timeout: float | None = None) -> None:
+        self._response.stop()
+
+
 @dataclass
 class _Stream:
     events: list[RecordedEvent] = field(default_factory=list)
@@ -103,6 +179,7 @@ class FakeKurrentDB:
         self._delays: dict[str, deque[PendingCommit]] = defaultdict(deque)
         self._unavailable: BaseException | None = None
         self.calls: list[Call] = []
+        self.read_responses: list[FakeReadResponse] = []
 
     # --- clients and failure injection ----------------------------------
 
@@ -258,6 +335,14 @@ class FakeKurrentDB:
             visible = [event for event in visible if event.stream_position >= stream_position]
         return tuple(visible[:limit])
 
+    def _read_response(self, name: str, stream_position: int | None, backwards: bool, limit: int) -> FakeReadResponse:
+        try:
+            response = FakeReadResponse(self._read(name, stream_position, backwards, limit))
+        except NotFoundError as error:
+            response = FakeReadResponse((), error)
+        self.read_responses.append(response)
+        return response
+
     def _delete(self, name: str, current_version: int | StreamState) -> None:
         head = self._head(name)
         if current_version is StreamState.ANY:
@@ -312,6 +397,10 @@ class FakeSyncClient:
         kwargs = {"stream_position": stream_position, "backwards": backwards, "limit": limit, "timeout": timeout}
         return self.server._invoke("get_stream", stream_name, kwargs, lambda: self.server._read(stream_name, stream_position, backwards, limit))
 
+    def read_stream(self, stream_name, *, stream_position=None, backwards=False, resolve_links=False, limit=sys.maxsize, timeout=None, credentials=None) -> FakeReadResponse:
+        kwargs = {"stream_position": stream_position, "backwards": backwards, "limit": limit, "timeout": timeout}
+        return self.server._invoke("read_stream", stream_name, kwargs, lambda: self.server._read_response(stream_name, stream_position, backwards, limit))
+
     def get_current_version(self, stream_name, *, timeout=None, credentials=None) -> int | StreamState:
         return self.server._invoke("get_current_version", stream_name, {"timeout": timeout}, lambda: self.server._head(stream_name))
 
@@ -352,6 +441,10 @@ class FakeAsyncClient:
     async def get_stream(self, stream_name, *, stream_position=None, backwards=False, resolve_links=False, limit=sys.maxsize, timeout=None, credentials=None) -> tuple[RecordedEvent, ...]:
         await asyncio.sleep(0)
         return self._sync.get_stream(stream_name, stream_position=stream_position, backwards=backwards, limit=limit, timeout=timeout)
+
+    async def read_stream(self, stream_name, *, stream_position=None, backwards=False, resolve_links=False, limit=sys.maxsize, timeout=None, credentials=None) -> FakeAsyncReadResponse:
+        await asyncio.sleep(0)
+        return FakeAsyncReadResponse(self._sync.read_stream(stream_name, stream_position=stream_position, backwards=backwards, limit=limit, timeout=timeout))
 
     async def get_current_version(self, stream_name, *, timeout=None, credentials=None) -> int | StreamState:
         await asyncio.sleep(0)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -204,7 +205,7 @@ def test_fake_clients_mirror_real_signatures():
     from kurrentdb_fake import FakeAsyncClient, FakeSyncClient
     from kurrentdbclient import AsyncKurrentDBClient, KurrentDBClient
 
-    methods = ["append_to_stream", "get_stream", "get_current_version", "delete_stream", "get_stream_metadata", "set_stream_metadata"]
+    methods = ["append_to_stream", "get_stream", "read_stream", "get_current_version", "delete_stream", "get_stream_metadata", "set_stream_metadata"]
     for fake, real in ((FakeSyncClient, KurrentDBClient), (FakeAsyncClient, AsyncKurrentDBClient)):
         for name in methods:
             real_params = [(p.name, p.kind, p.default) for p in inspect.signature(getattr(real, name)).parameters.values() if p.name != "self"]
@@ -439,6 +440,46 @@ def test_fake_failure_injection_targets_one_stream():
     pending.release()
     assert pending.committed is True and client.get_current_version("c") == 0
     assert client.get_current_version("a") == 0 and client.get_current_version("b") == 0
+
+
+def test_fake_read_stream_streams_lazily_and_reports_not_found_on_iteration():
+    from kurrentdbclient.common import AbstractAsyncReadResponse, AbstractReadResponse
+
+    server = FakeKurrentDB()
+    client = server.sync_client()
+    client.append_to_stream("s", events=[_event(n=n) for n in range(5)], current_version=StreamState.NO_STREAM)
+
+    # The real clients return a response object (iterator + context manager), not a tuple.
+    assert {name for name in ("__iter__", "__next__", "__enter__", "__exit__", "stop")} <= set(dir(AbstractReadResponse))
+    assert {name for name in ("__aiter__", "__anext__", "__aenter__", "__aexit__", "stop")} <= set(dir(AbstractAsyncReadResponse))
+
+    with client.read_stream("s", backwards=True, timeout=1.0) as response:
+        assert [json.loads(next(response).data)["n"] for _ in range(2)] == [4, 3]
+    assert response.yielded == [4, 3] and response.stopped
+    assert list(response) == []
+    assert server.calls_to("read_stream")[-1].kwargs == {"stream_position": None, "backwards": True, "limit": sys.maxsize, "timeout": 1.0}
+    assert [e.stream_position for e in client.read_stream("s", stream_position=1, limit=2)] == [1, 2]
+
+    missing = client.read_stream("nope")  # the call succeeds; the server's "not found" arrives as the first response
+    with pytest.raises(NotFoundError):
+        next(missing)
+
+    async def _scenario():
+        async_client = server.async_client()
+        positions = []
+        async with await async_client.read_stream("s", backwards=True) as events:
+            async for event in events:
+                positions.append(event.stream_position)
+                if len(positions) == 3:
+                    break
+        assert events.stopped
+        missing = await async_client.read_stream("nope")
+        with pytest.raises(NotFoundError):
+            await anext(missing)
+        return positions
+
+    assert asyncio.run(_scenario()) == [4, 3, 2]
+    assert server.read_responses[-2].yielded == [4, 3, 2]
 
 
 def test_fake_async_client_shares_the_server():
