@@ -423,6 +423,24 @@ def test_fake_failure_injection_lost_ack_and_late_commit():
     assert ("get_current_version", "s") in [(call.method, call.stream_name) for call in server.calls]
 
 
+def test_fake_failure_injection_targets_one_stream():
+    server = FakeKurrentDB()
+    client = server.sync_client()
+    server.fail_next("append_to_stream", DeadlineExceededError("timeout"), stream_name="b")
+    pending = server.delay_commit("append_to_stream", DeadlineExceededError("late"), stream_name="c")
+    # Calls on other streams pass untouched and leave the injections queued.
+    client.append_to_stream("a", events=[_event()], current_version=StreamState.NO_STREAM)
+    with pytest.raises(DeadlineExceededError, match="timeout"):
+        client.append_to_stream("b", events=[_event()], current_version=StreamState.NO_STREAM)
+    client.append_to_stream("b", events=[_event()], current_version=StreamState.NO_STREAM)
+    with pytest.raises(DeadlineExceededError, match="late"):
+        client.append_to_stream("c", events=[_event()], current_version=StreamState.NO_STREAM)
+    assert client.get_current_version("c") is StreamState.NO_STREAM
+    pending.release()
+    assert pending.committed is True and client.get_current_version("c") == 0
+    assert client.get_current_version("a") == 0 and client.get_current_version("b") == 0
+
+
 def test_fake_async_client_shares_the_server():
     server = FakeKurrentDB()
     sync_client = server.sync_client()

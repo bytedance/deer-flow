@@ -307,8 +307,10 @@ def test_interrupted_cleanup_never_resurrects_after_restart(server):
     assert delta["deletedFactIds"] == ["fact_1"]
     cutoff = delta["revision"]
     flag["down"] = False
-    # Without the intent the stale records would still be there.
-    assert "fact_1" in _storage(server).get_fact_usage(agent_name=AGENT, user_id="alice")
+    # Without the intent the stale records would still be there (usage is also dropped for non-facts)...
+    assert "fact_1" in [item["factId"] for item in _storage(server, intents=lambda stream: []).get_eviction_audit(agent_name=AGENT, user_id="alice")[0]["evicted"]]
+    # ...while the default provider (the deletion engine's open intents) hides them.
+    assert [item["factId"] for item in _storage(server).get_eviction_audit(agent_name=AGENT, user_id="alice")[0]["evicted"]] == ["fact_9"]
 
     open_intents: list[dict] = [{"op": "delete_facts", "agent": AGENT, "factIds": ["fact_1"], "cutoff": cutoff}]
     seen: list[str] = []

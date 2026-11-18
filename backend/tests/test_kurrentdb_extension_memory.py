@@ -167,7 +167,7 @@ def test_revision_monotonic_may_skip(server):
     assert second == first + 2
 
     # A lost-request append is fenced; the fence advances the revision too.
-    server.fail_next("append_to_stream", DeadlineExceededError("lost"))
+    server.fail_next("append_to_stream", DeadlineExceededError("lost"), stream_name=ALICE_STREAM)
     with pytest.raises(MemoryManifestRevisionConflict):
         storage.save({"facts": []}, AGENT, user_id="alice", expected_revision=second)
     third = storage.load(AGENT, user_id="alice")["revision"]
@@ -349,13 +349,13 @@ def test_transport_failure_raises_memory_read_error(server):
     server.set_unavailable(None)
 
     # The append and its fence both fail: unknown outcome, read error, no re-append.
-    server.fail_next("append_to_stream", DeadlineExceededError("lost"))
-    server.fail_next("append_to_stream", ServiceUnavailableError("fence down"))
+    server.fail_next("append_to_stream", DeadlineExceededError("lost"), stream_name=ALICE_STREAM)
+    server.fail_next("append_to_stream", ServiceUnavailableError("fence down"), stream_name=ALICE_STREAM)
     revision = storage.load(AGENT, user_id="alice")["revision"]
     server.calls.clear()
     with pytest.raises(KurrentdbMemoryReadError):
         storage.save({"facts": []}, AGENT, user_id="alice", expected_revision=revision)
-    assert len(server.calls_to("append_to_stream")) == 2
+    assert len(server.calls_to("append_to_stream", ALICE_STREAM)) == 2
 
     # A client that cannot be created is a read error too.
     from deerflow_extension_kurrentdb.memory import KurrentdbMemoryStorage
@@ -672,7 +672,7 @@ def test_apply_changes_never_partial_on_conflict(server):
     assert _head(server, ALICE_STREAM) == head
 
     # A fenced-off append without rebase raises, leaving the scope as it was.
-    server.fail_next("append_to_stream", DeadlineExceededError("request lost"))
+    server.fail_next("append_to_stream", DeadlineExceededError("request lost"), stream_name=ALICE_STREAM)
     with pytest.raises(MemoryManifestRevisionConflict):
         storage.apply_changes(
             {**change_set, "upserts": [_fact("fact_new", "new"), dict(document["facts"][1], content="lost", revision=2)], "upsertRevisions": {"fact_new": None, "fact_2": 2}},

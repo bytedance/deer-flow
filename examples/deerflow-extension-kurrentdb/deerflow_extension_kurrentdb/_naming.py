@@ -25,5 +25,14 @@ def memory_meta_stream(user_id: str | None) -> str:
     return "deerflow.memory-meta-global" if user_id is None else f"deerflow.memory-meta-user.{enc(user_id)}"
 
 
+def memory_meta_stream_of(primary: str) -> str | None:
+    """The sidecar stream of a primary memory stream name, or ``None`` when ``primary`` is not one."""
+    if primary == "deerflow.memory-global":
+        return "deerflow.memory-meta-global"
+    if primary.startswith("deerflow.memory-user."):
+        return "deerflow.memory-meta-" + primary.removeprefix("deerflow.memory-")
+    return None
+
+
 def run_events_stream(thread_id: str) -> str:
     return f"deerflow.run-events-{enc(thread_id)}"

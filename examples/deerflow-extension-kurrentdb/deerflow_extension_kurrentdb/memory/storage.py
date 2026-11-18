@@ -14,8 +14,11 @@ outcome is unknown is settled by ``_fence.settle_append`` and never re-appended.
 
 ``save``, ``apply_changes`` and ``clear_all`` are planned against the fold
 (``changes``) and written as one append each; a no-op appends nothing. Plans that
-delete facts or clear a scope go through ``_commit_destructive`` as a
-``MemorySnapshot`` boundary of the resulting state.
+delete facts or clear a scope are deletions (``deletions.DeletionEngine``): an
+intent in the deletions index, then one ``MemorySnapshot`` boundary of the
+resulting state carrying the intent id, then the sidecar boundary and ``$tb`` on
+the sidecar and primary streams. Before every primary write the open deletions of
+that scope are completed (``recover_deletions`` does the same at startup).
 
 ``load()`` serves a per-scope cache but checks the stream head on every call and
 folds only the new events; ``reload()`` re-reads from the newest snapshot. DeerMem
@@ -28,16 +31,20 @@ the file storage: a sidecar failure is logged and never fails a memory read or
 write. Usage is one ``StreamState.ANY`` append per call, never read first.
 Deletions replace the sidecar stream's state with a ``MetadataSnapshot`` boundary
 without the removed records, and reads drop every record an open deletion
-intent's criteria match (``intents_provider``), so a cleanup interrupted after
-the primary boundary never resurrects removed records.
+intent's criteria match (``intents_provider``, by default the engine's open,
+primary-committed intents), so a cleanup interrupted after the primary boundary
+never resurrects removed records. Usage is also dropped for ids that are not
+facts in the current fold, so a late cross-process access append never shows a
+deleted fact.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
@@ -51,8 +58,9 @@ from kurrentdbclient.exceptions import NotFoundError, WrongCurrentVersionError
 
 from .._client import sync_client_factory
 from .._fence import AmbiguousAppendError, settle_append
-from .._naming import memory_meta_stream, memory_stream
+from .._naming import memory_meta_stream, memory_meta_stream_of, memory_stream
 from .._settings import load_settings
+from ..deletions import DeletionConflict, DeletionEngine, DeletionError, DerivedStep, Intent
 from . import changes, events, sidecars
 from .changes import Plan
 from .fold import MemoryState
@@ -77,6 +85,11 @@ def no_open_intents(stream: str) -> tuple[Mapping[str, Any], ...]:
     return ()
 
 
+@contextlib.contextmanager
+def _no_lock() -> Iterator[None]:
+    yield
+
+
 class KurrentdbMemoryReadError(MemoryReadError):
     """KurrentDB could not be read (transport, timeout), or a write's outcome is unknown."""
 
@@ -91,9 +104,11 @@ class KurrentdbMemoryStorage(MemoryStorage):
     def __init__(self, config: DeerMemConfig, *, client_factory: Callable[[], Any] | None = None, intents_provider: IntentsProvider | None = None):
         """``intents_provider(primary_stream)`` returns the criteria of the open, primary-committed
         deletion intents of that memory stream; sidecar reads drop every record they match.
+        It defaults to the deletion engine's ``open_intents_for``.
         """
         self._config = config
-        self._intents_provider = intents_provider if intents_provider is not None else no_open_intents
+        self._intents_provider = intents_provider if intents_provider is not None else self._open_intent_criteria
+        self._engine_instance: DeletionEngine | None = None
         self._meta_states: dict[str, SidecarState] = {}
         self._settings = load_settings()
         self._timeout = self._settings.timeout
@@ -116,6 +131,55 @@ class KurrentdbMemoryStorage(MemoryStorage):
     def _scope_lock(self, stream: str) -> threading.RLock:
         with self._locks_guard:
             return self._scope_locks.setdefault(stream, threading.RLock())
+
+    # --- deletions ----------------------------------------------------------------
+
+    def _engine(self) -> DeletionEngine:
+        with self._locks_guard:
+            if self._engine_instance is None:
+                self._engine_instance = DeletionEngine(self._client(), timeout=self._timeout, derive=self._derive)
+            return self._engine_instance
+
+    def _derive(self, intent: Intent) -> list[DerivedStep] | None:
+        """The memory sidecar step of an intent on a memory stream; ``None`` for other streams."""
+        meta = memory_meta_stream_of(intent.primary_stream)
+        return None if meta is None else [DerivedStep(meta, self._sidecar_cleanup)]
+
+    def _open_intent_criteria(self, primary: str) -> list[dict[str, Any]]:
+        return [intent.criteria for intent in self._engine().open_intents_for(primary)]
+
+    def recover_deletions(self, stream: str | None = None) -> list[Intent]:
+        """Finish or abandon open memory deletions (all scopes for ``None``); returns those still open."""
+        with self._scope_lock(stream) if stream is not None else _no_lock():
+            return self._engine().recover_primary(stream)
+
+    def _recover_before_write(self, stream: str) -> None:
+        """Complete the scope's open deletions before a primary write; best-effort. Caller holds the scope lock."""
+        try:
+            self._engine().recover_primary(stream)
+        except Exception:
+            logger.warning("Completing open deletions of %r before a write failed", stream, exc_info=True)
+
+    def _sidecar_cleanup(self, intent: Intent) -> int | None:
+        """Step 3: the sidecar boundary without the records the intent's criteria match; idempotent.
+
+        Returns the position of the sidecar stream's newest snapshot (for ``$tb``),
+        ``None`` when it has none and nothing to remove. Raises when the cleanup
+        could not be written, so the intent stays open.
+        """
+        meta = memory_meta_stream_of(intent.primary_stream)
+        if meta is None:
+            return None
+        with self._scope_lock(intent.primary_stream), self._scope_lock(meta):
+            for _ in range(SIDECAR_SNAPSHOT_ATTEMPTS):
+                state = self._refresh_meta(meta)
+                survivors = state.without(intent.criteria).snapshot_state()
+                if survivors == state.snapshot_state():
+                    return state.snapshot_position
+                snapshot = sidecars.new_event(sidecars.METADATA_SNAPSHOT, {"agent": None, "revision": None, "intent_id": intent.intent_id, "state": survivors})
+                if self._meta_snapshot(meta, state.position, snapshot):
+                    return 0 if state.position is None else state.position + 1
+        raise RuntimeError(f"sidecar cleanup of {meta!r} kept conflicting with concurrent writes")
 
     # --- reads ------------------------------------------------------------------
 
@@ -224,6 +288,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
             facts_raw = self._validate_save(memory_data, agent_name)
             stream = self._stream(agent_name, user_id)
             with self._scope_lock(stream):
+                self._recover_before_write(stream)
                 state = self._refresh(stream)
                 if expected_revision is not None and expected_revision != state.revision:
                     raise MemoryManifestRevisionConflict(f"Expected user-memory revision {expected_revision}, found {state.revision}")
@@ -290,25 +355,32 @@ class KurrentdbMemoryStorage(MemoryStorage):
             return self._append(stream, state, events.new_change_set(plan.changes))
         return self._commit_destructive(stream, state, plan, user_id=user_id)
 
-    def _commit_destructive(self, stream: str, state: MemoryState, plan: Plan, *, user_id: str | None) -> MemoryState | None:
-        """Write a plan that removes facts or clears the scope as one ``MemorySnapshot`` boundary.
+    def _commit_destructive(self, stream: str, state: MemoryState, plan: Plan, *, user_id: str | None) -> MemoryState:
+        """Write a plan that removes facts or clears the scope as a deletion (``DeletionEngine``).
 
-        The deletion engine's entry point: everything that deletes goes through
-        here, with ``plan.criteria`` naming what is removed. This interim engine
-        writes the boundary (the resulting state, in one append at the folded
-        head) and then drops the removed facts' sidecar metadata. It does not yet
-        record a deletion intent or raise ``$tb``; the full protocol replaces it.
-        Caller holds the scope lock.
+        The intent's criteria are ``plan.criteria`` plus ``cutoff``: the revision
+        right after the boundary, so sidecar records written under an earlier
+        revision are removed and later ones survive. The boundary is one
+        ``MemorySnapshot`` of the resulting state at the folded head, carrying the
+        intent id; the sidecar boundary and ``$tb`` follow (or are finished by
+        recovery). A boundary that did not commit is a manifest conflict; one whose
+        outcome is unknown, or a deletion blocked by an open one, is a
+        ``KurrentdbMemoryReadError``. Caller holds the scope lock.
         """
+        if state.position is None or plan.criteria is None:
+            raise AssertionError("a destructive plan needs existing state and criteria")
+        criteria = {**plan.criteria, "cutoff": state.position + 2}
+        intent = Intent.new(criteria["op"], criteria, stream, state.position)
         resulting = self._fold(state.copy(), self._recorded(state, events.new_change_set(plan.changes)), stream)
-        boundary = events.new_change_set([(events.MEMORY_SNAPSHOT, {"agent": None, "state": resulting.snapshot_state()})])
-        committed = self._append(stream, state, boundary)
-        criteria = plan.criteria or {}
-        if criteria.get("op") == "delete_facts":
-            self.clear_fact_metadata(agent_name=criteria["agent"], user_id=user_id, fact_ids=list(criteria["factIds"]))
-        elif criteria.get("op") == "clear_all":
-            # Every agent's sidecars, including agents that had no facts.
-            self._clear_metadata(stream, memory_meta_stream(user_id), {"op": "clear_all"})
+        boundary = [events.new_event(events.MEMORY_SNAPSHOT, intent.intent_id, 0, {"agent": None, "intent_id": intent.intent_id, "state": resulting.snapshot_state()})]
+        try:
+            self._engine().run(intent, lambda: boundary, self._derive(intent) or [])
+        except DeletionConflict as exc:
+            raise MemoryManifestRevisionConflict(f"Memory deletion in {stream!r} did not commit: {exc}") from exc
+        except DeletionError as exc:
+            raise KurrentdbMemoryReadError(f"Memory deletion in {stream!r} failed: {exc}") from exc
+        committed = self._fold(state.copy(), self._recorded(state, boundary), stream)
+        self._states[stream] = committed
         return committed
 
     def apply_changes(
@@ -338,6 +410,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
         for attempt in range(CHANGE_SET_ATTEMPTS):
             try:
                 with self._scope_lock(stream):
+                    self._recover_before_write(stream)
                     state = self._refresh(stream)
                     if expected is not None and expected != state.revision:
                         raise MemoryManifestRevisionConflict(f"Expected user-memory revision {expected}, found {state.revision}")
@@ -368,6 +441,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
         for attempt in range(CHANGE_SET_ATTEMPTS):
             try:
                 with self._scope_lock(stream):
+                    self._recover_before_write(stream)
                     state = self._refresh(stream)
                     plan = changes.plan_clear_all(state)
                     self._commit(stream, state, plan, user_id=user_id)
@@ -479,9 +553,16 @@ class KurrentdbMemoryStorage(MemoryStorage):
             logger.warning("Clearing memory sidecars in %r failed (criteria %r)", meta, dict(criteria), exc_info=True)
 
     def get_fact_usage(self, *, agent_name: str, user_id: str | None = None) -> dict[str, dict[str, Any]]:
+        """Usage of the agent's current facts (a late access append for a deleted fact is dropped)."""
         primary, meta = self._meta_scope(agent_name, user_id)
+        try:
+            with self._scope_lock(primary):
+                facts = set(self._refresh(primary).agent_facts(agent_name))
+        except Exception:
+            logger.warning("Reading %r to filter fact usage failed; treating usage as empty", primary, exc_info=True)
+            return {}
         view = self._meta_view(primary, meta, "fact usage")
-        return view.usage(agent_name) if view is not None else {}
+        return {fact_id: entry for fact_id, entry in view.usage(agent_name).items() if fact_id in facts} if view is not None else {}
 
     def get_eviction_audit(self, *, agent_name: str, user_id: str | None = None) -> list[dict[str, Any]]:
         """The bounded capacity-eviction evidence, oldest first (the file storage's ``eviction-audit.json``)."""

@@ -25,11 +25,13 @@ Semantics modelled (see ``test_kurrentdb_extension_basics.py``):
 
 Failure injection, per method name:
 
-- ``fail_next(method, exc, after_commit=False)``: the next call raises ``exc``
-  before applying (lost request) or after applying (lost ack)
-- ``delay_commit(method, exc)``: the next call raises ``exc`` and applies nothing
-  until ``PendingCommit.release()``, which applies it then, against the state at
-  that moment (a late server commit racing a fence)
+- ``fail_next(method, exc, after_commit=False, stream_name=None)``: the next call
+  raises ``exc`` before applying (lost request) or after applying (lost ack)
+- ``delay_commit(method, exc, stream_name=None)``: the next call raises ``exc`` and
+  applies nothing until ``PendingCommit.release()``, which applies it then, against
+  the state at that moment (a late server commit racing a fence)
+- With ``stream_name``, only a call on that stream consumes the injection, so a
+  test can target one write of a multi-stream protocol
 - ``set_unavailable(exc)``: every call raises ``exc`` until cleared with ``None``
 
 ``calls`` records every client call for assertions about read patterns.
@@ -67,6 +69,7 @@ class PendingCommit:
     method: str
     exc: BaseException
     _server: FakeKurrentDB
+    stream_name: str | None = None
     _apply: Callable[[], Any] | None = None
     committed: bool | None = None
     result: Any = None
@@ -96,7 +99,7 @@ class FakeKurrentDB:
         self._lock = threading.RLock()
         self._streams: dict[str, _Stream] = defaultdict(_Stream)
         self._commit_position = 0
-        self._failures: dict[str, deque[tuple[BaseException, bool]]] = defaultdict(deque)
+        self._failures: dict[str, deque[tuple[BaseException, bool, str | None]]] = defaultdict(deque)
         self._delays: dict[str, deque[PendingCommit]] = defaultdict(deque)
         self._unavailable: BaseException | None = None
         self.calls: list[Call] = []
@@ -109,13 +112,22 @@ class FakeKurrentDB:
     def async_client(self) -> FakeAsyncClient:
         return FakeAsyncClient(self)
 
-    def fail_next(self, method: str, exc: BaseException, *, after_commit: bool = False) -> None:
-        self._failures[method].append((exc, after_commit))
+    def fail_next(self, method: str, exc: BaseException, *, after_commit: bool = False, stream_name: str | None = None) -> None:
+        self._failures[method].append((exc, after_commit, stream_name))
 
-    def delay_commit(self, method: str, exc: BaseException) -> PendingCommit:
-        pending = PendingCommit(method=method, exc=exc, _server=self)
+    def delay_commit(self, method: str, exc: BaseException, *, stream_name: str | None = None) -> PendingCommit:
+        pending = PendingCommit(method=method, exc=exc, _server=self, stream_name=stream_name)
         self._delays[method].append(pending)
         return pending
+
+    @staticmethod
+    def _take(queue: deque, stream_name: str, target: Callable[[Any], str | None]) -> Any:
+        """Pop the first injection aimed at ``stream_name`` (or at any stream)."""
+        for index, item in enumerate(queue):
+            if target(item) in (None, stream_name):
+                del queue[index]
+                return item
+        return None
 
     def set_unavailable(self, exc: BaseException | None) -> None:
         self._unavailable = exc
@@ -128,11 +140,11 @@ class FakeKurrentDB:
             self.calls.append(Call(method, stream_name, kwargs))
             if self._unavailable is not None:
                 raise self._unavailable
-            if self._delays[method]:
-                pending = self._delays[method].popleft()
+            pending = self._take(self._delays[method], stream_name, lambda item: item.stream_name)
+            if pending is not None:
                 pending._apply = apply
                 raise pending.exc
-            failure = self._failures[method].popleft() if self._failures[method] else None
+            failure = self._take(self._failures[method], stream_name, lambda item: item[2])
             if failure is not None and not failure[1]:
                 raise failure[0]
             result = apply()

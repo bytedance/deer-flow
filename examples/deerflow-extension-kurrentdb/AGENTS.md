@@ -21,7 +21,9 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   fencing, never by a read alone. The one exception is a sidecar record
   (`memory/sidecars.py`): a blind `StreamState.ANY` append that is never retried,
   because the records commute and are best-effort; sidecar snapshots still use
-  an expected version
+  an expected version. Deletion index events (`deletions.py`) are the other
+  exception: keyed by intent with deterministic ids, they commute and a
+  duplicate is harmless
 - **Memory state is a fold of its scope's stream** (`memory/fold.py`). Fold code
   skips fence events, and an unknown event type or a broken invariant is
   `MemoryStorageCorruption`, never a silent skip
@@ -29,6 +31,11 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   plan that removes facts or clears a scope goes through
   `KurrentdbMemoryStorage._commit_destructive` as a `MemorySnapshot` boundary,
   never as plain `FactDeleted` / `MemoryCleared` deltas
+- **Every deletion runs through `deletions.DeletionEngine`.** Intent first, then
+  a boundary carrying `intent_id`, derived steps, `$tb` (derived streams, then
+  the primary, only ever raised) and `DeletionDone`. A missing boundary is
+  abandoned only after a fence lands at its position. Every truncation sits on a
+  boundary, so a fold from the newest boundary is never partial
 - **Sidecars never fail a memory call.** Sidecar reads and writes log a warning
   and fall back to empty; reads drop every record an open deletion intent's
   criteria match (`intents_provider`), and records carry the primary revision

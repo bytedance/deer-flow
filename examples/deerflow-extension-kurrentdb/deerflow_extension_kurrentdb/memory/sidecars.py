@@ -168,12 +168,15 @@ class SidecarState:
         self._config = config
         self.agents: dict[str, _Agent] = {}
         self.position: int | None = None
+        # Position of the newest snapshot folded (the stream's boundary), if any.
+        self.snapshot_position: int | None = None
         self.log: list[tuple[str, dict[str, Any]]] = []
 
     def copy(self) -> SidecarState:
         clone = SidecarState(self._config)
         clone.agents = copy.deepcopy(self.agents)
         clone.position = self.position
+        clone.snapshot_position = self.snapshot_position
         clone.log = list(self.log)
         return clone
 
@@ -199,6 +202,7 @@ class SidecarState:
             return
         if recorded.type == METADATA_SNAPSHOT:
             self.log = []
+            self.snapshot_position = recorded.stream_position
         self.log.append((recorded.type, data))
         self.apply_data(recorded.type, data)
 
