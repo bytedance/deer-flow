@@ -19,5 +19,8 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   the extension never connects to KurrentDB
 - **Every append carries an expected version.** Settle an ambiguous append by
   fencing, never by a read alone
+- **Memory state is a fold of its scope's stream** (`memory/fold.py`). Fold code
+  skips fence events, and an unknown event type or a broken invariant is
+  `MemoryStorageCorruption`, never a silent skip
 - **Test against `backend/tests/kurrentdb_fake.py`.** When the live suite shows
   a divergence, fix the fake first, then the code
