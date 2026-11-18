@@ -1077,6 +1077,10 @@ async def run_agent(
     # earlier runs on the same thread — without it, one stale fallback in
     # history would mark every subsequent run on this thread as ``error``.
     pre_existing_message_ids: set[str] = set()
+    # First values frame replayed when the pre-run capture failed. It is an
+    # emission boundary, not current output: only later message IDs can decide
+    # this run's fallback.
+    fallback_boundary_ids: set[str] | None = None
 
     # Bound agent graph accessor + captured pre-run rollback point; assigned
     # inside the try block so the finally rollback path can fork the pre-run
@@ -1703,6 +1707,22 @@ async def run_agent(
                 pending_pause = True
                 remember_approval(streamed_interrupts)
 
+        def _fallback_scope(chunk: Any, mode: str) -> set[str] | None:
+            """Message IDs allowed to decide this run's fallback for one frame.
+
+            ``None`` means this frame only establishes the boundary and must not
+            latch a fallback. Without a captured pre-run snapshot, the first values
+            frame can be entirely replayed history; later frames are compared
+            against that baseline.
+            """
+            nonlocal fallback_boundary_ids
+            if mode != "values" or not snapshot_capture_failed:
+                return pre_existing_message_ids
+            if fallback_boundary_ids is None:
+                fallback_boundary_ids = _collect_pre_existing_message_ids(chunk)
+                return None
+            return pre_existing_message_ids | fallback_boundary_ids
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
             if input_control is not None:
@@ -1723,14 +1743,10 @@ async def run_agent(
                                     break
                                 if single_mode != "custom":
                                     # Custom frames carry task_* events whose payload can hold a delegated
-                                    # subagent's messages; see the multi-mode branch below. When the
-                                    # pre-run boundary is unknown, values chunks can replay stale history,
-                                    # so only their newest message may decide this run's fallback.
-                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(
-                                        chunk,
-                                        pre_existing_message_ids,
-                                        last_message_only=snapshot_capture_failed and single_mode == "values",
-                                    )
+                                    # subagent's messages; see the multi-mode branch below.
+                                    scope_ids = _fallback_scope(chunk, single_mode)
+                                    if scope_ids is not None:
+                                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, scope_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
                                 single_payload = serialize(chunk, mode=single_mode)
                                 if single_mode == "values" and seq_stamper is not None:
@@ -1785,14 +1801,10 @@ async def run_agent(
                                 # fallback: a delegated subagent's marked fallback is the
                                 # executor's to map (task_failed), not this run's. That
                                 # includes the child messages task_running custom events
-                                # carry, which are root frames too. When the pre-run boundary
-                                # is unknown, values chunks can replay stale history, so only
-                                # their newest message may decide this run's fallback.
-                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(
-                                    chunk,
-                                    pre_existing_message_ids,
-                                    last_message_only=snapshot_capture_failed and mode == "values",
-                                )
+                                # carry, which are root frames too.
+                                scope_ids = _fallback_scope(chunk, mode)
+                                if scope_ids is not None:
+                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, scope_ids)
                             observe_stream_pause(mode, chunk, namespace)
                             await _publish_stream_item(
                                 bridge=bridge,
@@ -3936,7 +3948,7 @@ def _try_extract_from_message(obj: Any, pre_existing_ids: set[str] | None = None
     return None
 
 
-def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] | None = None, *, last_message_only: bool = False) -> str | None:
+def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] | None = None) -> str | None:
     """Find LLM fallback markers in streamed LangGraph chunks.
 
     Error fallback messages returned by model-call middleware are not guaranteed
@@ -3946,10 +3958,6 @@ def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] |
     history from prior runs on the same thread (LangGraph replays the full
     messages channel in ``stream_mode="values"`` chunks), and any error
     fallback in that history was already resolved when its run finished.
-
-    ``last_message_only`` is the fail-closed values-mode fallback when the
-    pre-run boundary could not be captured: an earlier message may be stale
-    history, so only the newest message can be attributed to this run.
     """
     # Fast path: large state chunks produced by stream_mode="values" have a
     # top-level "messages" list. Scanning only that list avoids expensive deep
@@ -3957,8 +3965,7 @@ def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] |
     if isinstance(value, dict):
         messages = value.get("messages")
         if isinstance(messages, (list, tuple)):
-            candidates = messages[-1:] if last_message_only and messages else messages
-            for msg in candidates:
+            for msg in messages:
                 result = _try_extract_from_message(msg, pre_existing_ids)
                 if result is not None:
                     return result

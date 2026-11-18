@@ -1938,6 +1938,10 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
 
     class DummyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            # A real values stream emits the initial replayed state first, then
+            # the current run's output. Keep the stale fallback out of the
+            # initial boundary frame so only later messages can decide.
+            yield {"messages": []}
             yield {
                 "messages": [
                     AIMessage(
@@ -3472,7 +3476,9 @@ async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run(capture
 
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             # Replay the prior fallback message (as LangGraph would when using
-            # stream_mode="values") and then yield a fresh successful AIMessage.
+            # stream_mode="values") as an initial boundary frame, then emit a
+            # fresh successful AIMessage.
+            yield {"messages": [stale_fallback]}
             yield {
                 "messages": [
                     stale_fallback,
