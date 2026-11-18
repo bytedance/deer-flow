@@ -8,6 +8,8 @@ Each subfolder under `agents/memory/backends/` is a pluggable memory backend. Sw
   `langchain-openviking` package (single-user middleware mode).
 - `honcho/` - optional remote Honcho backend over HTTP: user-model memory (representations built by Honcho's server-side deriver; no local LLM calls). Workspace-per-user isolation with per-user overrides.
 
+DeerMem storage providers (`memory.backend_config.storage_class`): `file` (default), `markdown`, or a dotted `MemoryStorage` class path, such as the [KurrentDB extension](../../../../../../../examples/deerflow-extension-kurrentdb/README.md).
+
 This guide tells you **which files to touch** when you change, swap, or add a memory system. Paths are relative to `backend/` unless noted.
 
 ---

@@ -179,7 +179,9 @@ name's syntax (`^[a-z][a-z0-9_-]{0,63}$`), because extensions load after config.
 The Gateway resolves the name against its own loaded extensions at startup and
 stops when none provides it, naming the backend, the extension-provided
 backends and any extension that failed to load. It never falls back to another
-backend. `producer_fencing: strict` still requires `db`.
+backend. `producer_fencing: strict` still requires `db`. The
+[KurrentDB extension](../../examples/deerflow-extension-kurrentdb/README.md)
+registers `kurrent`, a single-process store with one KurrentDB stream per thread.
 
 Confirmation is limited to the Store's declared failure and concurrency model:
 

@@ -19,14 +19,14 @@ python -m pytest tests -q -k "extension or plugin"
 make test-blocking-io
 ```
 
-Manager tests create temporary Git repositories with an empty repository-local
-hook directory, so they never run a developer's or CI's Git hooks.
+Manager tests use temporary Git repositories with an empty hook directory, so
+they never run a developer's or CI's Git hooks.
 
 ## Trust model
 
-- **Extension code runs with Gateway privileges.** It is trusted, not sandboxed.
-  For that reason the `plugins:` list in `config.yaml` is read at startup only and
-  has no online write API. Everything a Gateway API can edit lives elsewhere.
+- **Extension code runs with Gateway privileges.** It is trusted, not sandboxed,
+  so the `plugins:` list in `config.yaml` is read at startup only and has no
+  online write API. Everything a Gateway API can edit lives elsewhere.
 - **Source checks prevent accidents, not attacks.** Snapshot filters (credential
   files, Git metadata) and source-form rules protect an operator from a packaging
   mistake. They do not make an untrusted source safe.
@@ -43,8 +43,8 @@ hook directory, so they never run a developer's or CI's Git hooks.
   `uv.lock`, the managed `plugins:` block and the source snapshot together under
   `.deer-flow/extension-manager.lock`. A failure restores all of them, including
   file permission bits, and resynchronizes the environment.
-- **A cleanup error never replaces the original error.** This includes
-  interruptions during rollback.
+- **A cleanup error never replaces the original error**, even an interrupted
+  rollback.
 - **Stop on a concurrent external edit.** When recovery finds that someone else
   changed the dependency files or the config, it reports that and does not
   overwrite the edit.
@@ -58,9 +58,8 @@ hook directory, so they never run a developer's or CI's Git hooks.
 - **The uv version is pinned in one place** (`UV_IMAGE` in `backend/Dockerfile`),
   and CI uses the same version. A newer uv elsewhere can write a lock that the
   production image cannot read.
-- **Every mutation needs a Gateway restart**, because plugins load once at startup.
 - **The `plugins:` block is rewritten in place.** Its boundaries come from the YAML
-  parser, not from a text pattern, so that a neighbouring section with an unusual
+  parser, not from a text pattern, so a neighbouring section with an unusual
   key is never replaced. A config with duplicate top-level `plugins:` keys is
   rejected.
 
@@ -72,7 +71,8 @@ hook directory, so they never run a developer's or CI's Git hooks.
 - **`extensions/ordering.py` owns the ordering invariants** and validates the final
   composed chain. Contributed middleware declares a semantic placement; it is
   composed at one final point.
-- **Run-event store factories are only collected here.** Built-in, duplicate or bad names return False
+- **Run-event store factories are only collected here.** Built-in, duplicate or
+  malformed names return False
 - **A failing extension does not fail the run.** Contributed middleware is wrapped
   by `IsolatedMiddleware`, and observer failures are contained per observer.
 - **Cancellation is the exception.** A genuine cancellation of the run propagates

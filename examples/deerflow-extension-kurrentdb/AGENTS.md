@@ -2,10 +2,13 @@
 
 All KurrentDB code stays in this package. Core only offers the vendor-neutral
 `run_event_store` registration hook. Behaviour suites live in
-`backend/tests/test_kurrentdb_*.py` with the `bundled_extension` marker
+`backend/tests/test_kurrentdb_*.py` with the `bundled_extension` marker. The
+user guide is `README.md`; its guarantees section changes with the behaviour
 
 ```bash
-cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
+cd backend && uv run --frozen pytest tests -q -m bundled_extension -k kurrentdb
+# live server: see the docstring of tests/test_kurrentdb_extension_live.py
+cd .. && docker compose -f docker/docker-compose.kurrentdb.yaml config -q
 ```
 
 ## Rules
@@ -72,3 +75,6 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   every obligation in the background. Never run it on a caller's path
 - **Test against `backend/tests/kurrentdb_fake.py`.** When the live suite shows
   a divergence, fix the fake first, then the code
+- **Demos and docs read named streams or categories, never `$all`.** `$all`
+  ignores `$tb` and returns deleted events until a scavenge, so a `$all`
+  example would contradict the deletion guarantee
