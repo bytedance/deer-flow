@@ -48,7 +48,7 @@ A `runtime_checkable` Protocol: the write-only surface passed to `install()`. Ev
 | `service(service: ExtensionService)`                       | `None`  | A Gateway-lifetime service                                                               |
 | `routers(routers: Sequence[Any])`                          | `None`  | FastAPI routers, built during `install()`                                                |
 | `plugin(contribution: PluginContribution)`                 | `bool`  | A full-stack plugin. `True` when accepted, `False` on a host without plugin support. Experimental |
-| `run_event_store(name: str, factory: RunEventStoreFactory)` | `bool` | A named run-event store backend. `True` when accepted; `False` for a built-in name (`memory`, `db`, `jsonl`), a name already registered, or a host without support. See [Run-event stores](#run-event-stores) |
+| `run_event_store(name: str, factory: RunEventStoreFactory)` | `bool` | A named run-event store backend. `True` when accepted; `False` for a built-in name (`memory`, `db`, `jsonl`), a name already registered, a name that fails the syntax check, or a host without support. See [Run-event stores](#run-event-stores) |
 
 ## Middleware
 

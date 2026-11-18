@@ -183,6 +183,13 @@ backend. `producer_fencing: strict` still requires `db`. The
 [KurrentDB extension](../../examples/deerflow-extension-kurrentdb/README.md)
 registers `kurrent`, a single-process store with one KurrentDB stream per thread.
 
+For maintainers: the registry only collects factories. `make_run_event_store`
+resolves against the extension snapshot it is passed, never a process-global
+one. `run_event_store()` returns `False` for a built-in name, a duplicate, a
+name that fails the syntax check, or a host without support. The built-in names
+and the name pattern live only in `deerflow/constants.py`
+(`BUILTIN_RUN_EVENT_BACKENDS`, `RUN_EVENTS_BACKEND_PATTERN`).
+
 Confirmation is limited to the Store's declared failure and concurrency model:
 
 | Backend | Guarantee boundary |

@@ -17,6 +17,8 @@ Payloads (besides ``id`` and ``agent``) of the event types written to the stream
 them in memory and writes the resulting ``MemorySnapshot`` as its deletion
 boundary, so neither type is ever appended.
 
+Fold-only steps:
+
 - ``FactDeleted``: ``factId``, ``revision`` (the revision that was removed)
 - ``MemoryCleared``: agent ``None`` clears summaries and every agent; a name clears
   that agent's facts

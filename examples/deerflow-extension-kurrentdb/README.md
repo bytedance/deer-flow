@@ -151,9 +151,11 @@ finishes a deletion that a crash interrupted.
   `KurrentdbMemoryReadError`, a `MemoryReadError`, and the Gateway answers a
   plain 500, as it does for other remote memory backends. A memory read waits
   at most one timeout for a write to the same scope to finish, then raises the
-  same error, so a read takes at most about twice the timeout. A memory write
-  whose outcome stays unknown because the fence also failed raises the same
-  error; reload before retrying
+  same error. Beyond that wait, a read spends only its own call deadlines (the
+  head check and the reads; a full read pages with one deadline per page), and
+  a sidecar read takes the sidecar stream's lock with the same one-timeout
+  wait. A memory write whose outcome stays unknown because the fence also
+  failed raises the same error; reload before retrying
 - **Undecodable or unexpected stored data is corruption**, not an empty
   answer: memory raises `MemoryStorageCorruption` (the Gateway answers 500,
   `Stored memory data is corrupted.`), run-event reads raise
