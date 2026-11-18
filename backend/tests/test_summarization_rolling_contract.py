@@ -17,7 +17,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
-from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummaryGenerationError
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.extensions import ExtensionRegistry
 
@@ -36,7 +36,8 @@ class RecordingModel(BaseChatModel):
         answer = self.answers.pop(0) if self.answers else self.default_answer
         if isinstance(answer, Exception):
             raise answer
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=answer))])
+        message = answer if isinstance(answer, AIMessage) else AIMessage(content=answer)
+        return ChatResult(generations=[ChatGeneration(message=message)])
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
@@ -107,6 +108,70 @@ async def test_middle_chunk_fallback_becomes_the_next_full_carry(asynchronous):
     assert middleware.summary_call_count == 1
     assert middleware.summary_skip_count == 0
     assert state == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"finish_reason": "length"},
+        {"stop_reason": "max_tokens"},
+        {"finish_reason": "MAX_TOKENS"},
+        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+    ],
+    ids=["openai-chat", "anthropic", "gemini", "openai-responses"],
+)
+async def test_length_capped_summary_falls_back_before_becoming_carry(asynchronous, metadata):
+    primary = RecordingModel(
+        answers=["PRIMARY_ONE", AIMessage(content="PARTIAL", response_metadata=metadata)],
+        default_answer="PRIMARY_LATER",
+    )
+    fallback = RecordingModel(default_answer="FALLBACK_TWO")
+    middleware = _middleware(primary, configured_model_name="primary", run_model_name="fallback", prebuilt_models={"fallback": fallback})
+    state, _ = _state()
+
+    result = await _compact(middleware, state, asynchronous)
+
+    assert result is not None
+    assert fallback.prompts == [primary.prompts[1]]
+    assert _sections(primary.prompts[2])["existing_summary"] == "FALLBACK_TWO"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_length_capped_final_chunk_preserves_history_and_retries(asynchronous):
+    state, _ = _state()
+    original = copy.deepcopy(state)
+    control = RecordingModel()
+    assert await _compact(_middleware(control), state, asynchronous) is not None
+    chunk_count = len(control.prompts)
+    assert chunk_count > 1
+
+    capped = AIMessage(content="S", response_metadata={"finish_reason": "length"})
+    primary = RecordingModel(answers=["S"] * (chunk_count - 1) + [capped, capped, "COMPLETE"])
+    fallback = RecordingModel(answers=[capped, capped])
+    hook = Mock()
+    middleware = _middleware(primary, configured_model_name="primary", run_model_name="fallback", prebuilt_models={"fallback": fallback}, before_summarization=[hook])
+
+    assert await _compact(middleware, state, asynchronous) is None
+    assert state == original
+    hook.assert_not_called()
+
+    runtime = SimpleNamespace(context={})
+    with pytest.raises(SummaryGenerationError):
+        if asynchronous:
+            await middleware.acompact_state(state, runtime, force=True, raise_on_failure=True)
+        else:
+            middleware.compact_state(state, runtime, force=True, raise_on_failure=True)
+    assert state == original
+    hook.assert_not_called()
+
+    result = await _compact(middleware, state, asynchronous)
+    assert result is not None and result.summary_text == "COMPLETE"
+    assert len(primary.prompts) == chunk_count + 2
+    assert len(fallback.prompts) == 2
+    hook.assert_called_once()
 
 
 @pytest.mark.asyncio
