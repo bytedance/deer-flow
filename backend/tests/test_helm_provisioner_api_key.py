@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support.shell import require_posix_sh
 
 from deerflow.config.app_config import AppConfig
 
@@ -140,7 +141,7 @@ def test_shell_default_sets_the_variable_only_when_nothing_else_did(external: st
     prefix = re.search(r"\}\}(export PROVISIONER_API_KEY=.*?&& )\{\{ end \}\}cd backend", GATEWAY_TEMPLATE.read_text(encoding="utf-8"))
     assert prefix is not None and prefix.group(1) == SHELL_DEFAULT
     env = {"PATH": "/usr/bin:/bin"} | ({ENV_NAME: external} if external else {})
-    result = subprocess.run(["sh", "-c", prefix.group(1) + f"printenv {ENV_NAME}"], env=env, capture_output=True, text=True)
+    result = subprocess.run([require_posix_sh(), "-c", prefix.group(1) + f"printenv {ENV_NAME}"], env=env, capture_output=True, text=True)
     assert result.returncode == 0, "the variable must be set in every case"
     assert result.stdout == f"{external or ''}\n"
 
