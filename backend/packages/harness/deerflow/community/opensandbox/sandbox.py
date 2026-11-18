@@ -103,14 +103,36 @@ def execution_body(execution: Any) -> str:
     return _append_output(output, stderr)
 
 
-def _is_timeout_execution(execution: Any, exit_code: int | None) -> bool:
-    """Recognize an explicit command deadline, not an ambiguous signal kill.
+def _is_timeout_execution(
+    execution: Any,
+    exit_code: int | None,
+    *,
+    elapsed: float | None = None,
+    limit: float | None = None,
+) -> bool:
+    """Recognize a command deadline, not an ambiguous signal kill.
 
-    The SDK leaves exit_code unset when the error value is nonnumeric. A
-    bare -1 only indicates signal termination and cannot prove a timeout.
+    Two execd behaviours report the same deadline. Older releases raise the
+    error value ``context deadline exceeded``, which the SDK cannot read as an
+    integer, so ``exit_code`` stays unset. execd ``release-1.2.1`` kills the
+    process group when the command context ends and reports only the signal
+    status: ``CommandExecError`` with ``-1`` and no cause (#8367).
+
+    A bare ``-1`` on its own is still just a signal. It becomes the deadline
+    only when the call lasted as long as the timeout DeerFlow passed, which the
+    provider measures itself; a kill that arrives earlier stays a plain signal
+    exit. The remaining ambiguity is a foreign ``SIGKILL`` that lands exactly at
+    the deadline.
     """
     error = getattr(execution, "error", None)
-    return exit_code is None and getattr(error, "name", None) == "CommandExecError" and getattr(error, "value", None) == "context deadline exceeded"
+    if getattr(error, "name", None) != "CommandExecError":
+        return False
+    value = getattr(error, "value", None)
+    if value == "context deadline exceeded":
+        return exit_code is None
+    if exit_code != -1 and (exit_code is not None or value != "-1"):
+        return False
+    return elapsed is not None and limit is not None and elapsed >= limit
 
 
 class OpenSandboxSandbox(Sandbox):
@@ -203,8 +225,21 @@ class OpenSandboxSandbox(Sandbox):
         self._note_failure(failure, api_not_found_is_terminal=True)
         raise failure
 
+    def _command_timeout(self, timeout: float | None) -> float:
+        """Return the deadline this call passes to execd."""
+        return self._default_command_timeout if timeout is None else float(timeout)
+
     def _run(self, command: str, *, env: dict[str, str] | None = None, timeout: float | None = None) -> Any:
-        command_timeout = self._default_command_timeout if timeout is None else float(timeout)
+        execution, _ = self._run_timed(command, env=env, timeout=timeout)
+        return execution
+
+    def _run_timed(self, command: str, *, env: dict[str, str] | None = None, timeout: float | None = None) -> tuple[Any, float]:
+        """Run *command* and report how long the execd call itself took.
+
+        Only the ``commands.run`` call is timed: lock waits and lease renewals
+        stay out, because they say nothing about the command deadline.
+        """
+        command_timeout = self._command_timeout(timeout)
         if command_timeout <= 0:
             raise ValueError(f"timeout must be positive, got {timeout}")
         sdk_timeout = timedelta(seconds=command_timeout)
@@ -219,7 +254,9 @@ class OpenSandboxSandbox(Sandbox):
             try:
                 if renewal_timeout is not None:
                     self._sandbox.renew(renewal_timeout)
-                return self._sandbox.commands.run(command, opts=opts)
+                started = time.monotonic()
+                result = self._sandbox.commands.run(command, opts=opts)
+                return result, time.monotonic() - started
             except Exception as exc:
                 failure = exc
         # A command-path 404 means the execd endpoint/sandbox is gone. File APIs
@@ -271,15 +308,16 @@ class OpenSandboxSandbox(Sandbox):
         _validate_extra_env(env)
         merged_env = {**self._default_env, **(env or {})} or None
         try:
-            execution = self._run(command, env=merged_env, timeout=timeout)
+            execution, elapsed = self._run_timed(command, env=merged_env, timeout=timeout)
         except Exception as exc:
             logger.error("Failed to execute command in OpenSandbox %s: %s", self.id, exc)
             return f"Error: {exc}"
         exit_code = getattr(execution, "exit_code", None)
         # Command deadlines arrive as execution error events, not builtin
-        # TimeoutError. Normalize only the explicit deadline result; transport
-        # errors, launch failures and signal-only exits keep their own details.
-        if _is_timeout_execution(execution, exit_code):
+        # TimeoutError. Normalize only the explicit deadline result and the
+        # signal-only kill that lands after the deadline we passed; transport
+        # errors, launch failures and earlier kills keep their own details.
+        if _is_timeout_execution(execution, exit_code, elapsed=elapsed, limit=self._command_timeout(timeout)):
             body = execution_body(execution)
             message = "Error: command timed out\nExit Code: 124"
             return f"{body}\n{message}" if body else message
