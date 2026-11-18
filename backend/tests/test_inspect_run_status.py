@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
@@ -95,7 +96,12 @@ def test_bound_tool_has_no_model_supplied_arguments():
     assert tool.args == {}
 
 
-def test_tool_reads_live_graph_state_without_exposing_message_content():
+@pytest.mark.parametrize(
+    "todo",
+    [{"content": "private task"}, {"content": "private task", "status": None}, {"content": "private task", "status": "pending"}],
+    ids=["missing-status", "null-status", "pending-status"],
+)
+def test_tool_reads_live_graph_state_without_exposing_message_content(todo):
     from langchain.agents import create_agent
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 
@@ -116,7 +122,7 @@ def test_tool_reads_live_graph_state_without_exposing_message_content():
     graph = create_agent(model=model, tools=[build_inspect_run_status_tool(context_window=100)], state_schema=ThreadState)
     result = asyncio.run(
         graph.ainvoke(
-            {"messages": [HumanMessage(content="secret request")], "todos": [{"content": "private task"}]},
+            {"messages": [HumanMessage(content="secret request")], "todos": [todo]},
             {"configurable": {"thread_id": "status-test"}},
             context={CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset()},
         )
