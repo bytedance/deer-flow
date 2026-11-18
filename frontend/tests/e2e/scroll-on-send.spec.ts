@@ -177,7 +177,11 @@ test.describe("Scroll on send", () => {
       await textarea.fill(SENT_TEXT);
       await textarea.press("Enter");
 
-      const sentMessage = page.getByText(SENT_TEXT, { exact: true });
+      // The composer keeps the draft until the send is accepted, so the sent
+      // text can still be in the textarea; match the message list only.
+      const sentMessage = page
+        .getByTestId("main-message-list")
+        .getByText(SENT_TEXT, { exact: true });
       await expect(sentMessage).toBeVisible({ timeout: 15_000 });
 
       // The user's message now sits at the top of the viewport (the group
@@ -286,7 +290,11 @@ test.describe("Scroll on send", () => {
       await textarea.fill(SENT_TEXT);
       await textarea.press("Enter");
 
-      const sentMessage = page.getByText(SENT_TEXT, { exact: true });
+      // The composer keeps the draft until the send is accepted, so the sent
+      // text can still be in the textarea; match the message list only.
+      const sentMessage = page
+        .getByTestId("main-message-list")
+        .getByText(SENT_TEXT, { exact: true });
       await expect(sentMessage).toBeVisible({ timeout: 15_000 });
       const scrollerHandle = await scroller.elementHandle();
       const sentTopInViewport = () =>

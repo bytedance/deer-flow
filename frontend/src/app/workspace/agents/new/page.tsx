@@ -203,14 +203,19 @@ export default function NewAgentPage() {
 
     setAgentName(trimmed);
     setStep("chat");
-    await sendMessage(
-      threadId,
-      {
-        text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
-        files: [],
-      },
-      { agent_name: trimmed },
-    );
+    try {
+      await sendMessage(
+        threadId,
+        {
+          text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
+          files: [],
+        },
+        { agent_name: trimmed },
+      );
+    } catch {
+      // The bootstrap turn never started; the stream error was already shown.
+      // The page stays on the chat step so the user can retry from the composer.
+    }
   }, [
     nameInput,
     sendMessage,
@@ -460,7 +465,7 @@ export default function NewAgentPage() {
                 ) : (
                   <PromptInput
                     disabled={thread.isLoading}
-                    onSubmit={({ text }) => void handleChatSubmit(text)}
+                    onSubmit={({ text }) => handleChatSubmit(text)}
                   >
                     <PromptInputTextarea
                       autoFocus

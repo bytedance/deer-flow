@@ -1995,6 +1995,7 @@ export const enUS: Translations = {
     submit: "Submit",
     emptyError: "Enter an answer before submitting.",
     requiredError: "Fill in all required fields before submitting.",
+    submitFailed: "The answer could not be sent. Please try again.",
     requiredA11yLabel: "required",
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,

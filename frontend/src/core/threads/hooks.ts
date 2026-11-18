@@ -66,6 +66,7 @@ import {
   searchThreadsByArchive,
   type ThreadMetadataPatch,
 } from "./api";
+import { isHistoryError, withHistoryErrorTagging } from "./history-error";
 import {
   dedupeMessagesByIdentity,
   insertByTrustedSeq,
@@ -149,14 +150,15 @@ type SendMessageOptions = {
    */
   conversationReferences?: string[];
   /**
-   * Invoked exactly once when the send is genuinely dispatched: after the
-   * in-flight guard and after any attachments upload, right before the run is
-   * submitted. It never fires for a dropped send or one whose attachments fail
-   * to prepare or upload, so callers can safely perform one-time cleanup (e.g.
-   * clearing quoted references) without losing state a retry still needs.
-   * The guarantee ends at dispatch: a run that fails afterwards does not
-   * reject `thread.submit` (the SDK reports it through the stream's
-   * `onError`), so the send resolves and the composer is cleared as a whole.
+   * Invoked exactly once when the run was actually accepted: after the
+   * in-flight guard, after any attachments upload, and after the Gateway
+   * acknowledged the run (its `Content-Location` metadata or the first stream
+   * frame). A send whose run request is rejected never calls it, because the
+   * SDK creates the run after `thread.submit` resolves, so dispatch alone does
+   * not prove the turn exists. Callers can therefore retire one-time composer
+   * state (quotes, references, staged files, the stored draft) without losing
+   * anything a retry still needs: `sendMessage` rejects instead, and the
+   * composer restores its text and draft.
    */
   onSent?: () => void;
 };
@@ -176,6 +178,85 @@ type PendingApprovalSubmission = {
   resolve: (accepted: boolean) => void;
   timeout: number | undefined;
 };
+
+/**
+ * The one send this mounted client is waiting to see accepted.
+ *
+ * `thread.submit` only enqueues the stream, so its resolution proves nothing:
+ * the SDK creates the run afterwards and reports a rejected request through
+ * `onError`. This records the acceptance promise so `sendMessage` resolves
+ * only for a run the Gateway accepted, and rejects for one it refused.
+ * `onSent` belongs to acceptance, so one-time composer state survives a
+ * failed first attempt for a retry.
+ */
+type PendingSend = {
+  threadId: string;
+  /** The conversation did not exist yet when the send started. */
+  newThread: boolean;
+  /**
+   * The id of the thread the SDK created for this send. A new chat submits a
+   * placeholder id; once the SDK reports the created thread, the send has a
+   * known identity and another chat's acceptance can no longer retire it.
+   */
+  serverThreadId?: string;
+  options?: SendMessageOptions;
+  settled: boolean;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
+
+/**
+ * A send whose caller was released because the view switched or unmounted
+ * before acceptance arrived. The caller no longer waits, but `onSent` still
+ * belongs to the run: if the Gateway accepted it afterwards, its one-time
+ * composer state must be retired exactly once. The record is kept by reference
+ * so a thread id the SDK reports after the navigation still binds to it.
+ */
+type ReleasedSend = PendingSend;
+
+/** Upper bound on released sends kept for a late acceptance. */
+const MAX_RELEASED_SENDS = 8;
+
+/**
+ * Whether an acceptance that names `frameThreadId` may settle the pending send.
+ *
+ * A send on an existing conversation accepts only a frame naming that thread.
+ * A new-chat send carries a page placeholder; once the SDK reports the thread
+ * it created (`onThreadId`), that id becomes the send's identity too. Until
+ * then it may adopt one frame, and only when no other unnamed send (another
+ * new-chat send, released or not) could own the same frame. That keeps one
+ * stream's late acceptance from retiring a later send's draft.
+ */
+export function shouldAcceptPendingSend(input: {
+  frameThreadId: string;
+  pendingThreadId: string;
+  pendingNewThread: boolean;
+  retiredReleased: boolean;
+  otherUnnamedReleased: boolean;
+}): boolean {
+  if (!input.frameThreadId) {
+    return false;
+  }
+  if (!input.pendingThreadId || input.frameThreadId === input.pendingThreadId) {
+    return true;
+  }
+  if (!input.pendingNewThread) {
+    return false;
+  }
+  return !input.retiredReleased && !input.otherUnnamedReleased;
+}
+
+/**
+ * Stop pressed after `thread.submit` resolved but before the Gateway accepted
+ * the run. Shaped like an abort so the composer treats it as "no turn was
+ * created" and keeps its text, and a first send can restore the welcome layout.
+ */
+function createStoppedSendError(): Error {
+  const error = new Error("The run was stopped before it was accepted.");
+  error.name = "AbortError";
+  return error;
+}
 
 export function deriveHitlApprovalState({
   liveInterrupt,
@@ -2152,6 +2233,19 @@ export function useThreadStream({
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
+  // The SDK thread id at send time: undefined means the conversation is new,
+  // so the run's frame supplies the real id (a page may pass a placeholder).
+  const sdkThreadIdRef = useRef<string | undefined>(threadId);
+  sdkThreadIdRef.current = threadId;
+  const pendingSendRef = useRef<PendingSend | null>(null);
+  // Sends whose caller was released on navigation can still be accepted later;
+  // keep each one until that acceptance so a late frame cannot strand its draft.
+  // A list, not a slot: release A, start B, release B must not lose A's cleanup.
+  const releasedSendsRef = useRef<ReleasedSend[]>([]);
+  // New-chat sends in submission order, until the SDK reports the thread it
+  // created for each. The stream controller serializes starts, so the reports
+  // arrive in the same order as the sends and binding the first one is exact.
+  const unboundThreadSendsRef = useRef<PendingSend[]>([]);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
     null,
@@ -2261,38 +2355,176 @@ export function useThreadStream({
     }
   }, [restInterrupts, restInterruptsError, restInterruptsLoading]);
 
-  const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
-    threadIdRef.current = _threadId;
-    setOptimisticThreadId((currentOptimisticThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
-      if (
-        currentOptimisticThreadId &&
-        (currentOptimisticThreadId === currentView ||
-          currentOptimisticThreadId === _threadId)
-      ) {
-        return _threadId;
-      }
-      return currentOptimisticThreadId;
-    });
-    setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
-      if (
-        currentLiveMessagesThreadId &&
-        (currentLiveMessagesThreadId === currentView ||
-          currentLiveMessagesThreadId === _threadId)
-      ) {
-        return _threadId;
-      }
-      return currentLiveMessagesThreadId;
-    });
-    if (!startedRef.current) {
-      listeners.current.onStart?.(_threadId, _runId);
-      startedRef.current = true;
-    }
-    setOnStreamThreadId(_threadId);
+  const queryClient = useQueryClient();
+
+  /**
+   * A settled send no longer needs a thread binding. Dropping it also keeps a
+   * stale unbound entry from adopting the next send's created thread.
+   */
+  const forgetUnboundSend = useCallback((send: PendingSend) => {
+    unboundThreadSendsRef.current = unboundThreadSendsRef.current.filter(
+      (candidate) => candidate !== send,
+    );
   }, []);
 
-  const queryClient = useQueryClient();
+  /**
+   * A stream frame, the run's `Content-Location` metadata, or a finished
+   * stream proves the run was created: retire the send's one-time composer
+   * state and let `sendMessage` resolve. A send whose caller was already
+   * released still gets its `onSent` here when the acceptance names its thread.
+   */
+  const acceptPendingSend = useCallback(
+    (threadId?: string) => {
+      const pending = pendingSendRef.current;
+      // A released send is retired only by an acceptance that names its own
+      // thread: either the id it was submitted with or the id the SDK created for
+      // it (`onThreadId`). A send with a known thread id never adopts another
+      // chat's frame; that is how a released new-chat attempt keeps its draft
+      // until its own run is acknowledged.
+      let retiredReleased = false;
+      if (threadId) {
+        const released = releasedSendsRef.current;
+        let match = released.findIndex(
+          (send) =>
+            send.threadId === threadId || send.serverThreadId === threadId,
+        );
+        if (match < 0) {
+          const unnamed = released.filter(
+            (send) => send.newThread && !send.serverThreadId,
+          );
+          const candidate = unnamed[0];
+          if (unnamed.length === 1 && candidate) {
+            match = released.indexOf(candidate);
+          }
+        }
+        if (match >= 0) {
+          const [accepted] = released.splice(match, 1);
+          retiredReleased = true;
+          if (accepted) {
+            forgetUnboundSend(accepted);
+            try {
+              accepted.options?.onSent?.();
+            } catch (error) {
+              // A caller's one-time cleanup must not break the stream callback
+              // that observed acceptance; surface it instead of swallowing it.
+              console.error(
+                "Failed to retire one-time composer state for an accepted send.",
+                error,
+              );
+            }
+          }
+        }
+      }
+      if (!pending || pending.settled) {
+        return;
+      }
+      // A new-chat send may carry only the page's placeholder id: the run's frame
+      // names the server's real thread. It accepts that frame only when no other
+      // unnamed send could own it; a send on an existing conversation still
+      // rejects a frame from another thread.
+      if (
+        !shouldAcceptPendingSend({
+          frameThreadId: threadId ?? "",
+          pendingThreadId: pending.serverThreadId ?? pending.threadId,
+          pendingNewThread: pending.newThread && !pending.serverThreadId,
+          retiredReleased,
+          otherUnnamedReleased: releasedSendsRef.current.some(
+            (send) => send.newThread && !send.serverThreadId,
+          ),
+        })
+      ) {
+        return;
+      }
+      pending.settled = true;
+      pendingSendRef.current = null;
+      forgetUnboundSend(pending);
+      try {
+        pending.options?.onSent?.();
+      } catch (error) {
+        console.error(
+          "Failed to retire one-time composer state for an accepted send.",
+          error,
+        );
+      } finally {
+        // Acceptance always resolves the caller, even if its cleanup threw.
+        pending.resolve();
+      }
+    },
+    [forgetUnboundSend],
+  );
+
+  const rejectPendingSend = useCallback(
+    (error: unknown) => {
+      const pending = pendingSendRef.current;
+      if (!pending || pending.settled) {
+        return;
+      }
+      pending.settled = true;
+      pendingSendRef.current = null;
+      forgetUnboundSend(pending);
+      pending.reject(error);
+    },
+    [forgetUnboundSend],
+  );
+
+  /**
+   * The view moved on before acceptance arrived. Let the caller finish without
+   * retiring its one-time composer state yet: if the run is accepted later,
+   * `onSent` still runs from that acceptance.
+   */
+  const releasePendingSend = useCallback(() => {
+    const pending = pendingSendRef.current;
+    if (!pending || pending.settled) {
+      return;
+    }
+    pending.settled = true;
+    pendingSendRef.current = null;
+    // Keep the record itself, not a copy: a thread id the SDK reports after the
+    // navigation must still bind to this send. Bounded so a long session does
+    // not accumulate drafts, and the oldest attempt is the least likely to be
+    // accepted after this much navigation.
+    releasedSendsRef.current = [
+      ...releasedSendsRef.current.slice(-MAX_RELEASED_SENDS + 1),
+      pending,
+    ];
+    pending.resolve();
+  }, []);
+
+  const handleStreamStart = useCallback(
+    (_threadId: string, _runId: string) => {
+      threadIdRef.current = _threadId;
+      setOptimisticThreadId((currentOptimisticThreadId) => {
+        const currentView = currentViewThreadIdRef.current;
+        if (
+          currentOptimisticThreadId &&
+          (currentOptimisticThreadId === currentView ||
+            currentOptimisticThreadId === _threadId)
+        ) {
+          return _threadId;
+        }
+        return currentOptimisticThreadId;
+      });
+      setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
+        const currentView = currentViewThreadIdRef.current;
+        if (
+          currentLiveMessagesThreadId &&
+          (currentLiveMessagesThreadId === currentView ||
+            currentLiveMessagesThreadId === _threadId)
+        ) {
+          return _threadId;
+        }
+        return currentLiveMessagesThreadId;
+      });
+      if (!startedRef.current) {
+        listeners.current.onStart?.(_threadId, _runId);
+        startedRef.current = true;
+      }
+      setOnStreamThreadId(_threadId);
+      acceptPendingSend(_threadId);
+    },
+    [acceptPendingSend],
+  );
+
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
 
@@ -2370,8 +2602,16 @@ export function useThreadStream({
     [],
   );
 
+  // Tagged so `onError` can tell a failed history fetch from a refused run:
+  // the SDK reports both without run metadata, but only the refusal means the
+  // send never became a turn.
+  const streamClient = useMemo(
+    () => withHistoryErrorTagging(getAPIClient(isMock)),
+    [isMock],
+  );
+
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(isMock),
+    client: streamClient,
     assistantId,
     threadId: onStreamThreadId,
     reconnectOnMount: true,
@@ -2383,6 +2623,17 @@ export function useThreadStream({
     // starves UI updates while chunks keep arriving faster than the window.
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
+    // The SDK reports the conversation it created for a new-chat send before any
+    // run frame. Bind it to that send so a released attempt keeps its draft
+    // until its own run is acknowledged, never another chat's.
+    onThreadId(createdThreadId) {
+      const [send] = unboundThreadSendsRef.current;
+      if (!send) {
+        return;
+      }
+      send.serverThreadId = createdThreadId;
+      unboundThreadSendsRef.current = unboundThreadSendsRef.current.slice(1);
+    },
     onCreated(meta) {
       const pendingApproval = pendingApprovalSubmissionRef.current;
       const timedOutApproval = timedOutApprovalSubmissionRef.current;
@@ -2444,6 +2695,24 @@ export function useThreadStream({
           .catch(() => ({}));
       }
     },
+    onMetadataEvent(data) {
+      // The run's metadata frame means the Gateway accepted this send even
+      // when the response header is unreadable (e.g. a proxy that hides
+      // Content-Location). Only the thread it names can be accepted: an
+      // id-less acceptance could retire a newer send from an older stream, so a
+      // frame without `thread_id` is not an acceptance at all — the stream's
+      // start/finish callbacks still settle the send.
+      const eventThreadId =
+        typeof data === "object" &&
+        data !== null &&
+        "thread_id" in data &&
+        typeof (data as { thread_id?: unknown }).thread_id === "string"
+          ? (data as { thread_id: string }).thread_id
+          : undefined;
+      if (eventThreadId) {
+        acceptPendingSend(eventThreadId);
+      }
+    },
     onUpdateEvent(data, { mutate }) {
       if (hasRenderedThreadStateUpdate(data)) {
         mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
@@ -2492,6 +2761,9 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      // Not an acceptance signal: a custom frame carries no thread identity,
+      // so accepting here could retire a newer send from an older stream.
+      // `onMetadataEvent`, `handleStreamStart` and `onFinish` name their thread.
       // Narrow `event.type` once; taskEventToSubtaskUpdate already validated the
       // task_* events, so the per-branch re-narrowing below reads this single
       // source of truth instead of re-checking the object shape each time.
@@ -2552,6 +2824,17 @@ export function useThreadStream({
     },
     onError(error, run) {
       timedOutApprovalSubmissionRef.current = null;
+      // The run request itself was refused, so no stream frame ever arrived:
+      // the send never became a turn. Reject it so the composer can keep the
+      // text and draft for a retry. `run` is only present once the Gateway
+      // created the run (which is what `acceptPendingSend` records), so an
+      // error carrying run metadata is a later stream failure, not this send.
+      // A failed history fetch also arrives here without run metadata, but that
+      // send can still be accepted afterwards: settle it from its own
+      // run-creation result instead of rejecting it (#8092 review).
+      if (!run && !isHistoryError(error)) {
+        rejectPendingSend(error);
+      }
       if (pendingApprovalSubmissionRef.current) {
         settlePendingApproval(false);
       }
@@ -2603,6 +2886,9 @@ export function useThreadStream({
       }
     },
     onFinish(state, run) {
+      // A stream that finished without an explicit run metadata frame still
+      // created its run; the send must not stay pending forever.
+      acceptPendingSend(run?.thread_id);
       settlePendingApproval(false);
       if (run) {
         completedRunIdsRef.current.add(run.run_id);
@@ -2850,6 +3136,11 @@ export function useThreadStream({
 
   const stopThread = useCallback(async () => {
     settlePendingApproval(false);
+    // Stop can land after `thread.submit` resolved but before the Gateway
+    // acknowledged the run. No acceptance frame will arrive for a turn this
+    // client abandoned, so settle the send here: the composer keeps its text
+    // and a first send restores the welcome layout instead of staying blocked.
+    rejectPendingSend(createStoppedSendError());
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
     const pendingReplay = pendingPreparedReplayRef.current;
@@ -2873,6 +3164,7 @@ export function useThreadStream({
     knownActiveRunId,
     isMock,
     queryClient,
+    rejectPendingSend,
     settlePendingApproval,
     thread,
     threadId,
@@ -2955,6 +3247,7 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    releasePendingSend();
     settlePendingApproval(false);
     messagesRef.current = [];
     transientHistoryBridgeRef.current = [];
@@ -2972,8 +3265,11 @@ export function useThreadStream({
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
-    return () => settlePendingApproval(false);
-  }, [settlePendingApproval, threadId]);
+    return () => {
+      releasePendingSend();
+      settlePendingApproval(false);
+    };
+  }, [releasePendingSend, settlePendingApproval, threadId]);
 
   // Confirming a new thread only assigns its SDK id; the displayed
   // conversation and its submitted human anchor have not changed.
@@ -3062,8 +3358,18 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
+      // Capture the conversation's state before the upload await: a navigation
+      // during a slow upload would otherwise flip the flag under the send.
+      const startedNewThread = sdkThreadIdRef.current === undefined;
+      // A new send on this conversation supersedes released attempts for the
+      // same conversation whose acceptance never arrived: their one-time state
+      // is already stale, while other conversations' attempts stay tracked.
+      releasedSendsRef.current = releasedSendsRef.current.filter(
+        (send) => send.threadId !== threadId,
+      );
 
       const text = message.text.trim();
+      let pendingSend: PendingSend | null = null;
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -3217,16 +3523,47 @@ export function useThreadStream({
           }
         }
 
-        // Attachments are uploaded, so the send is genuinely dispatched and
-        // callers can drop one-time state. A failed upload rejected above
-        // without reaching here, leaving that state for a retry.
+        // Attachments are uploaded, so the send is dispatched. `onSent` still
+        // waits for the run to be accepted: the SDK only enqueues the stream
+        // here, and a rejected run request must leave one-time composer state
+        // (draft, quotes, references, staged files) untouched for the retry.
         pausedRunContextsRef.current.set(threadId, {
           extraContext,
           conversationReferences: options?.conversationReferences
             ? [...options.conversationReferences]
             : undefined,
         });
-        options?.onSent?.();
+        // ES2022 target: Promise.withResolvers is not in the configured libs.
+        let resolveAccepted!: () => void;
+        let rejectAccepted!: (error: unknown) => void;
+        const accepted = new Promise<void>((resolve, reject) => {
+          resolveAccepted = resolve;
+          rejectAccepted = reject;
+        });
+        // The submit path may throw before it awaits this promise; keep the
+        // rejection observed so a failed submit never surfaces as an
+        // unhandled rejection. `sendMessage` still rethrows the same error.
+        void accepted.catch(() => undefined);
+        const pending: PendingSend = {
+          threadId,
+          newThread: startedNewThread,
+          options,
+          settled: false,
+          promise: accepted,
+          resolve: resolveAccepted,
+          reject: rejectAccepted,
+        };
+        pendingSend = pending;
+        pendingSendRef.current = pending;
+        if (startedNewThread) {
+          // The SDK will create this conversation and report its id through
+          // `onThreadId`; keep the submission order so each report binds its own
+          // send, even when an earlier attempt was released on navigation.
+          unboundThreadSendsRef.current = [
+            ...unboundThreadSendsRef.current,
+            pending,
+          ];
+        }
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
@@ -3255,11 +3592,20 @@ export function useThreadStream({
             }),
           },
         );
+        // Resolves once the Gateway acknowledged the run; rejects when the run
+        // request failed, so a failed send keeps the composer and draft.
+        await pending.promise;
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
+        // This invocation owns the rejection only while it is still the pending
+        // send: after navigation, an upload failure from an older attempt must
+        // not report a newer send as failed.
+        if (pendingSendRef.current === pendingSend) {
+          rejectPendingSend(error);
+        }
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -3267,6 +3613,9 @@ export function useThreadStream({
         localTurnAnchorRef.current = null;
         throw error;
       } finally {
+        if (pendingSendRef.current === pendingSend) {
+          pendingSendRef.current = null;
+        }
         sendInFlightRef.current = false;
       }
     },
@@ -3280,6 +3629,7 @@ export function useThreadStream({
       humanMessageCount,
       persistedMessages,
       visibleHistory,
+      rejectPendingSend,
     ],
   );
 

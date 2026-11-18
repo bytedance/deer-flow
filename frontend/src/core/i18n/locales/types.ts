@@ -1689,6 +1689,7 @@ export interface Translations {
     submit: string;
     emptyError: string;
     requiredError: string;
+    submitFailed: string;
     requiredA11yLabel: string;
     selectPlaceholder: string;
     answeredValue: (value: string) => string;

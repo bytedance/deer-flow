@@ -662,7 +662,15 @@ test.describe("Thread history", () => {
     );
     await textarea.press("Enter");
 
-    await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toBeVisible();
+    // The turn is drawn in the message list; the composer clears one frame
+    // later, when the acceptance frame settles the send. Scope the locator so
+    // the overlap is not read as an ambiguous match.
+    await expect(
+      page.getByTestId("main-message-list").getByText(OPTIMISTIC_PROMPT_MARKER),
+    ).toBeVisible({ timeout: 15_000 });
+    // A rejected send keeps the text (#8039); an accepted one retires it, so the
+    // prompt cannot be submitted twice.
+    await expect(textarea).toHaveValue("", { timeout: 15_000 });
 
     await page.getByText("Destination conversation").click();
     await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
