@@ -339,6 +339,8 @@ cd backend && uv run --frozen pytest tests -q -m bundled_extension -k kurrentdb
 
 `test_kurrentdb_extension_live.py` runs the same stream semantics and round
 trips against a real server when `KURRENTDB_LIVE_CONNECTION_STRING` is set; its
-docstring has the command. It was last run on the arm64 experimental image
-`kurrentplatform/kurrentdb:26.2.0-experimental-arm64-10.0-noble`, because the
-amd64 image does not start under emulation on arm64 hosts.
+docstring has the command. It passes on the amd64 image
+`docker.kurrent.io/kurrent-latest/kurrentdb:latest`, natively or on arm64 hosts
+under Docker Desktop's Rosetta emulation (under qemu emulation the server
+segfaults), and on the arm64 experimental image
+`kurrentplatform/kurrentdb:26.2.0-experimental-arm64-10.0-noble`.

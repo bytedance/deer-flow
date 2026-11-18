@@ -8,10 +8,12 @@ Run with a server up, for instance::
     KURRENTDB_LIVE_CONNECTION_STRING='kurrentdb://127.0.0.1:2113?tls=false' \\
         uv run --frozen pytest tests/test_kurrentdb_extension_live.py -q
 
-The brief's image is amd64-only and segfaults under qemu on arm64 hosts (also with
-``DOTNET_EnableWriteXorExecute=0``); there the suite was run on the arm64 build
+The image above is amd64: the suite passes on it natively or, on arm64 hosts,
+under Rosetta emulation (Docker Desktop's "Use Rosetta for x86_64/amd64
+emulation"); under qemu emulation the server segfaults (also with
+``DOTNET_EnableWriteXorExecute=0``). The arm64 build
 ``kurrentplatform/kurrentdb:26.2.0-experimental-arm64-10.0-noble`` with the same
-flags. Rerun on amd64 with the image above when one is at hand.
+flags also passes.
 
 Two parts:
 
