@@ -102,8 +102,12 @@ truncate-before (`$tb`) to that boundary. Every step is recorded in
 `deerflow.kurrent-deletions`, so another process or the next Gateway start
 finishes a deletion that a crash interrupted.
 
-- **Primary streams: immediate.** Once the call returns, DeerFlow and readers of
-  the named streams or their categories no longer see the deleted content
+- **Primary streams: immediate.** Once the call returns, DeerFlow no longer
+  serves the deleted content, and neither do readers of the named streams or
+  their categories. When a crash interrupts a deletion after its boundary is
+  written, DeerFlow still never serves the deleted content, but raw reads of the
+  stream keep returning it until recovery raises `$tb`: on the next deletion of
+  that stream, at Gateway startup, or in the recovery service's next pass
 - **Canonical streams: eventual.** A cleanup rewrites the canonical stream with
   the surviving events and truncates it, or deletes it when nothing survives.
   A deletion is complete for canonical readers once
@@ -112,8 +116,9 @@ finishes a deletion that a crash interrupted.
   write cannot bring deleted content back. While KurrentDB is unreachable or
   the cleanup keeps failing, a canonical copy stays readable; the recovery
   service retries every 30 seconds and logs a warning on each failure.
-  Cleanups run only while `KURRENTDB_CANONICAL_EVENTS` is on; turning it off
-  leaves the open ones waiting until it is turned back on
+  Cleanup and verification run whether or not `KURRENTDB_CANONICAL_EVENTS` is
+  on, so turning it off stops new canonical events but still removes what was
+  written while it was on. They read the canonical streams on every deletion
 - **`$all` keeps deleted events until a scavenge.** Reads of `$all`, and
   `fromAll()` projections, bypass stream metadata. Run a scavenge to remove
   truncated and deleted events from disk, and in a secured deployment keep

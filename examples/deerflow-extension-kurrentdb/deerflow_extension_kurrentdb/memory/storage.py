@@ -419,9 +419,8 @@ class KurrentdbMemoryStorage(MemoryStorage):
 
     def _kick_canonical_cleanup(self, stream: str, *, deleted: bool) -> None:
         """Queue the scope's pending canonical cleanups behind its emissions, after a deletion or after a
-        write while one is pending (cached index, no I/O); never raises and never runs on the caller's thread."""
-        if not self._canonical_enabled:
-            return
+        write while one is pending (cached index, no I/O); never raises and never runs on the caller's thread.
+        Runs whatever ``KURRENTDB_CANONICAL_EVENTS`` says (R17): canonical copies written while it was on must still go."""
         try:
             engine = self._engine_instance
             if not deleted and (engine is None or self._cleaner.backing_off(stream) or not engine.has_pending_canonical(stream)):
@@ -430,13 +429,11 @@ class KurrentdbMemoryStorage(MemoryStorage):
         except Exception:
             logger.warning("Scheduling the canonical cleanup of %r failed", stream, exc_info=True)
 
-    def run_canonical_obligations(self) -> canonical_cleanup.PassReport | None:
+    def run_canonical_obligations(self) -> canonical_cleanup.PassReport:
         """One pass over every open memory canonical cleanup and due verification (recovery service); never raises.
 
-        ``None`` when canonical events are off.
+        Runs whatever ``KURRENTDB_CANONICAL_EVENTS`` says (R17): the flag gates emission, never removal.
         """
-        if not self._canonical_enabled:
-            return None
         return self._cleaner.run()
 
     def flush_canonical(self, timeout: float | None = None) -> bool:

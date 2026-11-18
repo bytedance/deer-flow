@@ -67,7 +67,9 @@ cd .. && docker compose -f docker/docker-compose.kurrentdb.yaml config -q
   and reselects on a conflict. `CanonicalCleanupDone` is followed by verification
   after `MAX_LIFETIME_SECONDS` plus one timeout; only `CanonicalCleanupVerified`
   closes it. One pure decision per attempt (`plan_cleanup`) serves the sync and
-  async cleaners, which differ only in I/O. Stores kick it after their own writes;
+  async cleaners, which differ only in I/O. It runs with or without
+  `KURRENTDB_CANONICAL_EVENTS`, which gates emission only, so copies written
+  while it was on still go after a deletion. Stores kick it after their own writes;
   `KurrentRecoveryService` (`service.py`, registered by `install()`) reads the
   Gateway config, stays idle unless memory or run events use KurrentDB, builds
   the memory storage from the Gateway's `DeerMemConfig` (sidecar caps must

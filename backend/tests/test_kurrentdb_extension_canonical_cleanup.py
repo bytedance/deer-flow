@@ -1009,6 +1009,78 @@ async def test_acceptance_primary_now_canonical_once_verified(server, clock, sce
     assert sum(report.verified + report.cleaned + report.failed for report in again) == 0
 
 
+# --- R17: removal does not depend on KURRENTDB_CANONICAL_EVENTS ---------------------------
+
+
+def test_memory_cleanup_runs_with_canonical_events_off(server, clock, monkeypatch):
+    writer = _storage(server, clock=clock)  # emits while the flag is on
+    _create(writer, _fact("f1", "Doomed"), _fact("f2", "Kept"))
+    assert writer.flush_canonical(timeout=5)
+    assert _facts(server) == ["Doomed", "Kept"]
+    monkeypatch.setenv("KURRENTDB_CANONICAL_EVENTS", "off")
+    storage = _storage(server, clock=clock)
+    storage.apply_changes({"deletes": ["f1"]}, user_id="alice", agent_name=AGENT)
+    assert storage.flush_canonical(timeout=5)
+    (intent_id,) = _intents(server)
+    assert _facts(server) == ["Kept"]
+    assert _kinds(server, intent_id)[-1] == "CanonicalCleanupDone"
+    clock.advance(PAST_VERIFICATION)
+    assert storage.run_canonical_obligations().verified == 1
+    assert _kinds(server, intent_id)[-1] == "CanonicalCleanupVerified"
+    _create(storage, _fact("f3", "Not emitted"))  # emission itself stays off
+    assert storage.flush_canonical(timeout=5)
+    assert _facts(server) == ["Kept"]
+
+
+async def test_run_event_cleanup_runs_with_canonical_events_off(server, clock, monkeypatch):
+    writer = _store(server, clock=clock)
+    await _say(writer, "doomed", "r1")
+    await _say(writer, "kept", "r2")
+    await writer.flush_canonical()
+    monkeypatch.setenv("KURRENTDB_CANONICAL_EVENTS", "off")
+    store = _store(server, clock=clock)
+    assert await store.delete_by_run("t1", "r1") == 1
+    await store.flush_canonical()
+    (intent_id,) = _intents(server)
+    assert [text for _, _, text in _session(server)] == [None, "kept"]
+    clock.advance(PAST_VERIFICATION)
+    assert (await store.run_canonical_obligations()).verified == 1
+    assert _kinds(server, intent_id)[-1] == "CanonicalCleanupVerified"
+    await _say(store, "not emitted", "r3")
+    await store.flush_canonical()
+    assert [text for _, _, text in _session(server)] == [None, "kept"]
+
+
+async def test_service_cleans_and_verifies_with_canonical_events_off(server, clock, monkeypatch):
+    from deerflow_extension_kurrentdb import KurrentRecoveryService
+
+    writer = _store(server, clock=clock)
+    await _say(writer, "doomed", "r1")
+    await writer.flush_canonical()
+    monkeypatch.setenv("KURRENTDB_CANONICAL_EVENTS", "off")
+    store = _store(server, clock=clock)
+    store._canonical_chains = CapturedChains()  # the deleting process never runs its own cleanup
+    assert await store.delete_by_thread("t1") == 1
+    (intent_id,) = _intents(server)
+    assert [text for _, _, text in _session(server)] == [None, "doomed"]
+    service = KurrentRecoveryService(memory_factory=lambda config: _storage(server, clock=clock, config=config), store_factory=lambda: _store(server, clock=clock), config_source=_both_backends, interval=0.01, clock=clock)
+    await service.start(None)
+    try:
+        for _ in range(500):
+            if "CanonicalCleanupDone" in _kinds(server, intent_id):
+                break
+            await asyncio.sleep(0.01)
+        assert _events(server, T1_CANONICAL) == []
+        clock.advance(PAST_VERIFICATION)
+        for _ in range(500):
+            if _kinds(server, intent_id)[-1] == "CanonicalCleanupVerified":
+                break
+            await asyncio.sleep(0.01)
+        assert _kinds(server, intent_id)[-1] == "CanonicalCleanupVerified"
+    finally:
+        await service.stop()
+
+
 # --- pure pieces --------------------------------------------------------------------------
 
 

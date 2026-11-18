@@ -451,9 +451,8 @@ class KurrentRunEventStore(RunEventStore):
 
     def _kick_canonical_cleanup(self, thread_id: str, *, deleted: bool) -> None:
         """Queue the thread's pending canonical cleanups behind its emissions, after a deletion or after a
-        write while one is pending (cached indexes, no I/O); never raises and never awaited by the caller."""
-        if not self._canonical_enabled:
-            return
+        write while one is pending (cached indexes, no I/O); never raises and never awaited by the caller.
+        Runs whatever ``KURRENTDB_CANONICAL_EVENTS`` says (R17): canonical copies written while it was on must still go."""
         stream = run_events_stream(thread_id)
         try:
             if not deleted and (self._cleaner.backing_off(stream) or not any(engine.has_pending_canonical(stream) for _client, engine in list(self._engines.values()))):
@@ -462,13 +461,11 @@ class KurrentRunEventStore(RunEventStore):
         except Exception:
             logger.warning("Scheduling the canonical cleanup of %r failed", stream, exc_info=True)
 
-    async def run_canonical_obligations(self) -> canonical_cleanup.PassReport | None:
+    async def run_canonical_obligations(self) -> canonical_cleanup.PassReport:
         """One pass over every open run-event canonical cleanup and due verification (recovery service); never raises.
 
-        ``None`` when canonical events are off.
+        Runs whatever ``KURRENTDB_CANONICAL_EVENTS`` says (R17): the flag gates emission, never removal.
         """
-        if not self._canonical_enabled:
-            return None
         return await self._cleaner.run()
 
     async def flush_canonical(self) -> None:

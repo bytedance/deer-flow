@@ -202,7 +202,8 @@ async def test_flag_off_writes_nothing(server, monkeypatch):
     await _conversation(store)
     await store.flush_canonical()
     assert _canonical_streams(server) == []
-    assert not [call for call in server.calls if call.stream_name.startswith(("AgentMemory-", "AgentSession-"))]
+    # Deletions still read canonical streams to remove what an earlier run with the flag on wrote (R17); nothing is written.
+    assert not [call for call in server.calls if call.stream_name.startswith(("AgentMemory-", "AgentSession-")) and call.method not in ("get_stream", "read_stream", "get_current_version", "get_stream_metadata")]
     assert not [thread for thread in threading.enumerate() if thread.name == WORKER_THREAD]
 
 

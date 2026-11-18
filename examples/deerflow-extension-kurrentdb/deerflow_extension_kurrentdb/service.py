@@ -17,8 +17,9 @@ decay, which must match the Gateway's. Then:
   touch. When a budget cut recovery short, the loop's first pass retries it
 - **in the background**, runs a pass right away and then every ``interval``
   seconds (sooner when a verification falls due): primary recovery again, then
-  the canonical obligations (cleanups, and verifications whose wait is over) when
-  ``KURRENTDB_CANONICAL_EVENTS`` is on. A failing pass is logged at WARNING and
+  the canonical obligations (cleanups, and verifications whose wait is over),
+  also when ``KURRENTDB_CANONICAL_EVENTS`` is off (R17: canonical copies written
+  while it was on must still go). A failing pass is logged at WARNING and
   retried on the next
 
 Missing settings (no ``KURRENTDB_CONNECTION_STRING``) or a failure to build the

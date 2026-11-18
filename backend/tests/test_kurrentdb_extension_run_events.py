@@ -692,7 +692,8 @@ def _index(server: FakeKurrentDB) -> list[str]:
         recorded = server.sync_client().get_stream(INDEX)
     except Exception:
         return []
-    return [event.type.rsplit(".", 1)[-1] for event in recorded]
+    # Primary-side protocol only: canonical cleanup also runs with canonical events off (R17), on its own schedule.
+    return [event.type.rsplit(".", 1)[-1] for event in recorded if not event.type.rsplit(".", 1)[-1].startswith("Canonical")]
 
 
 def _tb(server: FakeKurrentDB, stream: str = T1) -> int:
