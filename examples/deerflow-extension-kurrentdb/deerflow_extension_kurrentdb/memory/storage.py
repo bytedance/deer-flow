@@ -263,11 +263,9 @@ class KurrentdbMemoryStorage(MemoryStorage):
             return self._refresh(stream).to_document(agent_name)
 
     def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-        stream = self._stream(agent_name, user_id)
-        with self._scope_lock(stream):
-            state = self._full_read(self._client(), stream)
-            self._states[stream] = state
-            return state.to_document(agent_name)
+        """Same as ``load``: the cache is checked against the stream head on every call, so it is
+        never stale, and a head behind the cache or a truncation re-reads from the newest snapshot."""
+        return self.load(agent_name, user_id=user_id)
 
     # --- writes -----------------------------------------------------------------
 

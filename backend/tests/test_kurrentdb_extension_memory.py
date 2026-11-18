@@ -207,10 +207,37 @@ def test_load_checks_head_and_folds_incrementally(server):
     # Every client call carries the configured deadline (R7).
     assert all(call.kwargs.get("timeout") == TIMEOUT for call in storage_calls)
 
-    # reload() re-reads from scratch and agrees with the incremental fold.
-    server.calls.clear()
+    # reload() agrees with the incremental fold.
     assert reader.reload(AGENT, user_id="alice") == document
-    assert server.calls_to("get_stream")
+    assert _storage(server).reload(AGENT, user_id="alice") == document
+
+
+def test_reload_is_head_checked_and_incremental(server):
+    """DeerMem reloads on every manifest-conflict retry: it must not re-read the history since the last snapshot."""
+    writer = _storage(server)
+    revision = 0
+    for index in range(40):
+        assert writer.save({"facts": [_fact(f"fact_{i}", f"fact {i}") for i in range(index + 1)]}, AGENT, user_id="alice", expected_revision=revision) is True
+        revision = writer.load(AGENT, user_id="alice")["revision"]
+    reader = _storage(server)
+    assert len(reader.reload(AGENT, user_id="alice")["facts"]) == 40
+
+    # Unchanged head: one head check, no event reads.
+    server.calls.clear()
+    assert len(reader.reload(AGENT, user_id="alice")["facts"]) == 40
+    assert [call.method for call in server.calls] == ["get_current_version"]
+
+    # Moved head: one forward read of only the new events.
+    head = _head(server, ALICE_STREAM)
+    assert writer.save({"facts": [_fact(f"fact_{i}", f"fact {i}") for i in range(41)]}, AGENT, user_id="alice", expected_revision=revision) is True
+    server.calls.clear()
+    document = reader.reload(AGENT, user_id="alice")
+    assert len(document["facts"]) == 41
+    reads = server.calls_to("get_stream")
+    assert len(reads) == 1
+    assert reads[0].kwargs["stream_position"] == head + 1
+    assert reads[0].kwargs["backwards"] is False
+    assert all(call.kwargs.get("timeout") == TIMEOUT for call in server.calls)
 
 
 def test_reload_folds_from_newest_snapshot(server):
