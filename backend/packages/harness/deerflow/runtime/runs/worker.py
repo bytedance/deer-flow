@@ -1716,7 +1716,7 @@ async def run_agent(
             against that baseline.
             """
             nonlocal fallback_boundary_ids
-            if mode != "values" or not snapshot_capture_failed:
+            if mode != "values" or not snapshot_capture_failed or checkpointer is None:
                 return pre_existing_message_ids
             if fallback_boundary_ids is None:
                 fallback_boundary_ids = _collect_pre_existing_message_ids(chunk)
