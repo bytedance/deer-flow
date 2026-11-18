@@ -161,7 +161,10 @@ and after scans. Its budget is shared and consumed root by root (workspace
 before outputs), so a workspace at the limit starves outputs.
 `get_changed_output_paths()` inherits this uncertainty: newly observed outputs
 are suppressed when the before snapshot was truncated, while modifications
-observed in both snapshots remain eligible. The worker passes this list through
+observed in both snapshots remain eligible. Hidden paths are working state, not
+deliverables: any dot-prefixed segment below the outputs root (a cursor/state
+JSON, a `.work/` scratch tree) is excluded, so it never enters `produced_paths`.
+The worker passes this list through
 `_produced_output_paths()` to its delivery check; an empty list leaves
 `produced_paths` and `verification` absent from the delivery receipt, and
 `_delivery_error()` returns no error. When that empty list accompanies a truncated

@@ -233,8 +233,9 @@ Import paths a consumer may rely on. Everything listed here is a Python import; 
 | `create_deerflow_agent(..., checkpoint_channel_mode="full", checkpoint_snapshot_frequency=None, ...)` | `deerflow.agents.factory` | public agent factory; delta plus a checkpointer is rejected | `factory:66-77`, `factory:135-141` |
 | `CheckpointStateAccessor`, `build_state_mutation_graph` | `deerflow.runtime` (package re-export) | accessor choke point and mutation graph | `deerflow/runtime/__init__.py:8,21-22` |
 | `ThreadState`, `DeltaThreadState`, `SandboxState` | `deerflow.agents` (package re-export) | lazily exported state schemas | `agents/__init__.py:14-16,40-47` |
-| `CheckpointStateAccessor.bind(graph, checkpointer, *, store=None, mode="full")` | `deerflow.runtime.checkpoint_state` | bind graph, saver, and mode | `cstate:112-134` |
-| `build_state_mutation_graph(as_node, mode, state_schema=None, *, snapshot_frequency=None)` | `deerflow.runtime.checkpoint_state` | state-only writer graph for `Overwrite`-style writes | `cstate:39-65` |
+| `CheckpointStateAccessor.bind(graph, checkpointer, *, store=None, mode="full")` | `deerflow.runtime.checkpoint_state` | bind graph, saver, and mode | `cstate:134-154` |
+| `build_state_mutation_graph(as_node, mode, state_schema=None, *, snapshot_frequency=None)` | `deerflow.runtime.checkpoint_state` | state-only writer graph for `Overwrite`-style writes | `cstate:59-89` |
+| `validate_state_mutation_node(as_node)` | `deerflow.runtime.checkpoint_state` | refuses a node name LangGraph cannot compile; the request model of `POST /api/threads/{thread_id}/state` runs it on `as_node` | `cstate:37-56`, `threads:601-609` |
 
 <Callout type="warning">
   In delta mode a raw saver read sees sentinels, not messages. Consumers must read

@@ -89,9 +89,43 @@ class GatewayAgentRunsHost:
             raise AgentRunError(403, "Batch follow-up authorization revoked")
         return _BoundAgentRuns(self, user_id, version, source, frozenset(permissions), origin=make_origin("subagent_batch"))
 
+    async def restore_delegated_authority(
+        self,
+        *,
+        user_id: str,
+        grant: dict,
+        validator: Callable[[], Awaitable[None]] | None = None,
+        plugin_namespace: str | None = None,
+    ):
+        """Restore a persisted delegated grant (e.g. workflow recovery) with its ceiling.
+
+        The grant is the mapping ``capture_authority`` returned at mint time
+        (token_version, source, permissions); expiry and revocation are the
+        caller's contract, enforced through ``validator`` on every operation
+        this handle performs. Restoring re-loads the user row and fails closed
+        on a changed token_version, needs_setup or a disabled account, exactly
+        like ``restore_batch_authority``; it never creates fresh authority.
+        """
+        source, version, permissions = grant.get("source"), grant.get("token_version"), grant.get("permissions")
+        if source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED) or type(version) is not int or not isinstance(permissions, list) or any(not isinstance(value, str) for value in permissions):
+            raise AgentRunError(403, "Invalid delegated authority")
+        user = get_auth_disabled_user() if source == AUTH_SOURCE_AUTH_DISABLED and is_auth_disabled() else await self.load_user(user_id) if source == AUTH_SOURCE_SESSION and self.load_user is not None else None
+        if user is None or str(user.id) != user_id or user.token_version != version or user.needs_setup or getattr(user, "disabled", False):
+            raise AgentRunError(403, "Delegated authorization revoked")
+        return _BoundAgentRuns(
+            self,
+            user_id,
+            version,
+            source,
+            frozenset(permissions),
+            plugin_namespace=plugin_namespace,
+            origin=make_origin("extension", namespace=plugin_namespace),
+            delegation_validator=validator,
+        )
+
 
 class _BoundAgentRuns:
-    def __init__(self, host, user_id: str, token_version: int, source: str, permissions: frozenset[str], plugin_namespace: str | None = None, origin: dict | None = None):
+    def __init__(self, host, user_id: str, token_version: int, source: str, permissions: frozenset[str], plugin_namespace: str | None = None, origin: dict | None = None, delegation_validator: Callable[[], Awaitable[None]] | None = None):
         self._host = host
         self._user_id = user_id
         self._token_version = token_version
@@ -99,6 +133,19 @@ class _BoundAgentRuns:
         self._permissions = permissions
         self._plugin_namespace = plugin_namespace
         self._origin = origin
+        self._delegation_validator = delegation_validator
+
+    def capture_authority(self) -> dict | None:
+        """Persistable restorable snapshot of this handle's existing authority.
+
+        Returns the mint-time ceiling (token_version, source, permissions) for
+        a host-originated session handle, or None when this handle's authority
+        is not restorable. The host never validates the caller here: capture
+        only reflects authority the live handle already holds.
+        """
+        if not self._host.active or self._source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED):
+            return None
+        return {"token_version": self._token_version, "source": self._source, "permissions": sorted(self._permissions)}
 
     def for_plugin(self, namespace: str):
         if not isinstance(namespace, str) or not namespace or len(namespace) > 96 or ":" in namespace:
@@ -107,7 +154,7 @@ class _BoundAgentRuns:
             if namespace != self._plugin_namespace:
                 raise AgentRunError(422, "Agent run handle is already bound to a plugin")
             return self
-        return _BoundAgentRuns(self._host, self._user_id, self._token_version, self._source, self._permissions, namespace)
+        return _BoundAgentRuns(self._host, self._user_id, self._token_version, self._source, self._permissions, namespace, self._origin, self._delegation_validator)
 
     @asynccontextmanager
     async def _request(self, permission: str, thread_id: str | None = None):
@@ -117,8 +164,15 @@ class _BoundAgentRuns:
             user = get_auth_disabled_user() if is_auth_disabled() else None
         else:
             user = await self._host.load_user(self._user_id) if self._host.load_user is not None else None
-        if user is None or str(user.id) != self._user_id or user.token_version != self._token_version or user.needs_setup:
+        if user is None or str(user.id) != self._user_id or user.token_version != self._token_version or user.needs_setup or getattr(user, "disabled", False):
             raise AgentRunError(403, "Agent run authorization revoked")
+        if self._delegation_validator is not None:
+            try:
+                await self._delegation_validator()
+            except AgentRunError:
+                raise
+            except Exception as exc:
+                raise AgentRunError(403, "Delegated authorization revoked") from exc
         permissions = self._permissions.intersection(await resolve_route_permissions(user, is_internal=False))
         if permission not in permissions:
             raise AgentRunError(403, f"Permission denied: {permission}")

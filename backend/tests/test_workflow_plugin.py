@@ -41,6 +41,11 @@ class Runs:
 
     revision = "initial"
 
+    def capture_authority(self):
+        if self.denied:
+            return None
+        return {"token_version": 0, "source": "session", "permissions": ["runs:create", "threads:write"]}
+
     async def configuration_evidence(self, *, thread_id, run_id):
         return {"run_id": run_id, "thread_id": thread_id, "source": "host_assembly", "version": "synthetic-assembly", "model": "test-model"}
 
@@ -1162,3 +1167,255 @@ agent({stepId:args.second,agentRef:'lead_agent',task:'read',artifacts:[f.artifac
     assert len(result["steps"]) <= 2
     assert len(runs.starts) <= 2
     assert len({s["step_id"] for s in result["steps"]}) == len(result["steps"])
+
+
+class ValidatingRuns:
+    """Wraps every delegated operation in the host's per-operation validator gate."""
+
+    def __init__(self, runs, validator):
+        self._runs = runs
+        self._validator = validator
+
+    def __getattr__(self, name):
+        attribute = getattr(self._runs, name)
+        if not callable(attribute):
+            return attribute
+
+        async def operation(*args, **kwargs):
+            await self._validator()
+            return await attribute(*args, **kwargs)
+
+        return operation
+
+
+class Restorer:
+    """Host-side delegated restore stub; the real host revalidates the grant on
+    every operation of the returned handle, including before publication."""
+
+    def __init__(self, runs):
+        self.runs = runs
+        self.calls = []
+
+    async def __call__(self, *, user_id, grant, validator=None, plugin_namespace=None):
+        self.calls.append((user_id, grant, plugin_namespace))
+        return self.runs if validator is None else ValidatingRuns(self.runs, validator)
+
+
+async def crash_like_record(service, run_id, owner="alice"):
+    """What a SIGKILL leaves: recoverable, children back at their queued window."""
+    record = await asyncio.to_thread(service.store.get, owner, run_id)
+    record["status"] = "recoverable"
+    record["error"] = None
+    for row in record["steps"]:
+        if row["status"] in ("queued", "creating_thread", "admitting", "running", "cancelled"):
+            row["status"] = "queued"
+            row["run_id"] = None
+            row.pop("error", None)
+    # A graceful stop records an error response for the in-flight frame; a real
+    # crash loses it, leaving the frame unanswered for replay to re-dispatch.
+    for item in record["journal"]:
+        item["responses"] = None
+    await asyncio.to_thread(service.store.put, owner, record)
+    return record
+
+
+@pytest.mark.asyncio
+async def test_unattended_recovery_requires_session_opt_in_and_capture(plugin):
+    from dataclasses import replace
+
+    _, actions, service, runs = plugin
+    with pytest.raises(ValueError, match="Unattended recovery requires a session-authenticated launch"):
+        await actions["launch"]({"request_id": "a", "script": "return 1;", "args": {}, "unattended_recovery": True}, context(runs))
+    with pytest.raises(ValueError, match="unattended_recovery must be boolean"):
+        await actions["launch"]({"request_id": "b", "script": "return 1;", "args": {}, "unattended_recovery": "yes"}, replace(context(runs), interaction="session"))
+    session = replace(context(runs), interaction="session")
+    plain = await actions["launch"]({"request_id": "c", "script": "return 1;"}, session)
+    assert (await asyncio.to_thread(service.store.get, "alice", plain["run_id"]))["grant"] is None
+    granted = await actions["launch"]({"request_id": "d", "script": "return 1;", "unattended_recovery": True}, session)
+    record = await asyncio.to_thread(service.store.get, "alice", granted["run_id"])
+    assert record["grant"] == {
+        "authority": {"token_version": 0, "source": "session", "permissions": ["runs:create", "threads:write"]},
+        "expires_at": pytest.approx(time.time() + service.config["pause_timeout_seconds"], abs=5),
+        "revoked": False,
+        "version": 1,
+    }
+    # The grant is authority metadata and never projected to API responses.
+    assert "grant" not in await actions["get"]({"run_id": granted["run_id"]}, context(runs))
+
+
+@pytest.mark.asyncio
+async def test_unattended_recovery_resumes_crashed_workflow_to_child_results(plugin):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from deerflow_extension_workflows.constants import NAMESPACE
+    from deerflow_extension_workflows.service import Workflows
+
+    _, actions, service, runs = plugin
+    script = "const a = await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});const b = await agent({stepId:'b',agentRef:'lead_agent',task:'second'});return b.output;"
+    launched = await actions["launch"]({"request_id": "crash", "script": script, "unattended_recovery": True}, replace(context(runs), interaction="session"))
+    run_id = launched["run_id"]
+    # Freeze the crash window: the step row is saved queued, admission never starts.
+    gate = asyncio.Event()
+    original_create = runs.create_thread
+
+    async def gated_create(**kwargs):
+        await gate.wait()
+        return await original_create(**kwargs)
+
+    runs.create_thread = gated_create
+    for _ in range(500):
+        record = await asyncio.to_thread(service.store.get, "alice", run_id)
+        if record["steps"]:
+            break
+        await asyncio.sleep(0.01)
+    gate.set()
+    await service.stop()
+    runs.create_thread = original_create
+    record = await crash_like_record(service, run_id)
+    # Nothing was truly admitted before the crash; drop the interrupted stand-ins.
+    stale_thread = record["steps"][0]["thread_id"]
+    runs.runs = {key: value for key, value in runs.runs.items() if value.thread_id != stale_thread}
+
+    restorer = Restorer(runs)
+    replacement = Workflows(service.config)
+    await replacement.start(SimpleNamespace(agent_runs_restore=restorer))
+    try:
+        for _ in range(500):
+            if run_id in replacement.entries:
+                break
+            await asyncio.sleep(0.01)
+        assert run_id in replacement.entries, "unattended recovery never resumed the workflow"
+        runs.release.set()
+        await asyncio.wait_for(replacement.wait_idle(run_id), 10)
+        final = await replacement.get({"run_id": run_id}, context(runs))
+        assert final["status"] == "completed", (final.get("error"), [(s["step_id"], s["status"], s.get("error")) for s in final["steps"]])
+        # The unadmitted child was re-dispatched with its original identity and key.
+        assert final["steps"][0]["attempt"] == 1
+        assert final["steps"][0]["idempotency_key"] == record["steps"][0]["idempotency_key"]
+        assert final["steps"][0]["thread_id"] == record["steps"][0]["thread_id"]
+        assert final["result"] == {"echo": "second"}
+        assert restorer.calls == [("alice", {"token_version": 0, "source": "session", "permissions": ["runs:create", "threads:write"]}, NAMESPACE)]
+    finally:
+        gate.set()
+        runs.release.set()
+        await replacement.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_recovered_workflow_keeps_child_cleanup_authorized(plugin):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from deerflow_extension_workflows.service import Workflows
+
+    _, actions, service, runs = plugin
+    launched = await actions["launch"](
+        {"request_id": "recancel", "script": "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});", "unattended_recovery": True},
+        replace(context(runs), interaction="session"),
+    )
+    run_id = launched["run_id"]
+    # Freeze the crash window: the step row is saved queued, admission never starts.
+    gate = asyncio.Event()
+    original_create = runs.create_thread
+
+    async def gated_create(**kwargs):
+        await gate.wait()
+        return await original_create(**kwargs)
+
+    runs.create_thread = gated_create
+    for _ in range(500):
+        record = await asyncio.to_thread(service.store.get, "alice", run_id)
+        if record["steps"]:
+            break
+        await asyncio.sleep(0.01)
+    gate.set()
+    await service.stop()
+    runs.create_thread = original_create
+    record = await crash_like_record(service, run_id)
+    stale_thread = record["steps"][0]["thread_id"]
+    runs.runs = {key: value for key, value in runs.runs.items() if value.thread_id != stale_thread}
+
+    replacement = Workflows(service.config)
+    await replacement.start(SimpleNamespace(agent_runs_restore=Restorer(runs)))
+    try:
+        for _ in range(500):
+            if runs.entered.is_set() and replacement.entries.get(run_id) is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert runs.entered.is_set(), "recovered workflow never re-admitted its child"
+        # The delegated handle is the only authorized path to the running child;
+        # revoking before cleanup would strand it in needs_reconciliation.
+        # Cancel on the replacement service: the fixture's actions are bound to
+        # the original, which stop() already made unavailable.
+        assert (await replacement.cancel({"run_id": run_id}, context(runs)))["status"] == "cancelling"
+        await asyncio.wait_for(replacement.wait_idle(run_id), 10)
+        final = await replacement.get({"run_id": run_id}, context(runs))
+        assert final["status"] == "cancelled", (final.get("error"), [(s["step_id"], s["status"], s.get("error")) for s in final["steps"]])
+        assert final["steps"][0]["status"] == "cancelled", final["steps"][0]
+        persisted = await asyncio.to_thread(replacement.store.get, "alice", run_id)
+        assert persisted["grant"]["revoked"] is True
+    finally:
+        gate.set()
+        runs.release.set()
+        await replacement.stop()
+
+
+@pytest.mark.asyncio
+async def test_revoked_or_expired_grants_stay_on_the_manual_path(plugin):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from deerflow_extension_workflows.service import Workflows
+
+    _, actions, service, runs = plugin
+    service.config["pause_timeout_seconds"] = 1
+    launched = await actions["launch"]({"request_id": "paused", "script": "await pause({stepId:'p'});", "unattended_recovery": True}, replace(context(runs), interaction="session"))
+    run_id = launched["run_id"]
+    await waiting(plugin, run_id, "paused")
+    await service.stop()
+    await crash_like_record(service, run_id)
+
+    # Revoked: the owner's cancellation withdrew the standing authority.
+    record = await asyncio.to_thread(service.store.get, "alice", run_id)
+    record["grant"]["revoked"] = True
+    await asyncio.to_thread(service.store.put, "alice", record)
+    restorer = Restorer(runs)
+    replacement = Workflows(service.config)
+    await replacement.start(SimpleNamespace(agent_runs_restore=restorer))
+    try:
+        await asyncio.sleep(0.05)
+        assert not restorer.calls and run_id not in replacement.entries
+        assert (await replacement.get({"run_id": run_id}, context(runs)))["status"] == "recoverable"
+        # Manual session recovery is unaffected by the unusable grant.
+        recovered = await replacement.recover({"run_id": run_id}, replace(context(runs), interaction="session"))
+        assert recovered["status"] == "queued"
+    finally:
+        await replacement.stop()
+
+
+@pytest.mark.asyncio
+async def test_expired_grant_never_restores_authority(plugin):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from deerflow_extension_workflows.service import Workflows
+
+    _, actions, service, runs = plugin
+    service.config["pause_timeout_seconds"] = 1
+    launched = await actions["launch"]({"request_id": "stale", "script": "await pause({stepId:'p'});", "unattended_recovery": True}, replace(context(runs), interaction="session"))
+    run_id = launched["run_id"]
+    await waiting(plugin, run_id, "paused")
+    await service.stop()
+    await crash_like_record(service, run_id)
+    await asyncio.sleep(1.1)  # the bounded mint-time TTL lapses
+
+    restorer = Restorer(runs)
+    replacement = Workflows(service.config)
+    await replacement.start(SimpleNamespace(agent_runs_restore=restorer))
+    try:
+        await asyncio.sleep(0.05)
+        assert not restorer.calls and run_id not in replacement.entries
+        assert (await replacement.get({"run_id": run_id}, context(runs)))["status"] == "recoverable"
+    finally:
+        await replacement.stop()

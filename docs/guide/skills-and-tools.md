@@ -44,6 +44,16 @@ orientation.
 
 The **ppt-generation** skill preserves transparent slide images when composing a presentation, including grayscale and palette PNG transparency.
 
+The **data-analysis** skill reads legacy Excel 97–2003 (`.xls`) workbooks with
+optional `pandas` and `xlrd` packages. It preserves literal text such as `NA`
+and leading-zero identifiers while importing cell values into DuckDB. See the
+[data-analysis setup instructions](../../skills/public/data-analysis/SKILL.md)
+for the additional dependencies. Legacy `.xls` and CSV input do not require
+DuckDB extensions and can be analyzed offline with an empty extension cache.
+The `.xlsx` reader continues to use the spatial extension. Legacy workbooks that
+cannot be opened are reported and skipped while other input files continue;
+analysis fails if no tables can be loaded.
+
 Administrators can see **Could not load** warnings in Capability Center > Skills
 when their own custom skill's `SKILL.md` contains invalid YAML. Warnings show the
 package-relative file and, when available, its line and column, with a quoting
@@ -155,6 +165,12 @@ The video-generation skill derives reference-image MIME metadata from `.png`,
 submitted reference with a missing or unrecognized extension raises a clear error
 before API submission. Filenames must match their contents; image bytes are not
 validated or converted, and provider-specific format restrictions still apply.
+
+The [image-generation skill](../../skills/public/image-generation/SKILL.md#output-handling)
+decodes Gemini base64 image data before opening the output file,
+preserving an existing image when decoding fails. With the legacy MiniMax
+`/v1/image_generation` endpoint, a decode failure can still erase an existing
+output image. Use a fresh `--output-file` path to keep the previous image.
 
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 

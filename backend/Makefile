@@ -19,15 +19,15 @@ dev:
 gateway:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run --locked uvicorn app.gateway.app:app --host 127.0.0.1 --port 8001
 
-# Run all four duration-balanced shards locally; wait for every shard on failure.
-TEST_JOBS ?= 4
-TEST_SHARD_TARGETS := test-shard-1 test-shard-2 test-shard-3 test-shard-4
+# Run all six duration-balanced shards locally (matching CI); wait for every shard on failure.
+TEST_JOBS ?= 6
+TEST_SHARD_TARGETS := test-shard-1 test-shard-2 test-shard-3 test-shard-4 test-shard-5 test-shard-6
 .PHONY: test test-shard test-bundled-extensions $(TEST_SHARD_TARGETS)
 test:
 	$(MAKE) --no-print-directory -k -j$(TEST_JOBS) $(TEST_SHARD_TARGETS)
 
 $(TEST_SHARD_TARGETS):
-	$(MAKE) --no-print-directory test-shard SPLITS=4 GROUP=$(patsubst test-shard-%,%,$@)
+	$(MAKE) --no-print-directory test-shard SPLITS=6 GROUP=$(patsubst test-shard-%,%,$@)
 
 test-live:
 	DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m live tests/ -v -s
@@ -41,8 +41,8 @@ test-blocking-io:
 # read from .test_durations. Shards only READ that file (no --store-durations),
 # so concurrent CI jobs cannot race writes on it. Refresh it with
 # `make test-shard-durations` after a meaningful change to the test set.
-# `make test-shard SPLITS=4 GROUP=2` runs shard 2 of 4; a bare `make test-shard`
-# runs the whole offline suite as a single split; `make test` runs all four shards.
+# `make test-shard SPLITS=6 GROUP=2` runs shard 2 of 6; a bare `make test-shard`
+# runs the whole offline suite as a single split; `make test` runs all six shards.
 SPLITS ?= 1
 GROUP ?= 1
 DURATIONS_FILE ?= .test_durations

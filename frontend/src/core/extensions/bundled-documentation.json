@@ -583,6 +583,57 @@
     },
     "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-retrieval#readme"
   },
+  "deerflow-extension-skill-evolution": {
+    "schema_version": 1,
+    "id": "catalog/skillEvolution",
+    "locales": {
+      "zh-CN": {
+        "title": "证据驱动的技能进化",
+        "description": "在回归用例与宿主校验通过后才提议技能修改，对比新旧结果，并可回滚到已确认的版本。",
+        "usage": [
+          {
+            "title": "安装并授权",
+            "description": "通过 make extension-install 安装示例，在 config.yaml 中配置 skill mutation 与 evidence 授权后重启 Gateway。"
+          },
+          {
+            "title": "记录回归用例",
+            "description": "在包的 cases 目录添加 JSON 用例，用 file_exists、text_contains、text_not_contains 等静态检查描述这次修改要修复什么。"
+          },
+          {
+            "title": "提出、评估、应用与回滚",
+            "description": "调用 /api/extension-skill-evolution/proposals 提交候选版本，查看 justified、unjustified 或 failed 结论；通过后 apply，必要时 revert 到已确认版本。"
+          }
+        ],
+        "requirements": [
+          "需要支持 skill_mutations 的持久化数据库、run_events.backend: db，以及单实例 POSIX 本地磁盘。",
+          "需要在 config.yaml 中显式授予 skill mutation 与 evidence 访问权限。"
+        ]
+      },
+      "en-US": {
+        "title": "Evidence-gated skill evolution",
+        "description": "Propose skill edits only after a regression case and host checks pass, compare old and new results, and roll back to a known-good revision.",
+        "usage": [
+          {
+            "title": "Install and grant access",
+            "description": "Install the example with make extension-install, configure the skill mutation and evidence grants in config.yaml, then restart Gateway."
+          },
+          {
+            "title": "Record a regression case",
+            "description": "Add a JSON case under the package's cases directory using static checks such as file_exists, text_contains and text_not_contains to state what the change fixes."
+          },
+          {
+            "title": "Propose, evaluate, apply and roll back",
+            "description": "Submit a candidate to /api/extension-skill-evolution/proposals, inspect the justified, unjustified or failed verdict, apply an accepted revision, and revert when needed."
+          }
+        ],
+        "requirements": [
+          "Requires a durable database backend, run_events.backend: db, and a single POSIX host with local disk.",
+          "Requires explicit skill mutation and evidence grants in config.yaml."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-skill-evolution#readme"
+  },
   "deerflow-extension-weknora": {
     "schema_version": 1,
     "id": "catalog/weknora",
