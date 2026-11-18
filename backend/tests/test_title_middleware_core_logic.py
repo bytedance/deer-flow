@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from _agent_e2e_helpers import build_single_tool_call_model
+from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_model
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
@@ -14,6 +14,7 @@ from langgraph.constants import TAG_NOSTREAM
 from deerflow.agents.middlewares import title_middleware as title_middleware_module
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
@@ -68,6 +69,57 @@ async def test_return_direct_tool_end_keeps_local_title_without_calling_title_mo
     assert state["title"] == "Please look up the result"
     assert state["messages"][-1].type == "tool"
     create_title_model.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_title_waits_for_todo_continuation_after_text_only_progress(monkeypatch):
+    title_model = AsyncMock(return_value=AIMessage(content="Completed task"))
+    monkeypatch.setattr(title_middleware_module, "create_chat_model", lambda **_: SimpleNamespace(ainvoke=title_model))
+    todos = TodoMiddleware()
+    monkeypatch.setattr(todos, "_MAX_COMPLETION_REMINDERS", 1)
+    graph = create_agent(
+        model=FakeToolCallingModel(responses=[AIMessage(content="Still working"), AIMessage(content="Finished report")]),
+        middleware=[todos, TitleMiddleware(title_config=TitleConfig(model_name="test-title-model"))],
+    )
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="Prepare report")], "todos": [{"content": "Prepare report", "status": "in_progress"}]},
+        context={},
+    )
+    assert result["title"] == "Completed task"
+    title_model.assert_awaited_once()
+    prompt = title_model.await_args.args[0]
+    assert "Finished report" in prompt
+    assert "Still working" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visible", [True, False])
+async def test_title_prompt_excludes_reasoning_blocks(monkeypatch, visible):
+    title_model = AsyncMock(return_value=AIMessage(content="Model title"))
+    monkeypatch.setattr(title_middleware_module, "create_chat_model", lambda **_: SimpleNamespace(ainvoke=title_model))
+    blocks = [{"type": "reasoning", "text": "Private reasoning"}]
+    if visible:
+        blocks.append({"type": "text", "text": "Public answer"})
+    middleware = TitleMiddleware(title_config=TitleConfig(model_name="title-model"))
+    result = await middleware.aafter_agent({"messages": [HumanMessage(content="My question"), AIMessage(content=blocks)]}, MagicMock())
+    if visible:
+        assert result == {"title": "Model title"}
+        prompt = title_model.await_args.args[0]
+        assert "Public answer" in prompt
+        assert "Private reasoning" not in prompt
+    else:
+        assert result == {"title": "My question"}
+        title_model.assert_not_awaited()
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+def test_compaction_reminder_preserves_first_user_turn_for_fallback(serialized):
+    middleware = TitleMiddleware(title_config=TitleConfig())
+    reminder = HumanMessage(name="todo_reminder", content="Pending todos", additional_kwargs={"hide_from_ui": True})
+    messages = [HumanMessage(content="My task"), reminder.model_dump() if serialized else reminder]
+    assert middleware.after_agent({"messages": messages}, MagicMock()) == {"title": "My task"}
+    messages.append(HumanMessage(content="Another task"))
+    assert middleware.after_agent({"messages": messages}, MagicMock()) is None
 
 
 def _clone_title_config(config: TitleConfig) -> TitleConfig:
@@ -536,17 +588,6 @@ class TestTitleMiddlewareCoreLogic:
         # Assert behavior (truncated fallback + ellipsis) without overfitting exact text.
         assert title.endswith("...")
         assert title.startswith("这是一个非常长的问题描述")
-
-    def test_aafter_model_delegates_to_async_helper(self, monkeypatch):
-        _set_test_title_config(model_name="title-model")
-        middleware = TitleMiddleware()
-
-        monkeypatch.setattr(middleware, "_agenerate_title_result", AsyncMock(return_value={"title": "异步标题"}))
-        result = asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock()))
-        assert result == {"title": "异步标题"}
-
-        monkeypatch.setattr(middleware, "_agenerate_title_result", AsyncMock(return_value=None))
-        assert asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock())) is None
 
     def test_aafter_model_uses_local_fallback_when_no_title_model_is_configured(self, monkeypatch):
         """Default async path must not block stream completion on a second LLM call."""

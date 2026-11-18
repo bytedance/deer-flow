@@ -6,8 +6,8 @@
 
 ## 实现方式
 
-使用 `TitleMiddleware` 在 `after_model` 钩子中：
-1. 检测是否是首轮对话。默认本地标题在首个助手步骤后生成；显式配置标题模型时，等待助手给出有可见文本且不再请求工具的回复。
+使用 `TitleMiddleware` 按首轮对话的生命周期生成标题：
+1. 检测是否是首轮对话。默认本地标题在首个助手步骤后生成；显式配置标题模型时，在 `aafter_agent` 等待整轮结束，仅使用最终助手回复的可见文本。
 2. 检查 state 是否已有 title
 3. 默认从首条用户消息生成本地 fallback 标题，避免在流式回复结束前额外等待一次 LLM 调用；显式配置 `model_name` 时才调用 LLM 生成标题（默认最多6个词）
 4. 将 title 存储到 `ThreadState` 中（会被 checkpointer 持久化）
@@ -163,6 +163,7 @@ sequenceDiagram
     alt title.model_name 为空（默认）
         TitleMiddleware->>TitleMiddleware: 从首条用户消息生成本地 fallback title
     else 显式配置 title.model_name
+        LangGraph->>TitleMiddleware: 回合结束，aafter_agent()
         TitleMiddleware->>TitleModel: 生成 LLM title
         TitleModel-->>TitleMiddleware: 返回 title
     end
@@ -229,23 +230,8 @@ uv run pytest tests/test_title_middleware_core_logic.py tests/test_title_generat
 
 ### 实现细节
 
-```python
-# TitleMiddleware 核心逻辑
-@override
-async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-    return await self._agenerate_title_result(state)
+异步执行时，默认标题及纯附件标题在首个助手步骤即可写入。配置标题模型后，只有回合结束且最终回复包含可见文本时才调用模型。待办提醒不计入用户轮数，推理块不进入标题提示词。
 
-async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-    if not self._should_generate_title(state):
-        return None
-
-    config = self._get_title_config()
-    if not config.model_name:
-        return self._generate_title_result(state)
-
-    # 显式配置 title.model_name 时才调用标题模型；失败会回退到本地 title。
-    ...
-```
 
 ## 相关文件
 

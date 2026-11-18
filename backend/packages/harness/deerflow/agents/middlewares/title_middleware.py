@@ -9,12 +9,13 @@ from unicodedata import category
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.model_response import has_tool_call_intent
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_texts
 from deerflow.config.title_config import get_title_config
@@ -111,7 +112,12 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     @staticmethod
     def _is_user_message_for_title(message: object) -> bool:
-        return TitleMiddleware._message_type(message) == "human" and not TitleMiddleware._is_dynamic_context_reminder_message(message)
+        if TitleMiddleware._message_type(message) != "human" or TitleMiddleware._is_dynamic_context_reminder_message(message):
+            return False
+        if isinstance(message, dict):
+            # Apply the same authorship rules to checkpoint metadata.
+            message = HumanMessage(content="", name=message.get("name"), additional_kwargs=message.get("additional_kwargs") or {})
+        return is_genuine_user_message(message)
 
     @staticmethod
     def _has_tool_call_intent(message: object) -> bool:
@@ -144,7 +150,16 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
     def _final_assistant_text(self, message: object | None) -> str:
         if message is None or self._has_tool_call_intent(message):
             return ""
-        return self._strip_think_tags(self._normalize_content(self._message_content(message)))
+        content = self._message_content(message)
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") in ("text", "output_text") and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+            content = "\n".join(parts)
+        return self._strip_think_tags(content) if isinstance(content, str) else ""
 
     def _get_title_user_message(self, state: TitleMiddlewareState) -> str:
         user_message = next((message for message in state.get("messages") or [] if self._is_user_message_for_title(message)), None)
@@ -334,10 +349,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         self,
         state: TitleMiddlewareState,
         *,
+        turn_ended: bool = True,
         task_store=None,
     ) -> dict | None:
         """Generate a configured LLM title asynchronously and fall back locally."""
-        if not self._should_generate_title(state):
+        if not self._should_generate_title(state, allow_partial_exchange=turn_ended):
             return None
 
         attachment_title = self._attachment_only_title(state)
@@ -356,9 +372,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         # Default and attachment titles use only the user request and retain
         # their early state update. A configured model also needs the answer.
+        if not turn_ended:
+            return None
         _, assistant_message = self._first_exchange(state)
         if not self._final_assistant_text(assistant_message):
-            return None
+            return {"title": self._fallback_title(user_msg)}
 
         try:
             prompt, user_msg = self._build_title_prompt(state)
@@ -406,6 +424,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         return await self._agenerate_title_result(
             state,
+            turn_ended=False,
             task_store=task_store_from_runtime(runtime),
         )
 
@@ -417,4 +436,6 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return self._generate_title_result(state, allow_partial_exchange=True)
+        from deerflow_extension_api import task_store_from_runtime
+
+        return await self._agenerate_title_result(state, task_store=task_store_from_runtime(runtime))
