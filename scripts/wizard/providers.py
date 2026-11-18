@@ -700,6 +700,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="cloro",
+        display_name="cloro",
+        description="Google Search results and People also ask, optional AI Overview, API key required",
+        use="deerflow.community.cloro.tools:web_search_tool",
+        env_var="CLORO_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="sofya",
         display_name="Sofya",
         description="Search results include page content, API key required",

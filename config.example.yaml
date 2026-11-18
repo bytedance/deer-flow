@@ -961,6 +961,19 @@ tools:
   #   # hl: en                       # Optional interface language
   #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
 
+  # Web search tool (uses cloro - Google Search API, requires CLORO_API_KEY)
+  # cloro returns live Google organic results and the "People also ask" questions.
+  # A call costs 5 credits; ai_overview: true adds the Google AI Overview text and
+  # its sources for 2 more credits. Get a key at
+  # https://dashboard.cloro.dev/api-keys?utm_source=deer-flow&utm_medium=byok
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.cloro.tools:web_search_tool
+  #   max_results: 5                 # capped at 10 (one Google results page)
+  #   # country: US                  # ISO 3166-1 alpha-2 code for the results
+  #   # ai_overview: false           # true adds the AI Overview (+2 credits)
+  #   # api_key: $CLORO_API_KEY      # Optional if the env var is set
+
   # News search tool (uses Webz.io News Search, requires WEBZ_API_KEY)
   # Recent news coverage, not general web search. Replace the active web_search entry.
   # - name: web_search
