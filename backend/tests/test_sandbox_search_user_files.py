@@ -19,7 +19,6 @@ from deerflow.sandbox.search import (
     find_glob_matches,
     find_grep_matches,
     ignore_rules_for,
-    inside_git_checkout,
 )
 from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
 
@@ -53,7 +52,6 @@ def test_a_checkout_keeps_hiding_data_looking_names(tmp_path: Path) -> None:
     (checkout / "app.log").write_text("FATAL out of memory\n", encoding="utf-8")
     (checkout / "notes.txt").write_text("FATAL in notes\n", encoding="utf-8")
 
-    assert inside_git_checkout(checkout) is True
     assert ignore_rules_for(checkout).should_ignore("app.log") is True
     # The user-data flag wins over the checkout: uploads inside a checkout are
     # still the user's files.
@@ -132,11 +130,13 @@ def test_host_path_resolved_from_the_user_data_mount_still_counts_as_user_data(t
     ]
 
 
-def test_a_checkout_directory_outside_the_user_data_mount_still_hides_logs(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
+def test_a_root_outside_the_user_data_mount_keeps_the_repository_filter(tmp_path: Path) -> None:
+    # Any root the mount table does not label as user data -- a skills mount, an
+    # ad-hoc host path, a checkout -- keeps the filter it always had.
     inbox = _uploads(tmp_path)
     sandbox = LocalSandbox("local", [])
 
+    assert ignore_rules_for(inbox).should_ignore("app.log") is True
     matches, _ = sandbox.glob(str(inbox), "**/*")
     assert {Path(name).name for name in matches} == {"notes.txt"}
 

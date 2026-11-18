@@ -117,12 +117,6 @@ def should_ignore_name(name: str) -> bool:
     return _REPOSITORY_RULES.should_ignore(name)
 
 
-def inside_git_checkout(path: Path) -> bool:
-    """Whether ``path``, or the directory holding it, sits in a checkout."""
-    start = path if path.is_dir() else path.parent
-    return any((candidate / ".git").exists() for candidate in (start, *start.parents))
-
-
 def _names_user_data(pattern: str) -> bool:
     name = pattern.rsplit("/", 1)[-1]
     return any(fnmatch.fnmatchcase(name, candidate) for candidate in USER_DATA_PATTERNS)
@@ -131,17 +125,16 @@ def _names_user_data(pattern: str) -> bool:
 def ignore_rules_for(search_root: Path, *, glob: str | None = None, user_data: bool = False) -> IgnoreRules:
     """Names to skip while searching ``search_root``.
 
-    The repository filter stays as it was inside a git checkout. Anywhere else
-    the root holds user files -- uploads, documents, workspace output -- where
+    Everything except the user's own files keeps the repository filter, so a
+    skills mount or an ad-hoc host path hides ``*.log`` as it always did.
+    ``user_data`` marks a root the sandbox maps to ``/mnt/user-data``; there
     ``*.log`` and ``logs/`` are content, so only repository noise is hidden. A
-    glob the caller spelled out wins over the defaults even inside a checkout:
-    asking for ``*.log`` is a request for logs. ``user_data`` marks a search root
-    the sandbox maps to ``/mnt/user-data``, which is the user's files even when
-    the host path happens to sit inside a checkout.
+    glob the caller spelled out wins over the defaults: asking for ``*.log`` is
+    a request for logs, even in a checkout.
     """
     if user_data or (glob is not None and _names_user_data(glob)):
         return _CONTENT_RULES
-    return _REPOSITORY_RULES if inside_git_checkout(search_root) else _CONTENT_RULES
+    return _REPOSITORY_RULES
 
 
 def should_ignore_path(path: str) -> bool:
