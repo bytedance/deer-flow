@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import errno
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 # Only match where a host base ends at a real path-segment boundary, so a mount
 # root does not match inside a sibling that merely shares its prefix
@@ -113,6 +113,40 @@ def build_output_mask_pattern(base: str, *, separator_agnostic: bool = False) ->
     return re.compile(PATH_START_BOUNDARY + escaped + _SEGMENT_BOUNDARY + _PATH_TAIL)
 
 
+def _next_path_match(output: str, searchable_output: str, searchable_base: str, search_from: int) -> tuple[int, int] | None:
+    """Return the ``(start, end)`` of the next match for one base, or ``None``.
+
+    A match is a base occurrence that starts a path (not inside a longer
+    word) and ends at a segment boundary, plus the path tail up to the next
+    terminator. Candidates that fail the boundary are skipped, not returned,
+    so the caller never sees a prefix sibling as a match.
+    """
+    while True:
+        match_start = searchable_output.find(searchable_base, search_from)
+        if match_start < 0:
+            return None
+        if match_start > 0 and _PATH_START_BLOCKERS.fullmatch(searchable_output[match_start - 1]):
+            search_from = match_start + 1
+            continue
+
+        base_end = match_start + len(searchable_base)
+        match_end = base_end
+        if base_end < len(searchable_output):
+            next_char = searchable_output[base_end]
+            if next_char in "/\\":
+                match_end += 1
+                while match_end < len(output):
+                    char = output[match_end]
+                    if char.isspace() or char in _PATH_TAIL_TERMINATORS:
+                        break
+                    match_end += 1
+            elif _SEGMENT_BOUNDARY_CHAR.fullmatch(next_char) is None:
+                search_from = match_start + 1
+                continue
+
+        return match_start, match_end
+
+
 def replace_output_path_matches(
     output: str,
     base: str,
@@ -153,27 +187,10 @@ def replace_output_path_matches(
                 raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
 
     while True:
-        match_start = searchable_output.find(searchable_base, search_from)
-        if match_start < 0:
+        found = _next_path_match(output, searchable_output, searchable_base, search_from)
+        if found is None:
             break
-        if match_start > 0 and _PATH_START_BLOCKERS.fullmatch(searchable_output[match_start - 1]):
-            search_from = match_start + 1
-            continue
-
-        base_end = match_start + len(searchable_base)
-        match_end = base_end
-        if base_end < len(searchable_output):
-            next_char = searchable_output[base_end]
-            if next_char in "/\\":
-                match_end += 1
-                while match_end < len(output):
-                    char = output[match_end]
-                    if char.isspace() or char in _PATH_TAIL_TERMINATORS:
-                        break
-                    match_end += 1
-            elif _SEGMENT_BOUNDARY_CHAR.fullmatch(next_char) is None:
-                search_from = match_start + 1
-                continue
+        match_start, match_end = found
 
         matched_path = output[match_start:match_end]
         if callable(replacement):
@@ -186,6 +203,77 @@ def replace_output_path_matches(
         _append(replaced_path)
         copied_until = match_end
         search_from = match_end
+
+    if not chunks:
+        if max_bytes is not None and len(output.encode("utf-8")) > max_bytes:
+            raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
+        return output
+    _append(output[copied_until:])
+    return "".join(chunks)
+
+
+def replace_output_path_matches_all(
+    output: str,
+    bases: Sequence[str],
+    replacement: Callable[[str], str],
+    *,
+    separator_agnostic: bool = False,
+    max_bytes: int | None = None,
+) -> str:
+    """Replace path matches for several bases in a single left-to-right scan.
+
+    Same boundary and path-tail contract as ``replace_output_path_matches``,
+    shared through ``_next_path_match`` so the two cannot drift. The scan
+    differs in one way only: the budget applies to the fully substituted
+    output, not to an intermediate pass. When an early base expands a path
+    and a later base contracts others, a per-pass cap rejects an
+    intermediate string the caller never sees; here the ceiling sees the
+    net result (#8260, willem-bd P2). Allocation stays bounded all the same
+    — the output is built piece by piece under one running budget, so a
+    refused payload is never materialized. At the same start the longest
+    base wins, matching the longest-local-first pass order of the sequential
+    form; scanning resumes after each match, so replacement text is never
+    rewritten a second time.
+    """
+    if not output or not bases:
+        return output
+
+    searchable_output = output.replace("\\", "/") if separator_agnostic and "\\" in output else output
+    searchable_bases = [base.replace("\\", "/") if separator_agnostic and "\\" in base else base for base in bases]
+    chunks: list[str] = []
+    copied_until = 0
+    search_from = 0
+    budgeted_size = 0
+
+    def _append(piece: str) -> None:
+        nonlocal budgeted_size
+        chunks.append(piece)
+        if max_bytes is not None:
+            budgeted_size += len(piece.encode("utf-8"))
+            if budgeted_size > max_bytes:
+                raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
+
+    while True:
+        best_start = -1
+        best_end = -1
+        best_base_len = -1
+        for searchable_base in searchable_bases:
+            found = _next_path_match(output, searchable_output, searchable_base, search_from)
+            if found is None:
+                continue
+            start, end = found
+            if best_start < 0 or start < best_start or (start == best_start and len(searchable_base) > best_base_len):
+                best_start, best_end, best_base_len = start, end, len(searchable_base)
+        if best_start < 0:
+            break
+
+        matched_path = output[best_start:best_end]
+        replaced_path = replacement(matched_path)
+
+        _append(output[copied_until:best_start])
+        _append(replaced_path)
+        copied_until = best_end
+        search_from = best_end
 
     if not chunks:
         if max_bytes is not None and len(output.encode("utf-8")) > max_bytes:

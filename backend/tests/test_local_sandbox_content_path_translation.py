@@ -332,6 +332,52 @@ def test_download_file_enforces_limit_on_restored_bytes(tmp_path):
     assert excinfo.value.errno == errno.EFBIG
 
 
+def test_download_file_applies_limit_to_fully_restored_output(tmp_path):
+    """willem-bd P2 on #8260 (2026-11-17): the download limit applies to
+    the fully restored output, not to each mapping pass. With two custom
+    mounts, the first pass (longest local root first) expands paths and
+    the second contracts them, so a limit equal to the stored size must
+    still return the restored bytes when they fit — the old per-pass cap
+    raised EFBIG on the intermediate expansion instead.
+    """
+    expanding_host = tmp_path / ("a" * 80)
+    expanding_host.mkdir()
+    contracting_host = tmp_path / ("b" * 40)
+    contracting_host.mkdir()
+    # The expanding mount's virtual root is far longer than its host root;
+    # the contracting mount's virtual root is a single short segment.
+    expanding_virtual = "/mnt/user-data/" + "/".join(["segment"] * 48) + "/outputs"
+    contracting_virtual = "/m"
+    sandbox = LocalSandbox(
+        id="test",
+        path_mappings=[
+            PathMapping(container_path=expanding_virtual, local_path=str(expanding_host)),
+            PathMapping(container_path=contracting_virtual, local_path=str(contracting_host)),
+        ],
+    )
+    virtual = f"{expanding_virtual}/run.sh"
+    expand_line = f"cat {expanding_virtual}/data.csv\n"
+    contract_line = f"cat {contracting_virtual}/data.csv\n"
+    # Size the fixture from the resolved host paths, so the net contraction
+    # holds whatever the temporary directory is called: one expanding line
+    # and enough contracting lines that the restored bytes fit the stored
+    # size, while the first pass alone still expands past it.
+    expand_growth = len(expand_line) - len(f"cat {os.path.realpath(expanding_host)}/data.csv\n")
+    contract_shrink = len(f"cat {os.path.realpath(contracting_host)}/data.csv\n") - len(contract_line)
+    assert expand_growth > 0  # the first pass really expands
+    assert contract_shrink > 0  # the second pass really contracts
+    n_contract = (expand_growth + 50) // contract_shrink + 1
+    content = "#!/bin/sh\n" + expand_line + contract_line * n_contract
+    sandbox.write_file(virtual, content)
+
+    stored = (expanding_host / "run.sh").read_bytes()
+    restored = content.encode("utf-8")
+    assert b"/mnt/user-data" not in stored  # host paths live on disk
+    assert len(restored) < len(stored)  # net contraction: the limit fits
+
+    assert sandbox.download_file(virtual, max_bytes=len(stored)) == restored
+
+
 def test_download_file_bounds_restored_bytes_while_substituting(tmp_path):
     """The size ceiling must bound the substitution itself, not only the
     result: with a virtual root far longer than the host root, repeated
@@ -367,4 +413,13 @@ def test_download_file_bounds_restored_bytes_while_substituting(tmp_path):
     assert excinfo.value.errno == errno.EFBIG
     # The refused payload is never materialized: peak memory stays well
     # below the size of the expanded string the old code built first.
-    assert peak < len(restored) // 2
+    # The traced allocation includes reading and decoding the stored file,
+    # whose size grows with the host temporary directory name on every
+    # repeated path — so the bound is sized by the stored bytes, not by a
+    # fixed fraction of the restored size, or a longer pytest root fails
+    # it (willem-bd P3 on #8260: 27,094 bytes against 26,505 under the
+    # default macOS pytest directory). The stored file is read, decoded,
+    # and substituted under the budget, so peak stays near three stored
+    # sizes plus one replacement piece and tracing overhead.
+    assert peak < 4 * stored_size + 8192
+    assert peak < len(restored)

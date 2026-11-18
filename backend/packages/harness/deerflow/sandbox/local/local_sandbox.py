@@ -24,7 +24,7 @@ from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, current_command_sc
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
+from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches, replace_output_path_matches_all
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
@@ -718,8 +718,13 @@ class LocalSandbox(Sandbox):
             output: Output string that may contain local paths
             max_bytes: Bound on the substituted output in bytes. When set,
                 the budget is enforced while substituting (see
-                ``replace_output_path_matches``), so a caller that refuses
-                an oversized result never materializes the expanded string.
+                ``replace_output_path_matches_all``), so a caller that refuses
+                an oversized result never materializes the expanded string —
+                and the ceiling applies to the fully restored output, not to
+                an intermediate pass: an early mapping that expands a path
+                must not trip it when a later mapping contracts the result
+                back under the limit (#8260, willem-bd P2). Without a budget
+                the mappings still apply one pass at a time, as before.
 
         Returns:
             Output with local paths resolved to container paths
@@ -733,17 +738,21 @@ class LocalSandbox(Sandbox):
         # ``_resolve_paths_in_command``), so matching must accept both
         # separators or the model sees raw host paths that no container path
         # maps back to.
+        if max_bytes is not None:
+            return replace_output_path_matches_all(
+                output,
+                [self._resolved_local_paths[mapping] for mapping in self._mappings_by_local_specificity],
+                self._reverse_resolve_path,
+                separator_agnostic=True,
+                max_bytes=max_bytes,
+            )
         result = output
         for mapping in self._mappings_by_local_specificity:
-            # Only pass the budget when one is set, so the unbudgeted call
-            # sites keep the exact call shape they had before.
-            budget = {"max_bytes": max_bytes} if max_bytes is not None else {}
             result = replace_output_path_matches(
                 result,
                 self._resolved_local_paths[mapping],
                 self._reverse_resolve_path,
                 separator_agnostic=True,
-                **budget,
             )
 
         return result
