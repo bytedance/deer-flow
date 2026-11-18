@@ -14,6 +14,7 @@ import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 from langchain_mcp_adapters.tools import load_mcp_tools
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,45 +45,54 @@ _SUBMISSION_CONTEXT = ContextVar("mcp_submission_integration_context", default=N
 _SERVER = """
 import asyncio
 import os
+import sqlite3
 
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("submission-barriers")
 accepted = asyncio.Event()
+reply_held = asyncio.Event()
 release = asyncio.Event()
-tasks = {}
-cancel_calls = 0
-submit_calls = 0
+# Each thread has its own stdio session, but a deployed task service owns
+# remote handles independently of the connection that submitted them.
+remote = sqlite3.connect(os.environ["MCP_TEST_REMOTE_STATE"])
+remote.row_factory = sqlite3.Row
+with remote:
+    remote.execute("CREATE TABLE IF NOT EXISTS task (id INTEGER PRIMARY KEY, status TEXT, cancel_calls INTEGER, submit_calls INTEGER)")
+    remote.execute("INSERT OR IGNORE INTO task VALUES (1, NULL, 0, 0)")
+
+
+def inspect_remote():
+    return dict(remote.execute("SELECT status, cancel_calls, submit_calls FROM task WHERE id = 1").fetchone())
 
 
 @mcp.tool()
 async def submit_report(hold_reply: bool = False) -> dict[str, object]:
-    global submit_calls
-    submit_calls += 1
-    tasks.setdefault("remote-report", "running")
+    with remote:
+        remote.execute("UPDATE task SET submit_calls = submit_calls + 1, status = COALESCE(status, 'running') WHERE id = 1")
     accepted.set()
     if hold_reply:
+        reply_held.set()
         await release.wait()
     return {"task_id": "remote-report", "status": "running", "pid": os.getpid()}
 
 
 @mcp.tool()
 async def status_report(task_id: str) -> dict[str, object]:
-    return {"task_id": task_id, "status": tasks[task_id]}
+    return {"task_id": task_id, "status": inspect_remote()["status"]}
 
 
 @mcp.tool()
 async def cancel_report(task_id: str) -> dict[str, object]:
-    global cancel_calls
-    cancel_calls += 1
-    tasks[task_id] = "cancelled"
+    with remote:
+        remote.execute("UPDATE task SET cancel_calls = cancel_calls + 1, status = 'cancelled' WHERE id = 1")
     return {"task_id": task_id, "status": "cancelled"}
 
 
 @mcp.tool()
 async def wait_until_accepted() -> dict[str, object]:
     await accepted.wait()
-    return {"submit_calls": submit_calls}
+    return {"submit_calls": inspect_remote()["submit_calls"]}
 
 
 @mcp.tool()
@@ -92,12 +102,14 @@ async def release_reply() -> dict[str, object]:
 
 
 @mcp.tool()
+async def wait_until_reply_held() -> dict[str, object]:
+    await reply_held.wait()
+    return {"submit_calls": inspect_remote()["submit_calls"]}
+
+
+@mcp.tool()
 async def inspect_task() -> dict[str, object]:
-    return {
-        "status": tasks.get("remote-report"),
-        "cancel_calls": cancel_calls,
-        "submit_calls": submit_calls,
-    }
+    return inspect_remote()
 
 
 @mcp.tool()
@@ -168,6 +180,7 @@ async def _runtime(tmp_path, monkeypatch, *, phase=None):
                     "type": "stdio",
                     "command": sys.executable,
                     "args": ["-c", _SERVER],
+                    "env": {"MCP_TEST_REMOTE_STATE": str(tmp_path / "remote-tasks.sqlite")},
                     "task_toolsets": [{"name": "reports", "submit_tool": "submit_report", "status_tool": "status_report", "cancel_tool": "cancel_report"}],
                 }
             }
@@ -295,6 +308,80 @@ async def test_cancelled_duplicate_submit_preserves_existing_remote_owner(tmp_pa
             if not duplicate.done():
                 duplicate.cancel()
             await asyncio.wait_for(asyncio.gather(duplicate, return_exceptions=True), timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["deleted", "recreated"])
+@pytest.mark.parametrize("has_owner", [True, False], ids=["duplicate-handle", "unique-handle"])
+async def test_cancelled_late_handle_preserves_ownership_after_thread_lifecycle(tmp_path, monkeypatch, lifecycle, has_owner):
+    async with _runtime(tmp_path, monkeypatch) as runtime:
+        first = None
+        if has_owner:
+            async with runtime.repo._sf() as session:
+                session.add(ThreadMetaRow(thread_id="owner-thread", incarnation="owner-incarnation", user_id=_USER))
+                await session.commit()
+            first = await runtime.service.submit(
+                driver_name=ORDINARY_MCP_TASK_DRIVER,
+                request=TaskSubmitRequest(
+                    user_id=_USER,
+                    thread_id="owner-thread",
+                    thread_incarnation="owner-incarnation",
+                    run_id="owner-run",
+                    tool_call_id="owner-call",
+                    server_name="reports",
+                    task_name="reports",
+                    arguments={"hold_reply": False},
+                    driver_data={"submit_tool": "submit_report", "status_tool": "status_report", "cancel_tool": "cancel_report", "connection_scope": "deployment"},
+                ),
+            )
+
+        submission = asyncio.create_task(runtime.submit(hold_reply=True))
+        try:
+            held = await asyncio.wait_for(runtime.control("wait_until_reply_held"), timeout=15)
+            assert held["submit_calls"] == 1 + int(has_owner)
+            await _deliver_cancellation(submission)
+            async with runtime.repo._sf() as session:
+                thread = await session.get(ThreadMetaRow, _THREAD)
+                assert thread is not None
+                await session.delete(thread)
+                await session.commit()
+                if lifecycle == "recreated":
+                    session.add(ThreadMetaRow(thread_id=_THREAD, incarnation="replacement-incarnation", user_id=_USER))
+                    await session.commit()
+            await runtime.control("release_reply")
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(submission), timeout=10)
+            await runtime.service.stop()
+
+            remote = await runtime.control("inspect_task")
+            assert remote == {
+                "status": "running" if has_owner else "cancelled",
+                "cancel_calls": 0 if has_owner else 1,
+                "submit_calls": 1 + int(has_owner),
+            }, "a lifecycle rejection must compensate only an unowned remote handle"
+            if has_owner:
+                owner_view = await runtime.caller.call_tool(
+                    server_name="reports",
+                    tool_name="inspect_task",
+                    arguments={},
+                    user_id=_USER,
+                    thread_id="owner-thread",
+                    thread_incarnation="owner-incarnation",
+                )
+                assert not owner_view.isError
+                assert owner_view.structuredContent == remote, "both thread sessions must observe the same remote task"
+            async with runtime.repo._sf() as session:
+                rows = list((await session.execute(select(McpTaskRow))).scalars())
+                assert [row.id for row in rows] == ([first["id"]] if has_owner else [])
+                if has_owner:
+                    assert runtime.repo._row_to_dict(rows[0]) == first, "the original owner's lifecycle and leases must remain unchanged"
+                thread = await session.get(ThreadMetaRow, _THREAD)
+                assert (thread.incarnation if thread else None) == ("replacement-incarnation" if lifecycle == "recreated" else None)
+        finally:
+            await runtime.control("release_reply")
+            if not submission.done():
+                submission.cancel()
+            await asyncio.wait_for(asyncio.gather(submission, return_exceptions=True), timeout=10)
 
 
 @pytest.mark.asyncio

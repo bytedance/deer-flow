@@ -232,6 +232,18 @@ class McpTaskRepository:
                 thread_id=thread_id,
                 thread_incarnation=expected_thread_incarnation,
             ):
+                # A lifecycle rejection must not make an already-owned remote
+                # handle eligible for compensation. Match the unique key even
+                # when its owner belongs to an old thread or is terminal.
+                existing_owner = await session.scalar(
+                    select(McpTaskRow.id).where(
+                        McpTaskRow.user_id == user_id,
+                        McpTaskRow.server_name == server_name,
+                        McpTaskRow.remote_task_id == remote_task_id,
+                    )
+                )
+                if existing_owner is not None:
+                    raise DuplicateMcpRemoteTaskError(f"Remote MCP task {remote_task_id!r} is already tracked for server {server_name!r} by this user")
                 raise McpTaskThreadMismatchError("MCP task submission crossed a thread lifecycle boundary")
             row.thread_incarnation = expected_thread_incarnation
             session.add(row)

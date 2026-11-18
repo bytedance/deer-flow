@@ -14,6 +14,12 @@ A bounded wait hands unfinished work to the service. Once a remote handle arrive
 the unique durable create must settle before cancellation can act on that handle;
 a duplicate handle already tracked by another submission is left untouched.
 
+If the submitting thread has been deleted, recreated or is no longer accessible,
+the rejected create still checks ownership by user, server and remote handle
+before allowing compensation. A task tracked by another thread, an older
+incarnation or a terminal record keeps its ownership. An untracked handle keeps
+the existing best-effort compensation cancellation.
+
 If cancellation wins before the result is delivered, a successful create is
 followed by a durable cancellation request matching that exact creation receipt.
 This internal cleanup still works after the original thread is deleted or
