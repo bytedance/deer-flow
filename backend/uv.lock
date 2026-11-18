@@ -927,6 +927,8 @@ dev = [
     { name = "blockbuster" },
     { name = "hypothesis" },
     { name = "jsonschema" },
+    { name = "kurrent-agent-schema" },
+    { name = "kurrentdbclient" },
     { name = "monocle-apptrace" },
     { name = "prompt-toolkit" },
     { name = "pytest" },
@@ -977,6 +979,8 @@ dev = [
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
     { name = "hypothesis", specifier = ">=6.100,<7" },
     { name = "jsonschema", specifier = ">=4.26.0" },
+    { name = "kurrent-agent-schema", specifier = ">=0.5,<1" },
+    { name = "kurrentdbclient", specifier = ">=1.3,<2" },
     { name = "monocle-apptrace", specifier = ">=0.8.8" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
@@ -1631,6 +1635,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ff/b0/4af731ff7492c68a96e4c71bfd0f4590acde92b31c6fe4894e6465c10ff6/grpcio-1.81.1-cp314-cp314-win_amd64.whl", hash = "sha256:3768a5ff1b2125e6f552e561b6b2dca0e64982d8949689b4df145cf8b98d7821", size = 5070275, upload-time = "2026-06-11T12:46:48.486Z" },
 ]
 
+[package.optional-dependencies]
+protobuf = [
+    { name = "grpcio-tools" },
+]
+
 [[package]]
 name = "grpcio-health-checking"
 version = "1.81.1"
@@ -1642,6 +1651,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/65/46/6b6678b5a922765ae7637205bb6d0618a4da8b35f2ce6116f8bcff262370/grpcio_health_checking-1.81.1.tar.gz", hash = "sha256:ecc61480e25058a4a04e11e4ab6900ad7439b32e60a8ce4ece7d9f219221c85d", size = 17107, upload-time = "2026-06-11T12:58:49.632Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6e/87/174bbfb5613794862c45b5cdf567fcfb478ad5a3a7b594e11d998656b2f9/grpcio_health_checking-1.81.1-py3-none-any.whl", hash = "sha256:cbc6a4171825ec64389de2f062d296ba129a5c27eefd0dd55fa837909184bdf9", size = 19120, upload-time = "2026-06-11T12:58:38.008Z" },
+]
+
+[[package]]
+name = "grpcio-status"
+version = "1.81.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "googleapis-common-protos" },
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/32/26/0aa9168c87882381fd810d140c279a2490ed6aee655f0515d6f56c5ca404/grpcio_status-1.81.1.tar.gz", hash = "sha256:9389a03e746017b10f0630c064289201458f3ce01f5d7ef4b0bebc1ef6cf82ad", size = 13923, upload-time = "2026-06-11T12:58:48.636Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/5e/5abfec5f7e89d3b7993d57cfb025ca5f968a2c18656d7fcda2b6919440b9/grpcio_status-1.81.1-py3-none-any.whl", hash = "sha256:08072fa9995f4a95c647fc6f4f85e2411573d00087bcabdf30f260114338f232", size = 14638, upload-time = "2026-06-11T12:58:31.982Z" },
 ]
 
 [[package]]
@@ -2074,6 +2097,33 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2c/8f/85bf51ad4150f64e8c665daf0d9dfe9787ae92005efb9a4d1cba592bd79d/kubernetes-35.0.0.tar.gz", hash = "sha256:3d00d344944239821458b9efd484d6df9f011da367ecb155dadf9513f05f09ee", size = 1094642, upload-time = "2026-01-16T01:05:27.76Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/70/05b685ea2dffcb2adbf3cdcea5d8865b7bc66f67249084cf845012a0ff13/kubernetes-35.0.0-py2.py3-none-any.whl", hash = "sha256:39e2b33b46e5834ef6c3985ebfe2047ab39135d41de51ce7641a7ca5b372a13d", size = 2017602, upload-time = "2026-01-16T01:05:25.991Z" },
+]
+
+[[package]]
+name = "kurrent-agent-schema"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1b/da/88972bb9a1b9b242c47c5ed08c5f6428c2ac4432ec0730190a7eaa00ac36/kurrent_agent_schema-0.5.0.tar.gz", hash = "sha256:a58d644151f3e66633102c569fdd76cb34d6e9a93de67ca66df61c8847499c48", size = 20664, upload-time = "2026-09-07T10:33:01.327Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5a/cb/963df41a672cb33ce7a0af64188490bf2983e6322a05b877bc18ac42f223/kurrent_agent_schema-0.5.0-py3-none-any.whl", hash = "sha256:8e8f66950edd7fcb201a35a18a3b31f57630ed5ffd3024e92ecc20779b7f1f4f", size = 17233, upload-time = "2026-09-07T10:33:00.216Z" },
+]
+
+[[package]]
+name = "kurrentdbclient"
+version = "1.3.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "googleapis-common-protos" },
+    { name = "grpcio", extra = ["protobuf"] },
+    { name = "grpcio-status" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/88/c848cce647241422eb9626f680b6d0f8959dbbea0bf271fb65e536fc80f1/kurrentdbclient-1.3.6.tar.gz", hash = "sha256:8c5f4295947ebf98819ad03d07159d7079fed34ed399895b856d3e93f23f874d", size = 193263, upload-time = "2026-10-31T14:42:51.091Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e3/c0/4c1d4c71f57c709f2fa5ea09e96ded4cfb9335ffa5014701058fbe2dfb14/kurrentdbclient-1.3.6-py3-none-any.whl", hash = "sha256:8cbc6cd0fb535600f2b2c4e47011473da69bd908a5da7d1474a48563065cc844", size = 187746, upload-time = "2026-10-31T14:42:49.513Z" },
 ]
 
 [[package]]
