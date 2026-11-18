@@ -102,6 +102,14 @@ class TestNormalizeFilename:
             write_upload_file_no_symlink(tmp_path, "notes.txt:hidden", b"secret")
         assert list(tmp_path.iterdir()) == []
 
+    def test_drive_reference_platform_behavior(self):
+        assert normalize_filename("C:/reports/report.txt") == "report.txt"
+        if os.name == "nt":
+            assert normalize_filename("C:report.txt") == "report.txt"
+        else:
+            with pytest.raises(ValueError, match="colon"):
+                normalize_filename("C:report.txt")
+
     @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
     def test_rejects_reserved_staging_names(self, filename):
         with pytest.raises(ValueError, match="reserved upload staging"):
