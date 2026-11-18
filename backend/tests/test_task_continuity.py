@@ -1093,3 +1093,138 @@ def test_repeated_archive_sources_keep_canonical_read_version(role_runtime):
     assert row["truncated"] is source["truncated"] is True
     assert source["text"] == text[:1000]
     assert row["excerpt"] == source["text"][row["excerpt_start"] : row["excerpt_end"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("location", ["archive", "active", "mixed"])
+async def test_history_search_cursor_visits_each_source_once(role_runtime, async_mode, location):
+    import json
+
+    archived = [HumanMessage(content="needle", id=f"archived-{i}") for i in range(12)] if location != "active" else []
+    active = [HumanMessage(content="needle", id=f"active-{i}") for i in range(10)] if location != "archive" else []
+    config = TaskContinuityConfig(enabled=True)
+    if archived:
+        # Keep a duplicate archive row and an overlapping active source.
+        role_runtime.state["task_history"] = archive.capture({}, role_runtime, archived, config)
+        role_runtime.state["task_history"] = archive.capture(role_runtime.state, role_runtime, [archived[0], AIMessage(content="needle", id="ignored")], config)
+        if active:
+            active.insert(0, archived[0])
+    role_runtime.state["messages"] = active
+
+    async def search(**kwargs):
+        arguments = {"runtime": role_runtime, "query": "needle", "role": "user", **kwargs}
+        result = await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments)
+        return json.loads(result)
+
+    first = await search()
+    assert first == await search(cursor=None)
+    assert len(first["results"]) == 8
+    assert len(first["next_cursor"]) <= 90
+    if location == "archive":
+        assert [row["message_id"] for row in first["results"]] == [message.id for message in archived[:8]]
+    if location != "archive":
+        expected = active[1:9] if location == "mixed" else active[:8]
+        assert [row["message_id"] for row in first["results"]] == [message.id for message in expected]
+    rows = first["results"]
+    cursor = first["next_cursor"]
+    for _ in range(3):
+        page = await search(cursor=cursor)
+        assert page["status"] == "available"
+        assert 0 < len(page["results"]) <= 8
+        rows += page["results"]
+        cursor = page.get("next_cursor")
+        if not cursor:
+            break
+    assert cursor is None
+    assert len(rows) == len({row["id"] for row in rows})
+    assert {row["message_id"] for row in rows} == {message.id for message in [*archived, *active]}
+
+
+def test_history_search_cursor_is_bound_to_query_scope_and_snapshot(role_runtime):
+    import json
+
+    messages = [HumanMessage(content="needle", id=f"hit-{i}") for i in range(9)]
+    role_runtime.state["messages"] = [HumanMessage(content="needle current", id="current")]
+    config = TaskContinuityConfig(enabled=True, max_batches=2)
+    role_runtime.state["task_history"] = archive.capture(role_runtime.state, role_runtime, messages, config)
+
+    def search(**kwargs):
+        return json.loads(history_search.invoke({"runtime": role_runtime, "query": "needle", **kwargs}))
+
+    original = role_runtime.state.copy()
+    cursor = search()["next_cursor"]
+    stale = {"results": [], "status": "stale_cursor"}
+    assert search(cursor=cursor, query="other") == stale
+    assert search(cursor=cursor, role="user") == stale
+    assert search(cursor="x" * 1000) == {"results": [], "status": "invalid_cursor"}
+    role_runtime.state = {**original, "messages": [HumanMessage(content="needles changed", id="current")]}
+    assert search(cursor=cursor) == stale
+    role_runtime.state = {"messages": original["messages"]}
+    assert search(cursor=cursor) == stale
+    role_runtime.state = original
+    owner = role_runtime.context
+    role_runtime.context = {**owner, "thread_id": "other-thread"}
+    assert search(cursor=cursor) == stale
+    role_runtime.context = {**owner, "user_id": "other-user"}
+    assert search(cursor=cursor) == stale
+    role_runtime.context = owner
+    future = archive.capture(role_runtime.state, role_runtime, [HumanMessage(content="needle future", id="future")], config)
+    assert future["status"] == "available"
+    assert search(cursor=cursor) == stale
+    assert search(query="future") == {"results": [], "status": "available"}
+    after_fork = search()["next_cursor"]
+    archive.capture(role_runtime.state, role_runtime, [HumanMessage(content="replacement", id="replacement")], TaskContinuityConfig(enabled=True, max_batches=1))
+    assert search(cursor=after_fork) == stale
+    assert search()["status"] == "partially_expired"
+
+
+def test_history_search_cursor_rejects_changed_rank_prefix(role_runtime):
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    messages = [HumanMessage(content="needle body", id=f"hit-{i}") for i in range(10)]
+    role_runtime.state["task_history"] = archive.capture({}, role_runtime, messages, TaskContinuityConfig(enabled=True))
+    arguments = {"runtime": role_runtime, "query": "needle"}
+    first = json.loads(history_search.invoke(arguments))
+    assert first["results"][0]["message_id"] == "hit-0"
+    # A changed index can reorder the same stored sources in the same batches.
+    path, _ = archive.scope(role_runtime)
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE sources SET words = 'needle' WHERE rowid = 10")
+    refreshed = json.loads(history_search.invoke(arguments))
+    assert refreshed["results"][0]["message_id"] == "hit-9"
+    assert json.loads(history_search.invoke({**arguments, "cursor": first["next_cursor"]})) == {"results": [], "status": "stale_cursor"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_history_search_cursor_continues_in_live_graph(scoped, async_mode):
+    import json
+
+    class PagedRecallModel(StaticModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            args = {"query": "needle"}
+            last = messages[-1]
+            if isinstance(last, ToolMessage):
+                page = json.loads(last.content)
+                if last.tool_call_id == "first":
+                    args["cursor"] = page["next_cursor"]
+                else:
+                    assert page["status"] == "available"
+                    assert "next_cursor" not in page
+                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content="pages completed"))])
+            call = {"name": "history_search", "args": args, "id": "next" if "cursor" in args else "first"}
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=[call]))])
+
+    archived = [HumanMessage(content="needle", id=f"archived-{i}") for i in range(12)]
+    history = archive.capture({}, scoped, archived, TaskContinuityConfig(enabled=True))
+    graph = create_agent(PagedRecallModel(), tools=[history_search], state_schema=ThreadState)
+    initial = {"messages": [HumanMessage(content="Resume", id="resume")], "task_history": history}
+    result = await graph.ainvoke(initial, context=scoped.context) if async_mode else graph.invoke(initial, context=scoped.context)
+    assert result["messages"][-1].content == "pages completed"
+    rows = [row for message in result["messages"] if isinstance(message, ToolMessage) for row in json.loads(message.content)["results"]]
+    source_ids = [row["id"] for row in rows]
+    assert len(source_ids) == len(set(source_ids))
+    assert {row["message_id"] for row in rows if row["role"] == "human"} == {message.id for message in archived}

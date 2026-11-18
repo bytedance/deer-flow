@@ -46,6 +46,18 @@ The standard lead-agent builders (including custom-agent bootstrap) and
   type; omission or `null` preserves search across all roles. These values map to
   internal `human`, `ai`, and `tool` roles; returned role values stay unchanged.
   Both active and archived history are filtered before the eight-result limit.
+  Results include `next_cursor` when more distinct sources match. Pass it as
+  `cursor` with the same query and role to get the next page. Each page returns
+  at most eight sources, and the last page omits `next_cursor`.
+  The first page reserves space for active matches. Later pages continue with the
+  remaining active and ranked archived matches from that search. Appended messages
+  are left for the next fresh search, so the search tool's own replies do not
+  change the results during pagination. If earlier messages or archive batches
+  change, a continuation returns `stale_cursor`. New batches outside the current
+  checkpoint can also affect full-text ranking and expire the cursor. A continuation
+  checks the order of previous hits, including ties, before returning more results.
+  Start a fresh search for `stale_cursor` or `invalid_cursor`. Each page checks the
+  current thread scope and reachable archive batches before returning sources.
   For example, `history_search(query="replicas", role="user")` narrows the search
   to user messages about replica counts; use `history_read` to verify the source.
   Filtering does not change ranking or guarantee retrieval of the latest message.
