@@ -31,12 +31,17 @@ The sidecars (fact usage, eviction evidence, extraction watermarks; see
 the file storage: a sidecar failure is logged and never fails a memory read or
 write. Usage is one ``StreamState.ANY`` append per call, never read first.
 Deletions replace the sidecar stream's state with a ``MetadataSnapshot`` boundary
-without the removed records, and reads drop every record an open deletion
-intent's criteria match (``intents_provider``, by default the engine's open,
-primary-committed intents), so a cleanup interrupted after the primary boundary
-never resurrects removed records. Usage is also dropped for ids that are not
-facts in the current fold, so a late cross-process access append never shows a
-deleted fact.
+without the removed records, and reads drop every record a primary-committed
+deletion intent's criteria match below its cutoff (``intents_provider``, by default
+the engine's ``committed_intents_for``: open or done, never abandoned). So a
+cleanup interrupted after the primary boundary never resurrects removed records,
+and neither does a sidecar append from another process that read the primary
+revision before the deletion and landed after its cleanup closed it (sidecar
+appends are ``StreamState.ANY``, and scope locks are process-local). The intent
+index is cached incrementally, so this costs no read beyond its head check, and
+intents whose cutoff is at or below every record's revision are skipped; the
+filtered view is reused while neither the sidecar fold nor the intents change. Usage is
+also dropped for ids that are not facts in the current fold.
 """
 
 from __future__ import annotations
@@ -101,15 +106,17 @@ class _Recorded(NamedTuple):
 
 class KurrentdbMemoryStorage(MemoryStorage):
     def __init__(self, config: DeerMemConfig, *, client_factory: Callable[[], Any] | None = None, intents_provider: IntentsProvider | None = None, clock: Callable[[], float] | None = None):
-        """``intents_provider(primary_stream)`` returns the criteria of the open, primary-committed
-        deletion intents of that memory stream; sidecar reads drop every record they match.
-        It defaults to the deletion engine's ``open_intents_for``. ``clock`` (wall-clock
+        """``intents_provider(primary_stream)`` returns the criteria of the primary-committed
+        deletion intents of that memory stream, open or done; sidecar reads drop every
+        record they match. It defaults to the deletion engine's ``committed_intents_for``. ``clock`` (wall-clock
         seconds, default ``time.time``) times canonical cleanup verification.
         """
         self._config = config
-        self._intents_provider = intents_provider if intents_provider is not None else self._open_intent_criteria
+        self._intents_provider = intents_provider if intents_provider is not None else self._committed_intent_criteria
         self._engine_instance: DeletionEngine | None = None
         self._meta_states: dict[str, SidecarState] = {}
+        # Per meta stream: the folded state and intents of the last filtered view, and that view.
+        self._meta_views: dict[str, tuple[SidecarState, list[Mapping[str, Any]], SidecarState]] = {}
         self._settings = load_settings()
         self._timeout = self._settings.timeout
         self._client_factory = client_factory if client_factory is not None else sync_client_factory(self._settings)
@@ -165,8 +172,8 @@ class KurrentdbMemoryStorage(MemoryStorage):
         meta = memory_meta_stream_of(intent.primary_stream)
         return None if meta is None else [DerivedStep(meta, self._sidecar_cleanup)]
 
-    def _open_intent_criteria(self, primary: str) -> list[dict[str, Any]]:
-        return [intent.criteria for intent in self._engine().open_intents_for(primary)]
+    def _committed_intent_criteria(self, primary: str) -> list[dict[str, Any]]:
+        return [intent.criteria for intent in self._engine().committed_intents_for(primary)]
 
     def recover_deletions(self, stream: str | None = None) -> list[Intent]:
         """Finish or abandon open memory deletions (all scopes for ``None``); returns those still open."""
@@ -594,11 +601,17 @@ class KurrentdbMemoryStorage(MemoryStorage):
         return state
 
     def _meta_view(self, primary: str, meta: str, what: str) -> SidecarState | None:
-        """The sidecars without any open intent's records, or ``None`` (logged) when they cannot be read."""
+        """The sidecars without any committed intent's records, or ``None`` (logged) when they cannot be read."""
         try:
             with self._read_lock(meta):
                 state = self._refresh_meta(meta)
-            return state.filtered(self._intents_provider(primary))
+            intents = list(self._intents_provider(primary))
+            cached = self._meta_views.get(meta)
+            if cached is not None and cached[0] is state and cached[1] == intents:
+                return cached[2]
+            view = state.filtered(intents)
+            self._meta_views[meta] = (state, intents, view)
+            return view
         except Exception:
             logger.warning("Reading memory %s from %r failed; treating it as empty", what, meta, exc_info=True)
             return None

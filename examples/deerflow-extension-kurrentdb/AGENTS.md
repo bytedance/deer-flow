@@ -45,9 +45,11 @@ cd .. && docker compose -f docker/docker-compose.kurrentdb.yaml config -q
   `ThreadCleared`. Both carry `seq_high_water` (`run_events/seq.py`), so `seq` is
   never reused. A thread with nothing to delete writes no intent
 - **Sidecars never fail a memory call.** Sidecar reads and writes log a warning
-  and fall back to empty; reads drop every record an open deletion intent's
-  criteria match (`intents_provider`), and records carry the primary revision
-  they were written under so a deletion's `cutoff` spares later records
+  and fall back to empty; reads drop every record a primary-committed deletion
+  intent's criteria match, open or done (`intents_provider`, default
+  `committed_intents_for`), so a late cross-process append after a closed
+  deletion stays hidden; records carry the primary revision they were written
+  under so a deletion's `cutoff` spares later records
 - **Canonical events are best-effort and never on the caller's path.** Map in
   `canonical/mapping.py` (schema payloads only; DeerFlow identities and
   `deerflow.origin` in event metadata; deterministic ids). Emit through

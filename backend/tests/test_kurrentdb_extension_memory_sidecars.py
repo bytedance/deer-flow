@@ -343,6 +343,65 @@ def test_interrupted_cleanup_never_resurrects_after_restart(server):
         assert restarted.get_extraction_watermark("thread-1", agent_name=agent, user_id="alice") is None
 
 
+def _delete_fact_1(storage) -> None:
+    document = storage.load(AGENT, user_id="alice")
+    storage.apply_changes({"deletes": ["fact_1"], "deleteRevisions": {"fact_1": 1}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=document["revision"])
+
+
+@pytest.mark.parametrize(
+    ("deletion", "write", "visible"),
+    [
+        pytest.param(
+            lambda s: s.clear_all(user_id="alice"),
+            lambda s: s.set_extraction_watermark("thread-1", ["msg-1"], agent_name=AGENT, user_id="alice"),
+            lambda s: s.get_extraction_watermark("thread-1", agent_name=AGENT, user_id="alice") is not None,
+            id="watermark-clear_all",
+        ),
+        pytest.param(
+            lambda s: s.clear_all(user_id="alice"),
+            lambda s: s.record_capacity_eviction(_decision(["fact_1"]), max_facts=5, agent_name=AGENT, user_id="alice", occurred_at=T0),
+            lambda s: s.get_eviction_audit(agent_name=AGENT, user_id="alice") != [],
+            id="eviction-clear_all",
+        ),
+        pytest.param(
+            _delete_fact_1,
+            lambda s: s.record_capacity_eviction(_decision(["fact_1"]), max_facts=5, agent_name=AGENT, user_id="alice", occurred_at=T0),
+            lambda s: s.get_eviction_audit(agent_name=AGENT, user_id="alice") != [],
+            id="eviction-delete_facts",
+        ),
+        pytest.param(
+            lambda s: s.clear_all(user_id="alice"),
+            lambda s: s.record_fact_accesses(["fact_1"], agent_name=AGENT, user_id="alice", accessed_at=T0),
+            lambda s: s.get_fact_usage(agent_name=AGENT, user_id="alice") != {},
+            id="usage-clear_all",
+        ),
+    ],
+)
+def test_late_cross_process_sidecar_append_after_closed_deletion_stays_hidden(server, deletion, write, visible):
+    """A writer reads the old primary revision, a deletion in another process completes and closes, then the writer appends."""
+    writer, deleter = _storage(server), _storage(server)
+    _seed(writer, ["fact_1", "fact_2"])
+    _seed(deleter, ["fact_3"], OTHER)
+    original = writer._meta_append
+
+    def late_append(meta, event_type, data):
+        deletion(deleter)
+        assert deleter._engine().open_intents_for(ALICE_STREAM) == []
+        assert deleter.recover_deletions(ALICE_STREAM) == []
+        assert data["revision"] < deleter.load(AGENT, user_id="alice")["revision"]
+        original(meta, event_type, data)
+
+    writer._meta_append = late_append
+    write(writer)
+    assert any(event_type.endswith(("CapacityEvicted", "ExtractionWatermarkSet", "FactsAccessed")) for event_type in _types(server, ALICE_META)[-1:])
+    for reader in (_storage(server), deleter):
+        assert not visible(reader)
+    # A record written after the deletion (at or above its cutoff) is still served.
+    _seed(deleter, ["fact_1"])
+    write(deleter)
+    assert visible(_storage(server))
+
+
 def test_sidecar_failures_never_fail_memory_calls(server):
     flag = {"down": True}
     storage = _storage(server, meta_down=flag)

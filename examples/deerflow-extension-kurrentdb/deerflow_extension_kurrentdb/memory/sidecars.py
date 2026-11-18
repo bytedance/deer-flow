@@ -110,6 +110,14 @@ def matches(criteria: Criteria, *, agent: str, fact_id: str | None, revision: in
     return False
 
 
+def _may_match(criteria: Criteria, oldest_revision: int | None) -> bool:
+    """Whether ``criteria`` can match a record when the oldest one was written under ``oldest_revision``."""
+    if oldest_revision is None:
+        return False
+    cutoff = criteria.get("cutoff")
+    return not (isinstance(cutoff, int) and not isinstance(cutoff, bool) and oldest_revision >= cutoff)
+
+
 def _filter_eviction(record: Any, drop: Callable[[str], bool]) -> dict[str, Any] | None:
     """``record`` without the evicted items ``drop`` names (``clear_fact_metadata``'s rule); ``None`` when nothing is left."""
     if not isinstance(record, dict) or not isinstance(record.get("evicted"), list):
@@ -160,7 +168,7 @@ class SidecarState:
     """The fold of one scope's sidecar stream (from its newest snapshot).
 
     ``log`` keeps the decoded events since that snapshot (the snapshot first), so
-    a read under open deletion intents can re-fold them with those intents' records
+    a read under committed deletion intents can re-fold them with those intents' records
     dropped.
     """
 
@@ -171,6 +179,8 @@ class SidecarState:
         # Position of the newest snapshot folded (the stream's boundary), if any.
         self.snapshot_position: int | None = None
         self.log: list[tuple[str, dict[str, Any]]] = []
+        # Lowest primary revision any record in ``log`` was written under (``None``: no records).
+        self.oldest_revision: int | None = None
 
     def copy(self) -> SidecarState:
         clone = SidecarState(self._config)
@@ -178,6 +188,7 @@ class SidecarState:
         clone.position = self.position
         clone.snapshot_position = self.snapshot_position
         clone.log = list(self.log)
+        clone.oldest_revision = self.oldest_revision
         return clone
 
     # --- folding ---------------------------------------------------------------
@@ -203,7 +214,9 @@ class SidecarState:
         if recorded.type == METADATA_SNAPSHOT:
             self.log = []
             self.snapshot_position = recorded.stream_position
+            self.oldest_revision = None
         self.log.append((recorded.type, data))
+        self._track_revisions(recorded.type, data)
         self.apply_data(recorded.type, data)
 
     def apply_data(self, event_type: str, data: dict[str, Any], intents: Iterable[Criteria] = ()) -> None:
@@ -234,6 +247,24 @@ class SidecarState:
             thread_id = data.get("threadId")
             if isinstance(thread_id, str) and not dropped(None):
                 self._watermark(agent, thread_id, data.get("watermark"), revision)
+
+    def _track_revisions(self, event_type: str, data: dict[str, Any]) -> None:
+        if event_type != METADATA_SNAPSHOT:
+            revisions = [_revision(data.get("revision"))]
+        else:
+            state = data.get("state")
+            revisions = []
+            for records in state.values() if isinstance(state, dict) else ():
+                if not isinstance(records, dict):
+                    continue
+                for group in ("usage", "watermarks"):
+                    entries = records.get(group)
+                    revisions += [_revision(entry.get("revision")) for entry in (entries.values() if isinstance(entries, dict) else ()) if isinstance(entry, dict)]
+                evictions = records.get("evictions")
+                revisions += [_revision(record.get("revision")) for record in (evictions if isinstance(evictions, list) else ()) if isinstance(record, dict)]
+        if revisions:
+            lowest = min(revisions)
+            self.oldest_revision = lowest if self.oldest_revision is None else min(self.oldest_revision, lowest)
 
     def _bucket(self, agent: str) -> _Agent:
         return self.agents.setdefault(agent, _Agent())
@@ -307,8 +338,13 @@ class SidecarState:
     # --- derived states ---------------------------------------------------------
 
     def filtered(self, intents: Iterable[Criteria]) -> SidecarState:
-        """This state as if every record the intents' criteria match had never been written."""
-        intents = list(intents)
+        """This state as if every record the intents' criteria match had never been written.
+
+        Intents whose ``cutoff`` is at or below every record's revision cannot match
+        anything and are skipped, so the deletions accumulated over a scope's life
+        cost a re-fold only while some record predates them.
+        """
+        intents = [criteria for criteria in intents if _may_match(criteria, self.oldest_revision)]
         if not intents:
             return self
         state = SidecarState(self._config)
