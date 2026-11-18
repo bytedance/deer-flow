@@ -78,6 +78,12 @@ Windows. The portable string assertions do not replace it.
   because `splitlines()` also splits on other Unicode separators.
 - A failed or incomplete directory traversal is an error. Returning a partial
   listing makes the model believe that files do not exist.
+- Search roots decide what counts as noise. `search.ignore_rules_for()` hides
+  `*.log`, `logs/` and the other data-looking names only inside a git checkout;
+  outside one (uploads, documents, workspace output) only repository machinery is
+  hidden, and a glob the caller spelled out wins even inside a checkout. A file
+  named as the search root is read at any size; the 1 MB bound only skips files a
+  directory walk discovers.
 - Same-path write serialization is scoped to `(sandbox.id, path)`. Two isolated
   sandboxes use the same virtual paths and must not contend.
 
