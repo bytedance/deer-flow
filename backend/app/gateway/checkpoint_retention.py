@@ -157,7 +157,8 @@ def _mark_duration_leaves_without_the_marker(nodes: dict[tuple[str, str], _Node]
         parent = nodes.get((node.parent_ns, node.parent_id))
         if parent is None or node.metadata_source != "update" or not node.carries_run_durations:
             continue
-        if channel_versions_match(node.versions, parent.versions):
+        # Without the authoritative writes marker, require a non-empty map as evidence.
+        if node.versions and parent.versions and channel_versions_match(node.versions, parent.versions):
             node.duration_only = True
 
 

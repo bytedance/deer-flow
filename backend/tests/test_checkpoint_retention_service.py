@@ -839,7 +839,7 @@ async def test_admission_retention_bounds_storage_work_independently_of_history(
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "shape",
-    ["pending-writes", "missing-parent", "no-parent-link", "changed-versions", "swapped-channels", "markerless", "empty-durations", "empty-write-entry"],
+    ["pending-writes", "missing-parent", "no-parent-link", "changed-versions", "swapped-channels", "markerless", "empty-durations", "empty-write-entry", "empty-channel-versions", "markerless-empty-channel-versions"],
 )
 async def test_admission_retention_checks_only_a_proven_metadata_leaf(
     saver_env: _SaverEnv,
@@ -858,12 +858,21 @@ async def test_admission_retention_checks_only_a_proven_metadata_leaf(
         saver_env.saver.writes[(thread_id, "", duration_id)] = {}
     elif shape == "pending-writes":
         await saver_env.saver.aput_writes(head.config, [("messages", [HumanMessage(content="pending")])], task_id="pending")
-    elif shape in {"markerless", "empty-durations"}:
+    elif shape in {"markerless", "empty-durations", "empty-channel-versions", "markerless-empty-channel-versions"}:
         metadata = copy.deepcopy(head.metadata)
-        metadata.pop("writes", None)
+        if shape in {"markerless", "empty-durations", "markerless-empty-channel-versions"}:
+            metadata.pop("writes", None)
         if shape == "empty-durations":
             metadata["run_durations"] = {}
-        await saver_env.saver.aput(head.parent_config, head.checkpoint, metadata, {})
+        if shape in {"empty-channel-versions", "markerless-empty-channel-versions"}:
+            parent_checkpoint = copy.deepcopy(parent.checkpoint)
+            parent_checkpoint["channel_versions"] = {}
+            await saver_env.saver.aput(parent.parent_config, parent_checkpoint, parent.metadata, {})
+            checkpoint = copy.deepcopy(head.checkpoint)
+            checkpoint["channel_versions"] = {}
+            await saver_env.saver.aput(head.parent_config, checkpoint, metadata, {})
+        else:
+            await saver_env.saver.aput(head.parent_config, head.checkpoint, metadata, {})
     elif shape in {"changed-versions", "swapped-channels"}:
         checkpoint = copy.deepcopy(head.checkpoint)
         versions = checkpoint["channel_versions"]
@@ -887,11 +896,15 @@ async def test_admission_retention_checks_only_a_proven_metadata_leaf(
 
         monkeypatch.setattr(saver_env.saver, "aget_tuple", incomplete_chain)
 
+    if shape == "empty-channel-versions" and saver_env.kind == "postgres":
+        pytest.skip("Postgres removes the writes marker, so this marker-backed case applies to memory and SQLite")
+
     report = await enforce_completed_run_retention(checkpointer=saver_env.saver, thread_id=thread_id)
 
-    assert report.deleted_checkpoint_ids == ([duration_id] if shape in {"markerless", "empty-write-entry"} else [])
+    should_delete = shape in {"markerless", "empty-write-entry", "empty-channel-versions"}
+    assert report.deleted_checkpoint_ids == ([duration_id] if should_delete else [])
     retained = await original_get(_config_thread(thread_id, duration_id))
-    assert (retained is None) == (shape in {"markerless", "empty-write-entry"})
+    assert (retained is None) == should_delete
 
 
 @pytest.mark.anyio
