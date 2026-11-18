@@ -220,8 +220,13 @@ per call hash or per tool-frequency burst) and each hard stop produced by
 Task-tool subagents forward the append to the parent loop because `RunJournal`
 and its event store must not cross the isolated-loop boundary. Durable batch
 subagents have no parent run journal and do not emit these events. The event's
-`action` is `warn` or
-`hard_stop`. The `changes` object identifies the detection layer, affected tool
+`action` is `warn`, `hard_stop`, or `reject_excess` when a tool reaches its
+per-tool limit inside a batch: the calls that do not fit are dropped and the
+rest of the batch runs. Each tool that reaches its limit gets its own row with
+its own count and threshold. Later drops of the same capped tool are not
+recorded again. A row records the decision when it was made: if another
+middleware then discards every admitted call (for example after a steer), the
+cap is undone but the row stays. The `changes` object identifies the detection layer, affected tool
 names, observed count, effective threshold, whether the producer was a
 subagent, and its agent id when applicable. Tool arguments, prompts, message
 content, tool results, and argument-derived hashes are not persisted in this

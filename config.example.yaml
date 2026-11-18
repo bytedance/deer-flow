@@ -1010,6 +1010,18 @@ tools:
   #   # mode: 0                      # Optional: 0=web, 1=VR, 2=mixed
   #   # api_key: $TENCENTCLOUD_WSA_APIKEY  # Optional explicit env-var reference
 
+  # Web search tool (DeepSeek server-side search, requires DEEPSEEK_API_KEY)
+  # Replace the active web_search entry with this provider.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.deepseek.tools:web_search_tool
+  #   api_key: $DEEPSEEK_API_KEY
+  #   model: deepseek-flash
+  #   thinking: false               # true enables multi-step thinking search
+  #   max_results: 5                # Returned sources, capped at 50
+  #   timeout_seconds: 180          # Includes server-side search and reasoning
+  #   max_tokens: 8192
+
   # Web search tool (uses Exa, requires EXA_API_KEY)
   # - name: web_search
   #   group: web
@@ -2022,6 +2034,25 @@ sandbox:
 #   # environment:                    # create-time and per-command defaults
 #   #   PYTHONUNBUFFERED: "1"
 
+# Option 7: boxd machine Sandbox
+# Runs each sandbox as an isolated boxd machine (an Ubuntu microVM). Released
+# machines stay in an in-process warm pool and are reclaimed only by the same
+# user/thread. Requires the optional SDK: pip install "deerflow-harness[boxd]".
+# sandbox:
+#   use: deerflow.community.boxd_sandbox:BoxdSandboxProvider
+#   # boxd_api_key: $BOXD_API_KEY     # falls back to the BOXD_API_KEY env var
+#   # org: my-org                     # optional; the key's own org when omitted
+#   # region: fra                     # optional; fra or nyc
+#   # vcpu: 2                         # optional; 1, 2, 4 or 8 (memory 4G, 8G, 16G or 32G follows)
+#   # from_snapshot: my-snapshot      # optional; start machines from a prepared snapshot
+#   # auto_suspend_timeout: 300       # optional; idle seconds before a machine goes to standby
+#   # ready_timeout: 120              # seconds to wait for a new machine to boot
+#   # name_prefix: deer-flow-         # machine names are <prefix><scope>-<random suffix>
+#   # replicas: 3                     # active + warm cap per gateway process
+#   # idle_timeout: 600               # warm seconds before the machine is deleted; 0 disables
+#   # environment:                    # merged into every command's environment
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
@@ -2220,6 +2251,23 @@ hitl_approval:
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
+#
+#   pi:
+#     # Pi coding agent through the community ACP adapter (`pi-acp`).
+#     # Requires Node.js 22+ and pi 0.81.0+. Install both in the Gateway environment:
+#     # npm install --global @earendil-works/pi-coding-agent pi-acp
+#     # Configure pi's model provider/API key for the Gateway user.
+#     # For interactive sign-in, start `pi` and run `/login` in its terminal UI.
+#     command: pi-acp
+#     args: []
+#     # Alternatively, fetch the adapter on demand (requires network access):
+#     # command: npx
+#     # args: ["-y", "pi-acp"]
+#     description: Pi coding agent for repository tasks and code generation
+#     # Pi performs filesystem and shell operations directly; auto_approve_permissions
+#     # only handles ACP permission requests and is not a sandbox. Isolate untrusted tasks.
+#     # auto_approve_permissions: false  # Set to true only for trusted tasks
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time
 
 # ============================================================================
 # Skills Configuration
