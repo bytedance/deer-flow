@@ -45,5 +45,13 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   and fall back to empty; reads drop every record an open deletion intent's
   criteria match (`intents_provider`), and records carry the primary revision
   they were written under so a deletion's `cutoff` spares later records
+- **Canonical events are best-effort and never on the caller's path.** Map in
+  `canonical/mapping.py` (schema payloads only; DeerFlow identities and
+  `deerflow.origin` in event metadata; deterministic ids). Emit through
+  `canonical/emitter.py`: queued in commit order (memory: `BackgroundQueue`,
+  run events: `AsyncChains`), pre-check against `committed_intents_for`, append
+  with an expected version, post-check and `reopen_canonical`, all within
+  `MAX_LIFETIME_SECONDS` of the commit. Never fence a canonical stream: it holds
+  only schema event types. The global memory scope emits nothing
 - **Test against `backend/tests/kurrentdb_fake.py`.** When the live suite shows
   a divergence, fix the fake first, then the code

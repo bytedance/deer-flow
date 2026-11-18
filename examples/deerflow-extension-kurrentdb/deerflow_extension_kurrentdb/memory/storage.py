@@ -60,6 +60,8 @@ from .._client import sync_client_factory
 from .._fence import AmbiguousAppendError, settle_append
 from .._naming import memory_meta_stream, memory_meta_stream_of, memory_stream
 from .._settings import load_settings
+from ..canonical import emitter as canonical_emitter
+from ..canonical import mapping as canonical_mapping
 from ..deletions import DeletionConflict, DeletionEngine, DeletionError, DerivedStep, Intent
 from . import changes, events, sidecars
 from .changes import Plan
@@ -116,6 +118,9 @@ class KurrentdbMemoryStorage(MemoryStorage):
         self._locks_guard = threading.Lock()
         self._scope_locks: dict[str, threading.RLock] = {}
         self._states: dict[str, MemoryState] = {}
+        self._canonical_enabled = self._settings.canonical_events
+        self._canonical_queue = canonical_emitter.BackgroundQueue()
+        self._canonical = canonical_emitter.CanonicalEmitter(self._client, self._engine, timeout=self._timeout)
 
     # --- scope ------------------------------------------------------------------
 
@@ -352,8 +357,58 @@ class KurrentdbMemoryStorage(MemoryStorage):
         if not plan.changes:
             return state
         if plan.criteria is None:
-            return self._append(stream, state, events.new_change_set(plan.changes))
-        return self._commit_destructive(stream, state, plan, user_id=user_id)
+            new_events = events.new_change_set(plan.changes)
+            committed = self._append(stream, state, new_events)
+        else:
+            new_events = []
+            committed = self._commit_destructive(stream, state, plan, user_id=user_id)
+        self._schedule_canonical(stream, plan, committed, new_events, user_id=user_id)
+        return committed
+
+    # --- canonical events ---------------------------------------------------------
+
+    def _schedule_canonical(self, stream: str, plan: Plan, committed: MemoryState | None, new_events: list[NewEvent], *, user_id: str | None) -> None:
+        """Queue ``FactRetained`` for the plan's upserts, off the caller's thread; never raises. Caller holds the scope lock.
+
+        Jobs are queued under the scope lock, so the worker emits in commit order.
+        The global scope has no canonical stream and emits nothing. After the append
+        that created the stream (``committed`` is ``None``, once per scope) the
+        commit's revision is read back here, by its event ids, before ``$tb`` can hide it.
+        """
+        if not self._canonical_enabled or not plan.upserted:
+            return
+        try:
+            canonical = canonical_mapping.memory_stream(user_id)
+            if canonical is None:
+                return
+            agent = next((data.get("agent") for event_type, data in plan.changes if event_type == events.FACT_UPSERTED), None)
+            upserted = copy.deepcopy(plan.upserted)
+            origin = committed.revision if committed is not None else self._revision_after(stream, {event.id for event in new_events})
+            if origin is None:
+                logger.warning("Canonical emission for %r skipped: the commit's revision could not be found", stream)
+                return
+            deadline = canonical_emitter.deadline_from_now()
+
+            def emit() -> None:
+                canonical_events = canonical_mapping.memory_events(upserted, user_id=user_id, agent=agent, origin=origin)
+                self._canonical.emit(canonical, canonical_events, primary=stream, deadline=deadline)
+
+            self._canonical_queue.submit(emit)
+        except Exception:
+            logger.warning("Scheduling canonical memory events for %r failed", stream, exc_info=True)
+
+    def _revision_after(self, stream: str, own_ids: set[Any]) -> int | None:
+        """The revision a commit produced, from its event ids (after an append that created the stream)."""
+        if not own_ids:
+            return None
+        for event in self._get_stream(self._client(), stream, backwards=True, limit=READ_PAGE_SIZE):
+            if event.id in own_ids:
+                return event.stream_position + 1
+        return None
+
+    def flush_canonical(self, timeout: float | None = None) -> bool:
+        """Wait for queued canonical emissions (tests, shutdown); ``False`` when ``timeout`` ran out first."""
+        return self._canonical_queue.flush(timeout)
 
     def _commit_destructive(self, stream: str, state: MemoryState, plan: Plan, *, user_id: str | None) -> MemoryState:
         """Write a plan that removes facts or clears the scope as a deletion (``DeletionEngine``).

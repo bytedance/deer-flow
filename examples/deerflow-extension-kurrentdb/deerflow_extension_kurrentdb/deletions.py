@@ -11,7 +11,10 @@ derived from the intent, so any process can finish it:
    ``expected_position + 1``
 3. run the derived steps (the memory sidecar boundary): each is idempotent and
    returns the position of its own boundary in its stream (or ``None``)
-4. canonical cleanup: not here (``CanonicalCleanup*`` events are defined for it)
+4. canonical cleanup: not here (``CanonicalCleanup*`` events are defined for it).
+   Live canonical emitters read ``committed_intents_for`` (open or done, never
+   abandoned) to suppress stale deliveries, and record one that slipped through
+   with ``reopen_canonical``
 5. raise ``$tb`` on every derived stream, then on the primary stream, to their
    boundaries: only ever raised, written with the metadata stream's expected version
 6. append ``DeletionDone``
@@ -155,6 +158,13 @@ def index_event(event_type: str, intent_id: str, **extra: Any) -> NewEvent:
     return NewEvent(id=uuid.uuid5(uuid.UUID(intent_id), event_type), type=event_type, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), content_type="application/json")
 
 
+def reopened_event(intent_id: str, key: str) -> NewEvent:
+    """``CanonicalCleanupReopened``: one per stale delivery (``key`` names it), so repeated reopens are distinct events."""
+    data = {"intent_id": intent_id, "key": key}
+    event_id = uuid.uuid5(uuid.UUID(intent_id), f"{CANONICAL_CLEANUP_REOPENED}/{key}")
+    return NewEvent(id=event_id, type=CANONICAL_CLEANUP_REOPENED, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), content_type="application/json")
+
+
 def intended_event(intent: Intent) -> NewEvent:
     return NewEvent(id=uuid.uuid5(uuid.UUID(intent.intent_id), DELETION_INTENDED), type=DELETION_INTENDED, data=json.dumps(intent.payload(), ensure_ascii=False).encode("utf-8"), content_type="application/json")
 
@@ -184,6 +194,7 @@ class IndexState:
     position: int | None = None
     intents: dict[str, Intent] = field(default_factory=dict)
     closed: set[str] = field(default_factory=set)
+    abandoned: set[str] = field(default_factory=set)
     canonical: dict[str, list[str]] = field(default_factory=dict)
 
     def apply(self, recorded: Any) -> None:
@@ -204,9 +215,23 @@ class IndexState:
                 return
             self.intents.setdefault(intent_id, intent)
         elif recorded.type in (DELETION_DONE, DELETION_ABANDONED):
-            self.closed.add(intent_id)
+            self.close(recorded.type, intent_id)
         else:
             self.canonical.setdefault(intent_id, []).append(recorded.type)
+
+    def close(self, event_type: str, intent_id: str) -> None:
+        self.closed.add(intent_id)
+        if event_type == DELETION_ABANDONED:
+            self.abandoned.add(intent_id)
+
+    def canonical_candidates(self, stream: str) -> tuple[list[Intent], list[Intent]]:
+        """``(done, open)`` intents of ``stream``, abandoned ones left out; done intents' boundaries are committed."""
+        done, still_open = [], []
+        for intent_id, intent in self.intents.items():
+            if intent.primary_stream != stream or intent_id in self.abandoned:
+                continue
+            (done if intent_id in self.closed else still_open).append(intent)
+        return done, still_open
 
     def open(self, stream: str | None = None) -> list[Intent]:
         return [intent for intent_id, intent in self.intents.items() if intent_id not in self.closed and (stream is None or intent.primary_stream == stream)]
@@ -301,7 +326,7 @@ class DeletionEngine:
     def _close(self, event_type: str, intent: Intent) -> None:
         self._append_index(index_event(event_type, intent.intent_id))
         with self._lock:
-            self._index.closed.add(intent.intent_id)
+            self._index.close(event_type, intent.intent_id)
 
     def _abandon(self, intent: Intent) -> None:
         try:
@@ -326,6 +351,16 @@ class DeletionEngine:
     def open_intents_for(self, stream: str) -> list[Intent]:
         """The open intents of ``stream`` whose primary boundary is committed, in index order."""
         return [intent for intent in self._open(stream) if self._status(intent) == "present"]
+
+    def committed_intents_for(self, stream: str) -> list[Intent]:
+        """Every intent of ``stream`` whose primary boundary is committed, open or done (canonical suppression)."""
+        with self._lock:
+            done, still_open = self._refresh_index().canonical_candidates(stream)
+        return done + [intent for intent in still_open if self._status(intent) == "present"]
+
+    def reopen_canonical(self, intent: Intent, key: str) -> None:
+        """Record a stale canonical delivery for ``intent``: its canonical cleanup must run again."""
+        self._append_index(reopened_event(intent.intent_id, key))
 
     # --- $tb -----------------------------------------------------------------------
 
@@ -470,7 +505,7 @@ class AsyncDeletionEngine:
 
     async def _close(self, event_type: str, intent: Intent) -> None:
         await self._append_index(index_event(event_type, intent.intent_id))
-        self._index.closed.add(intent.intent_id)
+        self._index.close(event_type, intent.intent_id)
 
     async def _abandon(self, intent: Intent) -> None:
         try:
@@ -493,6 +528,13 @@ class AsyncDeletionEngine:
     async def open_intents_for(self, stream: str) -> list[Intent]:
         index = await self._refresh_index()
         return [intent for intent in index.open(stream) if await self._status(intent) == "present"]
+
+    async def committed_intents_for(self, stream: str) -> list[Intent]:
+        done, still_open = (await self._refresh_index()).canonical_candidates(stream)
+        return done + [intent for intent in still_open if await self._status(intent) == "present"]
+
+    async def reopen_canonical(self, intent: Intent, key: str) -> None:
+        await self._append_index(reopened_event(intent.intent_id, key))
 
     async def raise_truncate_before(self, stream: str, position: int) -> None:
         for _ in range(TB_ATTEMPTS):

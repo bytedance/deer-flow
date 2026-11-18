@@ -70,6 +70,8 @@ from .._client import async_client_factory
 from .._fence import FENCE_EVENT_TYPE, AmbiguousAppendError, asettle_append
 from .._naming import RUN_EVENTS_PREFIX, run_events_stream
 from .._settings import load_settings
+from ..canonical import emitter as canonical_emitter
+from ..canonical import mapping as canonical_mapping
 from ..deletions import AsyncDeletionEngine, DeletionConflict, DerivedStep, Intent
 from .seq import next_seq, seq_high_water
 
@@ -277,10 +279,13 @@ class KurrentRunEventStore(RunEventStore):
         self._config = config
         settings = load_settings()
         self._timeout = settings.timeout
+        self._canonical_enabled = settings.canonical_events
         self._client_factory = client_factory if client_factory is not None else async_client_factory(settings)
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._heads: dict[str, tuple[int, int]] = {}
         self._engines: dict[int, tuple[Any, AsyncDeletionEngine]] = {}
+        self._canonical_chains = canonical_emitter.AsyncChains()
+        self._canonical = canonical_emitter.AsyncCanonicalEmitter(lambda: self._client_factory(), self._engine, timeout=self._timeout)
 
     def _lock_for(self, thread_id: str) -> asyncio.Lock:
         lock = self._locks.get(thread_id)
@@ -415,7 +420,25 @@ class KurrentRunEventStore(RunEventStore):
         raise _GroupFailed(_NOT_COMMITTED, RuntimeError(f"{stream}: append conflicted {MAX_APPEND_ATTEMPTS} times with other writers")) from conflict
 
     async def _after_commit(self, thread_id: str, records: list[dict]) -> None:
-        """Seam for live canonical session events; nothing canonical is written yet."""
+        """Queue the live canonical session events of committed records (runs inside the thread's lock).
+
+        Only queues: the emission runs in the thread's ``AsyncChains`` task after the
+        lock is released, in commit order, within ``MAX_LIFETIME_SECONDS`` of the commit.
+        """
+        if not self._canonical_enabled:
+            return
+        deadline = canonical_emitter.deadline_from_now()
+
+        async def emit() -> None:
+            canonical_events = canonical_mapping.session_events(records)
+            if canonical_events:
+                await self._canonical.emit(canonical_mapping.session_stream(thread_id), canonical_events, primary=run_events_stream(thread_id), deadline=deadline)
+
+        self._canonical_chains.submit(thread_id, emit)
+
+    async def flush_canonical(self) -> None:
+        """Wait for this loop's queued canonical emissions (tests, shutdown)."""
+        await self._canonical_chains.flush()
 
     async def _notify(self, thread_id: str, records: list[dict]) -> None:
         if not records:
