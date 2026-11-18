@@ -44,22 +44,14 @@ cd .. && docker compose -f docker/docker-compose.kurrentdb.yaml config -q
   metadata, `"survivor": true`) in one append; `delete_by_thread` appends
   `ThreadCleared`. Both carry `seq_high_water` (`run_events/seq.py`), so `seq` is
   never reused. A thread with nothing to delete writes no intent
-- **Sidecars never fail a memory call.** Sidecar reads and writes log a warning
-  and fall back to empty; reads drop every record a primary-committed deletion
-  intent's criteria match, open or done (`intents_provider`, default
-  `committed_intents_for`), so a late cross-process append after a closed
-  deletion stays hidden; records carry the primary revision they were written
-  under so a deletion's `cutoff` spares later records
-- **A sidecar-only clear is a deletion too.** `clear_fact_metadata` (a whole
-  agent or selected fact ids, also right after those facts' `delete_facts`
-  deletion: an append in between is stamped at its cutoff) and `clear_all` of an
-  already-empty scope write a
-  `clear_metadata` intent and a primary boundary that keeps the state (the revision moves, so
-  later records survive the cutoff); no record revision distinguishes a late
-  append from a later one otherwise. `clear_metadata` covers no canonical event
-- **Trap: sidecar records take the cached primary revision** (`_primary_revision`,
-  no head check), so a record written by a process whose cache predates another
-  process's deletion stays hidden for good; this errs toward hiding
+- **Sidecars never fail a memory call.** Failures log and read as empty. Reads
+  drop records that a committed intent (open or done, `committed_intents_for`)
+  matches below its `cutoff`; records carry their primary revision
+- **A sidecar-only clear is a deletion too** (`clear_metadata`): whole-agent or
+  fact-id `clear_fact_metadata`, and `clear_all` of an empty scope. Its boundary
+  keeps the state but moves the revision; it covers no canonical event
+- **Trap:** sidecar records take the cached primary revision (no head check), so
+  one from a process that missed another's deletion stays hidden
 - **Canonical events are best-effort and never on the caller's path.** Map in
   `canonical/mapping.py` (schema payloads only; DeerFlow identities and
   `deerflow.origin` in event metadata; deterministic ids). Emit through

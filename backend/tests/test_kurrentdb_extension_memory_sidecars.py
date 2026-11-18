@@ -223,7 +223,7 @@ def test_delete_one_fact_keeps_other_usage(server, tmp_path):
     assert set(cold.get_fact_usage(agent_name=AGENT, user_id="alice")) == {"fact_1"}
     assert cold.get_extraction_watermark("thread-1", agent_name=AGENT, user_id="alice") == ["msg-1", "hello"]
     # Evidence about fact_2 appended after its deletion (stamped at the deletion's cutoff) is
-    # still removed by DeerMem's follow-up metadata clear of the same id.
+    # still removed by a later metadata clear of the same id.
     storage.record_capacity_eviction(_decision(["fact_2"]), max_facts=5, agent_name=AGENT, user_id="alice", occurred_at=T0)
     assert "fact_2" in [item["factId"] for record in _storage(server, config).get_eviction_audit(agent_name=AGENT, user_id="alice") for item in record["evicted"]]
     storage.clear_fact_metadata(agent_name=AGENT, user_id="alice", fact_ids=["fact_2"])

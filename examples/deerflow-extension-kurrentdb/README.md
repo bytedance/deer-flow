@@ -162,12 +162,14 @@ finishes a deletion that a crash interrupted.
   `KurrentRunEventStoreCorruption`, and writes to that thread fail as not
   committed. Write to DeerFlow's streams only through DeerFlow
 - **Sidecar records are best-effort**: a failed sidecar read or write logs a
-  warning and never fails a memory call. Clearing one agent's memory, clearing
-  selected facts' sidecar records (DeerMem does so after every fact
-  deletion), or clearing an already-empty
-  scope is a deletion of its sidecar records and
-  moves the scope's revision once, so a sidecar write that another process
-  started before the clear stays hidden after it
+  warning and never fails a memory call. Clearing one agent's memory
+  (`clear_memory_data`, which deletes the facts and then clears the agent's
+  sidecar records), a direct `clear_fact_metadata` call for selected facts, and
+  clearing an already-empty scope each also write a deletion of the sidecar
+  records, which moves the scope's revision once more, so a sidecar write that
+  another process started before the clear stays hidden after it. Deleting a
+  single fact (`delete_memory_fact`) and capacity eviction do not call
+  `clear_fact_metadata` and write only the fact deletion
 
 ### Canonical events
 
