@@ -6,17 +6,20 @@ JSON data carries ``id`` (the change set it belongs to, a UUID string) and
 set is one append; its events get deterministic ids ``uuid5(change_set_id, index)``,
 so a retried or settled append is recognisable by id.
 
-Payloads (besides ``id`` and ``agent``):
+Payloads (besides ``id`` and ``agent``) of the event types written to the stream:
 
 - ``SummariesUpdated`` (agent ``None``): ``user``, ``history`` — the full sections
 - ``FactUpserted``: ``fact`` — the normalized fact, carrying its own ``revision``
+- ``MemorySnapshot`` (agent ``None``): ``state`` — ``user``, ``history``,
+  ``facts`` (agent name -> fact list) and ``lastUpdated``; the fold restarts from it
+
+``FactDeleted`` and ``MemoryCleared`` are fold steps only: a destructive plan folds
+them in memory and writes the resulting ``MemorySnapshot`` as its deletion
+boundary, so neither type is ever appended.
+
 - ``FactDeleted``: ``factId``, ``revision`` (the revision that was removed)
 - ``MemoryCleared``: agent ``None`` clears summaries and every agent; a name clears
   that agent's facts
-- ``MemoryImported``: ``document`` — replaces summaries when it has ``user`` /
-  ``history``, and the agent's facts when ``agent`` is set and it has ``facts``
-- ``MemorySnapshot`` (agent ``None``): ``state`` — ``user``, ``history``,
-  ``facts`` (agent name -> fact list) and ``lastUpdated``; the fold restarts from it
 
 Each payload also has ``at``, the commit time shown as ``lastUpdated``.
 """
@@ -35,10 +38,9 @@ SUMMARIES_UPDATED = f"{PREFIX}SummariesUpdated"
 FACT_UPSERTED = f"{PREFIX}FactUpserted"
 FACT_DELETED = f"{PREFIX}FactDeleted"
 MEMORY_CLEARED = f"{PREFIX}MemoryCleared"
-MEMORY_IMPORTED = f"{PREFIX}MemoryImported"
 MEMORY_SNAPSHOT = f"{PREFIX}MemorySnapshot"
 
-EVENT_TYPES = frozenset({SUMMARIES_UPDATED, FACT_UPSERTED, FACT_DELETED, MEMORY_CLEARED, MEMORY_IMPORTED, MEMORY_SNAPSHOT})
+EVENT_TYPES = frozenset({SUMMARIES_UPDATED, FACT_UPSERTED, FACT_DELETED, MEMORY_CLEARED, MEMORY_SNAPSHOT})
 
 
 def event_id(change_set_id: str, index: int) -> uuid.UUID:

@@ -76,8 +76,6 @@ class MemoryState:
             self._delete(data, agent, where)
         elif event_type == events.MEMORY_CLEARED:
             self._clear(agent)
-        elif event_type == events.MEMORY_IMPORTED:
-            self._import(data, agent, where)
         else:
             self._snapshot(data, where)
         at = data.get("at")
@@ -143,19 +141,6 @@ class MemoryState:
                 raise MemoryStorageCorruption(f"Duplicate fact {fact['id']!r} at {where}")
             result[fact["id"]] = fact
         return result
-
-    def _import(self, data: dict[str, Any], agent: str | None, where: str) -> None:
-        document = self._sections(data.get("document"), "MemoryImported.document", where)
-        if "user" in document:
-            self.user = self._sections(document["user"], "document.user", where)
-        if "history" in document:
-            self.history = self._sections(document["history"], "document.history", where)
-        if agent is not None and "facts" in document:
-            facts = self._fact_map(document["facts"], where)
-            if facts:
-                self.facts[agent] = facts
-            else:
-                self.facts.pop(agent, None)
 
     def _snapshot(self, data: dict[str, Any], where: str) -> None:
         state = self._sections(data.get("state"), "MemorySnapshot.state", where)

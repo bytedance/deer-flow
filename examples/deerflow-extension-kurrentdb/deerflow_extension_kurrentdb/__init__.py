@@ -6,11 +6,9 @@ from typing import Any
 
 from deerflow_extension_api import extension
 
-from .service import KurrentRecoveryService
+from .service import RUN_EVENT_BACKEND, KurrentRecoveryService
 
 __all__ = ["KurrentRecoveryService", "install"]
-
-RUN_EVENT_BACKEND = "kurrent"
 
 
 def _make_run_event_store(run_events_config: Any) -> Any:

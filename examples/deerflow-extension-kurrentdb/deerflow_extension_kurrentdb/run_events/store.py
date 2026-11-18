@@ -132,7 +132,6 @@ class _Walk:
     head: int | StreamState | None = None  # the stream head (any event type); None until an event arrives
     missing: bool = False
     high_water: int | None = None  # set when the walk reached the newest boundary
-    exhausted: bool = False  # the walk reached the boundary or the start of the readable stream
     seqs: list[int] = field(default_factory=list)
 
 
@@ -210,7 +209,6 @@ async def _walk(response: Any, walk: _Walk) -> AsyncIterator[tuple[dict, dict]]:
                 continue
             if event.type in BOUNDARY_EVENT_TYPES:
                 walk.high_water = _decode_boundary(event)
-                walk.exhausted = True
                 return
             if event.type != RUN_EVENT_TYPE:
                 raise _corrupt(event, "unknown event type")
@@ -221,7 +219,6 @@ async def _walk(response: Any, walk: _Walk) -> AsyncIterator[tuple[dict, dict]]:
             yield record, _decode_metadata(event)
     except NotFoundError:
         walk.missing = True
-    walk.exhausted = True
 
 
 async def _nothing() -> AsyncIterator[tuple[dict, dict]]:
@@ -266,16 +263,6 @@ def _draft(*, run_id: str, event_type: str, category: str, content: Any, metadat
     )
 
 
-def _window(items: list[dict], *, limit: int, before_seq: int | None, after_seq: int | None) -> list[dict]:
-    if limit <= 0:
-        return []
-    if after_seq is not None:
-        return [item for item in items if item["seq"] > after_seq and (before_seq is None or item["seq"] < before_seq)][:limit]
-    if before_seq is not None:
-        items = [item for item in items if item["seq"] < before_seq]
-    return items[-limit:]
-
-
 class KurrentRunEventStore(RunEventStore):
     def __init__(self, config: Any, *, client_factory: Callable[[], Awaitable[Any]] | None = None, clock: Callable[[], float] | None = None) -> None:
         """``clock`` (wall-clock seconds, default ``time.time``) times canonical cleanup verification."""
@@ -314,7 +301,7 @@ class KurrentRunEventStore(RunEventStore):
         try:
             response = await client.read_stream(run_events_stream(thread_id), backwards=True, timeout=self._timeout)
         except NotFoundError:
-            walk.missing = walk.exhausted = True
+            walk.missing = True
             yield _nothing(), walk
             return
         async with response:
@@ -326,7 +313,7 @@ class KurrentRunEventStore(RunEventStore):
         if limit <= 0:
             return []
         picked: list[dict] = []
-        async with self._scan(thread_id) as (records, _walk_state):
+        async with self._scan(thread_id) as (records, _):
             async for record, _metadata in records:
                 seq = record["seq"]
                 if after_seq is not None and seq <= after_seq:
@@ -575,7 +562,7 @@ class KurrentRunEventStore(RunEventStore):
         if not pending:
             return {}
         result: dict[str, str] = {}
-        async with self._scan(thread_id) as (records, _walk_state):
+        async with self._scan(thread_id) as (records, _):
             async for record, _metadata in records:
                 match = match_ai_message_run_id(record, pending)
                 if match is None:
@@ -603,7 +590,7 @@ class KurrentRunEventStore(RunEventStore):
         if not wanted:
             return {}
         result: dict[str, int] = {}
-        async with self._scan(thread_id) as (records, _walk_state):
+        async with self._scan(thread_id) as (records, _):
             async for record, _metadata in records:
                 run_id = record["run_id"]
                 if run_id not in wanted or run_id in result:
@@ -617,7 +604,7 @@ class KurrentRunEventStore(RunEventStore):
 
     async def count_messages(self, thread_id):
         count = 0
-        async with self._scan(thread_id) as (records, _walk_state):
+        async with self._scan(thread_id) as (records, _):
             async for record, _metadata in records:
                 count += record["category"] == "message"
         return count
@@ -627,7 +614,7 @@ class KurrentRunEventStore(RunEventStore):
         if not wanted:
             return {}
         found: dict[str, int] = {}
-        async with self._scan(thread_id) as (records, _walk_state):
+        async with self._scan(thread_id) as (records, _):
             async for record, _metadata in records:
                 if record["category"] != "message" or not isinstance(record["content"], dict):
                     continue

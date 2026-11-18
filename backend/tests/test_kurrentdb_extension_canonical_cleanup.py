@@ -1043,6 +1043,7 @@ async def test_run_event_cleanup_runs_with_canonical_events_off(server, clock, m
     await store.flush_canonical()
     (intent_id,) = _intents(server)
     assert [text for _, _, text in _session(server)] == [None, "kept"]
+    assert _kinds(server, intent_id)[-1] == "CanonicalCleanupDone"
     clock.advance(PAST_VERIFICATION)
     assert (await store.run_canonical_obligations()).verified == 1
     assert _kinds(server, intent_id)[-1] == "CanonicalCleanupVerified"

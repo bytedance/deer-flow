@@ -83,11 +83,6 @@ SIDECAR_SNAPSHOT_ATTEMPTS = 3
 IntentsProvider = Callable[[str], Iterable[Mapping[str, Any]]]
 
 
-def no_open_intents(stream: str) -> tuple[Mapping[str, Any], ...]:
-    """The default ``intents_provider``: no deletion is open."""
-    return ()
-
-
 @contextlib.contextmanager
 def _no_lock() -> Iterator[None]:
     yield
@@ -229,13 +224,13 @@ class KurrentdbMemoryStorage(MemoryStorage):
             position = page[-1].stream_position - 1
 
     @staticmethod
-    def _fold(state: MemoryState, recorded: list[Any] | tuple[Any, ...], stream: str) -> MemoryState:
+    def _fold(state: MemoryState, recorded: list[Any] | tuple[Any, ...]) -> MemoryState:
         for event in recorded:
             state.apply(event)
         return state
 
     def _full_read(self, client: Any, stream: str) -> MemoryState:
-        return self._fold(MemoryState(), self._since_newest_snapshot(client, stream), stream)
+        return self._fold(MemoryState(), self._since_newest_snapshot(client, stream))
 
     def _refresh(self, stream: str) -> MemoryState:
         """The scope's current state: cached when the head has not moved. Caller holds the scope lock."""
@@ -256,7 +251,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
                     # Truncated past the cache without a snapshot first: re-read from scratch.
                     state = self._full_read(client, stream)
                 else:
-                    state = self._fold(cached.copy(), new, stream)
+                    state = self._fold(cached.copy(), new)
             else:
                 state = self._full_read(client, stream)
         self._states[stream] = state
@@ -345,7 +340,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
             # A stream recreated after a soft delete continues its old positions: read them back.
             self._states.pop(stream, None)
             return None
-        committed = self._fold(state.copy(), self._recorded(state, new_events), stream)
+        committed = self._fold(state.copy(), self._recorded(state, new_events))
         self._states[stream] = committed
         return committed
 
@@ -456,7 +451,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
             raise AssertionError("a destructive plan needs existing state and criteria")
         criteria = {**plan.criteria, "cutoff": state.position + 2}
         intent = Intent.new(criteria["op"], criteria, stream, state.position)
-        resulting = self._fold(state.copy(), self._recorded(state, events.new_change_set(plan.changes)), stream)
+        resulting = self._fold(state.copy(), self._recorded(state, events.new_change_set(plan.changes)))
         boundary = [events.new_event(events.MEMORY_SNAPSHOT, intent.intent_id, 0, {"agent": None, "intent_id": intent.intent_id, "state": resulting.snapshot_state()})]
         try:
             self._engine().run(intent, lambda: boundary, self._derive(intent) or [])
@@ -464,7 +459,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
             raise MemoryManifestRevisionConflict(f"Memory deletion in {stream!r} did not commit: {exc}") from exc
         except DeletionError as exc:
             raise KurrentdbMemoryReadError(f"Memory deletion in {stream!r} failed: {exc}") from exc
-        committed = self._fold(state.copy(), self._recorded(state, boundary), stream)
+        committed = self._fold(state.copy(), self._recorded(state, boundary))
         self._states[stream] = committed
         return committed
 
