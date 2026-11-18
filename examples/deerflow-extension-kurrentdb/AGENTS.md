@@ -50,6 +50,14 @@ cd .. && docker compose -f docker/docker-compose.kurrentdb.yaml config -q
   `committed_intents_for`), so a late cross-process append after a closed
   deletion stays hidden; records carry the primary revision they were written
   under so a deletion's `cutoff` spares later records
+- **A sidecar-only clear is a deletion too.** `clear_fact_metadata` for a whole
+  agent and `clear_all` of an already-empty scope write a `clear_metadata`
+  intent and a primary boundary that keeps the state (the revision moves, so
+  later records survive the cutoff); no record revision distinguishes a late
+  append from a later one otherwise. `clear_metadata` covers no canonical event
+- **Trap: sidecar records take the cached primary revision** (`_primary_revision`,
+  no head check), so a record written by a process whose cache predates another
+  process's deletion stays hidden for good; this errs toward hiding
 - **Canonical events are best-effort and never on the caller's path.** Map in
   `canonical/mapping.py` (schema payloads only; DeerFlow identities and
   `deerflow.origin` in event metadata; deterministic ids). Emit through

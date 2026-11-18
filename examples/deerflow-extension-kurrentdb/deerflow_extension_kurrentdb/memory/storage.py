@@ -17,8 +17,10 @@ outcome is unknown is settled by ``_fence.settle_append`` and never re-appended.
 delete facts or clear a scope are deletions (``deletions.DeletionEngine``): an
 intent in the deletions index, then one ``MemorySnapshot`` boundary of the
 resulting state carrying the intent id, then the sidecar boundary and ``$tb`` on
-the sidecar and primary streams. Before every primary write the open deletions of
-that scope are completed (``recover_deletions`` does the same at startup).
+the sidecar and primary streams. Sidecar-only clears (a whole agent's
+``clear_fact_metadata``, ``clear_all`` of an already-empty scope) are
+``clear_metadata`` deletions whose boundary keeps the state. Before every primary
+write the open deletions of that scope are completed (``recover_deletions`` does the same at startup).
 
 ``load()`` and ``reload()`` serve a per-scope cache but check the stream head on
 every call and fold only the new events; a head behind the cache or a truncation
@@ -549,7 +551,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
                     self._commit(stream, state, plan, user_id=user_id)
                     if not plan.changes:
                         # An already-empty scope may still hold sidecars (agents without facts).
-                        self._clear_metadata(stream, memory_meta_stream(user_id), {"op": "clear_all"})
+                        self._clear_metadata_durably(stream, memory_meta_stream(user_id), None, user_id=user_id)
                 break
             except MemoryManifestRevisionConflict:
                 if attempt == CHANGE_SET_ATTEMPTS - 1:
@@ -660,6 +662,44 @@ class KurrentdbMemoryStorage(MemoryStorage):
         except Exception:
             logger.warning("Clearing memory sidecars in %r failed (criteria %r)", meta, dict(criteria), exc_info=True)
 
+    def _clear_metadata_durably(self, primary: str, meta: str, agent: str | None, *, user_id: str | None) -> None:
+        """Clear ``agent``'s sidecar records (the scope's for ``None``) as a ``clear_metadata`` deletion; best-effort.
+
+        A sidecar-only clear must outlive sidecar appends from other processes that
+        read the primary revision before it (``StreamState.ANY``; scope locks are
+        process-local), and records carry only the primary revision. So the clear is
+        a deletion like any other: an intent with a ``cutoff``, a primary boundary
+        that leaves the state unchanged (it moves the revision, so later records
+        survive), then the sidecar boundary. Reads keep filtering by the committed
+        intent after it closes, so even a clear that finds nothing to remove is
+        written (it cannot know whether such an append is in flight). A scope with
+        sidecars but no primary stream gets an empty snapshot first; a scope with
+        neither stream writes nothing. If the deletion cannot be written, the sidecars are still
+        cleared directly (not durable against a late append) and nothing raises.
+        """
+        criteria = {"op": "clear_metadata", "agent": agent}
+        for attempt in range(CHANGE_SET_ATTEMPTS):
+            try:
+                with self._scope_lock(primary):
+                    self._recover_before_write(primary)
+                    state = self._refresh(primary)
+                    if state.position is None:
+                        if self._head(self._client(), meta) is None:
+                            return  # nothing was ever written for this scope
+                        self._append(primary, state, events.new_change_set([(events.MEMORY_SNAPSHOT, {"agent": None, "state": state.snapshot_state()})]))
+                        state = self._refresh(primary)
+                    self._commit_destructive(primary, state, Plan([], [], [], criteria), user_id=user_id)
+                self._kick_canonical_cleanup(primary, deleted=True)
+                return
+            except MemoryManifestRevisionConflict:
+                if attempt < CHANGE_SET_ATTEMPTS - 1:
+                    continue
+                logger.warning("Clearing memory sidecars of %r as a deletion kept conflicting; clearing them directly", primary)
+            except Exception:
+                logger.warning("Clearing memory sidecars of %r as a deletion failed; clearing them directly", primary, exc_info=True)
+            break
+        self._clear_metadata(primary, meta, criteria)
+
     def get_fact_usage(self, *, agent_name: str, user_id: str | None = None) -> dict[str, dict[str, Any]]:
         """Usage of the agent's current facts (a late access append for a deleted fact is dropped)."""
         primary, meta = self._meta_scope(agent_name, user_id)
@@ -738,13 +778,12 @@ class KurrentdbMemoryStorage(MemoryStorage):
         """
         primary, meta = self._meta_scope(agent_name, user_id)
         if fact_ids is None:
-            criteria: dict[str, Any] = {"op": "clear_agent", "agent": agent_name}
-        else:
-            removed = sorted({str(fact_id) for fact_id in fact_ids})
-            if not removed:
-                return
-            criteria = {"op": "delete_facts", "agent": agent_name, "factIds": removed}
-        self._clear_metadata(primary, meta, criteria)
+            self._clear_metadata_durably(primary, meta, agent_name, user_id=user_id)
+            return
+        removed = sorted({str(fact_id) for fact_id in fact_ids})
+        if removed:
+            # The facts' own deletion intent already removed these records durably.
+            self._clear_metadata(primary, meta, {"op": "delete_facts", "agent": agent_name, "factIds": removed})
 
     # --- misc -------------------------------------------------------------------
 

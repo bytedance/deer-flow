@@ -818,9 +818,13 @@ def test_clear_all_clears_every_agent_and_summaries(server):
     assert [fact["id"] for fact in storage.load(AGENT, user_id="bob")["facts"]] == ["fact_bob"]
     assert storage.load(None, user_id="bob")["user"]["workContext"]["summary"] == "Bob's work"
 
-    # Clearing an already-empty scope is a no-op.
+    # Clearing an already-empty scope keeps it empty but is still a sidecar-only deletion (a
+    # late sidecar append from another process must stay hidden), so the revision moves once.
+    again = storage.clear_all(user_id="alice")
+    assert again["revision"] == cleared["revision"] + 1
+    assert again["facts"] == [] and again["user"]["workContext"]["summary"] == ""
+    # A scope that never had any memory or sidecar stays a no-op.
     server.calls.clear()
-    assert storage.clear_all(user_id="alice")["revision"] == cleared["revision"]
     assert storage.clear_all(user_id="nobody")["revision"] == 0
     assert server.calls_to("append_to_stream") == []
 

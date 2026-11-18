@@ -91,19 +91,20 @@ def matches(criteria: Criteria, *, agent: str, fact_id: str | None, revision: in
     """Whether one record (``fact_id`` ``None`` for a watermark) is removed by a deletion's criteria.
 
     ``op`` is ``clear_all`` (every record of the scope), ``clear_agent`` (every
-    record of ``agent``) or ``delete_facts`` (``agent``'s records about
-    ``factIds``; watermarks are kept). An optional int ``cutoff`` exempts records
+    record of ``agent``), ``clear_metadata`` (every record of ``agent``, or of the
+    scope when ``agent`` is ``None``) or ``delete_facts`` (``agent``'s records
+    about ``factIds``; watermarks are kept). An optional int ``cutoff`` exempts records
     written at or above that primary revision.
     """
     cutoff = criteria.get("cutoff")
     if isinstance(cutoff, int) and not isinstance(cutoff, bool) and revision >= cutoff:
         return False
     op = criteria.get("op")
-    if op == "clear_all":
+    if op == "clear_all" or (op == "clear_metadata" and criteria.get("agent") is None):
         return True
     if criteria.get("agent") != agent:
         return False
-    if op == "clear_agent":
+    if op in ("clear_agent", "clear_metadata"):
         return True
     if op == "delete_facts":
         return fact_id is not None and fact_id in set(criteria.get("factIds") or ())

@@ -77,7 +77,9 @@ CANONICAL_CLEANUP_REOPENED = f"{PREFIX}CanonicalCleanupReopened"
 CANONICAL_CLEANUP_VERIFIED = f"{PREFIX}CanonicalCleanupVerified"
 INDEX_EVENT_TYPES = frozenset({DELETION_INTENDED, DELETION_DONE, DELETION_ABANDONED, CANONICAL_CLEANUP_DONE, CANONICAL_CLEANUP_REOPENED, CANONICAL_CLEANUP_VERIFIED})
 
-OPS = frozenset({"delete_facts", "clear_agent", "clear_all", "delete_run", "delete_thread"})
+# ``clear_metadata`` removes memory sidecar records only (``agent`` or, for ``None``, the whole
+# scope); its boundary leaves the primary state unchanged and it covers no canonical event.
+OPS = frozenset({"delete_facts", "clear_agent", "clear_all", "clear_metadata", "delete_run", "delete_thread"})
 # Attempts to raise one $tb across concurrent metadata writers.
 TB_ATTEMPTS = 5
 

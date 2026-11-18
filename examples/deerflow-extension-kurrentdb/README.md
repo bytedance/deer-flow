@@ -162,7 +162,10 @@ finishes a deletion that a crash interrupted.
   `KurrentRunEventStoreCorruption`, and writes to that thread fail as not
   committed. Write to DeerFlow's streams only through DeerFlow
 - **Sidecar records are best-effort**: a failed sidecar read or write logs a
-  warning and never fails a memory call
+  warning and never fails a memory call. Clearing one agent's memory, or
+  clearing an already-empty scope, is a deletion of its sidecar records and
+  moves the scope's revision once, so a sidecar write that another process
+  started before the clear stays hidden after it
 
 ### Canonical events
 
