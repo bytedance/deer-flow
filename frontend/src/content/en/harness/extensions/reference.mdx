@@ -234,7 +234,7 @@ Frozen dataclass.
 | `requested_model`     | `str \| None`                     | required |
 | `effective_model`     | `str`                             | required |
 | `model_parameters`    | `dict[str, Any]`                  | required |
-| `thinking_enabled`    | `bool`                            | required |
+| `thinking_enabled`    | `bool \| None`                    | required |
 | `reasoning_effort`    | `Any`                             | required |
 | `base_prompt_hash`    | `str`                             | required |
 | `tools`               | `tuple[ToolDescriptor, ...]`      | required |
@@ -243,6 +243,8 @@ Frozen dataclass.
 | `enabled_skills`      | `tuple[str, ...]`                 | required |
 | `effective_policies`  | `dict[str, Any]`                  | required |
 | `build`               | `dict[str, Any]`                  | `{}`    |
+
+`thinking_enabled` can be `None` when the model supports optional thinking and uses the provider default. Assembly observers that distinguish this case from disabled thinking should check for `None` and `False` explicitly.
 
 `fingerprint: str` (cached property) is a `canonical_hash` of everything that changes behavior. Tools, deferred tool names, and skills are sorted; middleware order is preserved because it decides what wraps what. `build` and `requested_model` are excluded, so a redeploy of the same assembly keeps the same fingerprint.
 

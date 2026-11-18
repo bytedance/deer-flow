@@ -5293,6 +5293,54 @@ async def test_subagent_mcp_uses_captured_thread_incarnation(classes, monkeypatc
         assert call_remote.await_args.kwargs["scope_key"] == expected_scope
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("child_thinking, child_effort", [(False, "lite"), (None, None)])
+async def test_subagent_graph_preserves_caller_metadata(classes, base_config, monkeypatch, child_thinking, child_effort):
+    from langchain_core.runnables import RunnableConfig
+    from langchain_core.runnables.config import var_child_runnable_config
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+    observed = {}
+
+    def capture_metadata(_state: MessagesState, config: RunnableConfig):
+        observed.update(config["metadata"])
+        return {"messages": [classes["AIMessage"](content="done")]}
+
+    graph = StateGraph(MessagesState, context_schema=dict)
+    graph.add_node("capture_metadata", capture_metadata)
+    graph.add_edge(START, "capture_metadata")
+    graph.add_edge("capture_metadata", END)
+
+    base_config.thinking_enabled = child_thinking
+    base_config.reasoning_effort = child_effort
+    executor = classes["SubagentExecutor"](config=base_config, tools=[], parent_model="child-model")
+    monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(graph.compile()))
+
+    caller_scope = {
+        "allowed_subagents": ["general-purpose"],
+        "tool_groups": ["web"],
+        "mcp_plugins": [],
+        "available_skills": ["example-skill"],
+        "trace_id": "caller-trace",
+    }
+    caller_reasoning = {"model_name": "parent-model", "thinking_enabled": True, "reasoning_effort": "deep"}
+    caller_metadata = {**caller_scope, **caller_reasoning}
+    token = var_child_runnable_config.set({"metadata": caller_metadata})
+    try:
+        result = await executor._aexecute("Record child graph metadata")
+    finally:
+        var_child_runnable_config.reset(token)
+
+    assert result.status == classes["SubagentStatus"].COMPLETED, result.error
+    assert {key: observed[key] for key in caller_scope} == caller_scope
+    assert observed["model_name"] == "child-model"
+    assert observed["thinking_enabled"] is child_thinking
+    assert observed["reasoning_effort"] == child_effort
+    assert caller_metadata == {**caller_scope, **caller_reasoning}
+
+
 class TestSubagentCheckpointLineage:
     """Keep delegated graphs on the parent run's checkpoint lineage."""
 

@@ -1978,7 +1978,8 @@ class SubagentExecutor:
                 "recursion_limit": self._recursion_limit if self._recursion_limit is not None else self.config.max_turns,
                 "callbacks": [collector],
                 "tags": [collector_caller],
-                # Override ambient parent metadata for any permitted nested delegation.
+                # LangGraph merges these keys into the parent's metadata so
+                # nested delegation keeps the caller's scope and tracing.
                 "metadata": {
                     "model_name": self.model_name,
                     "thinking_enabled": self._effective_reasoning.thinking_enabled if self._effective_reasoning else self.thinking_enabled,
