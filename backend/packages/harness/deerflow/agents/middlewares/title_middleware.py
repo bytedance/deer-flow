@@ -122,8 +122,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         raw = message.get("additional_kwargs")
         return bool(message.get("tool_calls") or message.get("invalid_tool_calls") or message.get("function_call") or (isinstance(raw, Mapping) and (raw.get("tool_calls") or raw.get("function_call"))))
 
-    def _first_exchange(self, state: TitleMiddlewareState) -> tuple[object | None, str]:
-        """Select the first user request and the final assistant text that answers it.
+    def _first_exchange(self, state: TitleMiddlewareState) -> tuple[object | None, object | None]:
+        """Select the first user request and its latest assistant step.
 
         The graph calls after_model once per model step. Earlier assistant
         messages may describe the plan or request tools. Only the latest step
@@ -135,14 +135,16 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         for message in state.get("messages") or []:
             if self._is_user_message_for_title(message):
                 if user_message is not None:
-                    return None, ""
+                    return None, None
                 user_message = message
             elif user_message is not None and self._message_type(message) == "ai":
                 assistant_message = message
-        assistant_text = ""
-        if assistant_message is not None and not self._has_tool_call_intent(assistant_message):
-            assistant_text = self._strip_think_tags(self._normalize_content(self._message_content(assistant_message)))
-        return user_message, assistant_text
+        return user_message, assistant_message
+
+    def _final_assistant_text(self, message: object | None) -> str:
+        if message is None or self._has_tool_call_intent(message):
+            return ""
+        return self._strip_think_tags(self._normalize_content(self._message_content(message)))
 
     def _get_title_user_message(self, state: TitleMiddlewareState) -> str:
         user_message = next((message for message in state.get("messages") or [] if self._is_user_message_for_title(message)), None)
@@ -218,8 +220,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if state.get("title"):
             return False
 
-        user_message, assistant_text = self._first_exchange(state)
-        return user_message is not None and (bool(assistant_text) or allow_partial_exchange)
+        user_message, assistant_message = self._first_exchange(state)
+        return user_message is not None and (assistant_message is not None or allow_partial_exchange)
 
     def _build_title_prompt(self, state: TitleMiddlewareState) -> tuple[str, str]:
         """Extract user/assistant messages and build the title prompt.
@@ -227,7 +229,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         Returns (prompt_string, user_msg) so callers can use user_msg as fallback.
         """
         config = self._get_title_config()
-        _, assistant_msg = self._first_exchange(state)
+        _, assistant_message = self._first_exchange(state)
+        assistant_msg = self._final_assistant_text(assistant_message)
         user_msg = self._get_title_user_message(state)
 
         # This model is invoked directly, outside the main model wrappers.
@@ -350,6 +353,12 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config = self._get_title_config()
         if not config.model_name:
             return {"title": self._fallback_title(user_msg)}
+
+        # Default and attachment titles use only the user request and retain
+        # their early state update. A configured model also needs the answer.
+        _, assistant_message = self._first_exchange(state)
+        if not self._final_assistant_text(assistant_message):
+            return None
 
         try:
             prompt, user_msg = self._build_title_prompt(state)
