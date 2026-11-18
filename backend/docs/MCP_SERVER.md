@@ -281,6 +281,18 @@ servers, independently of transport idle timeouts, so a live connection that
 never returns the matching MCP response cannot stall the task poller. Other
 `http` and `sse` tools continue to use transport-level timeouts.
 
+## Tool Error Results
+
+For ordinary `http` and `sse` tools, a result with `isError: true` becomes a
+recoverable tool error using its text blocks and embedded text resources. If
+there is no text, the error reports the number of non-text content blocks.
+Binary payloads, data-URI links and `structuredContent` are never stringified
+into the error message. Successful multimodal results and structured artifacts
+keep their normal conversion.
+
+Custom interceptors can inspect and recover the raw MCP error result before
+this check; the check applies to the final result they return.
+
 ## Filesystem MCP Servers
 
 DeerFlow already provides built-in file tools for thread-scoped workspace access.

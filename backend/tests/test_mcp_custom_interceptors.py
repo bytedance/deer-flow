@@ -4,7 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.mcp.tools import get_mcp_tools
+from deerflow.mcp.tools import _handle_network_tool_error, get_mcp_tools
 
 
 def _make_patches(*, interceptor_paths=None):
@@ -38,7 +38,7 @@ def _make_patches(*, interceptor_paths=None):
         ),
         "build_servers": patch(
             "deerflow.mcp.tools.build_servers_config",
-            return_value={"test-server": {}},
+            return_value={"test-server": {"transport": "http", "url": "https://example.test/mcp"}},
         ),
         "oauth_headers": patch(
             "deerflow.mcp.tools.get_initial_oauth_headers",
@@ -53,9 +53,11 @@ def _make_patches(*, interceptor_paths=None):
 
 
 def _get_interceptors(mock_cls):
-    """Extract the tool_interceptors list passed to MultiServerMCPClient."""
+    """Verify the outer error guard, then inspect authentication/custom order."""
     kw = mock_cls.call_args
-    return kw.kwargs.get("tool_interceptors") or kw[1].get("tool_interceptors", [])
+    interceptors = kw.kwargs["tool_interceptors"]
+    assert interceptors[0] is _handle_network_tool_error
+    return interceptors[1:]
 
 
 def test_custom_interceptor_loaded_and_appended():
