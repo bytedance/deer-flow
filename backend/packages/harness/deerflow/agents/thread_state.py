@@ -171,8 +171,15 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
     - same scope -> union names, dedupe, preserve order.
     - a missing new turn_id inherits the existing scope. ``tool_search`` writes
       this shape after the filter establishes the current turn before the model.
+    - a non-object value from either side is unusable and carries nothing to
+      merge: an Overwrite-poisoned checkpoint stores one, and without this the
+      thread's later genuine promotion writes would keep failing on it.
     """
+    if not isinstance(existing, Mapping):
+        existing = None
     if not new:
+        return existing
+    if not isinstance(new, Mapping):
         return existing
     new_turn_id = new.get("turn_id")
     replace = existing is None or existing.get("catalog_hash") != new["catalog_hash"] or (new_turn_id is not None and existing.get("turn_id") != new_turn_id)
@@ -398,9 +405,16 @@ def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[Artifac
     by_handle: dict[str, ArtifactEntry] = {}
     order: list[str] = []
     for entry in [*(existing or []), *new]:
-        if not isinstance(entry, dict) or "handle" not in entry:
+        if not isinstance(entry, dict):
             continue
-        handle = entry["handle"]
+        # The state-update route persists reducer values with ``Overwrite``, so
+        # a checkpoint can carry an entry whose handle is missing or unhashable
+        # without this reducer ever seeing it. Skip such an entry instead of
+        # raising on the dict key: one bad write must not fail every later
+        # artifact capture on the thread.
+        handle = entry.get("handle")
+        if not isinstance(handle, str) or not handle:
+            continue
         if handle not in by_handle:
             order.append(handle)
         by_handle[handle] = entry

@@ -248,6 +248,11 @@ external boundaries. Ordinary `type`/`value` fields remain compatible.
 `goal: null` retains its existing semantics: it clears a state update's goal,
 but does not replace a goal through run input.
 
+A state update's optional `as_node` names the graph node recorded as the
+writer, and defaults to `manual_state_update`. It must be a name LangGraph can
+register as a node: `__start__`, `__end__`, LangGraph's other reserved names and
+names containing `:` or `|` are rejected with 422 before anything is written.
+
 Replaying messages from an earlier root checkpoint, including response regeneration, preserves
 the thread's current goal and continuation budget. A cleared or achieved goal
 is not restored from history. A valid goal explicitly supplied in run input
@@ -356,7 +361,7 @@ does not accept this header and keeps the existing missing-stream close of
 **Run Option Compatibility:**
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
-- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option. A run failed this way is stored as `error`, and its stream carries an `error` event (name `RunError`) with the delivery message before `end`, matching the `/wait` error envelope and the step-limit event described under `recursion_limit`. Any other terminal `error` the worker commits after the graph ends — an unpersisted delivery receipt, or a scheduled-goal cleanup that failed — publishes the same event with that error message.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
@@ -510,10 +515,15 @@ Gateway API callers can attach up to three explicit references to create/stream/
 
 A reference is a valid thread ID or an absolute `/workspace/chats/{thread_id}` URL
 (also `/workspace/agents/{agent_name}/chats/{thread_id}` for custom agents)
-with the same scheme and authority as the run request, without query or fragment.
-URLs are parsed as local selectors and are never fetched. For split-origin clients
-or internal proxies, pass the thread ID. The field is separate from message text:
-links in pasted documents, tool results, or previous messages grant no access.
+on the host and port the client sent the run request to, without query or fragment.
+Gateway takes that host from `Forwarded` / `X-Forwarded-Host` / `Host`, as the CSRF
+check does, and appends `X-Forwarded-Port` when that host carries no port of its own.
+A stray `X-Forwarded-Port: 8443` therefore turns `deerflow.example` into
+`deerflow.example:8443`, and a link without that port gets a 422. The scheme is
+not compared, since behind a TLS proxy Gateway can see `http` for an `https` link. URLs are parsed as local selectors and are never fetched.
+For split-origin clients or internal proxies, pass the thread ID. The field is
+separate from message text: links in pasted documents, tool results, or previous
+messages grant no access.
 The server supplies source IDs to the model as background user-role data and
 binds the reader to this run's references and authenticated identity.
 
@@ -1976,7 +1986,7 @@ DeerFlow enforces authentication for all non-public HTTP routes. Public routes a
 The authenticated auth endpoints are:
 
 - `GET /api/v1/auth/me` returns the current user.
-- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
+- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie. A `new_email` that another account already uses returns `400` `email_already_exists`, including an address registered while the request runs, and changes nothing.
 
 Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
 
@@ -2282,6 +2292,38 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
 > `config.recursion_limit` explicitly — see the [Create Run](#create-run)
 > section for details. Scheduled-task launches use
 > `scheduler.recursion_limit` from `config.yaml` instead of a client body.
+
+## Workspace search
+
+`POST /api/threads/search` additionally accepts an optional `query` (up to 256
+characters). It matches a trimmed, case-insensitive literal substring of the
+conversation title before pagination, preserving the existing array response.
+
+`POST /api/search` requires `threads:read` and returns grouped title/message
+matches for the current user. Message results additionally require `runs:read`
+and an installed `workspace_search` extension provider.
+
+```json
+{"query":"报告","types":["thread","message"],"archived":null,"limit":20,"cursor":null}
+```
+
+`types` defaults to both kinds; `limit` is 1–100. `archived` is a nullable boolean;
+`project_id` omitted includes every project, explicit null selects unassigned
+threads. Blank queries return recent titles. The response is
+`{items, cursor, indexing, messages_available}`. Each item carries `type`,
+`thread_id`, `title`, `agent_name`, `archived`, `project_id`, `updated_at` and
+`snippet` (plain-text `{text, matched?}` segments). Message hits also carry the
+canonical `message_id`, thread-global `seq` and `role`. Preserve the query and
+filters with each opaque cursor; invalid cursors return 400. When `indexing` is
+true, retry the current page until historical backfill completes. Provider errors
+return 503; without a provider, title search stays available.
+
+`GET /api/threads/{thread_id}/messages/around?message_id=...&seq=...&limit=20`
+requires `runs:read` and thread ownership. `seq` is an optional exact version hint;
+`limit` (1–50) bounds each side of the target. The response contains `messages`,
+`target_seq`, `has_before` and `has_after`. Hidden/superseded targets and stale
+version hints return 404. Earlier/later navigation uses the boundary message as
+the next anchor. The UI keeps these windows separate from live history.
 
 ## Chat archive and restore
 

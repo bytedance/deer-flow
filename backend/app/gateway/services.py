@@ -55,7 +55,7 @@ from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECE
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.agents_config import load_agent_config
-from deerflow.config.app_config import get_app_config
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
 from deerflow.mcp_scope import (
@@ -92,7 +92,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -643,7 +643,9 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", "durable_context_snapshot"})
+#: ``loop_cap`` is loop detection's record of capped tools; a caller copy could
+#: lift a cap or block a tool.
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", "durable_context_snapshot", "loop_cap"})
 
 #: The ``write_todos`` status contract the todo middleware renders.
 _TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
@@ -702,14 +704,82 @@ def _normalize_external_skill_context(value: Any, *, location: str) -> list[dict
     return normalized
 
 
+def _reject_overwrite_marker(value: Mapping[str, Any], *, location: str) -> None:
+    """Refuse a value LangGraph would apply with ``Overwrite`` semantics.
+
+    ``Overwrite`` reaches the validator in two dict spellings: the sentinel form
+    ``{"__overwrite__": value}`` and the dataclass-erased form an orjson round
+    trip produces, ``{"type": "__overwrite__", "value": value}``. Either one
+    bypasses the channel reducer and stores the caller's value directly on an
+    initialized channel, so a shape check alone cannot catch it.
+    """
+    if "__overwrite__" in value or value.get("type") == "__overwrite__":
+        raise HTTPException(status_code=400, detail=f"{location} cannot contain an Overwrite marker")
+
+
+def _normalize_external_promoted(value: Any, *, location: str) -> dict[str, Any] | None:
+    """Reject deferred-tool promotion records the reducer cannot merge.
+
+    ``promoted`` is a checkpointed reducer channel a caller may Overwrite even
+    though only the server writes it. ``merge_promoted`` calls ``new.get(...)``
+    and indexes ``new["catalog_hash"]``/``new["names"]``, so a string, a missing
+    key or a non-list ``names`` raises while the state update merges — failing
+    the run with an unhandled ``AttributeError``/``KeyError``/``TypeError``
+    instead of a 400 at this boundary. On the thread-state route the bad shape
+    would also be persisted, so every later promotion write on that thread would
+    keep failing on it.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise HTTPException(status_code=400, detail=f"{location} must be an object with a catalog_hash and a names list")
+    _reject_overwrite_marker(value, location=location)
+    catalog_hash = value.get("catalog_hash")
+    if not isinstance(catalog_hash, str) or not catalog_hash:
+        raise HTTPException(status_code=400, detail=f"{location}.catalog_hash must be a non-empty string")
+    names = value.get("names")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise HTTPException(status_code=400, detail=f"{location}.names must be a list of strings")
+    turn_id = value.get("turn_id")
+    if turn_id is not None and not isinstance(turn_id, str):
+        raise HTTPException(status_code=400, detail=f"{location}.turn_id must be a string")
+    return {**value, "catalog_hash": catalog_hash, "names": names}
+
+
+def _normalize_external_tool_artifacts(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject artifact-registry entries the reducer cannot key.
+
+    ``tool_artifacts`` is a checkpointed reducer channel a caller may Overwrite.
+    ``merge_tool_artifacts`` keys each entry by its ``handle``, so an entry whose
+    handle is missing or unhashable raises while the state update merges — a 500
+    instead of a 400 at this boundary. The thread-state route persists the value
+    with ``Overwrite`` before any reducer sees it, so the thread stays broken for
+    every later artifact capture. Require the registry's list-of-objects shape
+    with a non-empty string handle; the reducer also tolerates an already-poisoned
+    checkpoint.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of artifact objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        handle = entry.get("handle")
+        if not isinstance(handle, str) or not handle:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].handle must be a non-empty string")
+        normalized.append(dict(entry))
+    return normalized
+
+
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
     """Require usable goal text without rebuilding caller-supplied goal state."""
     if value is None:
         return None
     if not isinstance(value, Mapping) or not isinstance(value.get("objective"), str):
         raise HTTPException(status_code=400, detail=f"{location} must be an object with a string objective")
-    if "__overwrite__" in value or value.get("type") == "__overwrite__":
-        raise HTTPException(status_code=400, detail=f"{location} cannot contain an Overwrite marker")
+    _reject_overwrite_marker(value, location=location)
     try:
         objective = normalize_goal_objective(value["objective"])
     except ValueError as exc:
@@ -759,6 +829,16 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
         elif channel == "skill_context":
             normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
             stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
+        elif channel == "promoted":
+            # A dedicated validator must not bypass the metadata strip the
+            # generic branches apply to caller-supplied channel values.
+            stripped[channel] = _strip_external_metadata_from_message_like(_normalize_external_promoted(value, location="values.promoted"))
+        elif channel == "tool_artifacts":
+            normalized_tool_artifacts = _normalize_external_tool_artifacts(value, location="values.tool_artifacts")
+            # Registry entries are rich dicts, so keep the per-entry metadata
+            # strip the generic list branch applied: a caller-crafted entry must
+            # not smuggle server-owned message metadata into the checkpoint.
+            stripped[channel] = None if normalized_tool_artifacts is None else [_strip_external_metadata_from_message_like(item) for item in normalized_tool_artifacts]
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
@@ -829,6 +909,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
                 result = {**result, "delegations": cleaned}
         if "skill_context" in result:
             result = {**result, "skill_context": _normalize_external_skill_context(result["skill_context"], location="input.skill_context")}
+        if "promoted" in result:
+            result = {**result, "promoted": _normalize_external_promoted(result["promoted"], location="input.promoted")}
+        if "tool_artifacts" in result:
+            result = {**result, "tool_artifacts": _normalize_external_tool_artifacts(result["tool_artifacts"], location="input.tool_artifacts")}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
             normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
@@ -1070,6 +1154,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # at admission from threads_meta; a client-supplied value must
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
+            AGENT_AUTH_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
@@ -1368,10 +1453,11 @@ _DEFAULT_RECURSION_LIMIT = 100
 _DEFAULT_MAX_RECURSION_LIMIT = 1000
 
 
-def _resolve_gateway_recursion_limits() -> tuple[int, int]:
+def _resolve_gateway_recursion_limits(app_config: AppConfig | None = None) -> tuple[int, int]:
     """Resolve the run default and ceiling from one hot-reloaded snapshot."""
     try:
-        app_config = get_app_config()
+        if app_config is None:
+            app_config = get_app_config()
         raw = app_config.recursion_limit
         max_limit = app_config.max_recursion_limit
         if raw > max_limit:
@@ -1482,6 +1568,7 @@ def build_run_config(
     metadata: dict[str, Any] | None,
     *,
     assistant_id: str | None = None,
+    app_config: AppConfig | None = None,
 ) -> dict[str, Any]:
     """Build a RunnableConfig dict for the agent.
 
@@ -1499,13 +1586,16 @@ def build_run_config(
     This mirrors the channel manager's ``_resolve_run_params`` logic. IM
     channel runs send no ``recursion_limit`` unless their session config or
     channel policy sets one, so they get the same configured default here.
+
+    *app_config* is the snapshot the recursion limits come from; without it
+    they are read through ``get_app_config()``, which does file IO.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
     # subagent inside ONE lead tools-node step, and subagents enforce their own
     # limit via `subagents.max_turns`. Do not conflate this budget with the
     # general-purpose subagent's max_turns.
-    default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits()
+    default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits(app_config)
     config: dict[str, Any] = {"recursion_limit": default_recursion_limit}
     if request_config:
         caller_configurable = request_config.get("configurable")
@@ -2348,7 +2438,11 @@ async def start_run(
     stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    run_ctx = get_run_context(request)
+    # Building the context loads the live AppConfig, which stats and hashes
+    # config.yaml and reparses it after an edit, so it runs in a worker. The
+    # rest of the run start reuses that snapshot.
+    run_ctx = await asyncio.to_thread(get_run_context, request)
+    app_config = run_ctx.app_config
     admission_run_id: str | None = None
     producer_lease_started = False
     producer_lease_handed_off = False
@@ -2364,7 +2458,6 @@ async def start_run(
 
     # Validate model against the allowlist when a model_name is provided.
     if model_name:
-        app_config = get_app_config()
         resolved = app_config.get_model_config(model_name)
         if resolved is None:
             raise HTTPException(
@@ -2453,7 +2546,7 @@ async def start_run(
                     thread_id=thread_id,
                     accessor=accessor,
                     read_config=read_config,
-                    enabled=get_app_config().hitl_approval.enabled,
+                    enabled=app_config.hitl_approval.enabled,
                     body=body,
                 )
                 resume_map = getattr(validated_approval_request_ids, "resume_map", None)
@@ -2491,7 +2584,7 @@ async def start_run(
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
         try:
-            config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+            config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id, app_config=app_config)
         except ValueError as exc:
             # Raised only for the caller's own config sections or assistant_id.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2510,7 +2603,7 @@ async def start_run(
         from deerflow.approvals.policy import resolve_mode
 
         try:
-            resolve_mode(get_app_config().hitl_approval, config.get("context") or {})
+            resolve_mode(app_config.hitl_approval, config.get("context") or {})
         except (ValueError, TypeError) as exc:
             raise HTTPException(422, detail={"code": "invalid_approval_mode", "message": "The selected tool approval mode is not allowed"}) from exc
         if not is_internal_caller:
@@ -2606,6 +2699,20 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
+        if agent_config is not None and getattr(run_ctx.app_config, "mcp_agent_auth", None):
+            from deerflow.mcp.agent_auth import McpAgentAuthorizationError, capture_agent_authority
+
+            try:
+                agent_authority = await run_assembly(
+                    capture_agent_authority,
+                    run_ctx.app_config,
+                    user_id=owner_user_id or str(user.id),
+                    agent_config=agent_config,
+                )
+            except McpAgentAuthorizationError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from None
+            run_ctx = replace(run_ctx, agent_mcp_authority=agent_authority)
+
         if scheduled_task_runtime is not None:
             run_ctx = replace(run_ctx, scheduled_task_runtime=dict(scheduled_task_runtime))
         conversation_references = list(getattr(body, "conversation_references", None) or [])
@@ -2618,7 +2725,7 @@ async def start_run(
                 user_id=owner_user_id or (str(user.id) if user is not None else None),
                 run_context=run_ctx,
                 run_manager=run_mgr,
-                app_config=get_app_config(),
+                app_config=app_config,
             )
             reader, source_ids = prepared
             run_ctx = replace(run_ctx, conversation_reader=reader)
@@ -3111,7 +3218,7 @@ async def launch_scheduled_thread_run(
         input=graph_input,
         command=None,
         metadata=metadata or {},
-        config={"recursion_limit": _resolve_scheduler_recursion_limit()},
+        config={"recursion_limit": await asyncio.to_thread(_resolve_scheduler_recursion_limit)},
         # ``user_id`` mirrors what IM channels put in ``body.context`` so
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;

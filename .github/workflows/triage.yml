@@ -66,7 +66,12 @@ jobs:
               ['area:sandbox',  [/^docker\//, /^backend\/packages\/harness\/deerflow\/sandbox\//, /(^|\/)Dockerfile$/]],
               ['area:skills',   [/^skills\//, /^backend\/packages\/harness\/deerflow\/skills\//, /^frontend\/src\/core\/skills\//]],
               ['area:mcp',      [/^backend\/packages\/harness\/deerflow\/mcp\//, /^frontend\/src\/core\/mcp\//]],
-              ['area:ci',       [/^\.github\//, /^scripts\//]],
+              // deploy/ holds the Helm chart, which is release/deploy tooling like
+              // scripts/: bump_version.sh rewrites its versions, verify_versions.sh
+              // and the chart workflow gate its rendering. Without this entry a PR
+              // that touches only deploy/ (plus its backend/tests/test_helm_*.py)
+              // matches no rule at all and arrives with no area label.
+              ['area:ci',       [/^\.github\//, /^scripts\//, /^deploy\/helm\//]],
               ['area:docs',     [/^docs\//, /\.mdx?$/]],
               ['area:deps',     [/(^|\/)(pyproject\.toml|uv\.lock|package\.json|pnpm-lock\.yaml)$/]],
             ];

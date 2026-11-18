@@ -12,6 +12,11 @@ export const extensionCatalog = [
     icon: "file-text",
   },
   {
+    key: "workspaceSearch",
+    package: "deerflow-extension-workspace-search",
+    namespace: null,
+  },
+  {
     key: "agentTeams",
     icon: "users",
     package: "deerflow-extension-agent-teams",
@@ -72,6 +77,11 @@ export const extensionCatalog = [
     key: "knowledgeCenter",
     package: "deerflow-extension-knowledge-center",
     namespace: "knowledge-center",
+  },
+  {
+    key: "skillEvolution",
+    package: "deerflow-extension-skill-evolution",
+    namespace: null,
   },
   { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
   { key: "weknora", package: "deerflow-extension-weknora", namespace: null },

@@ -247,6 +247,21 @@ async def test_crawl_includes_api_key_when_set(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_crawl_uses_the_anonymous_tier_when_env_holds_the_template_placeholder(jina_client, monkeypatch):
+    """A fresh ``make config`` leaves ``JINA_API_KEY=your-jina-api-key``; sending it makes every fetch a 401."""
+    captured_headers = {}
+
+    async def mock_post(self, url, **kwargs):
+        captured_headers.update(kwargs.get("headers", {}))
+        return httpx.Response(200, text="ok", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    monkeypatch.setenv("JINA_API_KEY", "your-jina-api-key")
+    assert await jina_client.crawl("https://example.com") == "ok"
+    assert "Authorization" not in captured_headers
+
+
+@pytest.mark.anyio
 async def test_crawl_warns_once_when_api_key_missing(jina_client, monkeypatch, caplog):
     """Test that the missing API key warning is logged only once."""
     jina_client_module._api_key_warned = False

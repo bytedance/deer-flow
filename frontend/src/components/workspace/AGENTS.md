@@ -71,6 +71,15 @@ pnpm catalog:sync   # after a change to the capability catalog
   `@`. Typed slash text is still submitted as a normal message, which the backend
   and the IM channels rely on.
 
+## Artifact selection
+
+- **Artifact rewrite state outlives its panel.** Opening side chat unmounts the
+  file detail. Keep the source range and revision in the sidecar provider, apply
+  through the shared draft store, and preserve the revision-checked Save path.
+- **Verify the source span before rewriting Markdown.** Use positions from the
+  complete static parse with unchanged preprocessing and literal rendered text.
+  For other rendered selections, offer quotation and direct rewrites to View source.
+
 ## Delimited preview
 
 - **CSV parsing runs in the worker only**, with bounded input, cancellation of
@@ -78,3 +87,8 @@ pnpm catalog:sync   # after a change to the capability catalog
   a large file.
 - **The parser is told the record separator explicitly.** Auto-detection is
   corrupted by a newline inside an incomplete quoted field of a truncated sample.
+
+## Conversation search
+
+Keep historical message windows separate from live stream history. After
+the composer accepts a new turn, return to the live conversation.

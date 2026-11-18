@@ -33,6 +33,10 @@ When you add or rename a field, update `config.example.yaml` and raise its
 - **Read config through `get_app_config()` on each request.** It reloads when the
   resolved path or the content signature changes, so an edit applies to the next
   message. Do not cache `AppConfig` on `app.state` or in a module global.
+- **Async request paths read it in a worker.** Each read stats and hashes
+  `config.yaml` and `extensions_config.json`. Gateway authorization helpers run
+  through `asyncio.to_thread`; `start_run` builds `get_run_context()` in a worker
+  and reuses that one snapshot.
 - **Startup-only fields are registered.** `reload_boundary.py::STARTUP_ONLY_FIELDS`
   is the list, and each such field's description starts with `startup-only:`. A
   new field that is read once at startup joins both.

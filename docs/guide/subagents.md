@@ -1,5 +1,84 @@
 # Sub-Agents
 
+## Optional checkpoint history
+
+The Gateway can save checkpoint history for ordinary subagent executions. This
+is disabled by default.
+
+The default configuration already sets `database.backend` to `sqlite`.
+Keep the `database:` settings unchanged. In `config.yaml`, set
+`subagent_runtime.checkpoint_enabled` to `true`:
+
+```yaml
+subagent_runtime:
+  checkpoint_enabled: true
+```
+
+Restart the Gateway for the change to take effect. Parent and child checkpoints are saved in the same SQLite database selected by the host. When the host uses the default `database:` configuration, this is `deerflow.db` under `database.sqlite_dir`.
+
+This option currently supports SQLite; PostgreSQL and memory storage are not
+supported. Both `full` and `delta` checkpoint channel modes are supported. Keep
+the database on persistent storage to retain history across Gateway or
+container restarts. This option is independent of `run_events.backend`, which
+can remain `memory`.
+
+The Gateway owns a second saver on the persistent subagent event loop. Subagents
+using this checkpoint runtime share it, while the parent keeps its own saver and
+both connect to the same checkpoint database. Each child execution gets a
+distinct non-root namespace under its parent node. Child messages remain outside
+the parent transcript and its root message stream.
+
+The normal `task` delegation flow supplies the required parent graph context.
+Calling the executor directly from a parent graph node can also save history
+when it inherits that context and uses the installed checkpoint runtime.
+This option covers direct delegation from the parent graph. If a subagent
+dispatches another subagent, the nested execution runs with checkpoint history
+disabled. Tool calls and results within a recorded subagent can still be
+retained in its checkpoint history. Checkpoint history for items executed through `batch_task` is not included.
+
+Child checkpoint metadata includes `deerflow_subagent_execution_id` and
+`deerflow_subagent_name`, plus `deerflow_parent_run_id` and
+`deerflow_subagent_tool_call_id` when those identities are available. Use the
+server execution ID to distinguish attempts; provider tool-call IDs can repeat.
+The inherited checkpoint parent map retains the parent checkpoint reference.
+Readers can use these fields to attribute retained history without inferring
+ownership from timestamps. Concurrent children do not have a single global
+execution order.
+
+This option stores historical evidence and adds checkpoint writes and storage
+usage. It does not add a history UI or automatic subagent recovery. Standalone
+embedded clients and direct factories retain their existing checkpoint-disabled
+behavior unless they explicitly install the matching checkpoint resource
+lifetime around a persistent parent graph.
+
+Child checkpoint history is not automatically pruned by the existing checkpoint
+retention policies. Each child execution has its own namespace, whose latest
+checkpoint and ancestor chain are protected. Deleting the entire thread is
+currently the only supported way to reclaim this history. Storage usage grows
+with retained child executions.
+
+The Gateway closes admission and drains child execution, stream cleanup and
+checkpoint writes before closing the child saver. The parent saver remains open
+through that drain.
+
+### Checkpoint resource ownership
+
+All native subagents share one persistent event loop. The Gateway installs the
+optional child saver inside the parent saver's lifetime. Capture that runtime
+before dispatch and replace the inherited saver in a copied runnable config;
+LangGraph's inherited reference takes precedence over a compile-time saver.
+Identify strict-msgpack serializer clones by their underlying connection,
+because a clone can share its original saver's connection and lock.
+
+Extend the ambient checkpoint namespace with the server execution ID and retain
+its parent map. Keep checkpoint coordinates out of the explicit child invocation
+config, which can reset the namespace on newer LangGraph versions. Drain complete
+child execution and cleanup before closing the saver or stopping its owner loop.
+Delta schema normalization can copy middleware; audit both global authorization
+and subagent tool restrictions on the final instances before creating the graph.
+
+## Delegation behavior
+
 Web chats accept direct model choices such as “ask MODEL to handle this”, “use MODEL for this turn”, and “from now on use MODEL”; Chinese equivalents are supported too. A child choice leaves the main model unchanged, a one-turn choice leaves defaults unchanged, and a conversation choice uses the existing browser-local thread override without changing account preferences. Choices resolve against available configurations and optional `models[].aliases`; ambiguous names or scopes show a selection card before execution, while delegation still requires enabled subagents (Ultra mode).
 
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
