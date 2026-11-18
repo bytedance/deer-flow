@@ -35,7 +35,7 @@ make test-blocking-io
   root run ignore namespaced frames.
 
 - **Memory writers fence the captured generation.** After waiting for the stream Condition, check `retired` and `ended` before allocating an event ID or appending; rejected writes consume no sequence number, and END is idempotent for that generation.
-- **Bridge shutdown closes admission.** Memory and Redis bridges reject new `publish`, `publish_end` and `subscribe` calls once `close()` starts. Memory checks again after acquiring the stream Condition because a producer may have captured the stream before shutdown. Keep close idempotent and retryable after cancellation.
+- **Bridge close is a retirement barrier, not a permanent terminal state.** Memory fences `publish`, `publish_end` and new stream creation while close drains. A caller that captured an existing generation may observe its retirement gap; later calls can create a fresh generation after close returns. Keep close idempotent and retryable after cancellation.
 
 ## Checkpoints
 
