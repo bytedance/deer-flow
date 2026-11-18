@@ -31,11 +31,16 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   plan that removes facts or clears a scope goes through
   `KurrentdbMemoryStorage._commit_destructive` as a `MemorySnapshot` boundary,
   never as plain `FactDeleted` / `MemoryCleared` deltas
-- **Every deletion runs through `deletions.DeletionEngine`.** Intent first, then
+- **Every deletion runs through `deletions.DeletionEngine` (or `AsyncDeletionEngine`).** Intent first, then
   a boundary carrying `intent_id`, derived steps, `$tb` (derived streams, then
   the primary, only ever raised) and `DeletionDone`. A missing boundary is
   abandoned only after a fence lands at its position. Every truncation sits on a
   boundary, so a fold from the newest boundary is never partial
+- **Run-event deletions are boundaries, never stream deletes.** `delete_by_run`
+  appends `RunsCompacted` plus copies of every survivor (original data and
+  metadata, `"survivor": true`) in one append; `delete_by_thread` appends
+  `ThreadCleared`. Both carry `seq_high_water` (`run_events/seq.py`), so `seq` is
+  never reused. A thread with nothing to delete writes no intent
 - **Sidecars never fail a memory call.** Sidecar reads and writes log a warning
   and fall back to empty; reads drop every record an open deletion intent's
   criteria match (`intents_provider`), and records carry the primary revision

@@ -34,5 +34,8 @@ def memory_meta_stream_of(primary: str) -> str | None:
     return None
 
 
+RUN_EVENTS_PREFIX = "deerflow.run-events-"
+
+
 def run_events_stream(thread_id: str) -> str:
-    return f"deerflow.run-events-{enc(thread_id)}"
+    return f"{RUN_EVENTS_PREFIX}{enc(thread_id)}"

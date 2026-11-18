@@ -12,6 +12,22 @@ Event schema (every event's data and metadata are JSON):
   newest boundary forward; events before it are gone (written by deletions)
 - ``deerflow.Fence``: written only to settle an ambiguous append; ignored by reads
 
+Deletions are boundaries written through the crash-safe protocol in ``..deletions``
+(intent in ``deerflow.kurrent-deletions``, boundary at the head the deletion read,
+``$tb`` raised to the boundary's own position, ``DeletionDone``), never a stream
+delete, so ``seq`` bookkeeping survives them:
+
+- ``delete_by_run``: one append of a ``RunsCompacted{intent_id, seq_high_water, run_id,
+  deleted}`` boundary followed by copies of every surviving event (same data, same
+  metadata plus ``"survivor": true``)
+- ``delete_by_thread``: one ``ThreadCleared{intent_id, seq_high_water, deleted}`` boundary
+- ``seq_high_water`` is the newest boundary's high water and every ``seq`` since
+  (``seq.seq_high_water``), so a later write gets a higher ``seq`` even when the
+  deleted run owned the top numbers
+- A thread with no stream, or nothing to delete, is a no-op that reads once and never
+  writes an intent. Run events have no derived (sidecar) steps; canonical cleanup
+  of session streams is a separate obligation, not part of this store
+
 Reads stream the thread backwards (``read_stream``) and stop as soon as the query is
 answered, and at the newest boundary at the latest, so a long thread is never sent
 in full for a tail page, a lookup that resolves near the head, or the next ``seq``.
@@ -52,9 +68,10 @@ from kurrentdbclient.exceptions import NotFoundError, WrongCurrentVersionError
 
 from .._client import async_client_factory
 from .._fence import FENCE_EVENT_TYPE, AmbiguousAppendError, asettle_append
-from .._naming import run_events_stream
+from .._naming import RUN_EVENTS_PREFIX, run_events_stream
 from .._settings import load_settings
-from .seq import next_seq
+from ..deletions import AsyncDeletionEngine, DeletionConflict, DerivedStep, Intent
+from .seq import next_seq, seq_high_water
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +84,8 @@ BOUNDARY_EVENT_TYPES = frozenset({RUNS_COMPACTED_EVENT_TYPE, THREAD_CLEARED_EVEN
 MAX_APPEND_ATTEMPTS = 5
 #: Threads whose stream head is remembered between writes (a miss costs one read).
 _HEAD_CACHE_SIZE = 10_000
+#: Deletion engines kept, one per client (one client per event loop).
+_ENGINE_CACHE_SIZE = 8
 
 _RECORD_FIELDS = ("thread_id", "run_id", "event_type", "category", "content", "metadata", "seq", "created_at")
 _REQUIRED_EVENT_KEYS = ("thread_id", "run_id", "event_type", "category")
@@ -113,14 +132,15 @@ class _Walk:
     seqs: list[int] = field(default_factory=list)
 
 
-def encode_record(record: Mapping[str, Any], *, user_id: str | None, survivor: bool = False) -> NewEvent:
+def encode_record(record: Mapping[str, Any], *, user_id: str | None, survivor: bool = False, base_metadata: Mapping[str, Any] | None = None) -> NewEvent:
     """The ``RunEvent`` for a complete record (with ``seq``).
 
-    Deletions write their copies of surviving events with ``survivor=True``: a survivor's
-    ``seq`` may sit below its boundary's high water, so it never fixes the next ``seq``.
+    Deletions write their copies of surviving events with ``survivor=True`` and the
+    original event's metadata as ``base_metadata``: a survivor's ``seq`` may sit below
+    its boundary's high water, so it never fixes the next ``seq``.
     """
     data = {field: record[field] for field in _RECORD_FIELDS}
-    metadata: dict[str, Any] = {"user_id": user_id}
+    metadata: dict[str, Any] = {**(base_metadata or {}), "user_id": user_id}
     if survivor:
         metadata["survivor"] = True
     return NewEvent(
@@ -160,20 +180,24 @@ def _decode_boundary(event) -> int:
     return high_water
 
 
-def _is_survivor(event) -> bool:
+def _decode_metadata(event) -> dict:
     if not event.metadata:
-        return False
+        return {}
     try:
         metadata = json.loads(event.metadata)
     except (UnicodeDecodeError, ValueError) as exc:
         raise _corrupt(event, f"undecodable metadata: {exc}") from exc
     if not isinstance(metadata, dict):
         raise _corrupt(event, "metadata is not an object")
+    return metadata
+
+
+def _is_survivor(metadata: Mapping[str, Any]) -> bool:
     return metadata.get("survivor") is True
 
 
-async def _walk(response: Any, walk: _Walk) -> AsyncIterator[tuple[dict, bool]]:
-    """Yield ``(record, survivor)`` newest first, down to the newest boundary; fences are skipped."""
+async def _walk(response: Any, walk: _Walk) -> AsyncIterator[tuple[dict, dict]]:
+    """Yield ``(record, event metadata)`` newest first, down to the newest boundary; fences are skipped."""
     try:
         async for event in response:
             if walk.head is None:
@@ -190,19 +214,29 @@ async def _walk(response: Any, walk: _Walk) -> AsyncIterator[tuple[dict, bool]]:
             if walk.seqs and record["seq"] >= walk.seqs[-1]:
                 raise _corrupt(event, "seq is not strictly increasing")
             walk.seqs.append(record["seq"])
-            yield record, _is_survivor(event)
+            yield record, _decode_metadata(event)
     except NotFoundError:
         walk.missing = True
     walk.exhausted = True
 
 
-async def _nothing() -> AsyncIterator[tuple[dict, bool]]:
+async def _nothing() -> AsyncIterator[tuple[dict, dict]]:
     return
     yield
 
 
 def _advance(head: int | StreamState, count: int) -> int:
     return count - 1 if head is StreamState.NO_STREAM else int(head) + count
+
+
+def _derive_run_events(intent: Intent) -> list[DerivedStep] | None:
+    """Run-event intents have no derived steps; other stores' intents are not ours to recover."""
+    return [] if intent.primary_stream.startswith(RUN_EVENTS_PREFIX) else None
+
+
+def _boundary_event(event_type: str, intent: Intent, **fields: Any) -> NewEvent:
+    data = {"intent_id": intent.intent_id, **fields}
+    return NewEvent(id=uuid.uuid4(), type=event_type, data=json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
 
 def _context_owner() -> str | None:
@@ -246,6 +280,7 @@ class KurrentRunEventStore(RunEventStore):
         self._client_factory = client_factory if client_factory is not None else async_client_factory(settings)
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._heads: dict[str, tuple[int, int]] = {}
+        self._engines: dict[int, tuple[Any, AsyncDeletionEngine]] = {}
 
     def _lock_for(self, thread_id: str) -> asyncio.Lock:
         lock = self._locks.get(thread_id)
@@ -262,7 +297,7 @@ class KurrentRunEventStore(RunEventStore):
     # --- reads -----------------------------------------------------------
 
     @asynccontextmanager
-    async def _scan(self, thread_id: str, client: Any = None) -> AsyncIterator[tuple[AsyncIterator[tuple[dict, bool]], _Walk]]:
+    async def _scan(self, thread_id: str, client: Any = None) -> AsyncIterator[tuple[AsyncIterator[tuple[dict, dict]], _Walk]]:
         """One streaming backwards read; leaving the block stops it, so nothing older is sent."""
         if client is None:
             client = await self._client_factory()
@@ -283,7 +318,7 @@ class KurrentRunEventStore(RunEventStore):
             return []
         picked: list[dict] = []
         async with self._scan(thread_id) as (records, _walk_state):
-            async for record, _survivor in records:
+            async for record, _metadata in records:
                 seq = record["seq"]
                 if after_seq is not None and seq <= after_seq:
                     break  # seq only decreases from here
@@ -301,10 +336,10 @@ class KurrentRunEventStore(RunEventStore):
         """``(head, next seq, existing record)`` from one walk that stops as early as it can."""
         fresh_top: int | None = None
         async with self._scan(thread_id, client) as (records, walk):
-            async for record, survivor in records:
+            async for record, metadata in records:
                 if existing is not None and existing(record):
                     return walk.head, 0, record
-                if not survivor and fresh_top is None:
+                if not _is_survivor(metadata) and fresh_top is None:
                     fresh_top = record["seq"]
                     if existing is None:
                         break  # a non-survivor's seq is above every boundary's high water
@@ -317,7 +352,10 @@ class KurrentRunEventStore(RunEventStore):
         if walk.missing:
             return StreamState.NO_STREAM, 1, None
         stream = run_events_stream(thread_id)
-        head = await client.get_current_version(stream, timeout=self._timeout)
+        try:
+            head = await client.get_current_version(stream, timeout=self._timeout)
+        except NotFoundError:
+            head = StreamState.NO_STREAM
         if head is StreamState.NO_STREAM:
             return head, 1, None
         raise KurrentRunEventStoreCorruption(f"{stream}: the stream exists but nothing is readable, so the next seq is unknown")
@@ -483,7 +521,7 @@ class KurrentRunEventStore(RunEventStore):
             return {}
         result: dict[str, str] = {}
         async with self._scan(thread_id) as (records, _walk_state):
-            async for record, _survivor in records:
+            async for record, _metadata in records:
                 match = match_ai_message_run_id(record, pending)
                 if match is None:
                     continue
@@ -511,7 +549,7 @@ class KurrentRunEventStore(RunEventStore):
             return {}
         result: dict[str, int] = {}
         async with self._scan(thread_id) as (records, _walk_state):
-            async for record, _survivor in records:
+            async for record, _metadata in records:
                 run_id = record["run_id"]
                 if run_id not in wanted or run_id in result:
                     continue
@@ -525,7 +563,7 @@ class KurrentRunEventStore(RunEventStore):
     async def count_messages(self, thread_id):
         count = 0
         async with self._scan(thread_id) as (records, _walk_state):
-            async for record, _survivor in records:
+            async for record, _metadata in records:
                 count += record["category"] == "message"
         return count
 
@@ -535,7 +573,7 @@ class KurrentRunEventStore(RunEventStore):
             return {}
         found: dict[str, int] = {}
         async with self._scan(thread_id) as (records, _walk_state):
-            async for record, _survivor in records:
+            async for record, _metadata in records:
                 if record["category"] != "message" or not isinstance(record["content"], dict):
                     continue
                 identity = message_identity(record["content"])
@@ -546,8 +584,94 @@ class KurrentRunEventStore(RunEventStore):
 
     # --- deletions -----------------------------------------------------------
 
+    def _engine(self, client: Any) -> AsyncDeletionEngine:
+        """One deletion engine per client (the engine caches the index fold it read through that client)."""
+        known = self._engines.get(id(client))
+        if known is not None and known[0] is client:
+            return known[1]
+        if len(self._engines) >= _ENGINE_CACHE_SIZE:
+            self._engines.pop(next(iter(self._engines)))
+        engine = AsyncDeletionEngine(client, timeout=self._timeout, derive=_derive_run_events)
+        self._engines[id(client)] = (client, engine)
+        return engine
+
+    async def _live(self, client: Any, thread_id: str) -> tuple[int, int, list[tuple[dict, dict]]] | None:
+        """``(head, seq high water, live (record, metadata) oldest first)``, or ``None`` when the stream is missing."""
+        items: list[tuple[dict, dict]] = []
+        async with self._scan(thread_id, client) as (records, walk):
+            async for item in records:
+                items.append(item)
+        if walk.head is None:
+            if walk.missing:
+                return None
+            stream = run_events_stream(thread_id)
+            try:
+                head = await client.get_current_version(stream, timeout=self._timeout)
+            except NotFoundError:
+                return None
+            if head is StreamState.NO_STREAM:
+                return None
+            raise KurrentRunEventStoreCorruption(f"{stream}: the stream exists but nothing is readable, so the seq high water is unknown")
+        items.reverse()
+        return int(walk.head), seq_high_water(walk.high_water or 0, walk.seqs), items
+
+    async def _head_moved(self, client: Any, thread_id: str, head: int) -> bool:
+        try:
+            current = await client.get_current_version(run_events_stream(thread_id), timeout=self._timeout)
+        except NotFoundError:
+            return True
+        return current != head
+
+    async def _delete(self, thread_id: str, op: str, criteria: dict[str, Any], doomed: Callable[[dict], bool], boundary_type: str, boundary_fields: dict[str, Any]) -> int:
+        """Write one deletion boundary (plus survivor copies) through the deletion engine; returns the count removed."""
+        stream = run_events_stream(thread_id)
+        async with self._lock_for(thread_id):
+            client = await self._client_factory()
+            live = await self._live(client, thread_id)
+            if live is None or not any(doomed(record) for record, _ in live[2]):
+                return 0  # nothing to delete: no intent, no write
+            engine = self._engine(client)
+            self._heads.pop(thread_id, None)
+            # Settle earlier open deletions first; a recovery fence moves the head, so re-read then.
+            await engine.recover_primary(stream)
+            conflict: DeletionConflict | None = None
+            for attempt in range(MAX_APPEND_ATTEMPTS):
+                if attempt or await self._head_moved(client, thread_id, live[0]):
+                    live = await self._live(client, thread_id)
+                    if live is None or not any(doomed(record) for record, _ in live[2]):
+                        return 0
+                head, high_water, items = live
+                removed = [record for record, _ in items if doomed(record)]
+                survivors = [encode_record(record, user_id=metadata.get("user_id"), survivor=True, base_metadata=metadata) for record, metadata in items if not doomed(record)]
+                intent = Intent.new(op, {**criteria, "seq_high_water": high_water, "cutoff": high_water + 1}, stream, head)
+                events = [_boundary_event(boundary_type, intent, seq_high_water=high_water, deleted=len(removed), **boundary_fields), *survivors]
+                try:
+                    await engine.run(intent, lambda: events, [])
+                except DeletionConflict as exc:
+                    # Another writer (or a recovery fence) took the position; the intent is abandoned.
+                    conflict = exc
+                    continue
+                self._remember_head(thread_id, head + len(events), high_water + 1)
+                return len(removed)
+            assert conflict is not None
+            raise conflict
+
     async def delete_by_thread(self, thread_id, *, user_id: str | None | _AutoSentinel = AUTO):
-        raise NotImplementedError("KurrentRunEventStore.delete_by_thread is not implemented yet")
+        """Clear the thread with a ``ThreadCleared`` boundary; returns the number of live events removed.
+
+        The store is not user-scoped (like memory/JSONL): ``user_id`` is accepted in
+        all three states for interface parity and every owner's events are removed.
+        """
+        return await self._delete(thread_id, "delete_thread", {"thread_id": thread_id}, lambda record: True, THREAD_CLEARED_EVENT_TYPE, {})
 
     async def delete_by_run(self, thread_id, run_id, *, user_id: str | None | _AutoSentinel = AUTO):
-        raise NotImplementedError("KurrentRunEventStore.delete_by_run is not implemented yet")
+        """Remove one run with a ``RunsCompacted`` boundary plus survivor copies; ``user_id`` as in ``delete_by_thread``."""
+        return await self._delete(thread_id, "delete_run", {"thread_id": thread_id, "run_id": run_id}, lambda record: record["run_id"] == run_id, RUNS_COMPACTED_EVENT_TYPE, {"run_id": run_id})
+
+    async def recover_deletions(self) -> list[Intent]:
+        """Finish or abandon every open run-event deletion (startup); returns the intents still open."""
+        client = await self._client_factory()
+        try:
+            return await self._engine(client).recover_primary()
+        finally:
+            self._heads.clear()  # a recovery fence may have moved a cached head

@@ -174,13 +174,16 @@ def test_make_store_builds_without_connecting(monkeypatch):
 
 
 def test_seq_next_seq():
-    from deerflow_extension_kurrentdb.run_events.seq import next_seq
+    from deerflow_extension_kurrentdb.run_events.seq import next_seq, seq_high_water
 
     assert next_seq(0, []) == 1
     assert next_seq(0, [1, 2, 3]) == 4
     assert next_seq(10, [3, 4]) == 11
     assert next_seq(5, [3, 9]) == 10
     assert next_seq(7, iter(())) == 8
+    assert seq_high_water(0, []) == 0
+    assert seq_high_water(10, [3, 4]) == 10
+    assert seq_high_water(5, [3, 9]) == 9
 
 
 # --- put / seq -----------------------------------------------------------------
@@ -672,3 +675,301 @@ async def test_undecodable_stored_data_is_corruption(store, server, event):
         await store.list_messages("t1")
     with pytest.raises(RunEventStoreNotCommittedError):
         await store.put_batch([_ev()])
+
+
+# --- deletions (Task 11): boundaries, survivors, seq high water --------------------
+
+INDEX = "deerflow.kurrent-deletions"
+
+
+class TestKurrentDelete(core.TestDelete):
+    # Builds memory/jsonl/db stores itself; mirrored below for this backend (ruling R5).
+    test_delete_by_run_preserves_seq_watermark = None
+
+
+def _index(server: FakeKurrentDB) -> list[str]:
+    try:
+        recorded = server.sync_client().get_stream(INDEX)
+    except Exception:
+        return []
+    return [event.type.rsplit(".", 1)[-1] for event in recorded]
+
+
+def _tb(server: FakeKurrentDB, stream: str = T1) -> int:
+    return server.sync_client().get_stream_metadata(stream)[0].get("$tb", 0)
+
+
+def _all_events(server: FakeKurrentDB, stream: str = T1):
+    """Every recorded event, including those below ``$tb`` (the fake's raw history)."""
+    return list(server._streams[stream].events)
+
+
+def _short(event_type: str) -> str:
+    return event_type.rsplit(".", 1)[-1]
+
+
+async def _view(reader, thread_id: str = "t1") -> dict:
+    messages = await reader.list_messages(thread_id)
+    return {
+        "messages": [(m["seq"], m["run_id"], m["content"]) for m in messages],
+        "count": await reader.count_messages(thread_id),
+        "r1_events": [e["seq"] for e in await reader.list_events(thread_id, "r1")],
+        "r2_events": [e["seq"] for e in await reader.list_events(thread_id, "r2")],
+    }
+
+
+@pytest.mark.anyio
+async def test_delete_by_run_preserves_seq_watermark(store, server):
+    """Mirror of test_run_event_store.py:496 for this backend."""
+    r1 = await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="one")
+    r2 = await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message", content="two")
+    assert [r1["seq"], r2["seq"]] == [1, 2]
+    assert await store.delete_by_run("t1", "r2", user_id=None) == 1
+    r3 = await store.put(thread_id="t1", run_id="r3", event_type="human_message", category="message", content="three")
+    assert r3["seq"] > r2["seq"]
+    messages = await store.list_messages("t1", limit=50, after_seq=r2["seq"], user_id=None)
+    assert [message["seq"] for message in messages] == [r3["seq"]]
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_delete_run_keeps_survivors_and_seq_before_and_after_repair_and_restart(store, server):
+    alice = set_current_user(type("Owner", (), {"id": "alice"})())
+    try:
+        await store.put(**_ev(run_id="r1", content="a", metadata={"k": 1}))
+    finally:
+        reset_current_user(alice)
+    await store.put(**_ev(run_id="r2", content="b"))
+    await store.put(**_ev(run_id="r1", content="c", category="trace", event_type="llm_end"))
+    await store.put(**_ev(run_id="r2", content="d"))
+    expected = {"messages": [(1, "r1", "a")], "count": 1, "r1_events": [1, 3], "r2_events": []}
+
+    # The boundary commits but raising $tb fails: the deletion succeeds and stays open.
+    server.fail_next("get_stream_metadata", ServiceUnavailableError("metadata down"), stream_name=T1)
+    assert await store.delete_by_run("t1", "r2") == 2
+    assert _index(server) == ["DeletionIntended"]
+    assert _tb(server) == 0
+    assert [_short(e.type) for e in _raw(server)][4:] == ["RunsCompacted", "RunEvent", "RunEvent"]
+    for reader in (store, _store(server)):  # before the truncation repair
+        assert await _view(reader) == expected
+
+    # Repair: recovery raises $tb to the boundary itself, so it stays readable.
+    assert await _store(server).recover_deletions() == []
+    assert _index(server) == ["DeletionIntended", "DeletionDone"]
+    assert _tb(server) == 4
+    assert [_short(e.type) for e in _raw(server)] == ["RunsCompacted", "RunEvent", "RunEvent"]
+    boundary = json.loads(_raw(server)[0].data)
+    assert boundary["seq_high_water"] == 4 and boundary["run_id"] == "r2" and uuid.UUID(boundary["intent_id"])
+    for reader in (store, _store(server)):  # after it
+        assert await _view(reader) == expected
+
+    # Survivor copies keep their seq, data and metadata (owner included), marked as survivors.
+    copies = _raw(server)[1:]
+    assert [json.loads(e.data)["seq"] for e in copies] == [1, 3]
+    assert [json.loads(e.metadata) for e in copies] == [{"user_id": "alice", "survivor": True}, {"user_id": None, "survivor": True}]
+    assert json.loads(copies[0].data)["metadata"] == {"k": 1}
+
+    # Cold restart: a new client, a new store.
+    restarted = _store(server, server.async_client())
+    assert await _view(restarted) == expected
+    assert (await restarted.put(**_ev(run_id="r3", content="e")))["seq"] == 5
+    assert [m["seq"] for m in await restarted.list_messages("t1")] == [1, 5]
+
+
+@pytest.mark.anyio
+async def test_delete_run_owning_max_seq_then_restart_write_gets_higher_seq(store, server):
+    for run_id in ("r1", "r1", "r2", "r2"):
+        await store.put(**_ev(run_id=run_id))
+    assert await store.delete_by_run("t1", "r2") == 2
+    assert [m["seq"] for m in await store.list_messages("t1")] == [1, 2]
+
+    restarted = _store(server, server.async_client())
+    assert (await restarted.put(**_ev(run_id="r3")))["seq"] == 5
+    assert [m["seq"] for m in await restarted.list_messages("t1", after_seq=4)] == [5]
+    # The warm instance's cache is stale: it conflicts, re-reads and continues above.
+    assert (await store.put(**_ev(run_id="r3")))["seq"] == 6
+
+    # Deleting every remaining run leaves a boundary with no survivors; the high water holds.
+    assert await store.delete_by_run("t1", "r1") == 2
+    assert await store.delete_by_run("t1", "r3") == 2
+    assert await store.list_messages("t1") == []
+    assert (await _store(server).put(**_ev()))["seq"] == 7
+    assert _index(server) == ["DeletionIntended", "DeletionDone"] * 3
+
+
+@pytest.mark.anyio
+async def test_delete_thread_then_write_gets_higher_seq(store, server):
+    await store.put(**_ev(run_id="r1"))
+    await store.put(**_ev(run_id="r2"))
+    await store.put(**_ev(run_id="r2", category="trace", event_type="llm_end"))
+    # Delete the run that owns the top seq first: the thread boundary still carries it.
+    assert await store.delete_by_run("t1", "r2") == 2
+    assert await store.delete_by_thread("t1") == 1  # the survivor copy
+
+    raw = _raw(server)
+    assert [_short(e.type) for e in raw] == ["ThreadCleared"]
+    assert json.loads(raw[0].data)["seq_high_water"] == 3
+    assert _tb(server) == raw[0].stream_position
+    for reader in (store, _store(server)):
+        assert await reader.list_messages("t1") == []
+        assert await reader.count_messages("t1") == 0
+        assert await reader.list_events("t1", "r1") == []
+        assert await reader.find_latest_ai_message_run_ids("t1", {"x"}) == {}
+
+    restarted = _store(server, server.async_client())
+    assert (await restarted.put(**_ev(run_id="r3", content="after")))["seq"] == 4
+    assert (await store.put(**_ev(run_id="r3")))["seq"] == 5
+    assert [m["content"] for m in await restarted.list_messages("t1")] == ["after", ""]
+    assert _index(server) == ["DeletionIntended", "DeletionDone"] * 2
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_delete_returns_counts_per_contract(store, server):
+    # No stream yet: a cheap no-op that reads once and never touches the index.
+    assert await store.delete_by_thread("t1") == 0
+    assert await store.delete_by_run("t1", "r1") == 0
+    assert {call.method for call in server.calls} == {"read_stream"}
+    assert _index(server) == []
+
+    owners = [("alice", "r1"), ("bob", "r1"), (None, "r2"), ("alice", "r2")]
+    for owner, run_id in owners:
+        await store.put_batch([_ev(run_id=run_id, user_id=owner)])
+    await store.put_batch([_ev(run_id="r1", category="trace", event_type="llm_end", user_id="bob")])
+
+    # A run with no events, in an existing thread: 0, and no intent.
+    before = len(server.calls)
+    assert await store.delete_by_run("t1", "nope") == 0
+    assert {call.method for call in server.calls[before:]} == {"read_stream"}
+    assert _index(server) == []
+
+    # user_id is accepted in all three states and does not scope (the store is not user-scoped, like memory/JSONL).
+    assert await store.delete_by_run("t1", "r1", user_id="alice") == 3
+    token = set_current_user(type("Owner", (), {"id": "carol"})())
+    try:
+        assert await store.delete_by_run("t1", "r2") == 2  # AUTO
+    finally:
+        reset_current_user(token)
+    assert await store.count_messages("t1") == 0
+
+    await store.put(**_ev(run_id="r3"))
+    await store.put(**_ev(run_id="r3", category="trace", event_type="llm_end"))
+    assert await store.delete_by_thread("t1", user_id=None) == 2
+    # Already cleared: nothing live, so no new intent.
+    assert await store.delete_by_thread("t1", user_id="alice") == 0
+    assert await store.delete_by_run("t1", "r3") == 0
+    assert _index(server) == ["DeletionIntended", "DeletionDone"] * 3
+
+
+@pytest.mark.anyio
+async def test_deletion_updates_the_head_cache(store, server):
+    for run_id in ("r1", "r2", "r2"):
+        await store.put(**_ev(run_id=run_id))
+    assert await store.delete_by_run("t1", "r2") == 2
+    before = len(server.calls)
+    assert (await store.put(**_ev(run_id="r3")))["seq"] == 4
+    # The deletion remembered the new head: the next put is one append, no read, no conflict.
+    assert [call.method for call in server.calls[before:]] == ["append_to_stream"]
+    assert await store.delete_by_thread("t1") == 2
+    before = len(server.calls)
+    assert (await store.put(**_ev()))["seq"] == 5
+    assert [call.method for call in server.calls[before:]] == ["append_to_stream"]
+
+
+@pytest.mark.anyio
+async def test_deletion_lost_ack_is_settled_as_committed(store, server):
+    for run_id in ("r1", "r2"):
+        await store.put(**_ev(run_id=run_id))
+    server.fail_next("append_to_stream", DeadlineExceededError("ack lost"), after_commit=True, stream_name=T1)
+    assert await store.delete_by_run("t1", "r2") == 1
+    assert [_short(e.type) for e in _all_events(server)] == ["RunEvent", "RunEvent", "RunsCompacted", "RunEvent"]
+    assert _index(server) == ["DeletionIntended", "DeletionDone"]
+    assert (await store.put(**_ev(run_id="r3")))["seq"] == 3
+
+
+@pytest.mark.anyio
+async def test_deletion_lost_request_is_fenced_off_and_retried(store, server):
+    for run_id in ("r1", "r2"):
+        await store.put(**_ev(run_id=run_id))
+    server.fail_next("append_to_stream", DeadlineExceededError("request lost"), stream_name=T1)
+    assert await store.delete_by_run("t1", "r2") == 1
+    # The fence settles the first attempt as not committed (abandoned); the retry commits at the new head.
+    assert [_short(e.type) for e in _all_events(server)] == ["RunEvent", "RunEvent", "Fence", "RunsCompacted", "RunEvent"]
+    assert _index(server) == ["DeletionIntended", "DeletionAbandoned", "DeletionIntended", "DeletionDone"]
+    assert _tb(server) == 3
+    assert [m["run_id"] for m in await _store(server).list_messages("t1")] == ["r1"]
+    assert (await store.put(**_ev(run_id="r3")))["seq"] == 3
+
+
+@pytest.mark.anyio
+async def test_unsettled_deletion_blocks_the_next_until_settled(store, server):
+    from deerflow_extension_kurrentdb.deletions import DeletionBlocked, DeletionOutcomeUnknown
+
+    for run_id in ("r1", "r2", "r3"):
+        await store.put(**_ev(run_id=run_id))
+
+    def fail_primary_appends(count: int) -> None:
+        for _ in range(count):
+            server.fail_next("append_to_stream", ServiceUnavailableError("down"), stream_name=T1)
+
+    fail_primary_appends(2)  # the boundary and its fence
+    with pytest.raises(DeletionOutcomeUnknown):
+        await store.delete_by_run("t1", "r2")
+    assert _index(server) == ["DeletionIntended"]
+
+    fail_primary_appends(2)  # recovery's fence, twice (before reading the head, and inside the engine)
+    with pytest.raises(DeletionBlocked):
+        await store.delete_by_run("t1", "r3")
+    assert _index(server) == ["DeletionIntended"]  # no second intent while the first is unsettled
+    assert [m["run_id"] for m in await store.list_messages("t1")] == ["r1", "r2", "r3"]
+
+    # Once a fence lands, the first is abandoned and the next deletion proceeds.
+    assert await store.delete_by_run("t1", "r3") == 1
+    assert _index(server) == ["DeletionIntended", "DeletionAbandoned", "DeletionIntended", "DeletionDone"]
+    assert [m["run_id"] for m in await _store(server).list_messages("t1")] == ["r1", "r2"]
+    assert (await store.put(**_ev(run_id="r4")))["seq"] == 4
+
+
+@pytest.mark.anyio
+async def test_later_deletion_defers_tb_until_the_earlier_one_closes(store, server):
+    for run_id in ("r1", "r2", "r3"):
+        await store.put(**_ev(run_id=run_id))
+    # A's $tb fails in its own call and in both recoveries B runs first; B commits but defers.
+    for _ in range(3):
+        server.fail_next("get_stream_metadata", ServiceUnavailableError("metadata down"), stream_name=T1)
+    assert await store.delete_by_run("t1", "r2") == 1
+    assert await store.delete_by_run("t1", "r3") == 1
+    assert _index(server) == ["DeletionIntended", "DeletionIntended"]
+    assert _tb(server) == 0
+    assert [m["run_id"] for m in await _store(server).list_messages("t1")] == ["r1"]
+
+    assert await _store(server).recover_deletions() == []
+    assert _index(server) == ["DeletionIntended", "DeletionIntended", "DeletionDone", "DeletionDone"]
+    # $tb rose in deletion order, to each boundary in turn.
+    assert [call.kwargs["metadata"]["$tb"] for call in server.calls_to("set_stream_metadata", T1)] == [3, 6]
+    assert [_short(e.type) for e in _raw(server)] == ["RunsCompacted", "RunEvent"]
+    assert (await store.put(**_ev(run_id="r4")))["seq"] == 4
+
+
+@pytest.mark.anyio
+async def test_deletion_with_unreachable_server_raises_and_writes_nothing(store, server):
+    await store.put(**_ev())
+    server.set_unavailable(ServiceUnavailableError("down"))
+    with pytest.raises(ServiceUnavailableError):
+        await store.delete_by_thread("t1")
+    server.set_unavailable(None)
+    assert _index(server) == []
+    assert [_short(e.type) for e in _raw(server)] == ["RunEvent"]
+
+
+@pytest.mark.anyio
+async def test_deletion_client_calls_pass_the_timeout(store, server):
+    for run_id in ("r1", "r2", "r3"):
+        await store.put(**_ev(run_id=run_id))
+    server.fail_next("append_to_stream", DeadlineExceededError("request lost"), stream_name=T1)
+    await store.delete_by_run("t1", "r2")
+    await store.delete_by_thread("t1")
+    await store.delete_by_thread("t2")
+    await store.recover_deletions()
+    assert {call.method for call in server.calls} >= {"read_stream", "append_to_stream", "get_current_version", "get_stream", "get_stream_metadata", "set_stream_metadata"}
+    assert {call.kwargs.get("timeout") for call in server.calls} == {TIMEOUT}
