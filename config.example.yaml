@@ -1049,6 +1049,17 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
 
+  # Web search tool (uses Olostep, requires OLOSTEP_API_KEY)
+  # Olostep is web data infrastructure for AI agents: live web search, scraping
+  # and crawling. Each search costs 5 credits. Get a key at
+  # https://www.olostep.com/dashboard/api-keys
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.olostep.tools:web_search_tool
+  #   max_results: 5                # Clamped to 1-25 by Olostep
+  #   # api_key: $OLOSTEP_API_KEY   # Optional if the env var is set
+
   # Web search tool (uses Sofya, requires SOFYA_API_KEY)
   # Sofya returns the content of the result pages, not only their snippets.
   # Sign up at https://sofya.co to get a key.
@@ -1296,6 +1307,16 @@ tools:
   #   #                                     # and loads subresources on its own side, so the target-URL guard above
   #   #                                     # cannot be enforced end-to-end. Set true ONLY when its outbound network
   #   #                                     # is isolated from private and cloud-metadata networks.
+
+  # Web fetch tool (uses Olostep, requires OLOSTEP_API_KEY)
+  # Scrapes the page on Olostep's side and returns it as markdown. A scrape
+  # usually costs 1 credit.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.olostep.tools:web_fetch_tool
+  #   # api_key: $OLOSTEP_API_KEY
 
   # Web fetch tool (uses Sofya, requires SOFYA_API_KEY)
   # Returns the page as markdown. Also handles PDF, DOCX and other documents.

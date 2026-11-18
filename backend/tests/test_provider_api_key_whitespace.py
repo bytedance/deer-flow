@@ -83,7 +83,7 @@ class _LoopbackTransport(httpx.AsyncHTTPTransport):
 
 @pytest.fixture
 def loopback_httpx(backend, monkeypatch):
-    """Route clients built with a fixed provider host (``r.jina.ai``, InfoQuest, Tavily) to the loopback server."""
+    """Route clients built with a fixed provider host (``r.jina.ai``, InfoQuest, Olostep, Tavily) to the loopback server."""
     original = httpx.AsyncClient
 
     def client(*args, **kwargs):
@@ -113,6 +113,15 @@ async def _groundroute(source: str, backend, monkeypatch) -> str:
     monkeypatch.setattr(tools, "get_app_config", lambda: _app_config({"api_key": RAW_KEY} if source == "config" else {}))
     if source == "env":
         monkeypatch.setenv("GROUNDROUTE_API_KEY", RAW_KEY)
+    return await _outcome(lambda: tools.web_search_tool.ainvoke({"query": "q"}))
+
+
+async def _olostep(source: str, backend, monkeypatch) -> str:
+    from deerflow.community.olostep import tools
+
+    monkeypatch.setattr(tools, "get_app_config", lambda: _app_config({"api_key": RAW_KEY} if source == "config" else {}))
+    if source == "env":
+        monkeypatch.setenv("OLOSTEP_API_KEY", RAW_KEY)
     return await _outcome(lambda: tools.web_search_tool.ainvoke({"query": "q"}))
 
 
@@ -180,6 +189,8 @@ async def _crawl4ai(source: str, backend, monkeypatch) -> str:
 CASES = [
     ("groundroute", "config", _groundroute, "authorization", f"Bearer {KEY}"),
     ("groundroute", "env", _groundroute, "authorization", f"Bearer {KEY}"),
+    ("olostep", "config", _olostep, "authorization", f"Bearer {KEY}"),
+    ("olostep", "env", _olostep, "authorization", f"Bearer {KEY}"),
     ("infoquest", "env", _infoquest, "authorization", f"Bearer {KEY}"),
     ("tavily", "config", _tavily, "authorization", f"Bearer {KEY}"),
     ("tavily", "env", _tavily, "authorization", f"Bearer {KEY}"),
@@ -198,7 +209,7 @@ CASES = [
 @pytest.mark.parametrize(("provider", "source", "call", "header", "expected"), CASES, ids=[f"{case[0]}-{case[1]}" for case in CASES])
 async def test_key_with_trailing_newline_is_sent_stripped_and_never_echoed(provider, source, call, header, expected, loopback_httpx, monkeypatch, caplog):
     backend = loopback_httpx
-    for name in ("GROUNDROUTE_API_KEY", "INFOQUEST_API_KEY", "TAVILY_API_KEY", "EXA_API_KEY", "EXA_BASE_URL", "JINA_API_KEY", "FIRECRAWL_API_KEY", "CRW_API_KEY", "CRW_API_URL"):
+    for name in ("GROUNDROUTE_API_KEY", "OLOSTEP_API_KEY", "INFOQUEST_API_KEY", "TAVILY_API_KEY", "EXA_API_KEY", "EXA_BASE_URL", "JINA_API_KEY", "FIRECRAWL_API_KEY", "CRW_API_KEY", "CRW_API_URL"):
         monkeypatch.delenv(name, raising=False)
     caplog.set_level(logging.DEBUG)
 
