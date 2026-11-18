@@ -222,6 +222,16 @@ def test_delete_one_fact_keeps_other_usage(server, tmp_path):
     cold = _storage(server, config)
     assert set(cold.get_fact_usage(agent_name=AGENT, user_id="alice")) == {"fact_1"}
     assert cold.get_extraction_watermark("thread-1", agent_name=AGENT, user_id="alice") == ["msg-1", "hello"]
+    # DeerMem's follow-up metadata clear of the same ids adds nothing: that deletion already covers them.
+    server.calls.clear()
+    storage.clear_fact_metadata(agent_name=AGENT, user_id="alice", fact_ids=["fact_2"])
+    assert server.calls_to("append_to_stream") == []
+    # A selected-fact clear that no deletion covers is a deletion of its own (the fact stays).
+    head = server.sync_client().get_current_version(ALICE_STREAM)
+    storage.clear_fact_metadata(agent_name=AGENT, user_id="alice", fact_ids=["fact_1"])
+    assert server.sync_client().get_current_version(ALICE_STREAM) == head + 1
+    assert [fact["id"] for fact in storage.load(AGENT, user_id="alice")["facts"]] == ["fact_1"]
+    assert _storage(server, config).get_fact_usage(agent_name=AGENT, user_id="alice") == {}
     # ...and by omission from a full save.
     assert storage.save({"facts": [_fact("fact_3", "new")]}, AGENT, user_id="alice") is True
     assert _storage(server, config).get_fact_usage(agent_name=AGENT, user_id="alice") == {}
@@ -388,6 +398,10 @@ def _clear_all(storage) -> None:
     storage.clear_all(user_id="alice")
 
 
+def _clear_fact_1_metadata(storage) -> None:
+    storage.clear_fact_metadata(agent_name=AGENT, user_id="alice", fact_ids=["fact_1"])
+
+
 def _clear_agent_metadata(storage) -> None:
     storage.clear_fact_metadata(agent_name=AGENT, user_id="alice")
 
@@ -401,6 +415,8 @@ def _clear_agent_metadata(storage) -> None:
         pytest.param(True, _clear_all, _write_usage, _sees_usage, id="usage-clear_all"),
         pytest.param(True, _clear_agent, _write_watermark, _sees_watermark, id="watermark-clear_agent"),
         pytest.param(True, _clear_agent, _write_eviction, _sees_eviction, id="eviction-clear_agent"),
+        pytest.param(True, _clear_fact_1_metadata, _write_eviction, _sees_eviction, id="eviction-clear_fact_metadata"),
+        pytest.param(True, _clear_fact_1_metadata, _write_usage, _sees_usage, id="usage-clear_fact_metadata"),
         pytest.param(False, _clear_agent_metadata, _write_watermark, _sees_watermark, id="watermark-clear_agent-no-facts"),
         pytest.param(False, _clear_all, _write_watermark, _sees_watermark, id="watermark-empty-clear_all"),
         pytest.param(False, _clear_all, _write_eviction, _sees_eviction, id="eviction-empty-clear_all"),

@@ -92,7 +92,7 @@ def matches(criteria: Criteria, *, agent: str, fact_id: str | None, revision: in
 
     ``op`` is ``clear_all`` (every record of the scope), ``clear_agent`` (every
     record of ``agent``), ``clear_metadata`` (every record of ``agent``, or of the
-    scope when ``agent`` is ``None``) or ``delete_facts`` (``agent``'s records
+    scope when ``agent`` is ``None``; with ``factIds``, as ``delete_facts``) or ``delete_facts`` (``agent``'s records
     about ``factIds``; watermarks are kept). An optional int ``cutoff`` exempts records
     written at or above that primary revision.
     """
@@ -100,6 +100,8 @@ def matches(criteria: Criteria, *, agent: str, fact_id: str | None, revision: in
     if isinstance(cutoff, int) and not isinstance(cutoff, bool) and revision >= cutoff:
         return False
     op = criteria.get("op")
+    if op == "clear_metadata" and "factIds" in criteria:
+        op = "delete_facts"
     if op == "clear_all" or (op == "clear_metadata" and criteria.get("agent") is None):
         return True
     if criteria.get("agent") != agent:
