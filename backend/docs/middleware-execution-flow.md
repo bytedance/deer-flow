@@ -297,4 +297,8 @@ sequenceDiagram
 
 ### LoopDetectionMiddleware 为什么同时用多个钩子？
 
-`after_model` 只做检测：重复工具调用达到 warning 阈值时，把 warning 放入 `(thread_id, run_id)` 作用域的 pending 队列。真正注入发生在下一次 `wrap_model_call`：此时上一轮 `AIMessage(tool_calls)` 对应的 `ToolMessage` 已经在请求里，warning 追加在末尾，不会破坏 OpenAI/Moonshot 的 tool-call pairing。`before_agent` 清理同一 thread 下旧 run 的残留 warning，`after_agent` 清理当前 run 没被消费的 warning。
+`after_model` 只做检测：重复工具调用达到 warning 阈值时，把 warning 放入 `(thread_id, run_id)` 作用域的 pending 队列。真正注入发生在下一次 `wrap_model_call`：此时上一轮 `AIMessage(tool_calls)` 对应的 `ToolMessage` 已经在请求里，warning 追加在末尾，不会破坏 OpenAI/Moonshot 的 tool-call pairing。`after_agent` 清理当前 run 没被消费的 warning；检测历史保留在同一 run 内，供目标续跑共享预算，新 run 使用独立预算。
+
+重复判定以整批调用的参数和结果指纹为依据，忽略批内执行顺序、调用 ID、回执等临时元数据。每轮先按 AIMessage 的调用实例配对上一批结果，再用同参调用最近的结果估计当前尚未执行的批次；结果返回后修正这次记录。成功结果不同会分别计数，所以正常的读取、修改、重新读取不会仅因参数相同而被拦截。范围读取还使用读写门禁附带的完整文件哈希，能识别未显示部分的版本变化。无效版本标记会被忽略。
+
+相同成功结果仍会累计；结构化错误忽略变化的诊断文本，缺失、无法配对或无法序列化的结果退回调用模式保护。结果循环变化也会在最近窗口内累计各自的重复次数，而不是每次变化都清空历史。结果指纹只保留在有界的进程内历史中，不写入检查点或日志。默认仍在第 3 次重复请求警告、第 5 次强停；当前请求执行前只能依据已有结果判断。结果变化并不保证任务取得实质进展，因此每种工具的独立频率预算继续生效，默认第 30 次警告、第 50 次强停。
