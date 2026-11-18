@@ -52,6 +52,7 @@ _COMPLETION_REMINDER_RUN_STOP_REASONS = ("loop_capped", "token_capped")
 _COMPLETION_REMINDER_RESPONSE_STOP_MARKERS = {SAFETY_CAPPED_STOP_REASON: SAFETY_TERMINATION_MARKER, MODEL_LENGTH_CAPPED_STOP_REASON: MODEL_LENGTH_TERMINATION_MARKER}
 
 _TODO_TERMINAL_STATUSES = frozenset({"completed", "blocked", "waiting"})
+_TODO_STATUSES = _TODO_TERMINAL_STATUSES | {"pending", "in_progress"}
 
 
 class ExtendedTodo(TypedDict):
@@ -119,11 +120,16 @@ def _usable_todos(state: ThreadState) -> list[Mapping[str, Any]]:
     return [todo for todo in todos if isinstance(todo, Mapping)]
 
 
+def _stored_todo_status(todo: Mapping[str, Any]) -> str:
+    status = todo.get("status")
+    return status if isinstance(status, str) and status in _TODO_STATUSES else "pending"
+
+
 def _format_todos(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a list of Todo items into a human-readable string."""
     lines: list[str] = []
     for todo in todos:
-        status = todo.get("status", "pending")
+        status = _stored_todo_status(todo)
         content = todo.get("content", "")
         lines.append(f"- [{status}] {content}")
     return "\n".join(lines)
@@ -131,8 +137,7 @@ def _format_todos(todos: Iterable[Mapping[str, Any]]) -> str:
 
 def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a completion reminder for incomplete todo items."""
-    incomplete = [t for t in todos if t.get("status") not in _TODO_TERMINAL_STATUSES]
-    incomplete_text = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in incomplete)
+    incomplete_text = _format_todos(todo for todo in todos if _stored_todo_status(todo) not in _TODO_TERMINAL_STATUSES)
     return (
         "<system_reminder>\n"
         "You have incomplete todo items that must be finished before giving your final response:\n\n"
@@ -449,7 +454,7 @@ class TodoMiddleware(TodoListMiddleware):
         # and waiting items explain why the work cannot continue in this run;
         # they must not be relabeled as completed just to satisfy the guard.
         todos = _usable_todos(state)
-        if not todos or all(t.get("status") in _TODO_TERMINAL_STATUSES for t in todos):
+        if not todos or all(_stored_todo_status(todo) in _TODO_TERMINAL_STATUSES for todo in todos):
             return None
 
         # 4. Enforce a reminder cap to prevent infinite re-engagement loops.

@@ -24,6 +24,7 @@ from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFi
 from deerflow.agents.middlewares.todo_middleware import (
     TODO_REMINDER_MESSAGE_NAME,
     TodoMiddleware,
+    _format_completion_reminder,
     _format_todos,
     _has_tool_call_intent_or_error,
     _reminder_in_messages,
@@ -138,10 +139,10 @@ class TestFormatTodos:
         assert _format_todos([]) == ""
 
     def test_missing_fields_use_defaults(self):
-        todos = [{"content": "No status"}, {"status": "done"}]
+        todos = [{"content": "No status"}, {"status": "completed"}]
         result = _format_todos(todos)
         assert "- [pending] No status" in result
-        assert "- [done] " in result
+        assert "- [completed] " in result
 
 
 class TestBeforeModel:
@@ -1309,6 +1310,16 @@ class TestMalformedStoredTodos:
         mw = TodoMiddleware()
         state = {"messages": [AIMessage(content="final")], "todos": [{"content": "Done", "status": "completed"}, "junk"]}
         assert mw.after_model(state, _make_runtime()) is None
+
+    @pytest.mark.parametrize("status", [[], {}, None, "unknown"])
+    def test_invalid_stored_status_remains_pending(self, status):
+        todos = [{"content": "Recover me", "status": status}, {"content": "Finished", "status": "completed"}]
+        mw = TodoMiddleware()
+        assert mw.after_model({"messages": [AIMessage(content="final")], "todos": todos}, _make_runtime()) == {"jump_to": "model"}
+        assert "- [pending] Recover me" in _format_todos(todos)
+        reminder = _format_completion_reminder(todos)
+        assert "- [pending] Recover me" in reminder
+        assert "Finished" not in reminder
 
     @pytest.mark.parametrize("todos", [{"content": "x"}, "oops", 5])
     def test_todos_that_are_not_a_list_allow_a_clean_exit(self, todos):

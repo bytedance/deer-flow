@@ -30,3 +30,9 @@ from being counted. Frequency thresholds only emit INFO metrics with
 `action="observe_only"`; they never enqueue a model warning, strip tool calls,
 or set a stop reason. The hash warning and hard-stop behavior remains scoped to
 identical calls whose results show no progress.
+
+The lead agent applies the subagent call limit before loop detection, so the
+detector reconciles results against the admitted batch. A successful
+`write_file` or `str_replace` invalidates the predicted result for older
+reads of the same path. The next read observes the current version and
+completed results remain in the repetition window.

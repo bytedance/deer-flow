@@ -17,8 +17,8 @@
 | 8 | TitleMiddleware | | | ✓ | | | | ✓ | ✗ | `auto_title` |
 | 9 | MemoryMiddleware | | | | ✓ | | | ✓ | ✗ | `memory` |
 | 10 | ViewImageMiddleware | | | | | ✓ | | ✓ | ✗ | `vision` |
-| 11 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
-| 12 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
+| 11 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
+| 12 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
 | 13 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
 
 主 agent **14 个** middleware（`make_lead_agent`），subagent **4 个**（ThreadData、Sandbox、Guardrail、ToolErrorHandling）。`create_deerflow_agent` Phase 1 实现 **13 个**（Guardrail 仅支持自定义实例，无内置默认）。
@@ -118,17 +118,17 @@ sequenceDiagram
     Note right of LD: wrap_model_call drain 当前 run warning 并追加到末尾
     LD ->> M: messages + tools
     activate M
-    M -->> LD: AI response
+    M -->> SL: AI response
     deactivate M
-
-    Note right of LD: after_model 检测循环；warning 入队，hard-stop 清 tool_calls
-    LD -->> SL: after_model
-    deactivate LD
 
     activate SL
     Note right of SL: after_model 截断多余 task
-    SL -->> TI: after_model
+    SL -->> LD: after_model
     deactivate SL
+
+    Note right of LD: after_model 检测已准入批次；warning 入队，hard-stop 清 tool_calls
+    LD -->> TI: after_model
+    deactivate LD
 
     activate TI
     Note right of TI: after_model 生成标题

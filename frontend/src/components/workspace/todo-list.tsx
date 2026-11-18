@@ -27,6 +27,7 @@ export function TodoList({
   const [internalCollapsed, setInternalCollapsed] = useState(true);
   const isControlled = controlledCollapsed !== undefined;
   const collapsed = isControlled ? controlledCollapsed : internalCollapsed;
+  const occurrencesByContent = new Map<string, number>();
 
   const handleToggle = () => {
     if (isControlled) {
@@ -72,10 +73,13 @@ export function TodoList({
         )}
       >
         <QueueList className="bg-background mt-0 w-full rounded-t-xl">
-          {todos.map((todo, i) => {
+          {todos.map((todo) => {
+            const content = todo.content ?? "";
+            const occurrence = occurrencesByContent.get(content) ?? 0;
+            occurrencesByContent.set(content, occurrence + 1);
             const status = todo.status ?? "pending";
             return (
-              <QueueItem key={i + (todo.content ?? "")}>
+              <QueueItem key={JSON.stringify([content, occurrence])}>
                 <div className="flex items-center gap-2">
                   <QueueItemIndicator
                     aria-label={`Todo status: ${status}`}

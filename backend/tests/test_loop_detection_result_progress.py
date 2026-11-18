@@ -13,6 +13,7 @@ from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY, ReadBeforeWriteMiddleware
+from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 
 
 class _ScriptedModel(FakeMessagesListChatModel):
@@ -90,6 +91,89 @@ async def test_read_modify_reread_keeps_making_progress(tmp_path, async_mode, ra
     assert all(message.status == "success" for message in tool_results)
     assert result["messages"][-1].content == "Done."
     assert not _warnings(model)
+    assert context.get("stop_reason") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("edit_result", ["same_file", "other_file", "failed"])
+async def test_reread_near_limit_after_file_edit(tmp_path, async_mode, edit_result):
+    report = tmp_path / "report.md"
+    other = tmp_path / "other.md"
+    report.write_text("v1", encoding="utf-8")
+    reads = []
+
+    @tool
+    def read_file(path: str) -> str:
+        """Read the report."""
+        content = Path(path).read_text(encoding="utf-8")
+        reads.append(content)
+        return content
+
+    @tool
+    def str_replace(path: str) -> ToolMessage:
+        """Apply a test edit."""
+        if edit_result == "failed":
+            return ToolMessage(content="Edit failed", status="error", tool_call_id="call_0")
+        Path(path).write_text("v2", encoding="utf-8")
+        return ToolMessage(content="Edited", tool_call_id="call_0")
+
+    read = _call("read_file", {"path": str(report)})
+    edit = _call("str_replace", {"path": str(other if edit_result == "other_file" else report)})
+    responses = [AIMessage(content="", tool_calls=[call]) for call in [read, read, read, read, edit, read]]
+    model = _ScriptedModel(responses=[*responses, AIMessage(content="Done.")])
+    graph = create_agent(model=model, tools=[read_file, str_replace], middleware=[LoopDetectionMiddleware()])
+    context = {"thread_id": "edit-at-limit", "run_id": "edit-at-limit"}
+    result = await _invoke(graph, async_mode, context)
+
+    if edit_result == "same_file":
+        assert reads == ["v1"] * 4 + ["v2"]
+        assert result["messages"][-1].content == "Done."
+        assert context.get("stop_reason") is None
+    else:
+        assert reads == ["v1"] * 4
+        assert context["stop_reason"] == "loop_capped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_trimmed_delegations_preserve_progress_in_admitted_batch(async_mode):
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    observed = []
+    delegated = []
+
+    @tool
+    def inspect_job() -> str:
+        """Return the next observed job state."""
+        observed.append(len(observed) + 1)
+        return str(observed[-1])
+
+    @tool
+    def task(description: str) -> str:
+        """Record the admitted delegation."""
+        delegated.append(description)
+        return "Done."
+
+    config = {"configurable": {"subagent_enabled": True, "max_concurrent_subagents": 1}}
+    app_config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+    chain = build_middlewares(config, model_name=None, app_config=app_config, memory_enabled=False, available_skills=set())
+    middlewares = [mw for mw in chain if isinstance(mw, (LoopDetectionMiddleware, SubagentLimitMiddleware))]
+    calls = [
+        _call("inspect_job", {}),
+        _call("task", {"description": "admitted"}, "task-1"),
+        _call("task", {"description": "trimmed"}, "task-2"),
+    ]
+    model = _ScriptedModel(responses=[AIMessage(content="", tool_calls=calls) for _ in range(6)] + [AIMessage(content="Done.")])
+    graph = create_agent(model=model, tools=[inspect_job, task], middleware=middlewares)
+    context = {"thread_id": "admitted-batch", "run_id": "admitted-batch"}
+    result = await _invoke(graph, async_mode, context)
+
+    assert observed == list(range(1, 7))
+    assert delegated == ["admitted"] * 6
+    assert result["messages"][-1].content == "Done."
     assert context.get("stop_reason") is None
 
 
@@ -210,7 +294,7 @@ async def test_changing_results_are_not_stopped_by_tool_frequency_metrics():
 
 
 @pytest.mark.asyncio
-async def test_noop_writes_do_not_exempt_unchanged_reads(tmp_path):
+async def test_noop_writes_still_hit_the_loop_limit(tmp_path):
     report = tmp_path / "report.md"
     report.write_text("unchanged", encoding="utf-8", newline="\n")
     reads, writes = [], []
@@ -237,7 +321,10 @@ async def test_noop_writes_do_not_exempt_unchanged_reads(tmp_path):
 
     await _invoke(graph, True, context)
 
-    assert len(reads) == len(writes) == 4
+    # The last successful write warrants one more read. Its result settles to
+    # the old version, and the unchanged write loop still reaches the cap.
+    assert len(reads) == 5
+    assert len(writes) == 4
     assert report.read_text(encoding="utf-8") == "unchanged"
     assert context["stop_reason"] == "loop_capped"
 

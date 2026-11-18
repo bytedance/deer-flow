@@ -706,6 +706,12 @@ def build_middlewares(
 
     middlewares.append(SystemMessageCoalescingMiddleware())
 
+    # after_model runs in reverse order. Apply the delegation limit first
+    # so loop observations use the same batch that reaches the tools node.
+    loop_detection_config = resolved_app_config.loop_detection
+    if loop_detection_config.enabled:
+        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     effective_max_subagents_per_run: int | None = None
@@ -718,11 +724,6 @@ def build_middlewares(
         max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), resolved_app_config)
         effective_max_subagents_per_run = max_total_subagents
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
-
-    # LoopDetectionMiddleware — detect and break repetitive tool call loops
-    loop_detection_config = resolved_app_config.loop_detection
-    if loop_detection_config.enabled:
-        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
     # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
