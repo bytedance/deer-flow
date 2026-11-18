@@ -1229,6 +1229,8 @@ tools:
   #   use: deerflow.community.browser_automation.tools:browser_close_tool
 
   # Web search tool (uses Apify Google Search Scraper, requires APIFY_API_TOKEN)
+  # Create an API token for DeerFlow in Apify Console and copy it right after creating it, because it is shown only once:
+  # https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations
   # NOTE: Only one web_search provider can be active at a time.
   # Comment out the Tavily/Jina/other web_search entry above before enabling this one.
   # - name: web_search
@@ -1337,6 +1339,8 @@ tools:
   #   # api_key: $UNBROWSE_API_KEY
 
   # Web fetch tool (uses Apify Website Content Crawler, requires APIFY_API_TOKEN)
+  # Create an API token for DeerFlow in Apify Console and copy it right after creating it, because it is shown only once:
+  # https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI/other web_fetch entry above before enabling this one.
   # crawler_type options: "cheerio" (fast, no JS), "playwright:firefox" (JS-heavy pages)
@@ -1346,7 +1350,9 @@ tools:
   #   crawler_type: cheerio
   #   api_key: $APIFY_API_TOKEN
 
-  # Apify async actor tools — discover/start/await pattern for parallel actor runs
+  # Apify async actor tools — discover/start/await pattern for parallel actor runs (requires APIFY_API_TOKEN)
+  # Create an API token for DeerFlow in Apify Console and copy it right after creating it, because it is shown only once:
+  # https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations
   # - name: apify_actor_discover
   #   group: web
   #   use: deerflow.community.apify.tools:apify_actor_discover_tool

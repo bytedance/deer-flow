@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock, call, patch
+from urllib.parse import parse_qs, urlparse
 
 
 def _make_tool_config(api_key="test-key", **extra):
@@ -57,6 +59,61 @@ class TestWebSearchTool:
         web_search_tool.invoke({"query": "test"})
 
         mock_apify_cls.assert_called_with("my-apify-key")
+
+    @patch("deerflow.community.apify.tools.ApifyClient")
+    @patch("deerflow.community.apify.tools.get_app_config")
+    def test_strips_whitespace_from_configured_api_key(self, mock_get_app_config, mock_apify_cls):
+        # A key read from a file keeps its trailing newline; the header must not carry it.
+        mock_get_app_config.return_value.get_tool_config.return_value = _make_tool_config(api_key="  my-apify-key\n")
+        mock_apify_cls.return_value.actor.return_value.call.return_value = {"defaultDatasetId": "dataset-123"}
+        mock_apify_cls.return_value.dataset.return_value.iterate_items.return_value = iter([{"organicResults": []}])
+
+        from deerflow.community.apify.tools import web_search_tool
+
+        web_search_tool.invoke({"query": "test"})
+
+        mock_apify_cls.assert_called_with("my-apify-key")
+
+    @patch.dict("os.environ", {"APIFY_API_TOKEN": "  env-apify-key\n"})
+    @patch("deerflow.community.apify.tools.ApifyClient")
+    @patch("deerflow.community.apify.tools.get_app_config")
+    def test_blank_configured_key_falls_back_to_stripped_environment_key(self, mock_get_app_config, mock_apify_cls):
+        mock_get_app_config.return_value.get_tool_config.return_value = _make_tool_config(api_key="   ")
+        mock_apify_cls.return_value.actor.return_value.call.return_value = {"defaultDatasetId": "dataset-123"}
+        mock_apify_cls.return_value.dataset.return_value.iterate_items.return_value = iter([{"organicResults": []}])
+
+        from deerflow.community.apify.tools import web_search_tool
+
+        web_search_tool.invoke({"query": "test"})
+
+        mock_apify_cls.assert_called_with("env-apify-key")
+
+    @patch.dict("os.environ", {"APIFY_API_TOKEN": ""})
+    @patch("deerflow.community.apify.tools.ApifyClient")
+    @patch("deerflow.community.apify.tools.get_app_config")
+    def test_missing_key_points_to_the_create_token_form(self, mock_get_app_config, mock_apify_cls):
+        # Console shows a token only once and new accounts have none, so the error
+        # must link to the create-token form, attributed to this integration.
+        mock_get_app_config.return_value.get_tool_config.return_value = _make_tool_config(api_key="")
+
+        from deerflow.community.apify.tools import web_search_tool
+
+        result = web_search_tool.invoke({"query": "test"})
+
+        assert result.startswith("Error:")
+        mock_apify_cls.assert_not_called()
+        urls = re.findall(r"https://console\.apify\.com/[^\s)]+", result)
+        assert len(urls) == 1
+        parsed = urlparse(urls[0])
+        assert parsed.path == "/settings/integrations"
+        assert parse_qs(parsed.query) == {
+            "createApiToken": ["true"],
+            "for": ["DeerFlow"],
+            "utm_source": ["deerflow"],
+            "utm_medium": ["integrations"],
+        }
+        assert "tools[web_search].api_key" in result
+        assert "APIFY_API_TOKEN" in result
 
     @patch("deerflow.community.apify.tools.ApifyClient")
     @patch("deerflow.community.apify.tools.get_app_config")

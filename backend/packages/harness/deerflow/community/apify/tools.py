@@ -6,6 +6,7 @@ from apify_client import ApifyClient
 from langchain.tools import tool
 from langgraph.config import get_stream_writer
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.config import get_app_config
 
 # Terminal statuses as returned by the Apify API (note: hyphen in "TIMED-OUT").
@@ -13,16 +14,20 @@ from deerflow.config import get_app_config
 # when the actor is still running but our local timeout_secs deadline is exceeded.
 TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"}
 
+# Opens Console's create-token form with the description prefilled. Console shows a
+# token only once and new accounts have none, so users must create one, not copy one.
+APIFY_CREATE_TOKEN_URL = "https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations"
+
 
 def _get_apify_client(tool_name: str) -> ApifyClient:
     config = get_app_config().get_tool_config(tool_name)
-    api_key = None
-    if config is not None and "api_key" in config.model_extra:
-        api_key = config.model_extra.get("api_key")
+    configured = resolve_api_key(config.model_extra.get("api_key")) if config is not None else None
+    api_key = configured or resolve_api_key(os.environ.get("APIFY_API_TOKEN"))
     if not api_key:
-        api_key = os.environ.get("APIFY_API_TOKEN")
-    if not api_key:
-        raise ValueError(f"APIFY_API_TOKEN is not configured. Set it as tools[{tool_name}].api_key in config.yaml or as the APIFY_API_TOKEN environment variable.")
+        raise ValueError(
+            f"APIFY_API_TOKEN is not configured. Create an API token for DeerFlow in Apify Console ({APIFY_CREATE_TOKEN_URL}) and copy it right after creating it, because it is shown only once. "
+            f"Then set it as the APIFY_API_TOKEN environment variable or as tools[{tool_name}].api_key in config.yaml."
+        )
     return ApifyClient(api_key)
 
 
