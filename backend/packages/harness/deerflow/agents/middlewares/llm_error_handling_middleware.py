@@ -8,7 +8,7 @@ import random
 import threading
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, override
 
@@ -21,6 +21,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
@@ -363,8 +364,29 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     # burst-rate (limit_burst_rate) spikes. See _get_process_limiter.
     max_concurrent_llm_calls: int = 0
 
-    def __init__(self, *, app_config: AppConfig, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        app_config: AppConfig,
+        model_name: str | None = None,
+        fallback_model_names: list[str] | None = None,
+        thinking_enabled: bool = False,
+        reasoning_effort: str | None = None,
+        model_overrides: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
+
+        self.app_config = app_config
+        self.model_name = model_name
+        model_config = app_config.get_model_config(model_name) if model_name else None
+        configured_fallbacks = getattr(model_config, "fallback_models", ())
+        self.fallback_model_names = tuple(configured_fallbacks if fallback_model_names is None else fallback_model_names)
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
+        self.model_overrides = dict(model_overrides or {})
+        self._fallback_models: dict[str, BaseChatModel] = {}
+        self._fallback_models_lock = threading.Lock()
 
         self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
         self.circuit_recovery_timeout_sec = app_config.circuit_breaker.recovery_timeout_sec
@@ -742,6 +764,129 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             response_message=exc.response_message if isinstance(exc, EmptyModelResponseError) else None,
         )
 
+    def _create_fallback_model(self, model_name: str) -> BaseChatModel:
+        from deerflow.models import create_chat_model
+
+        with self._fallback_models_lock:
+            model = self._fallback_models.get(model_name)
+            if model is None:
+                model = create_chat_model(
+                    name=model_name,
+                    thinking_enabled=self.thinking_enabled,
+                    reasoning_effort=self.reasoning_effort,
+                    app_config=self.app_config,
+                    attach_tracing=False,
+                    model_overrides=self.model_overrides,
+                    disable_provider_retries=True,
+                )
+                self._fallback_models[model_name] = model
+            return model
+
+    def _authorize_fallback_model(self, request: ModelRequest, model_name: str) -> bool:
+        from deerflow.models.selection import ModelAuthorizationDenied, ModelAuthorizationUnavailable, authorize_selected_model
+
+        authz = getattr(self.app_config, "authorization", None)
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        if authz is not None and authz.enabled is True and not isinstance(context, Mapping):
+            logger.warning("Skipping fallback model %s because model authorization context is unavailable", model_name)
+            return False
+        if context is None:
+            context = {}
+        try:
+            authorize_selected_model(model_name, context=context, app_config=self.app_config)
+        except ModelAuthorizationDenied:
+            logger.info("Skipping unauthorized fallback model %s", model_name)
+            return False
+        except ModelAuthorizationUnavailable:
+            logger.warning("Skipping fallback model %s because model authorization is unavailable", model_name)
+            return False
+        return True
+
+    async def _aauthorize_fallback_model(self, request: ModelRequest, model_name: str) -> bool:
+        from deerflow.utils.assembly_io import run_assembly
+
+        return await run_assembly(self._authorize_fallback_model, request, model_name)
+
+    async def _acreate_fallback_model(self, model_name: str) -> BaseChatModel:
+        from deerflow.utils.assembly_io import run_assembly
+
+        return await run_assembly(self._create_fallback_model, model_name)
+
+    def _try_model_fallback_sync(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+        original_error: BaseException,
+        fallback_model_names: tuple[str, ...],
+    ) -> tuple[ModelResponse | None, BaseException]:
+        if not fallback_model_names or not _is_safe_for_model_failover(original_error):
+            return None, original_error
+
+        last_error = original_error
+        for fallback_name in fallback_model_names:
+            try:
+                if not self._authorize_fallback_model(request, fallback_name):
+                    continue
+                fallback_model = self._create_fallback_model(fallback_name)
+                fallback_request = request.override(model=fallback_model)
+                response = self._bounded_model_call_sync(fallback_request, handler)
+                _raise_for_empty_response(response)
+                logger.warning("LLM model failover succeeded: %s -> %s", self.model_name, fallback_name)
+                return response, last_error
+            except GraphBubbleUp:
+                raise
+            except Exception as exc:
+                last_error = exc
+                retriable, reason = self._classify_error(exc)
+                logger.warning(
+                    "LLM fallback model %s failed (%s): %s",
+                    fallback_name,
+                    reason,
+                    _extract_error_detail(exc),
+                )
+                if not retriable or not _is_safe_for_model_failover(exc):
+                    break
+        return None, last_error
+
+    async def _try_model_fallback(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+        original_error: BaseException,
+        fallback_model_names: tuple[str, ...],
+    ) -> tuple[ModelResponse | None, BaseException]:
+        if not fallback_model_names or not _is_safe_for_model_failover(original_error):
+            return None, original_error
+
+        last_error = original_error
+        for fallback_name in fallback_model_names:
+            try:
+                if not await self._aauthorize_fallback_model(request, fallback_name):
+                    continue
+                fallback_model = await self._acreate_fallback_model(fallback_name)
+                fallback_request = request.override(model=fallback_model)
+                response = await self._bounded_model_call(fallback_request, handler)
+                _raise_for_empty_response(response)
+                logger.warning("LLM model failover succeeded: %s -> %s", self.model_name, fallback_name)
+                return response, last_error
+            except GraphBubbleUp:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                retriable, reason = self._classify_error(exc)
+                logger.warning(
+                    "LLM fallback model %s failed (%s): %s",
+                    fallback_name,
+                    reason,
+                    _extract_error_detail(exc),
+                )
+                if not retriable or not _is_safe_for_model_failover(exc):
+                    break
+        return None, last_error
+
     def _build_retry_event(
         self,
         attempt: int,
@@ -834,6 +979,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
                 max_attempts = self._max_attempts_for(exc, reason)
+                if self.fallback_model_names and _is_safe_for_model_failover(exc):
+                    max_attempts = min(
+                        max_attempts,
+                        max(1, self.retry_max_attempts - len(self.fallback_model_names)),
+                    )
                 should_retry = retriable and attempt < max_attempts
                 if should_retry and reason == "empty_response":
                     should_retry = _consume_empty_response_retry(request)
@@ -861,8 +1011,27 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
-                if retriable and reason not in _NON_CIRCUIT_FAILURE_REASONS:
-                    self._record_failure(admission=admission)
+                if retriable and reason != "empty_response":
+                    remaining_attempts = max(0, self.retry_max_attempts - attempt)
+                    try:
+                        response, last_error = self._try_model_fallback_sync(
+                            request,
+                            handler,
+                            exc,
+                            self.fallback_model_names[:remaining_attempts],
+                        )
+                    except GraphBubbleUp:
+                        self._release_half_open_probe(admission=admission)
+                        raise
+                    if response is not None:
+                        self._record_success(admission=admission)
+                        return response
+                    if reason not in _NON_CIRCUIT_FAILURE_REASONS:
+                        self._record_failure(admission=admission)
+                    else:
+                        self._release_half_open_probe(admission=admission)
+                    exc = last_error
+                    _, reason = self._classify_error(exc)
                 else:
                     # These outcomes do not show that the provider is broadly unavailable.
                     self._release_half_open_probe(admission=admission)
@@ -899,6 +1068,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 except Exception as exc:
                     retriable, reason = self._classify_error(exc)
                     max_attempts = self._max_attempts_for(exc, reason)
+                    if self.fallback_model_names and _is_safe_for_model_failover(exc):
+                        max_attempts = min(
+                            max_attempts,
+                            max(1, self.retry_max_attempts - len(self.fallback_model_names)),
+                        )
                     should_retry = retriable and attempt < max_attempts
                     if should_retry and reason == "empty_response":
                         should_retry = _consume_empty_response_retry(request)
@@ -926,8 +1100,27 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                         _extract_error_detail(exc),
                         exc_info=exc,
                     )
-                    if retriable and reason not in _NON_CIRCUIT_FAILURE_REASONS:
-                        self._record_failure(admission=admission)
+                    if retriable and reason != "empty_response":
+                        remaining_attempts = max(0, self.retry_max_attempts - attempt)
+                        try:
+                            response, last_error = await self._try_model_fallback(
+                                request,
+                                handler,
+                                exc,
+                                self.fallback_model_names[:remaining_attempts],
+                            )
+                        except GraphBubbleUp:
+                            self._release_half_open_probe(admission=admission)
+                            raise
+                        if response is not None:
+                            self._record_success(admission=admission)
+                            return response
+                        if reason not in _NON_CIRCUIT_FAILURE_REASONS:
+                            self._record_failure(admission=admission)
+                        else:
+                            self._release_half_open_probe(admission=admission)
+                        exc = last_error
+                        _, reason = self._classify_error(exc)
                     else:
                         # These outcomes do not show that the provider is broadly unavailable.
                         self._release_half_open_probe(admission=admission)
@@ -968,6 +1161,26 @@ def _extract_status_code(exc: BaseException) -> int | None:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
+def _is_safe_for_model_failover(exc: BaseException) -> bool:
+    """Only switch providers when failure is known to precede response output."""
+    if isinstance(exc, AdmissionError | EmptyModelResponseError):
+        return False
+
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int) and not isinstance(status_code, bool) and status_code in _RETRIABLE_STATUS_CODES:
+        return True
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _extract_in_band_status(exc: BaseException, *, include_type: bool = True) -> int | None:

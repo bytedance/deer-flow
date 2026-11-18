@@ -700,6 +700,16 @@ class AppConfig(BaseModel):
         models_by_name: dict[str, ModelConfig] = {}
         for model in self.models:
             models_by_name.setdefault(model.name, model)
+        for model in self.models:
+            if model.name in model.fallback_models:
+                raise ValueError(f"Model {model.name!r} cannot list itself in fallback_models")
+            for fallback_name in model.fallback_models:
+                if fallback_name not in models_by_name:
+                    raise ValueError(f"Model {model.name!r} references unknown fallback model {fallback_name!r}")
+                if sum(candidate.name == fallback_name for candidate in self.models) > 1:
+                    raise ValueError(f"Fallback model name {fallback_name!r} is ambiguous")
+            if len(model.fallback_models) + 1 > self.llm_call.retry_max_attempts:
+                raise ValueError(f"Model {model.name!r} has more primary and fallback candidates than `llm_call.retry_max_attempts` allows")
         tools_by_name: dict[str, ToolConfig] = {}
         for tool in self.tools:
             tools_by_name.setdefault(tool.name, tool)

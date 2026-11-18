@@ -31,6 +31,7 @@ from deerflow.agents.middlewares.llm_error_handling_middleware import (
     _extract_retry_after_ms,
 )
 from deerflow.config.app_config import AppConfig, LlmCallConfig
+from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
 
@@ -78,6 +79,26 @@ def _make_app_config() -> AppConfig:
     return AppConfig(sandbox=SandboxConfig(use="test"))
 
 
+def _make_fallback_app_config(retry_max_attempts: int = 2) -> AppConfig:
+    return AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(retry_max_attempts=retry_max_attempts),
+        models=[
+            ModelConfig(name="primary", use="test:Model", model="primary", fallback_models=["backup"]),
+            ModelConfig(name="backup", use="test:Model", model="backup"),
+        ],
+    )
+
+
+class _FailoverRequest:
+    def __init__(self, model: object) -> None:
+        self.model = model
+        self.runtime = SimpleNamespace(context={})
+
+    def override(self, **kwargs):
+        return _FailoverRequest(kwargs["model"])
+
+
 class FakeError(Exception):
     def __init__(
         self,
@@ -93,6 +114,146 @@ class FakeError(Exception):
         self.code = code
         self.body = body
         self.response = SimpleNamespace(status_code=status_code, headers=headers or {}) if status_code is not None or headers else None
+
+
+def test_sync_call_fails_over_to_configured_model_after_transient_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+    attempts = []
+
+    def handler(request):
+        attempts.append(request.model)
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        return AIMessage(content="fallback response")
+
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert attempts == ["primary", "backup-model"]
+    assert result.content == "fallback response"
+
+
+def test_async_call_fails_over_to_configured_model_after_transient_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+    attempts = []
+
+    async def handler(request):
+        attempts.append(request.model)
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        return AIMessage(content="fallback response")
+
+    result = asyncio.run(middleware.awrap_model_call(_FailoverRequest("primary"), handler))
+
+    assert attempts == ["primary", "backup-model"]
+    assert result.content == "fallback response"
+
+
+def test_sync_fallback_graph_bubble_up_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    middleware._circuit_state = "half_open"
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+
+    def handler(request):
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        raise GraphBubbleUp()
+
+    with pytest.raises(GraphBubbleUp):
+        middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert middleware._circuit_probe_in_flight is False
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), lambda _request: AIMessage(content="healthy"))
+    assert result.content == "healthy"
+
+
+@pytest.mark.anyio
+async def test_async_fallback_graph_bubble_up_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    middleware._circuit_state = "half_open"
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+
+    async def handler(request):
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        raise GraphBubbleUp()
+
+    with pytest.raises(GraphBubbleUp):
+        await middleware.awrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert middleware._circuit_probe_in_flight is False
+
+    async def healthy_handler(_request):
+        return AIMessage(content="healthy")
+
+    result = await middleware.awrap_model_call(_FailoverRequest("primary"), healthy_handler)
+    assert result.content == "healthy"
+
+
+def test_async_call_does_not_fail_over_after_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    fallback_builds = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_builds.append(name) or name)
+    attempts = []
+
+    async def handler(request):
+        attempts.append(request.model)
+        raise httpx.ReadTimeout("response stream stalled")
+
+    result = asyncio.run(middleware.awrap_model_call(_FailoverRequest("primary"), handler))
+
+    assert attempts == ["primary", "primary"]
+    assert fallback_builds == []
+    assert result.additional_kwargs["error_type"] == "ReadTimeout"
+
+
+def test_failover_attempts_never_exceed_configured_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(
+        app_config=_make_fallback_app_config(retry_max_attempts=3),
+        model_name="primary",
+    )
+    fallback_builds = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_builds.append(name) or name)
+    monkeypatch.setattr(middleware, "_max_attempts_for", lambda _exc, _reason: 3)
+    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.time.sleep", lambda _delay: None)
+    primary_attempts = 0
+
+    def handler(request):
+        nonlocal primary_attempts
+        if request.model != "primary":
+            return AIMessage(content="fallback")
+        primary_attempts += 1
+        if primary_attempts < 3:
+            raise httpx.ReadTimeout("stream stalled")
+        raise FakeError("provider unavailable", status_code=503)
+
+    middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert primary_attempts == 3
+    assert fallback_builds == []
+
+
+def test_sync_call_skips_unauthorized_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deerflow.models import selection
+
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: pytest.fail("unauthorized model was constructed"))
+
+    def deny_fallback(model_name, *, context, app_config):
+        assert model_name == "backup"
+        raise selection.ModelAuthorizationDenied("denied")
+
+    monkeypatch.setattr(selection, "authorize_selected_model", deny_fallback)
+    attempts = []
+
+    def handler(request):
+        attempts.append(request.model)
+        raise FakeError("provider unavailable", status_code=503)
+
+    middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert attempts == ["primary"]
 
 
 # Middleware-level attribute -> ``LlmCallConfig`` field. ``llm_call`` knobs are

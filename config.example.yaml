@@ -162,6 +162,8 @@ models:
   #   # Model-name aliases differ from reasoning.effort.aliases (effort values).
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: doubao-seed-1-8-251228
+  #   # Optional ordered failover profiles; the same names must exist under models:.
+  #   # fallback_models: [deepseek-backup, claude-backup]
   #   api_base: https://ark.cn-beijing.volces.com/api/v3
   #   api_key: $VOLCENGINE_API_KEY
   #   timeout: 600.0

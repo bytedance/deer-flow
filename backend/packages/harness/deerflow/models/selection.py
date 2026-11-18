@@ -11,6 +11,15 @@ from typing import Any, Literal
 
 ModelScope = Literal["task", "turn", "conversation"]
 
+
+class ModelAuthorizationDenied(ValueError):
+    """A configured model is not authorized for the current principal."""
+
+
+class ModelAuthorizationUnavailable(ValueError):
+    """The authorization provider could not decide whether a model is usable."""
+
+
 _PATTERNS = (
     ("conversation", r"^(?:请)?(?:以后|今后|接下来)(?:这个对话|这段对话|这里)?(?:都|一直|默认)?(?:用|使用|改用|换成)\s*(.+?)(?:模型)?(?:[，。：:]|$)"),
     ("conversation", r"^(?:please\s+)?from now on\s+use\s+(.+?)(?:[,:]|$)"),
@@ -115,10 +124,10 @@ def authorize_selected_model(model_name: str, *, context: Any, app_config: Any) 
             raise TypeError("Invalid authorization result")
     except Exception:
         if authz.fail_closed:
-            raise ValueError("Model authorization is unavailable.") from None
+            raise ModelAuthorizationUnavailable("Model authorization is unavailable.") from None
         return
     if not decision.allow:
-        raise ValueError("The selected model is not available for your role.")
+        raise ModelAuthorizationDenied("The selected model is not available for your role.")
 
 
 def bind_selected_task_model(tools: list[Any], model_name: str) -> list[Any]:
