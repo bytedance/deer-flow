@@ -221,17 +221,20 @@ def test_fake_append_expected_version_conflict():
     with pytest.raises(NotFoundError):
         client.get_stream("s")
     assert client.get_current_version("s") is StreamState.NO_STREAM
-    with pytest.raises(WrongCurrentVersionError):
+    with pytest.raises(WrongCurrentVersionError) as missing:
         client.append_to_stream("s", events=[_event()], current_version=0)
+    assert (missing.value.stream_name, missing.value.actual_version, missing.value.expected_version) == ("s", StreamState.NO_STREAM, 0)
     with pytest.raises(WrongCurrentVersionError):
         client.append_to_stream("s", events=[_event()], current_version=StreamState.EXISTS)
 
     first = client.append_to_stream("s", events=[_event(n=0), _event(n=1)], current_version=StreamState.NO_STREAM)
     assert client.get_current_version("s") == 1
-    with pytest.raises(WrongCurrentVersionError):
+    with pytest.raises(WrongCurrentVersionError) as exists:
         client.append_to_stream("s", events=[_event()], current_version=StreamState.NO_STREAM)
-    with pytest.raises(WrongCurrentVersionError):
+    assert (exists.value.stream_name, exists.value.actual_version, exists.value.expected_version) == ("s", 1, StreamState.NO_STREAM)
+    with pytest.raises(WrongCurrentVersionError) as stale:
         client.append_to_stream("s", events=_event(), current_version=0)
+    assert (stale.value.actual_version, stale.value.expected_version) == (1, 0)
     second = client.append_to_stream("s", events=_event(n=2), current_version=1)
     third = client.append_to_stream("s", events=[_event(n=3)], current_version=StreamState.ANY)
     fourth = client.append_to_stream("s", events=[_event(n=4)], current_version=StreamState.EXISTS)
@@ -272,8 +275,9 @@ def test_fake_truncate_and_soft_delete_semantics():
     client.append_to_stream("s", events=[_event(n=i) for i in range(5)], current_version=StreamState.NO_STREAM)
 
     assert client.get_stream_metadata("s") == ({}, StreamState.NO_STREAM)
-    with pytest.raises(WrongCurrentVersionError):
+    with pytest.raises(WrongCurrentVersionError) as meta:
         client.set_stream_metadata("s", metadata={"$tb": 2}, current_version=0)
+    assert (meta.value.stream_name, meta.value.actual_version, meta.value.expected_version) == ("$$s", StreamState.NO_STREAM, 0)
     client.set_stream_metadata("s", metadata={"$tb": 2}, current_version=StreamState.NO_STREAM)
     assert client.get_stream_metadata("s") == ({"$tb": 2}, 0)
     with pytest.raises(WrongCurrentVersionError):
@@ -293,11 +297,18 @@ def test_fake_truncate_and_soft_delete_semantics():
     assert [e.stream_position for e in client.get_stream("s")] == [4, 5]
 
     # Soft delete: conditional on the head; then the stream reads as missing.
-    with pytest.raises(WrongCurrentVersionError):
+    with pytest.raises(WrongCurrentVersionError) as stale_delete:
         client.delete_stream("s", current_version=4)
+    assert (stale_delete.value.stream_name, stale_delete.value.actual_version, stale_delete.value.expected_version) == ("s", 5, 4)
     client.delete_stream("s", current_version=5)
     with pytest.raises(NotFoundError):
         client.get_stream("s")
+    # A conditional delete of a deleted or missing stream is NotFound: the real client maps actual version -1 to it.
+    for expected in (5, StreamState.EXISTS):
+        with pytest.raises(NotFoundError):
+            client.delete_stream("s", current_version=expected)
+    with pytest.raises(NotFoundError):
+        client.delete_stream("never", current_version=0)
     assert client.get_current_version("s") is StreamState.NO_STREAM
 
     # Appending recreates it: revisions continue and nothing from before the delete is readable.
@@ -339,6 +350,22 @@ def test_fake_assumes_soft_delete_writes_max_tb_and_keeps_metadata():
     client.delete_stream("s", current_version=0)
     metadata, version = client.get_stream_metadata("s")
     assert metadata == {"k": "v", "$tb": 2**63 - 1} and version == 1
+
+
+def test_fake_assumes_unconditional_delete_of_missing_stream_is_a_no_op():
+    """Assumption: ``delete_stream`` on a missing or soft-deleted stream with ``ANY``
+    or ``NO_STREAM`` succeeds without writing anything. Confirm in the live suite."""
+    server = FakeKurrentDB()
+    client = server.sync_client()
+    for expected in (StreamState.ANY, StreamState.NO_STREAM):
+        client.delete_stream("never", current_version=expected)
+    assert client.get_stream_metadata("never") == ({}, StreamState.NO_STREAM)
+    client.append_to_stream("s", events=[_event()], current_version=StreamState.NO_STREAM)
+    client.delete_stream("s", current_version=0)
+    deleted_metadata = client.get_stream_metadata("s")
+    for expected in (StreamState.ANY, StreamState.NO_STREAM):
+        client.delete_stream("s", current_version=expected)
+    assert client.get_stream_metadata("s") == deleted_metadata
 
 
 def test_fake_failure_injection_lost_ack_and_late_commit():

@@ -13,11 +13,15 @@ Semantics modelled (see ``test_kurrentdb_extension_basics.py``):
   original commit position; a different event there is a conflict
 - Stream metadata lives in its own versioned history; ``$tb`` (truncate before)
   hides lower positions from every read without renumbering
+- ``WrongCurrentVersionError`` carries ``stream_name``, ``actual_version`` and
+  ``expected_version`` like the real one (metadata conflicts name ``$$<stream>``)
 - A soft delete (``delete_stream``) is conditional on the head and sets ``$tb`` to
   the maximum int64, keeping other metadata keys; the stream then reads as missing
   (``NotFoundError``, ``get_current_version`` -> ``NO_STREAM``). An append with
   ``NO_STREAM``, ``ANY`` or the pre-delete head recreates it, positions continue,
-  and ``$tb`` drops to the first new event
+  and ``$tb`` drops to the first new event. Deleting a missing or soft-deleted
+  stream with an int or ``EXISTS`` raises ``NotFoundError``; with ``ANY`` or
+  ``NO_STREAM`` it is a no-op (an assumption, see ``test_fake_assumes_*``)
 
 Failure injection, per method name:
 
@@ -181,7 +185,8 @@ class FakeKurrentDB:
             # The pre-delete head stays a valid expectation after a soft delete.
             ok = bool(stream.events) and current_version == last
         if not ok:
-            raise WrongCurrentVersionError(f"stream {name!r}: expected {current_version!r}, current {StreamState.NO_STREAM if deleted or not stream.events else last!r}")
+            actual = StreamState.NO_STREAM if deleted or not stream.events else last
+            raise WrongCurrentVersionError(f"stream {name!r}: expected {current_version!r}, current {actual!r}", stream_name=name, actual_version=actual, expected_version=current_version)
         if not batch:
             return self._commit_position
 
@@ -252,7 +257,10 @@ class FakeKurrentDB:
         else:
             ok = current_version == head
         if not ok:
-            raise WrongCurrentVersionError(f"stream {name!r}: expected {current_version!r}, current {head!r}")
+            if head is StreamState.NO_STREAM:
+                # The server reports actual version -1, which the client maps to NotFoundError.
+                raise NotFoundError(f"stream {name!r} not found (expected {current_version!r})")
+            raise WrongCurrentVersionError(f"stream {name!r}: expected {current_version!r}, current {head!r}", stream_name=name, actual_version=head, expected_version=current_version)
         if head is StreamState.NO_STREAM:
             return
         stream = self._streams[name]
@@ -275,7 +283,7 @@ class FakeKurrentDB:
         else:
             ok = current_version == version
         if not ok:
-            raise WrongCurrentVersionError(f"metadata of {name!r}: expected {current_version!r}, current {version!r}")
+            raise WrongCurrentVersionError(f"metadata of {name!r}: expected {current_version!r}, current {version!r}", stream_name=f"$${name}", actual_version=version, expected_version=current_version)
         self._write_metadata(name, metadata)
 
 
