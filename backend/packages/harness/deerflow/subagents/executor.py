@@ -1857,6 +1857,7 @@ class SubagentExecutor:
             lead_task_id,
             notify_task_start,
             notify_task_stop,
+            stopped_task_info,
             subagent_task_outcome,
         )
 
@@ -2299,7 +2300,11 @@ class SubagentExecutor:
                         await notify_task_stop(
                             loaded_extensions,
                             task_store,
-                            task_info,
+                            stopped_task_info(
+                                task_info,
+                                status=result.status.value,
+                                error=result.error,
+                            ),
                             subagent_task_outcome(
                                 cancelled=result.status is SubagentStatus.CANCELLED,
                                 succeeded=result.status is SubagentStatus.COMPLETED,

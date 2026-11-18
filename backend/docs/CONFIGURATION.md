@@ -1659,6 +1659,8 @@ sandbox:
    ready_timeout: 30                  # create/readiness timeout seconds
    use_server_proxy: false            # proxy execd/file traffic through server
    secure_access: false               # per-sandbox endpoint token; Kubernetes + gateway mode only
+   resource: {cpu: "2", memory: 4Gi}  # sandbox limits; omitted = SDK default 1 CPU / 2Gi
+   resource_requests: {cpu: "1", memory: 2Gi}  # sandbox requests; omitted = server default
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
@@ -1670,6 +1672,19 @@ sandbox:
 `use_server_proxy` and `secure_access` accept YAML booleans. Omitted or `null`
 values default to `false`. Quoted values such as `"false"` cause a provider
 startup error.
+
+`resource` and `resource_requests` map resource names to Kubernetes quantities
+(`cpu`, `memory`, or any name the OpenSandbox runtime accepts). They become the
+sandbox's limits and requests. Without `resource`, the SDK asks for 1 CPU and
+2Gi; without `resource_requests`, the server decides the requests.
+
+Only Kubernetes runtimes apply `resource_requests`; the Docker runtime ignores
+them. On Kubernetes, a request you omit defaults to its limit, and every request
+must fit within its limit. That includes the SDK default limits: setting only
+`resource_requests: {cpu: "2", memory: 4Gi}` sends limits of 1 CPU and 2Gi, and
+the sandbox creation fails. Set `resource` whenever requests exceed those
+defaults. Blank names or quantities and zero, negative or non-finite numbers
+cause a provider startup error.
 
 Install the optional SDK before selecting this provider:
 
@@ -2280,6 +2295,45 @@ Docker container. DeerFlow forwards enabled MCP servers to the MCode session.
 Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
 only when the agent is expected to edit files or run commands for a trusted
 task.
+
+Pi can run as an external coding agent through the community `pi-acp` adapter.
+The adapter launches the separate `pi` executable, so install both packages in
+the Gateway environment before starting DeerFlow. `pi-acp` currently requires
+Node.js 22+ and pi 0.81.0+:
+
+```bash
+npm install --global @earendil-works/pi-coding-agent
+npm install --global pi-acp
+```
+
+Configure pi's model provider and API key separately for the user that runs the
+Gateway. For interactive providers, start `pi` in that same environment, then run
+`/login` in Pi's terminal UI and select your provider. Alternatively, provide the
+provider's documented environment variables. The `pi` executable and its credentials must
+be available inside the Gateway container; installing or authenticating them
+only on the Docker host is not sufficient.
+
+```yaml
+acp_agents:
+  pi:
+    command: pi-acp
+    args: []
+    description: Pi coding agent for repository tasks and code generation
+    auto_approve_permissions: false
+```
+
+Node.js, `pi-acp`, and `pi` must be available on the Gateway process's `PATH`. When
+the Gateway runs in Docker, install them inside the Gateway image or container.
+Pi executes its filesystem and shell tools directly in its working environment.
+`auto_approve_permissions` only controls permission requests sent through ACP;
+leaving it disabled does not sandbox these direct operations. Run untrusted Pi
+tasks in an independently isolated process, container, or VM with only the
+required files, credentials, and network access. Keep
+`auto_approve_permissions` disabled for untrusted tasks. Alternatively,
+set `command: npx` and `args: ["-y", "pi-acp"]` to fetch the adapter on demand;
+this requires `npx` on the Gateway's `PATH` and may require network access at
+startup. Preinstalling the adapter lets deployment tooling control its version
+without fetching it during an invocation.
 
 
 ## HITL Tool Approval

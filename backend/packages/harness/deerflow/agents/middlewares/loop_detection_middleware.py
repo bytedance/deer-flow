@@ -47,16 +47,33 @@ that omit ``run_id`` receive an opaque fallback ID anchored to LangGraph's
 run-scoped ``Runtime.control`` object, so replacement ``Runtime`` wrappers
 share one budget within an invocation while a later invocation starts fresh.
 
+Per-tool cap:
+  A per-tool frequency limit drops only the calls of a response that would
+  reach it; the calls within the limit run. The capped tool then stays
+  blocked for the rest of the execution. That state cannot live in the
+  frequency window (dropped calls are not counted, so other tools would
+  evict the capped tool and reopen it) or in memory (an approval resume is
+  a new run, possibly on a restarted Gateway). It is a checkpointed record
+  in the private ``loop_cap`` state channel, together with the explanation
+  the model has not read yet. ``before_agent`` expires a record that
+  another run left behind, which is what gives a new task its fresh budget:
+  that hook runs when a task enters the graph and not on a resume. See
+  ``docs/LOOP_DETECTION.md``.
+
 Stop-reason surfacing (#3875 Phase 2):
-  Like the token-budget guard, the loop hard stop does NOT raise — it
-  strips ``tool_calls`` so the agent loop terminates naturally with a
-  final answer. To let the caller (the subagent executor) distinguish a
-  loop-capped completion from a clean one, the run that triggered the hard
-  stop is recorded in ``_stop_reason`` and exposed via
+  Like the token-budget guard, a loop cap does NOT raise. The hard stop
+  strips ``tool_calls`` so the agent loop terminates naturally with a final
+  answer, and a per-tool cap lets the run wrap up. To let the caller (the
+  subagent executor) distinguish a loop-capped completion from a clean one,
+  the capped run is recorded in ``_stop_reason`` and exposed via
   :meth:`consume_stop_reason`. The executor collects that reason alongside
   the token-budget guard's so a loop-capped run surfaces as
   ``completed + loop_capped`` and the lead/ledger can tell it was capped
-  without parsing result text.
+  without parsing result text. A per-tool cap reports only when the run ends,
+  and not at all when another guard stopped the run, because other
+  middlewares read ``runtime.context["stop_reason"]`` mid-run as "the run is
+  ending" (see ``_report_cap``). A response whose admitted calls another
+  middleware discards before they run is undone (see ``_Admission``).
 """
 
 from __future__ import annotations
@@ -67,13 +84,14 @@ import logging
 import threading
 import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, override
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
+from itertools import islice
+from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, PrivateStateAttr
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
@@ -108,6 +126,21 @@ _OPEN_ENDED_READ = "end"
 _UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
 
 type _RunScopeKey = tuple[str, str | None]
+
+# State channel holding the tools that reached their per-tool limit. It is
+# checkpointed, so the cap outlives an approval pause, a new ``run_id`` on
+# resume, a Gateway restart and context compaction. See ``_LoopCap``.
+LOOP_CAP_STATE_KEY = "loop_cap"
+# Bounds on what a persisted record may name; a larger record is not ours.
+_MAX_CAPPED_TOOLS = 64
+_MAX_TOOL_NAME_CHARS = 128
+
+
+class LoopDetectionState(AgentState):
+    """Adds the per-tool cap record. Private: a client can neither send nor stream it."""
+
+    loop_cap: NotRequired[Annotated[dict | None, PrivateStateAttr]]
+
 
 # Deeply nested args cannot be serialized for a key; they collapse to one opaque key.
 _UNSERIALIZABLE_ARGS = "<unserializable>"
@@ -272,7 +305,141 @@ _TOOL_FREQ_WARNING_MSG = "[LOOP DETECTED] You have called {tool_name} {count} ti
 
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 
+# Admission is not execution: an admitted call can still be denied by approval,
+# a guardrail or the tool itself, so the model is pointed at the results.
+_TOOL_FREQ_REJECT_MSG = (
+    "[LOOP DETECTED] Loop detection skipped {skipped} of the {total} tool calls in your last response because {tools} reached "
+    "the per-tool limit for this run. The other {admitted} were passed on; their results above show which of them actually ran. "
+    "Do not call {names} again in this run. " + _WRAP_UP_INSTRUCTIONS
+)
+# For a drop whose tool the cap record cannot name (see ``_recordable_caps``).
+_UNNAMED_TOOL = "a tool"
+_UNNAMED_TOOL_AGAIN = "that tool"
+
 _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
+
+_TOOL_CAPPED_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} reached its per-tool safety limit of {limit} calls earlier in this run and cannot run again. Producing final answer with results collected so far."
+
+
+def _usable_tool_name(name: object) -> bool:
+    return isinstance(name, str) and 0 < len(name) <= _MAX_TOOL_NAME_CHARS and name.isprintable() and not any(ch.isspace() for ch in name)
+
+
+def _positive_int(value: object) -> bool:
+    return type(value) is int and value > 0
+
+
+def _recordable_caps(existing: Mapping[str, int], limits: Mapping[str, int]) -> dict[str, int]:
+    """Add newly limited tools to the capped set, keeping only what ``_read_loop_cap`` accepts.
+
+    The names come from the model's response, so one can be longer than the
+    reader allows, and a response can limit more tools than a record may hold.
+    Such a tool is left out: the window already dropped its calls, and writing
+    it would make the next read discard the record with every other cap in it.
+    Existing caps are kept first.
+    """
+    recorded = dict(existing)
+    for name, limit in limits.items():
+        if name not in recorded and len(recorded) < _MAX_CAPPED_TOOLS and _usable_tool_name(name) and _positive_int(limit):
+            recorded[name] = limit
+    return recorded
+
+
+@dataclass(frozen=True)
+class _CapNotice:
+    """What the model has not been told yet about its last trimmed response."""
+
+    total: int
+    skipped: int
+    tools: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _LoopCap:
+    """Tools that reached their per-tool limit in the execution that owns ``run_id``.
+
+    A capped tool stays blocked until a new task enters the graph, even when
+    other calls evict its entries from the frequency window. ``run_id`` is the
+    run that last carried the cap: an approval resume adopts it, and
+    ``before_agent`` expires a cap that another run left behind.
+
+    ``tools`` is empty when calls were dropped only for tools the record cannot
+    name. The record then still marks the execution as capped and carries the
+    notice.
+    """
+
+    run_id: str | None
+    tools: dict[str, int]
+    notice: _CapNotice | None = None
+
+    def dump(self) -> dict:
+        value: dict = {"run_id": self.run_id, "tools": dict(self.tools)}
+        if self.notice is not None:
+            value["notice"] = {"total": self.notice.total, "skipped": self.notice.skipped, "tools": list(self.notice.tools)}
+        return value
+
+    def notice_text(self) -> str | None:
+        notice = self.notice
+        if notice is None:
+            return None
+        return _TOOL_FREQ_REJECT_MSG.format(
+            skipped=notice.skipped,
+            total=notice.total,
+            admitted=notice.total - notice.skipped,
+            tools=", ".join(f"{name} (limit {self.tools[name]})" for name in notice.tools) or _UNNAMED_TOOL,
+            names=", ".join(notice.tools) or _UNNAMED_TOOL_AGAIN,
+        )
+
+
+def _read_loop_cap(value: object) -> _LoopCap | None:
+    """Validate a checkpointed cap record; anything malformed reads as no cap.
+
+    The record may come from an older release or a direct checkpoint write, and
+    its tool names are quoted to the model, so every field is checked here.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    raw_tools = value.get("tools")
+    run_id = value.get("run_id")
+    if not isinstance(raw_tools, Mapping) or len(raw_tools) > _MAX_CAPPED_TOOLS or not isinstance(run_id, str | None):
+        return None
+    if not all(_usable_tool_name(name) and _positive_int(limit) for name, limit in raw_tools.items()):
+        return None
+    tools = dict(raw_tools)
+
+    notice = None
+    raw_notice = value.get("notice")
+    if isinstance(raw_notice, Mapping):
+        total, skipped, names = raw_notice.get("total"), raw_notice.get("skipped"), raw_notice.get("tools")
+        if _positive_int(total) and _positive_int(skipped) and skipped < total and isinstance(names, list) and all(isinstance(name, str) and name in tools for name in names):
+            notice = _CapNotice(total=total, skipped=skipped, tools=tuple(dict.fromkeys(names)))
+    return _LoopCap(run_id=run_id, tools=tools, notice=notice)
+
+
+@dataclass(frozen=True)
+class _Admission:
+    """Loop state from before a response whose calls were passed on.
+
+    Another middleware can still discard every one of those calls before they
+    run: input admission supersedes the response when the user steers, and
+    approval strips calls it cannot address. Calls that never ran must not
+    count toward a limit or leave a cap behind, so the state is kept until the
+    next model call shows whether any of the calls stood. That check runs in
+    ``wrap_model_call`` rather than a ``before_model`` hook, because a hook is
+    a graph node: it would cost every turn a super-step of the run's
+    recursion limit.
+    """
+
+    message_id: str
+    call_ids: frozenset[str]
+    # The cap record as it would stand had the response made no decision.
+    record: dict | None
+    history: list[str] | None
+    warned: frozenset[str] | None
+    names: tuple[str, ...] | None
+    counter: dict[str, int] | None
+    freq_warned: frozenset[str] | None
+    pending_warnings: tuple[str, ...] | None
 
 
 @dataclass(frozen=True)
@@ -280,18 +447,26 @@ class _LoopDecision:
     """A loop-detection transition that may be persisted for audit."""
 
     message: str
-    action: Literal["warn", "hard_stop"]
+    action: Literal["warn", "hard_stop", "reject_excess"]
     detection_layer: Literal["identical_call_set", "tool_frequency"]
     tool_names: tuple[str, ...]
     count: int
     threshold: int
+    # reject_excess only: positions of the calls removed from the batch, the
+    # limit of every tool they belong to, the tools that reached their limit in
+    # this batch (rather than earlier) as (name, count, threshold), and a
+    # warning selected for the admitted calls that is delivered alongside.
+    rejected_indices: tuple[int, ...] = ()
+    limits: dict[str, int] = field(default_factory=dict)
+    crossings: tuple[tuple[str, int, int], ...] = ()
+    companion_warning: str | None = None
 
     @property
     def hard_stop(self) -> bool:
         return self.action == "hard_stop"
 
 
-class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
+class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
     """Detects and breaks repetitive tool call loops.
 
     Threshold parameters are validated upstream by :class:`LoopDetectionConfig`;
@@ -324,6 +499,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             weakening protection on all other tools. Default: ``None``
             (no overrides).
     """
+
+    state_schema = LoopDetectionState
 
     def __init__(
         self,
@@ -402,6 +579,16 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # both maps are written, evicted, and popped together under ``_lock``.
         self._stop_reason: BoundedDict[str | None, str] = BoundedDict(1000)
         self._stop_reason_thread_id: BoundedDict[str | None, str] = BoundedDict(1000)
+        # The newest response per run scope whose calls were passed on, with the
+        # state from before it (see ``_Admission``). Settled by the next
+        # ``before_model``; bounded because a run that pauses for approval
+        # resumes under another scope and never settles its entry.
+        self._admissions: OrderedDict[_RunScopeKey, _Admission] = OrderedDict()
+        # The cap record to use instead of the checkpointed one, set when an
+        # admission is undone in ``wrap_model_call`` and written to state by
+        # the ``after_model`` of that same model call.
+        self._record_overrides: OrderedDict[_RunScopeKey, dict | None] = OrderedDict()
+        self._max_admissions = max(1, self.max_tracked_threads * 2)
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
@@ -529,6 +716,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._tool_name_history.pop(evicted_key, None)
             self._tool_name_counter.pop(evicted_key, None)
             self._tool_freq_warned.pop(evicted_key, None)
+            self._admissions.pop(evicted_key, None)
+            self._record_overrides.pop(evicted_key, None)
             self._drop_pending_warning_key_locked(evicted_key)
             logger.debug(
                 "Evicted loop tracking for thread/run scope (LRU)",
@@ -576,10 +765,55 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._touch_pending_warning_key_locked(pending_key)
             self._prune_pending_warning_state_locked(protected_key=pending_key)
 
+    def _count_after_call(self, scope_key: _RunScopeKey, name: str) -> int:
+        """The windowed count of ``name`` if one more call to it were recorded.
+
+        A full window drops its oldest entry for the new one, so a call that
+        replaces an older call to the same tool does not raise the count. This
+        is the count ``_record_call_locked`` would return, without recording.
+
+        Must be called while holding self._lock.
+        """
+        history = self._tool_name_history[scope_key]
+        overflow = len(history) + 1 - self._tool_freq_window
+        evicted = sum(1 for old in islice(history, max(overflow, 0)) if old == name)
+        return self._tool_name_counter[scope_key].get(name, 0) + 1 - evicted
+
+    def _record_call_locked(self, scope_key: _RunScopeKey, name: str) -> int:
+        """Record one call in the frequency window and return the tool's count.
+
+        Windowed counting: append the name and trim to the frequency window
+        (>= the largest threshold) so the count can reach the warn/hard limits
+        on a tight burst yet still decay for spread-out calls. A mirrored
+        Counter gives an O(1) count even when a per-tool override inflates the
+        window globally.
+
+        Must be called while holding self._lock.
+        """
+        history = self._tool_name_history[scope_key]
+        counter = self._tool_name_counter[scope_key]
+        history.append(name)
+        counter[name] += 1
+        while len(history) > self._tool_freq_window:
+            old = history.popleft()
+            c = counter[old] - 1
+            if c <= 0:
+                del counter[old]
+            else:
+                counter[old] = c
+            old_warn = self._tool_freq_overrides.get(old, self._default_tool_freq_thresholds)[0]
+            if c < old_warn:
+                # Any tool can evict an older name from the shared window.
+                # Rearm that name as soon as its burst decays, even when the
+                # current call belongs to another tool.
+                self._tool_freq_warned[scope_key].discard(old)
+        return counter.get(name, 0)
+
     def _track_and_check(
         self,
         state: AgentState,
         runtime: Runtime,
+        cap: _LoopCap | None = None,
     ) -> _LoopDecision | None:
         """Track tool calls and check for loops.
 
@@ -588,6 +822,9 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
           2. **Frequency-based** (new): catches the same *tool type* being
              called many times with varying arguments (e.g. ``read_file``
              on 40 different files).
+
+        ``cap`` names the tools that already reached their limit in this
+        execution; their calls are rejected whatever the window now counts.
 
         Returns:
             A structured decision when a warning or hard stop is triggered.
@@ -668,54 +905,42 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 )
 
             # --- Layer 2: per-tool-type frequency (windowed) ---
-            tool_name_history = self._tool_name_history[scope_key]
             name_counter = self._tool_name_counter[scope_key]
-            for tc in tool_calls:
+            # A call that would reach its tool's hard limit is rejected instead
+            # of stopping the whole batch, so calls within the limit still run.
+            # Rejected calls never run and are not counted in the window.
+            capped = cap.tools if cap is not None else {}
+            rejected: list[int] = []
+            limited: dict[str, tuple[int, int]] = {}
+            # Tools that reach their limit in this response, with the count and
+            # threshold of the crossing. One audit row is written for each.
+            crossings: list[tuple[str, int, int]] = []
+            for index, tc in enumerate(tool_calls):
                 name = tc.get("name", "")
                 if not name:
                     continue
-                # Windowed counting: append the name and trim to the frequency
-                # window (>= the largest threshold) so the count can reach the
-                # warn/hard limits on a tight burst yet still decay for
-                # spread-out calls. A mirrored Counter gives O(1) freq_count
-                # even when a per-tool override inflates the window globally.
-                tool_name_history.append(name)
-                name_counter[name] += 1
-                while len(tool_name_history) > self._tool_freq_window:
-                    old = tool_name_history.popleft()
-                    c = name_counter[old] - 1
-                    if c <= 0:
-                        del name_counter[old]
-                    else:
-                        name_counter[old] = c
-                    old_warn = self._tool_freq_overrides.get(old, self._default_tool_freq_thresholds)[0]
-                    if c < old_warn:
-                        # Any tool can evict an older name from the shared
-                        # window. Rearm that name as soon as its burst decays,
-                        # even when the current call belongs to another tool.
-                        self._tool_freq_warned[scope_key].discard(old)
-                freq_count = name_counter.get(name, 0)
-
+                if name in capped:
+                    # Capped earlier in this execution. The window may have
+                    # decayed since, which must not reopen the tool.
+                    limited.setdefault(name, (capped[name], capped[name]))
+                    rejected.append(index)
+                    continue
+                if name in limited:
+                    rejected.append(index)
+                    continue
                 eff_warn, eff_hard = self._tool_freq_overrides.get(name, self._default_tool_freq_thresholds)
-
-                if freq_count >= eff_hard:
-                    logger.error(
-                        "Tool frequency hard limit reached — forcing stop",
-                        extra={
-                            "thread_id": thread_id,
-                            "run_id": run_id,
-                            "tool_name": name,
-                            "count": freq_count,
-                        },
-                    )
-                    return _LoopDecision(
-                        message=_TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=freq_count),
-                        action="hard_stop",
-                        detection_layer="tool_frequency",
-                        tool_names=(name,),
-                        count=freq_count,
-                        threshold=eff_hard,
-                    )
+                # Compare the count the call would leave in the window, after
+                # the window has dropped its oldest entry. Counting before that
+                # would reject a call that only replaces an older call to the
+                # same tool, and cap an interleaved workflow that never reaches
+                # the limit.
+                prospective = self._count_after_call(scope_key, name)
+                if prospective >= eff_hard:
+                    limited[name] = (prospective, eff_hard)
+                    crossings.append((name, prospective, eff_hard))
+                    rejected.append(index)
+                    continue
+                freq_count = self._record_call_locked(scope_key, name)
 
                 if freq_count >= eff_warn:
                     freq_warned = self._tool_freq_warned[scope_key]
@@ -732,6 +957,35 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     # Windowed count decayed below the warn threshold; allow a
                     # future burst of this tool to warn again.
                     self._tool_freq_warned[scope_key].discard(name)
+
+            first_limit = next(iter(limited.items()), None)
+            if first_limit is not None and len(rejected) == sum(1 for tc in tool_calls if tc.get("name")):
+                # No call fits: stop the run as before.
+                name, (freq_count, eff_hard) = first_limit
+                if name in capped:
+                    message = _TOOL_CAPPED_HARD_STOP_MSG.format(tool_name=name, limit=eff_hard)
+                else:
+                    # Count the call that reached the limit so later checks see
+                    # the exhausted window.
+                    self._record_call_locked(scope_key, name)
+                    message = _TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=freq_count)
+                logger.error(
+                    "Tool frequency hard limit reached — forcing stop",
+                    extra={
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                        "tool_name": name,
+                        "count": freq_count,
+                    },
+                )
+                return _LoopDecision(
+                    message=message,
+                    action="hard_stop",
+                    detection_layer="tool_frequency",
+                    tool_names=(name,),
+                    count=freq_count,
+                    threshold=eff_hard,
+                )
 
             if warning is not None:
                 if warning.detection_layer == "identical_call_set":
@@ -761,6 +1015,36 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                             "count": warning.count,
                         },
                     )
+
+            if first_limit is not None:
+                # Some calls fit: run them and drop only the calls past a limit.
+                _, (freq_count, eff_hard) = first_limit
+                logger.warning(
+                    "Tool frequency hard limit reached inside a batch — dropping the calls past the limit",
+                    extra={
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                        "tools": list(limited),
+                        "rejected": len(rejected),
+                        "batch": len(tool_calls),
+                    },
+                )
+                return _LoopDecision(
+                    # Not shown to the model: it reads the explanation built
+                    # from the cap record in ``wrap_model_call``.
+                    message=f"Dropped {len(rejected)} of {len(tool_calls)} tool calls past a per-tool limit",
+                    action="reject_excess",
+                    detection_layer="tool_frequency",
+                    tool_names=tuple(limited),
+                    count=freq_count,
+                    threshold=eff_hard,
+                    rejected_indices=tuple(rejected),
+                    limits={name: hard for name, (_, hard) in limited.items()},
+                    crossings=tuple(crossings),
+                    # A frequency warning for a tool that just hit its limit
+                    # says less than the rejection itself, so it is not repeated.
+                    companion_warning=None if warning is None or (warning.detection_layer == "tool_frequency" and warning.tool_names[0] in limited) else warning.message,
+                )
             return warning
 
     @staticmethod
@@ -815,57 +1099,266 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 exc_info=True,
             )
 
+    def _record_run_id(self, runtime: Runtime) -> str | None:
+        """The current run as the cap record stores it."""
+        run_id = self._get_run_id(runtime)
+        return None if run_id is None else str(run_id)
+
+    def _report_cap(self, runtime: Runtime, *, terminal: bool) -> None:
+        """Surface ``stop_reason=loop_capped`` for the current run (#3875 Phase 2).
+
+        A cap does not raise: the run finishes with an answer, so without this
+        the caller would see a clean completion. There are two channels. The
+        subagent executor reads ``consume_stop_reason`` after the run returns;
+        the lead worker (#4176) and Goal continuation read
+        ``runtime.context["stop_reason"]`` when the run is over. Run-input
+        admission, the todo middleware and the end-of-graph input handling also
+        read that key while the run goes on, as "the run is ending: skip your
+        checks".
+
+        ``terminal`` is a response with no call left, which ends the run: both
+        channels are written now, replacing another guard's reason as every
+        hard stop does. Otherwise the run goes on and its admitted calls must
+        pass those checks, so ``_finish`` reports when the run ends, and only
+        when no other guard has already given the reason it stopped. Both
+        channels then name the same guard. Written under the lock to match
+        ``TokenBudgetMiddleware``: the lead agent's middleware instance is
+        shared across concurrent Gateway threads.
+        """
+        thread_id, run_id = self._run_scope_key(runtime)
+        ctx = getattr(runtime, "context", None)
+        ctx = ctx if isinstance(ctx, dict) else None
+        if not terminal and ctx is not None and ctx.get("stop_reason") not in (None, "loop_capped"):
+            return
+        with self._lock:
+            self._stop_reason[run_id] = "loop_capped"
+            self._stop_reason_thread_id[run_id] = thread_id
+        if ctx is not None:
+            ctx["stop_reason"] = "loop_capped"
+
+    def _snapshot_locked(self, scope_key: _RunScopeKey) -> dict:
+        """Copy the loop state of one run scope. Must be called while holding self._lock."""
+        names = self._tool_name_history.get(scope_key)
+        counter = self._tool_name_counter.get(scope_key)
+        warned = self._warned.get(scope_key)
+        freq_warned = self._tool_freq_warned.get(scope_key)
+        pending = self._pending_warnings.get(scope_key)
+        history = self._history.get(scope_key)
+        return {
+            "history": list(history) if history is not None else None,
+            "warned": frozenset(warned) if warned is not None else None,
+            "names": tuple(names) if names is not None else None,
+            "counter": dict(counter) if counter is not None else None,
+            "freq_warned": frozenset(freq_warned) if freq_warned is not None else None,
+            "pending_warnings": tuple(pending) if pending is not None else None,
+        }
+
+    def _restore_locked(self, scope_key: _RunScopeKey, admission: _Admission) -> None:
+        """Put back the loop state from before ``admission``. Must be called while holding self._lock."""
+        if admission.history is None:
+            self._history.pop(scope_key, None)
+        else:
+            self._history[scope_key] = list(admission.history)
+        for mapping, value in (
+            (self._warned, admission.warned),
+            (self._tool_freq_warned, admission.freq_warned),
+        ):
+            if value is None:
+                mapping.pop(scope_key, None)
+            else:
+                mapping[scope_key] = set(value)
+        if admission.names is None:
+            self._tool_name_history.pop(scope_key, None)
+            self._tool_name_counter.pop(scope_key, None)
+        else:
+            self._tool_name_history[scope_key] = deque(admission.names)
+            self._tool_name_counter[scope_key] = Counter(admission.counter or {})
+        if admission.pending_warnings is None:
+            self._drop_pending_warning_key_locked(scope_key)
+        else:
+            self._pending_warnings[scope_key] = list(admission.pending_warnings)
+            self._touch_pending_warning_key_locked(scope_key)
+
+    def _settle_admission(self, state: object, runtime: Runtime) -> None:
+        """Undo the accounting of a response whose admitted calls were all discarded.
+
+        Runs as the next model call starts. If none of the calls this
+        middleware passed on is still in that response, another middleware
+        discarded them before they ran, so the response counts as if it had not
+        been made: the frequency window, the warning state and the cap record go
+        back to what they were before it. Caps from earlier responses stay. A
+        response that is no longer in the history (compaction) keeps its
+        accounting.
+        """
+        scope_key = self._run_scope_key(runtime)
+        with self._lock:
+            admission = self._admissions.pop(scope_key, None)
+        if admission is None or not isinstance(state, Mapping):
+            return
+        source = next((m for m in reversed(state.get("messages") or []) if getattr(m, "id", None) == admission.message_id), None)
+        if source is None:
+            return
+        standing = {tc.get("id") for tc in (getattr(source, "tool_calls", None) or [])}
+        if standing & admission.call_ids:
+            return
+        with self._lock:
+            self._restore_locked(scope_key, admission)
+            self._record_overrides[scope_key] = admission.record
+            self._record_overrides.move_to_end(scope_key)
+            while len(self._record_overrides) > self._max_admissions:
+                self._record_overrides.popitem(last=False)
+        thread_id, run_id = scope_key
+        logger.info(
+            "Loop detection undid the accounting of a response whose calls were discarded before they ran",
+            extra={"thread_id": thread_id, "run_id": run_id, "calls": len(admission.call_ids)},
+        )
+
+    def _current_record(self, scope_key: _RunScopeKey, state: object, *, consume: bool) -> object:
+        """The cap record in force: an undone admission's record, else the checkpointed one."""
+        with self._lock:
+            if scope_key in self._record_overrides:
+                return self._record_overrides.pop(scope_key) if consume else self._record_overrides[scope_key]
+        return state.get(LOOP_CAP_STATE_KEY) if isinstance(state, Mapping) else None
+
+    @staticmethod
+    def _admitted_calls(last_msg, decision: _LoopDecision) -> list[dict]:
+        """The calls of a trimmed response that go on to the tools node."""
+        calls = last_msg.tool_calls
+        rejected = set(decision.rejected_indices)
+        # Provider surfaces are synced by call id, so a call that shares its id
+        # with a rejected call cannot be kept on its own.
+        rejected_ids = {call_id for index in rejected if isinstance(call_id := calls[index].get("id"), str) and call_id}
+        return [tc for index, tc in enumerate(calls) if index not in rejected and tc.get("id") not in rejected_ids]
+
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
-        decision = self._track_and_check(state, runtime)
-        if decision is None:
-            return None
-
-        # Keep the shared loop-detection lock's critical section bounded; the
-        # journal append is cheap and non-blocking but does not belong under it.
-        self._record_audit_event(decision, runtime)
-        warning = decision.message
-
-        if decision.hard_stop:
-            # Record the stop reason so the executor can surface
-            # ``stop_reason=loop_capped`` after the run returns (#3875 Phase 2).
-            # The hard stop does not raise — it strips tool_calls and lets the
-            # run finish with a forced final answer — so without this the caller
-            # would see a clean ``completed``. See ``consume_stop_reason``.
-            # Written under the lock to match ``TokenBudgetMiddleware``: the lead
-            # agent's middleware instance is shared across concurrent Gateway
-            # threads, so the bounded-dict write needs the same guard.
-            thread_id, run_id = self._run_scope_key(runtime)
+        stored = state.get(LOOP_CAP_STATE_KEY)
+        scope_key = self._run_scope_key(runtime)
+        cap = _read_loop_cap(self._current_record(scope_key, state, consume=True))
+        messages = state.get("messages", [])
+        last_msg = messages[-1] if messages else None
+        calls = list(getattr(last_msg, "tool_calls", None) or []) if getattr(last_msg, "type", None) == "ai" else []
+        snapshot = None
+        if calls:
             with self._lock:
-                self._stop_reason[run_id] = "loop_capped"
-                self._stop_reason_thread_id[run_id] = thread_id
-            # Also write to runtime.context so the lead worker can read it
-            # without needing a reference to this middleware instance (#4176).
-            ctx = getattr(runtime, "context", None)
-            if isinstance(ctx, dict):
-                ctx["stop_reason"] = "loop_capped"
-            # Strip tool calls from every provider surface of the last
-            # AIMessage (structured, raw, and content blocks) to force text
-            # output. With no call left on any surface, the AIMessage no
-            # longer requires matching ToolMessage responses, so replacing it
-            # here is safe for strict provider pairing validators.
-            messages = state.get("messages", [])
-            last_msg = messages[-1]
-            content = self._append_text(last_msg.content, warning or _HARD_STOP_MSG)
-            stripped_msg = clone_ai_message_with_tool_calls(last_msg, [], content=content)
-            return {"messages": [stripped_msg]}
+                snapshot = self._snapshot_locked(scope_key)
+        decision = self._track_and_check(state, runtime, cap)
 
-        if decision.action == "warn":
-            # Defer injection to the next model call. We must NOT alter the
-            # AIMessage(tool_calls=...) here (would put framework words in
-            # the model's mouth, polluting downstream consumers like
-            # MemoryMiddleware), nor insert a separate non-tool message
-            # (would break OpenAI/Moonshot tool-call pairing because the
-            # tools node has not produced ToolMessage responses yet). The
-            # warning is delivered via ``wrap_model_call`` below.
-            self._queue_pending_warning(runtime, warning)
+        next_cap = cap
+        if cap is not None:
+            # The run carries a cap from an earlier response, possibly from
+            # before an approval pause. The model has now answered the request
+            # that explained the cap, so the notice is delivered.
+            next_cap = replace(cap, run_id=self._record_run_id(runtime), notice=None)
+        baseline = next_cap.dump() if next_cap is not None else None
+        admitted = calls
+
+        update: dict = {}
+        if decision is not None:
+            # Keep the shared loop-detection lock's critical section bounded; the
+            # journal append is cheap and non-blocking but does not belong under
+            # it. A dropped batch is audited once per tool that reached its limit
+            # in it, with that tool's own count and threshold; a repeated
+            # rejection of an already capped tool is no transition.
+            if decision.action == "reject_excess":
+                for name, count, threshold in decision.crossings:
+                    self._record_audit_event(replace(decision, tool_names=(name,), count=count, threshold=threshold), runtime)
+            else:
+                self._record_audit_event(decision, runtime)
+
+            if decision.action == "warn":
+                # Defer injection to the next model call. We must NOT alter the
+                # AIMessage(tool_calls=...) here (would put framework words in
+                # the model's mouth, polluting downstream consumers like
+                # MemoryMiddleware), nor insert a separate non-tool message
+                # (would break OpenAI/Moonshot tool-call pairing because the
+                # tools node has not produced ToolMessage responses yet). The
+                # warning is delivered via ``wrap_model_call`` below.
+                self._queue_pending_warning(runtime, decision.message)
+            else:
+                kept = self._admitted_calls(last_msg, decision) if decision.action == "reject_excess" else []
+                admitted = kept
+                capped_tools = _recordable_caps(cap.tools if cap is not None else {}, decision.limits)
+                if not kept:
+                    self._report_cap(runtime, terminal=True)
+                if kept:
+                    # Run the calls within the limit and drop the rest. Like a
+                    # warning, the explanation reaches the model on its next
+                    # call; it is read from the cap record, so it survives a
+                    # pause between this response and that call.
+                    total = len(last_msg.tool_calls)
+                    notice = _CapNotice(total=total, skipped=total - len(kept), tools=tuple(name for name in decision.tool_names if name in capped_tools))
+                    next_cap = _LoopCap(run_id=self._record_run_id(runtime), tools=capped_tools, notice=notice)
+                    if decision.companion_warning:
+                        self._queue_pending_warning(runtime, decision.companion_warning)
+                    update["messages"] = [clone_ai_message_with_tool_calls(last_msg, kept)]
+                else:
+                    # Strip tool calls from every provider surface of the last
+                    # AIMessage (structured, raw, and content blocks) to force
+                    # text output. With no call left on any surface, the
+                    # AIMessage no longer requires matching ToolMessage
+                    # responses, so replacing it here is safe for strict
+                    # provider pairing validators.
+                    if decision.hard_stop:
+                        text = decision.message or _HARD_STOP_MSG
+                    else:
+                        text = _TOOL_FREQ_HARD_STOP_MSG.format(tool_name=decision.tool_names[0], count=decision.threshold)
+                        next_cap = _LoopCap(run_id=self._record_run_id(runtime), tools=capped_tools)
+                    content = self._append_text(last_msg.content, text)
+                    update["messages"] = [clone_ai_message_with_tool_calls(last_msg, [], content=content)]
+
+        call_ids = frozenset(call_id for tc in admitted if isinstance(call_id := tc.get("id"), str) and call_id)
+        message_id = getattr(last_msg, "id", None)
+        if snapshot is not None and call_ids and isinstance(message_id, str) and message_id:
+            with self._lock:
+                self._admissions[scope_key] = _Admission(message_id=message_id, call_ids=call_ids, record=baseline, **snapshot)
+                self._admissions.move_to_end(scope_key)
+                while len(self._admissions) > self._max_admissions:
+                    self._admissions.popitem(last=False)
+
+        value = next_cap.dump() if next_cap is not None else None
+        if value != stored:
+            update[LOOP_CAP_STATE_KEY] = value
+        return update or None
+
+    def _expire_cap(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Give a new task a fresh budget.
+
+        ``before_agent`` runs when a task enters the graph and not when a
+        paused run resumes, so a cap that another run left behind belongs to an
+        earlier, finished execution. A later entry of the run that owns the cap
+        (a hidden goal continuation) keeps it.
+        """
+        stored = state.get(LOOP_CAP_STATE_KEY)
+        if stored is None:
             return None
+        cap = _read_loop_cap(stored)
+        run_id = self._record_run_id(runtime)
+        if cap is not None and run_id is not None and cap.run_id == run_id:
+            return None
+        return {LOOP_CAP_STATE_KEY: None}
 
-        return None
+    def _finish(self, state: AgentState, runtime: Runtime) -> dict | None:
+        update = None
+        cap = _read_loop_cap(state.get(LOOP_CAP_STATE_KEY))
+        if cap is not None:
+            # The run is over, so the report no longer suspends any check.
+            # ``after_agent`` hooks run in reverse middleware order, so the
+            # end-of-graph input handling appended after this middleware has
+            # already run. This also covers a resumed run that ends without
+            # another model call, and it hands the cap to this run for any
+            # later entry of it.
+            self._report_cap(runtime, terminal=False)
+            run_id = self._record_run_id(runtime)
+            if cap.run_id != run_id:
+                update = {LOOP_CAP_STATE_KEY: replace(cap, run_id=run_id).dump()}
+        # Resolved before taking the lock: a fallback run id takes it too.
+        scope_key = self._run_scope_key(runtime)
+        with self._lock:
+            self._admissions.pop(scope_key, None)
+            self._record_overrides.pop(scope_key, None)
+        self._clear_current_run_pending_warnings(runtime)
+        self._release_fallback_run_id(runtime)
+        return update
 
     def _clear_current_run_pending_warnings(self, runtime: Runtime) -> None:
         """Drop pending warnings owned by the current thread/run."""
@@ -881,15 +1374,15 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     @override
     def before_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
-        # Keep this hook in the compiled graph topology. Pending warnings are
-        # already run-scoped; touching sibling runs here would break overlapping
-        # invocations, while after_agent and the bounded queue own cleanup.
-        return None
+        # Pending warnings are already run-scoped; touching sibling runs here
+        # would break overlapping invocations, while after_agent and the bounded
+        # queue own cleanup. Only the checkpointed cap is expired here.
+        return self._expire_cap(state, runtime)
 
     @override
     async def abefore_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         # Async topology must mirror the sync hook above.
-        return None
+        return self._expire_cap(state, runtime)
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -901,15 +1394,11 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     @override
     def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
-        self._clear_current_run_pending_warnings(runtime)
-        self._release_fallback_run_id(runtime)
-        return None
+        return self._finish(state, runtime)
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
-        self._clear_current_run_pending_warnings(runtime)
-        self._release_fallback_run_id(runtime)
-        return None
+        return self._finish(state, runtime)
 
     def _drain_pending_warnings(self, runtime: Runtime) -> list[str]:
         """Pop and return all queued warnings for *runtime*'s thread/run."""
@@ -955,15 +1444,31 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         ]
         return request.override(messages=new_messages)
 
+    def _cap_notice(self, request: ModelRequest) -> list[str]:
+        """The explanation of a trimmed response, read from the checkpointed cap.
+
+        It is derived on every call rather than queued, so a retried call and a
+        call made after an approval resume or a restart still carry it.
+        ``after_model`` clears it once the model has answered.
+        """
+        state = getattr(request, "state", None)
+        cap = _read_loop_cap(self._current_record(self._run_scope_key(request.runtime), state, consume=False))
+        if cap is None:
+            return []
+        text = cap.notice_text()
+        return [text] if text else []
+
     @override
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        self._settle_admission(getattr(request, "state", None), request.runtime)
+        notice = self._cap_notice(request)
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return handler(self._inject_warnings(request, warnings))
+            return handler(self._inject_warnings(request, [*notice, *warnings]))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
@@ -974,9 +1479,11 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
+        self._settle_admission(getattr(request, "state", None), request.runtime)
+        notice = self._cap_notice(request)
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return await handler(self._inject_warnings(request, warnings))
+            return await handler(self._inject_warnings(request, [*notice, *warnings]))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
@@ -991,6 +1498,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     self._tool_name_history,
                     self._tool_name_counter,
                     self._tool_freq_warned,
+                    self._admissions,
+                    self._record_overrides,
                 ):
                     for key in list(mapping):
                         if key[0] == thread_id:
@@ -1014,3 +1523,5 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._stop_reason.clear()
                 self._stop_reason_thread_id.clear()
                 self._fallback_run_ids.clear()
+                self._admissions.clear()
+                self._record_overrides.clear()

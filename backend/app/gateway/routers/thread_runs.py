@@ -738,8 +738,8 @@ async def _find_target_run_id(
     if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
-            message_id,
-            thread_id,
+            sanitize_log_param(message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
@@ -807,8 +807,8 @@ async def _find_base_checkpoint_before_human(
     if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not locate target user message %s in recent checkpoint history for thread %s (limit=%s)",
-            human_message_id,
-            thread_id,
+            sanitize_log_param(human_message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(
