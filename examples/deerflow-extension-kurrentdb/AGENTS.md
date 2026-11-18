@@ -61,9 +61,12 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   ids, `deerflow.intent_id`) at the head it read or soft-deletes with that head,
   and reselects on a conflict. `CanonicalCleanupDone` is followed by verification
   after `MAX_LIFETIME_SECONDS` plus one timeout; only `CanonicalCleanupVerified`
-  closes it. Stores kick it after their own writes; `KurrentRecoveryService`
-  (`service.py`, registered by `install()`) recovers primary sides at start,
-  bounded, and runs every obligation in the background. Never run it on a
-  caller's path
+  closes it. One pure decision per attempt (`plan_cleanup`) serves the sync and
+  async cleaners, which differ only in I/O. Stores kick it after their own writes;
+  `KurrentRecoveryService` (`service.py`, registered by `install()`) reads the
+  Gateway config, stays idle unless memory or run events use KurrentDB, builds
+  the memory storage from the Gateway's `DeerMemConfig` (sidecar caps must
+  match), recovers primary sides at start with a budget per backend, and runs
+  every obligation in the background. Never run it on a caller's path
 - **Test against `backend/tests/kurrentdb_fake.py`.** When the live suite shows
   a divergence, fix the fake first, then the code

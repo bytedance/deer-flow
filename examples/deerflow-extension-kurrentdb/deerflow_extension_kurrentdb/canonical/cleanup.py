@@ -151,6 +151,45 @@ def copies(selection: Selection, intent: deletions.Intent) -> list[NewEvent]:
     ]
 
 
+@dataclass(frozen=True)
+class CleanupStep:
+    """One cleanup attempt's decision, from what it read; the sync and async cleaners only perform it.
+
+    - ``done``: nothing readable
+    - ``delete``: no survivors, soft-delete at ``expected``
+    - ``truncate``: the survivors already are the readable tail, raise ``$tb`` to ``first``
+    - ``append``: append ``events`` (survivor copies) at ``expected``, then raise ``$tb`` to ``first``
+
+    ``done_head`` is the ``head`` recorded in ``CanonicalCleanupDone`` once the step succeeded.
+    """
+
+    action: str
+    expected: int | None = None
+    first: int | None = None
+    events: tuple[NewEvent, ...] = ()
+    done_head: int | None = None
+
+
+def plan_cleanup(recorded: Iterable[Any], intents: Sequence[Any], intent: deletions.Intent) -> CleanupStep:
+    """Decide one cleanup attempt of ``intent``'s canonical stream: ``recorded`` is what it read, ``intents`` every primary-committed intent of the primary stream."""
+    selection = select(recorded, intents)
+    head = selection.head
+    if head is None:
+        return CleanupStep("done")
+    if not selection.survivors:
+        return CleanupStep("delete", expected=head, done_head=head)
+    if selection.tail_start is not None:
+        return CleanupStep("truncate", first=selection.tail_start, done_head=head)
+    new_events = tuple(copies(selection, intent))
+    return CleanupStep("append", expected=head, first=head + 1, events=new_events, done_head=head + len(new_events))
+
+
+def verification_start(done_data: Mapping[str, Any] | None) -> int:
+    """Where verification re-reads the canonical stream: right after the cleanup's recorded head (the whole stream without one)."""
+    head = _done_head(done_data)
+    return 0 if head is None else head + 1
+
+
 def verification_due(done_data: Mapping[str, Any] | None, timeout: float) -> float:
     """When a done cleanup may be verified: its ``done_at`` plus the maximum emitter lifetime and one timeout of clock-skew margin."""
     done_at = (done_data or {}).get("done_at")
@@ -249,27 +288,17 @@ class CanonicalCleaner:
                 recorded = client.get_stream(canonical, timeout=self._timeout)
             except NotFoundError:
                 recorded = ()
-            selection = select(recorded, intents)
-            head = selection.head
-            if head is None:
-                pass
-            elif not selection.survivors:
-                try:
-                    client.delete_stream(canonical, current_version=head, timeout=self._timeout)
-                except (WrongCurrentVersionError, NotFoundError):
-                    continue
-            else:
-                if selection.tail_start is not None:
-                    first = selection.tail_start
-                else:
-                    new_events = copies(selection, intent)
-                    try:
-                        client.append_to_stream(canonical, events=new_events, current_version=head, timeout=self._timeout)
-                    except WrongCurrentVersionError:
-                        continue
-                    first, head = head + 1, head + len(new_events)
-                engine.raise_truncate_before(canonical, first)
-            engine.record_canonical(deletions.CANONICAL_CLEANUP_DONE, intent, head=head, done_at=self._clock())
+            step = plan_cleanup(recorded, intents, intent)
+            try:
+                if step.action == "delete":
+                    client.delete_stream(canonical, current_version=step.expected, timeout=self._timeout)
+                elif step.action == "append":
+                    client.append_to_stream(canonical, events=list(step.events), current_version=step.expected, timeout=self._timeout)
+            except (WrongCurrentVersionError, NotFoundError):
+                continue  # a live event or another cleanup landed after the read: reselect
+            if step.first is not None:
+                engine.raise_truncate_before(canonical, step.first)
+            engine.record_canonical(deletions.CANONICAL_CLEANUP_DONE, intent, head=step.done_head, done_at=self._clock())
             return True
         logger.warning("Canonical cleanup of deletion %s kept conflicting with other writers; it stays open", intent.intent_id)
         return False
@@ -282,9 +311,8 @@ class CanonicalCleaner:
             return
         try:
             canonical = canonical_stream_of(intent)
-            head = _done_head(obligation.done_data)
             try:
-                recorded = self._client().get_stream(canonical, stream_position=0 if head is None else head + 1, timeout=self._timeout) if canonical else ()
+                recorded = self._client().get_stream(canonical, stream_position=verification_start(obligation.done_data), timeout=self._timeout) if canonical else ()
             except NotFoundError:
                 recorded = ()
             stale = _stale(recorded, intent)
@@ -374,27 +402,17 @@ class AsyncCanonicalCleaner:
                 recorded = await client.get_stream(canonical, timeout=self._timeout)
             except NotFoundError:
                 recorded = ()
-            selection = select(recorded, intents)
-            head = selection.head
-            if head is None:
-                pass
-            elif not selection.survivors:
-                try:
-                    await client.delete_stream(canonical, current_version=head, timeout=self._timeout)
-                except (WrongCurrentVersionError, NotFoundError):
-                    continue
-            else:
-                if selection.tail_start is not None:
-                    first = selection.tail_start
-                else:
-                    new_events = copies(selection, intent)
-                    try:
-                        await client.append_to_stream(canonical, events=new_events, current_version=head, timeout=self._timeout)
-                    except WrongCurrentVersionError:
-                        continue
-                    first, head = head + 1, head + len(new_events)
-                await engine.raise_truncate_before(canonical, first)
-            await engine.record_canonical(deletions.CANONICAL_CLEANUP_DONE, intent, head=head, done_at=self._clock())
+            step = plan_cleanup(recorded, intents, intent)
+            try:
+                if step.action == "delete":
+                    await client.delete_stream(canonical, current_version=step.expected, timeout=self._timeout)
+                elif step.action == "append":
+                    await client.append_to_stream(canonical, events=list(step.events), current_version=step.expected, timeout=self._timeout)
+            except (WrongCurrentVersionError, NotFoundError):
+                continue  # a live event or another cleanup landed after the read: reselect
+            if step.first is not None:
+                await engine.raise_truncate_before(canonical, step.first)
+            await engine.record_canonical(deletions.CANONICAL_CLEANUP_DONE, intent, head=step.done_head, done_at=self._clock())
             return True
         logger.warning("Canonical cleanup of deletion %s kept conflicting with other writers; it stays open", intent.intent_id)
         return False
@@ -407,9 +425,8 @@ class AsyncCanonicalCleaner:
             return
         try:
             canonical = canonical_stream_of(intent)
-            head = _done_head(obligation.done_data)
             try:
-                recorded = await client.get_stream(canonical, stream_position=0 if head is None else head + 1, timeout=self._timeout) if canonical else ()
+                recorded = await client.get_stream(canonical, stream_position=verification_start(obligation.done_data), timeout=self._timeout) if canonical else ()
             except NotFoundError:
                 recorded = ()
             stale = _stale(recorded, intent)

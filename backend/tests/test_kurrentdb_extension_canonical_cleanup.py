@@ -182,11 +182,21 @@ class CapturedChains:
         await self.run_all()
 
 
-def _storage(server: FakeKurrentDB, client=None, clock=None):
+def _storage(server: FakeKurrentDB, client=None, clock=None, config=None):
     from deerflow_extension_kurrentdb.memory import KurrentdbMemoryStorage
 
     client = client if client is not None else server.sync_client()
-    return KurrentdbMemoryStorage(DeerMemConfig(), client_factory=lambda: client, clock=clock)
+    return KurrentdbMemoryStorage(config or DeerMemConfig(), client_factory=lambda: client, clock=clock)
+
+
+KURRENT_STORAGE_CLASS = "deerflow_extension_kurrentdb.memory.KurrentdbMemoryStorage"
+
+
+def _both_backends():
+    """The Gateway config the service reads: both KurrentDB backends on, default DeerMem settings."""
+    from deerflow_extension_kurrentdb.service import Backends
+
+    return Backends(memory={"storage_class": KURRENT_STORAGE_CLASS}, run_events=True)
 
 
 def _store(server: FakeKurrentDB, client=None, clock=None):
@@ -518,6 +528,54 @@ def test_cleanup_retry_after_failed_truncation_appends_no_second_copies(server, 
     assert _facts(server) == ["Kept"]
 
 
+async def test_session_rewrite_never_re_emits_what_another_deletion_removed(server, clock):
+    from deerflow_extension_kurrentdb.canonical import emitter
+
+    store = _store(server, clock=clock)
+    await _say(store, "kept", "r0")
+    await store.flush_canonical()
+    chains = store._canonical_chains = CapturedChains()
+    await _say(store, "doomed by A", "r1")
+    await store.delete_by_run("t1", "r1")  # deletion A
+    first = _intents(server)[0]
+    pending_emission, *kicks = chains.jobs
+    chains.jobs = kicks
+    await chains.run_all()  # A's cleanup runs before the delayed emission of r1
+    assert "CanonicalCleanupDone" in _kinds(server, first)
+
+    async def no_post_check(*args):
+        return None  # the stale emitter's process dies right after its append
+
+    store._canonical._post_check = no_post_check
+    real_keep = emitter._keep
+    emitter._keep = lambda pending, intents: list(pending)  # it passed its pre-check before A committed
+    try:
+        await pending_emission()
+    finally:
+        emitter._keep = real_keep
+    assert [text for _, _, text in _session(server)] == [None, "kept", "doomed by A"]  # stale, unverified
+    await _say(store, "doomed by B", "r2")
+    await store.delete_by_run("t1", "r2")  # deletion B rewrites the stream
+    await chains.run_all()
+    assert [text for _, _, text in _session(server)] == [None, "kept"]  # B's rewrite drops A's stale event too, never copies it
+
+
+async def test_session_cleanup_retry_after_failed_truncation_appends_no_second_copies(server, clock):
+    store = _store(server, clock=clock)
+    await _say(store, "doomed", "r1")
+    await _say(store, "kept", "r2")
+    await store.flush_canonical()
+    server.fail_next("set_stream_metadata", ServiceUnavailableError("metadata down"), stream_name=T1_CANONICAL)
+    await store.delete_by_run("t1", "r1")
+    await store.flush_canonical()
+    (intent_id,) = _intents(server)
+    assert [kind for kind in _kinds(server, intent_id) if kind.startswith("Canonical")] == []  # copies appended, $tb not raised
+    appended = len(server._streams[T1_CANONICAL].events)
+    assert (await store.run_canonical_obligations()).cleaned == 1
+    assert len(server._streams[T1_CANONICAL].events) == appended  # the survivors already are the tail: only $tb is raised
+    assert [text for _, _, text in _session(server)] == [None, "kept"]
+
+
 # --- failure surfacing ---------------------------------------------------------------
 
 
@@ -581,7 +639,7 @@ async def test_canonical_failure_after_intent_deleter_gone_restart_recovers(serv
     (intent_id,) = _intents(server)
     assert _facts(server) == ["Doomed", "Kept"]
 
-    service = KurrentRecoveryService(memory_factory=lambda: _storage(server, clock=clock), store_factory=lambda: _store(server, clock=clock), interval=3600, clock=clock)
+    service = KurrentRecoveryService(memory_factory=lambda config: _storage(server, clock=clock, config=config), store_factory=lambda: _store(server, clock=clock), config_source=_both_backends, interval=3600, clock=clock)
     await service.start(None)
     try:
         for _ in range(500):
@@ -658,7 +716,9 @@ async def test_startup_recovery_does_not_block_on_canonical(server, clock):
     gate = threading.Event()
     sync_client = _HangingCanonical(server.sync_client(), gate)
     async_client = _AsyncHangingCanonical(server.async_client(), gate)
-    service = KurrentRecoveryService(memory_factory=lambda: _storage(server, sync_client, clock=clock), store_factory=lambda: _store(server, async_client, clock=clock), interval=3600, clock=clock)
+    service = KurrentRecoveryService(
+        memory_factory=lambda config: _storage(server, sync_client, clock=clock, config=config), store_factory=lambda: _store(server, async_client, clock=clock), config_source=_both_backends, interval=3600, clock=clock
+    )
     started = time.monotonic()
     await service.start(None)
     try:
@@ -679,7 +739,7 @@ async def test_service_start_never_raises_and_is_bounded(server, monkeypatch):
 
     # KurrentDB unreachable: start returns within its budget and the loop keeps retrying.
     server.set_unavailable(ServiceUnavailableError("down"))
-    service = KurrentRecoveryService(memory_factory=lambda: _storage(server), store_factory=lambda: _store(server), interval=3600, startup_budget=1.0)
+    service = KurrentRecoveryService(memory_factory=lambda config: _storage(server, config=config), store_factory=lambda: _store(server), config_source=_both_backends, interval=3600, startup_budget=1.0)
     started = time.monotonic()
     await service.start(None)
     assert time.monotonic() - started < 2.0
@@ -689,7 +749,7 @@ async def test_service_start_never_raises_and_is_bounded(server, monkeypatch):
 
     # No settings: idle, with a warning.
     monkeypatch.delenv("KURRENTDB_CONNECTION_STRING")
-    idle = KurrentRecoveryService()
+    idle = KurrentRecoveryService(config_source=_both_backends)
     await idle.start(None)
     assert not idle.running
     await idle.stop()
@@ -698,7 +758,7 @@ async def test_service_start_never_raises_and_is_bounded(server, monkeypatch):
 async def test_service_runs_primary_recovery_periodically(server, clock):
     from deerflow_extension_kurrentdb import KurrentRecoveryService
 
-    service = KurrentRecoveryService(memory_factory=lambda: _storage(server, clock=clock), store_factory=lambda: _store(server, clock=clock), interval=0.01, clock=clock)
+    service = KurrentRecoveryService(memory_factory=lambda config: _storage(server, clock=clock, config=config), store_factory=lambda: _store(server, clock=clock), config_source=_both_backends, interval=0.01, clock=clock)
     await service.start(None)
     try:
         store = _store(server, clock=clock)
@@ -715,6 +775,127 @@ async def test_service_runs_primary_recovery_periodically(server, clock):
         await store.flush_canonical()
     finally:
         await service.stop()
+
+
+class _MetaDown:
+    """A sync client whose memory-meta (sidecar) calls fail while ``down``."""
+
+    def __init__(self, inner):
+        self._inner, self.down = inner, True
+
+    def __getattr__(self, name):
+        target = getattr(self._inner, name)
+
+        def call(stream_name, *args, **kwargs):
+            if self.down and stream_name.startswith("deerflow.memory-meta"):
+                raise ServiceUnavailableError("sidecar stream unavailable")
+            return target(stream_name, *args, **kwargs)
+
+        return call
+
+
+async def test_service_recovery_uses_the_gateway_deermem_config(server):
+    from datetime import UTC, datetime
+
+    from deerflow_extension_kurrentdb import KurrentRecoveryService
+    from deerflow_extension_kurrentdb.service import Backends
+
+    from deerflow.agents.memory.backends.deermem.deermem.core.eviction import EvictedFact, FactEvictionDecision
+
+    # The operator keeps more eviction evidence than DeerMem's default (200 entries per agent).
+    backend_config = {"storage_class": KURRENT_STORAGE_CLASS, "eviction_audit_max_entries": 250}
+    gateway_config = DeerMemConfig.from_backend_config(backend_config)
+    assert gateway_config.eviction_audit_max_entries != DeerMemConfig().eviction_audit_max_entries
+    meta_down = _MetaDown(server.sync_client())
+    meta_down.down = False
+    gateway = _storage(server, meta_down, config=gateway_config)
+    _create(gateway, _fact("f1", "Doomed"))
+    for index in range(210):
+        decision = FactEvictionDecision(kept=[], evicted=[EvictedFact(fact_id=f"old{index}", category="preference", score=0.1, components={"confidence": 0.1})], scores={}, policy="confidence")
+        gateway.record_capacity_eviction(decision, max_facts=5, agent_name="other", user_id="alice", occurred_at=datetime(2026, 11, 1, tzinfo=UTC))
+    assert len(gateway.get_eviction_audit(agent_name="other", user_id="alice")) == 210
+    gateway.record_fact_accesses(["f1"], agent_name=AGENT, user_id="alice")  # so the deletion's sidecar boundary is a real snapshot
+    meta_down.down = True  # the sidecar step fails: the deletion's primary side stays open
+    gateway.apply_changes({"deletes": ["f1"]}, user_id="alice", agent_name=AGENT)
+    assert gateway.flush_canonical(timeout=5)
+    (intent_id,) = _intents(server)
+    assert "DeletionDone" not in _kinds(server, intent_id)
+
+    built = []
+
+    def memory_factory(config):
+        built.append(config)
+        return _storage(server, config=config)
+
+    service = KurrentRecoveryService(memory_factory=memory_factory, store_factory=lambda: _store(server), config_source=lambda: Backends(memory=backend_config, run_events=False), interval=3600)
+    await service.start(None)
+    await service.stop()
+    assert "DeletionDone" in _kinds(server, intent_id)
+    assert server._streams["deerflow.memory-meta-user.alice"].events[-1].type.endswith("MetadataSnapshot")  # the service wrote the sidecar boundary
+    assert built[0].eviction_audit_max_entries == 250
+    restarted = _storage(server, config=gateway_config)
+    assert len(restarted.get_eviction_audit(agent_name="other", user_id="alice")) == 210  # unrelated evidence kept under the Gateway's caps
+
+
+async def test_service_startup_budgets_are_separate_and_first_pass_is_full(server, clock):
+    from deerflow_extension_kurrentdb import KurrentRecoveryService
+
+    class StuckMemory:
+        def __init__(self):
+            self.gate = threading.Event()
+            self.recoveries = 0
+
+        def recover_deletions(self):
+            self.recoveries += 1
+            self.gate.wait(10)
+            return []
+
+        def run_canonical_obligations(self):
+            return None
+
+    memory = StuckMemory()
+    store = _store(server, clock=clock)
+    await _say(store, "doomed", "r1")
+    await _say(store, "kept", "r2")
+    await store.flush_canonical()
+    store._canonical_chains = CapturedChains()
+    server.fail_next("set_stream_metadata", ServiceUnavailableError("crash"), stream_name=T1_PRIMARY)
+    await store.delete_by_run("t1", "r1")
+    (intent_id,) = _intents(server)
+
+    service = KurrentRecoveryService(memory_factory=lambda *config: memory, store_factory=lambda: _store(server, clock=clock), config_source=_both_backends, interval=3600, startup_budget=0.2, clock=clock)
+    started = time.monotonic()
+    await service.start(None)
+    try:
+        assert time.monotonic() - started < 1.0
+        assert "DeletionDone" in _kinds(server, intent_id)  # run-event recovery ran although memory's timed out
+        memory.gate.set()
+        for _ in range(500):  # the first background pass retries the primary side (a full pass), not only canonical work
+            if memory.recoveries >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert memory.recoveries == 2
+    finally:
+        memory.gate.set()
+        await service.stop()
+
+
+async def test_service_idle_without_kurrent_backends():
+    from deerflow_extension_kurrentdb import KurrentRecoveryService
+    from deerflow_extension_kurrentdb.service import Backends, backends_from
+
+    built = []
+    service = KurrentRecoveryService(memory_factory=lambda config: built.append("memory"), store_factory=lambda: built.append("store"), config_source=lambda: Backends(memory=None, run_events=False))
+    await service.start(None)
+    assert not service.running and built == []
+    await service.stop()
+
+    # How the Gateway config is read: the memory storage class and the run-event backend name.
+    assert backends_from({"storage_class": KURRENT_STORAGE_CLASS}, "kurrent") == Backends(memory={"storage_class": KURRENT_STORAGE_CLASS}, run_events=True)
+    assert backends_from({"storage_class": "deerflow_extension_kurrentdb.memory.storage.KurrentdbMemoryStorage"}, "db").memory is not None
+    assert backends_from({"storage_class": "file"}, "db") == Backends(memory=None, run_events=False)
+    assert backends_from({}, "jsonl") == Backends(memory=None, run_events=False)
+    assert backends_from({"storage_class": "no.such.module.Storage"}, None) == Backends(memory=None, run_events=False)
 
 
 # --- acceptance ------------------------------------------------------------------------
