@@ -123,6 +123,42 @@ def test_agent_build_context_optional_fields_keep_their_defaults():
     assert isinstance(ctx.policy, HostPolicySnapshot)
 
 
+def _dummy_args_for_protocol_method(func):
+    sig = inspect.signature(func)
+    kwargs = {}
+    positional = []
+    sample_by_name = {
+        "app_store": ExtensionData("app"),
+        "task_store": ExtensionData("task-1"),
+        "ctx": AgentBuildContext(scope=AgentScope.LEAD),
+        "info": TaskInfo(task_id="t", run_id="r", thread_id="th", kind="lead"),
+        "outcome": TaskOutcome.COMPLETED,
+        "kind": SystemOperationKind.GOAL,
+        "request": SystemModelRequest(messages=("prompt",)),
+        "result": SystemModelResult(response="ok", duration_ms=1.0),
+        "deps": ExtensionRuntimeDeps(),
+        "cursor": None,
+        "limit": 10,
+        "thread_id": "th",
+        "run_id": "r",
+        "after_seq": None,
+        "name": "demo",
+        "routers": (),
+    }
+    for idx, (pname, param) in enumerate(sig.parameters.items()):
+        if idx == 0:
+            continue  # self
+        val = sample_by_name.get(pname, object())
+        if param.kind == inspect.Parameter.KEYWORD_ONLY:
+            kwargs[pname] = val
+        elif param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional.append(val)
+    return positional, kwargs
+
+
 @pytest.mark.parametrize(
     "protocol",
     [
@@ -135,21 +171,33 @@ def test_agent_build_context_optional_fields_keep_their_defaults():
     ],
 )
 def test_every_protocol_method_has_a_default_implementation(protocol):
-    """Adding a method to a Protocol is only additive when it has a default.
+    """Adding a method to a Protocol is only additive when it has a callable default.
 
-    Without this, shipping a new contract method breaks every already-released
-    extension that does not implement it.
+    Drive each unbound Protocol method on a bare object instead of matching
+    source strings: RunEvidenceReader methods must explicitly raise
+    NotImplementedError, and all other additive Protocols must return a concrete
+    default (never Ellipsis from an unimplemented stub body).
     """
+
+    class _Bare:
+        pass
+
+    bare = _Bare()
     checked = 0
     for name, member in vars(protocol).items():
         if name.startswith("_") or not inspect.isfunction(member):
             continue
         checked += 1
-        body = inspect.getsource(member).split("\n", 1)[1]
+        pos_args, kw_args = _dummy_args_for_protocol_method(member)
         if protocol is RunEvidenceReader:
-            assert "raise NotImplementedError" in body
+            with pytest.raises(NotImplementedError):
+                if inspect.iscoroutinefunction(member):
+                    asyncio.run(member(bare, *pos_args, **kw_args))
+                else:
+                    member(bare, *pos_args, **kw_args)
         else:
-            assert "return" in body, f"{protocol.__name__}.{name} has no default implementation. Adding a contract method is only additive when it returns a default; otherwise every already-released extension breaks on upgrade."
+            result = asyncio.run(member(bare, *pos_args, **kw_args)) if inspect.iscoroutinefunction(member) else member(bare, *pos_args, **kw_args)
+            assert result is not Ellipsis, f"{protocol.__name__}.{name} returned Ellipsis; provide a concrete default return value"
     assert checked > 0, f"{protocol.__name__} declared no methods to check"
 
 
