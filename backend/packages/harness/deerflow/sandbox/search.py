@@ -307,7 +307,7 @@ def find_grep_matches(
     literal: bool = False,
     case_sensitive: bool = False,
     max_results: int = 100,
-    max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
+    max_file_size: int | None = None,
     line_summary_length: int = DEFAULT_LINE_SUMMARY_LENGTH,
     relative_prefix: str = "",
     user_data: bool = False,
@@ -321,6 +321,9 @@ def find_grep_matches(
     root_is_file = root.is_file()
     if not root_is_file and not root.is_dir():
         raise NotADirectoryError(root)
+    # The traversal budget keeps a directory walk bounded; a file the caller
+    # named is read whatever its size, unless that caller sets its own budget.
+    size_limit = DEFAULT_MAX_FILE_SIZE_BYTES if max_file_size is None else max_file_size
 
     if literal:
         matches_line = _make_literal_matcher(pattern, case_sensitive=case_sensitive)
@@ -369,7 +372,7 @@ def find_grep_matches(
                 continue
             if is_binary_file(file_path):
                 continue
-            if not root_is_file and file_stat.st_size > max_file_size:
+            if file_stat.st_size > size_limit and (not root_is_file or max_file_size is not None):
                 continue
             # newline="\n" ends lines where LocalSandbox.read_file does, so a
             # hit's line_number is the start_line that reads it back; a bare
