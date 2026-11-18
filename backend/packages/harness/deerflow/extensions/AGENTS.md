@@ -101,6 +101,7 @@ hook directory, so they never run a developer's or CI's Git hooks.
   cannot collide.
 - **`configuration_revision` never exposes raw configuration.** It returns an HMAC.
   Sets hash the same way across process hash seeds; ordered lists keep their order.
+- **Restorable authority is captured, never created.** Restores revalidate it.
 
 ## Extension-first exceptions
 

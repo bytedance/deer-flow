@@ -34,6 +34,8 @@ Current MVP capabilities:
 
 Derived run summaries omit leading inline `<think>` reasoning before limiting the text, so a long thought does not replace the actual answer in previews or scheduled notices. Original response history and literal tags in the answer are unchanged; previously stored run summaries are not rewritten.
 
+Text that leaves for an IM platform through a notice is scrubbed first: known token shapes, key assignments, private-key blocks, a URL's embedded user info, and `Authorization` or `Cookie` header values are replaced with `[redacted]` in the task title, stop condition, and result summary. The scrub is best effort. Most rules keep the surrounding sentence, but a `Cookie` header and a `Digest` credential are replaced through the end of the line, so text that follows them on the same line is removed too. Check a notice before forwarding it somewhere else.
+
 **Filter execution history through the API**
 
 To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, `interrupted`, or `unmet`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).

@@ -251,6 +251,12 @@ class ExtensionRuntimeDeps:
     model_invoker: ModelInvoker | None = None
     completed_run_evidence: CompletedRunEvidenceReader | None = None
     skill_mutations: SkillMutationService | None = None
+    # Async callable (user_id, grant, *, validator=None, plugin_namespace=None)
+    # -> AgentRuns restoring a captured session ceiling for unattended host-side
+    # recovery. The host revalidates the user row per operation and fails closed;
+    # expiry/revocation stay the extension's contract via the validator. None on
+    # hosts without the delegated-restore capability.
+    agent_runs_restore: Any | None = None
 
 
 class ExtensionService(Protocol):
