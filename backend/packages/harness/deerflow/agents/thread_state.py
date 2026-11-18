@@ -266,27 +266,19 @@ _DELEGATION_LEDGER_STATUSES = frozenset({"in_progress", *SUBAGENT_STATUS_VALUES}
 
 
 def _usable_delegation_entries(entries: Any) -> list[DelegationEntry]:
-    """Drop channel values the ledger reducer and renderer cannot read.
+    """Drop channel values the ledger reducer cannot read.
 
-    The gateway validates caller-supplied ``delegations`` at both input
+    The gateway validates the full ledger shape at both caller-writable
     boundaries, but a checkpoint written before that validation, or by an
-    older caller path, can still hold a non-list value or an entry without the
-    identity key the reducer needs or the text fields the renderer indexes.
-    Treating those as absent keeps later genuine ledger writes working instead
-    of failing on the stored value.
+    older caller path, can still hold a non-list value, a non-object entry or
+    an entry without the identity key and status the reducer needs. Treating
+    those as absent keeps later genuine ledger writes working instead of
+    failing on the stored value; the reducer itself does not require the
+    renderer-only text fields.
     """
     if not isinstance(entries, list):
         return []
-    return [
-        entry
-        for entry in entries
-        if isinstance(entry, Mapping)
-        and isinstance(entry.get("id"), str)
-        and bool(entry.get("id"))
-        and isinstance(entry.get("description"), str)
-        and isinstance(entry.get("subagent_type"), str)
-        and entry.get("status") in _DELEGATION_LEDGER_STATUSES
-    ]
+    return [entry for entry in entries if isinstance(entry, Mapping) and isinstance(entry.get("id"), str) and bool(entry.get("id")) and entry.get("status") in _DELEGATION_LEDGER_STATUSES]
 
 
 def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
