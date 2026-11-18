@@ -128,6 +128,13 @@ their original task messages. Existing thread deletion removes this directory;
 there is no cross-thread search or separate global index. On multiple hosts,
 workers need the same thread filesystem to read these local archives.
 
+Exact source-ID reads use an auxiliary SQLite index to locate original archive
+rows. Older archives and batches added by an older DeerFlow process stay readable
+by scanning until capture builds the index for retained rows. Capture and
+eviction maintain the index in the same write transaction. The index counts
+toward the archive's page ceiling. If SQLite runs out of space, capture retries
+with the original scan-based layout.
+
 Checkpoint state holds batch references and the user/thread scope binding.
 Every history reader validates this metadata, including source lookup, capture
 failure recovery and durable-context rendering. Malformed history reports
