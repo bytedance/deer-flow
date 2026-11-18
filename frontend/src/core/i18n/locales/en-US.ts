@@ -200,6 +200,10 @@ export const enUS: Translations = {
         "deerflow-extension-knowledge-center",
         "en-US",
       ),
+      skillEvolution: bundledCopy(
+        "deerflow-extension-skill-evolution",
+        "en-US",
+      ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
       weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
       example: bundledCopy("deerflow-extension-example", "en-US"),
@@ -418,6 +422,20 @@ export const enUS: Translations = {
     copiedToClipboard: "Copied to clipboard",
     failedToCopyToClipboard: "Failed to copy to clipboard",
     linkCopied: "Link copied to clipboard",
+  },
+
+  artifactSelection: {
+    rewrite: "Rewrite selection",
+    instructions:
+      "Describe the change, then choose Rewrite selection. To ask a regular question, use Send.",
+    exactRequired: "Switch to source to select an exact range for rewriting.",
+    review: "Review replacement",
+    original: "Selected passage",
+    replacement: "Replacement",
+    apply: "Apply to draft",
+    applied: "Selection replaced in the draft. Review and save the artifact.",
+    changed: "The file or draft changed. Select the passage again.",
+    limit: "Select up to 12,000 characters.",
   },
 
   artifactEditing: {

@@ -23,6 +23,8 @@ sandbox:
   # ready_timeout: 30
   # use_server_proxy: false
   # secure_access: false
+  # resource: {cpu: "2", memory: 4Gi}          # limits; default 1 CPU / 2Gi
+  # resource_requests: {cpu: "1", memory: 2Gi} # requests; default from the server
   # sandbox_timeout: 14400  # remote lifetime; 0 means explicit cleanup only
   # bash_command_timeout: 600  # default command timeout
   # replicas: 3             # active + warm sandboxes per gateway process
@@ -48,6 +50,17 @@ and the SDK attaches it to every execd and file request, so no token setting is
 needed in DeerFlow. The server must run the Kubernetes runtime with
 `[ingress] mode = "gateway"`; the Docker runtime and other ingress modes reject
 the create with HTTP 400.
+
+`resource` sets each sandbox's limits and `resource_requests` its requests,
+as maps of resource names to Kubernetes quantities. Without `resource`, the
+SDK default of 1 CPU and 2Gi applies to every sandbox. Without
+`resource_requests`, the server decides the requests. Only Kubernetes runtimes
+apply `resource_requests`; Docker ignores them. Kubernetes uses the limit for
+any request you omit, and a request must not exceed its limit, including the
+SDK default limits when `resource` is unset (a request of 2 CPU without
+`resource` fails at sandbox creation). Positive numbers are passed as strings;
+blank names or quantities, zero, negative or non-finite numbers, and other
+value types cause a provider startup error.
 
 Values in `sandbox.environment` that start with `$` are resolved from the
 Gateway process environment once, when `config.yaml` loads; a missing variable

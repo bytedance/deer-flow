@@ -359,7 +359,11 @@ async def _persist_delivery_receipt(
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR = "Scheduled goal cleanup failed"
 _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
+# Stream error frames and the /wait error envelope share one name for a run that
+# ends in error without an exception; the Gateway spells it the same way.
+_RUN_ERROR_NAME = "RunError"
 _RECURSION_CAPPED_LISTED_OUTPUTS = 5
 
 
@@ -1049,6 +1053,8 @@ async def run_agent(
         lead_task_outcome,
         notify_task_start,
         notify_task_stop,
+        read_only_copy,
+        stopped_task_info,
     )
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
@@ -1271,6 +1277,7 @@ async def run_agent(
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
+                metadata=read_only_copy(record.metadata),
             )
             task_store = ExtensionData(task_id)
             # Seed the identity for every hook handed this store, not only
@@ -1879,6 +1886,12 @@ async def run_agent(
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
+            # Deliberately no `error` frame here, unlike the delivery check below.
+            # The fallback was streamed and stored as a visible assistant message
+            # carrying the provider failure (tagged `deerflow_error_fallback`), so
+            # this turn never looked like a silent success; a frame would only
+            # duplicate that notice. The record still commits `error` for
+            # accounting and retry purposes.
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
@@ -1937,6 +1950,17 @@ async def run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif delivery_error is not None and not record.ownership_lost:
+                # The run record is terminal `error`, so the stream must say the
+                # same thing: the web UI raises its run-failure toast only for an
+                # `error` frame, and streaming IM channels mark a turn failed only
+                # on that frame. Without it they report a successful turn while
+                # the record (and /wait) report the failure.
+                delivery_frame = {"message": delivery_error, "name": _RUN_ERROR_NAME}
+                if record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True):
+                    await bridge.publish(run_id, "error", delivery_frame)
+                else:
+                    terminal_error_frame = delivery_frame
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
@@ -2114,6 +2138,11 @@ async def run_agent(
                     receipt_persisted = await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content)
                     if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
                         await run_manager.set_status(run_id, RunStatus.error, error=_DELIVERY_RECEIPT_FAILED_ERROR, persist=False)
+                        # Same invariant as the completion branch: the record is now
+                        # `error`, so the stream must not end as a success. Frames
+                        # already deferred and published below the finalizer run
+                        # before END.
+                        terminal_error_frame = {"message": _DELIVERY_RECEIPT_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and journal is not None and persist_completion:
                     try:
@@ -2155,7 +2184,10 @@ async def run_agent(
                         deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(cleanup_task, deferred_finalization_interrupt)
                     except Exception:
                         logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
-                        await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
+                        await run_manager.set_status(run_id, RunStatus.error, error=_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, persist=False)
+                        # Same invariant as the receipt failure above: the record
+                        # is now `error`, so the stream must not end as a success.
+                        terminal_error_frame = {"message": _SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
                     try:
@@ -2303,7 +2335,13 @@ async def run_agent(
                         notify_task_stop(
                             extensions,
                             task_store,
-                            task_info,
+                            stopped_task_info(
+                                task_info,
+                                status=record.status.value,
+                                error=record.error,
+                                goal_verdict=record.goal_verdict,
+                                persisted=not record.ownership_lost and getattr(record, "terminal_status_persisted", True),
+                            ),
                             lead_task_outcome(
                                 aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
                                 succeeded=record.status == RunStatus.success,
@@ -2389,7 +2427,12 @@ async def run_agent(
 
                 terminal_stream_authorized = not record.ownership_lost and record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True)
                 if terminal_stream_authorized:
-                    if terminal_error_frame is not None:
+                    # A staged frame predates the final outcome, and a cancellation
+                    # can still win after it was staged: an interrupt replaces the
+                    # status and a rollback replaces the message (both can land
+                    # while scheduled-goal cleanup runs). Publish only the error
+                    # the record actually committed.
+                    if terminal_error_frame is not None and record.status == RunStatus.error and record.error == terminal_error_frame.get("message"):
                         await bridge.publish(
                             run_id,
                             "error",
