@@ -10,8 +10,10 @@ search root is read whatever its size.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from deerflow.sandbox.local.list_dir import list_dir
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.search import (
     DEFAULT_MAX_FILE_SIZE_BYTES,
     find_glob_matches,
@@ -19,6 +21,7 @@ from deerflow.sandbox.search import (
     ignore_rules_for,
     inside_git_checkout,
 )
+from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
 
 
 def _uploads(tmp_path: Path) -> Path:
@@ -98,3 +101,67 @@ def test_a_directory_search_keeps_the_size_bound(tmp_path: Path) -> None:
 
     matches, _ = find_grep_matches(uploads, "FATAL", user_data=True)
     assert matches == []
+
+
+def test_in_flight_upload_files_stay_hidden_in_user_data(tmp_path: Path) -> None:
+    uploads = _uploads(tmp_path)
+    (uploads / ".upload-active.part").write_text("partial", encoding="utf-8")
+
+    rules = ignore_rules_for(uploads, user_data=True)
+    assert rules.should_ignore(".upload-active.part")
+    assert not rules.should_ignore("app.log")
+    assert not any(".upload-active.part" in name for name in list_dir(str(uploads), max_depth=2, user_data=True))
+
+
+def test_host_path_resolved_from_the_user_data_mount_still_counts_as_user_data(tmp_path: Path) -> None:
+    # The public ls/glob/grep tools resolve /mnt/user-data/... to host paths
+    # before they call the provider, so a prefix check on the argument alone
+    # misses every real entry point. The mount table decides instead.
+    (tmp_path / ".git").mkdir()
+    uploads = _uploads(tmp_path)
+    sandbox = LocalSandbox("local", [PathMapping("/mnt/user-data/uploads", str(uploads))])
+
+    assert any(name.endswith("uploads/app.log") for name in sandbox.list_dir(str(uploads)))
+    matches, _ = sandbox.glob(str(uploads), "**/*")
+    assert "/mnt/user-data/uploads/app.log" in matches
+    greps, _ = sandbox.grep(str(uploads), "FATAL")
+    assert sorted(match.path for match in greps) == [
+        "/mnt/user-data/uploads/app.log",
+        "/mnt/user-data/uploads/logs/worker.log",
+        "/mnt/user-data/uploads/notes.txt",
+    ]
+
+
+def test_a_checkout_directory_outside_the_user_data_mount_still_hides_logs(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    inbox = _uploads(tmp_path)
+    sandbox = LocalSandbox("local", [])
+
+    matches, _ = sandbox.glob(str(inbox), "**/*")
+    assert {Path(name).name for name in matches} == {"notes.txt"}
+
+
+def test_public_tools_keep_uploaded_logs_when_the_host_tree_is_a_checkout(tmp_path: Path, monkeypatch) -> None:
+    # The reviewer's reproduction: the real public tools, with the user-data
+    # directory inside the checkout the Gateway runs from.
+    (tmp_path / ".git").mkdir()
+    for name in ("workspace", "uploads", "outputs"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "uploads" / "app.log").write_text("FATAL out of memory\n", encoding="utf-8")
+    sandbox = LocalSandbox("local", [PathMapping(f"/mnt/user-data/{name}", str(tmp_path / name)) for name in ("workspace", "uploads", "outputs")])
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "local"},
+            "thread_data": {
+                "workspace_path": str(tmp_path / "workspace"),
+                "uploads_path": str(tmp_path / "uploads"),
+                "outputs_path": str(tmp_path / "outputs"),
+            },
+        },
+        context={"thread_id": "thread-1"},
+    )
+
+    assert "app.log" in ls_tool.func(runtime=runtime, description="list uploads", path="/mnt/user-data/uploads")
+    assert "app.log" in glob_tool.func(runtime=runtime, description="all uploads", pattern="**/*", path="/mnt/user-data/uploads")
+    assert "app.log" in grep_tool.func(runtime=runtime, description="find fatal", pattern="FATAL", path="/mnt/user-data/uploads")

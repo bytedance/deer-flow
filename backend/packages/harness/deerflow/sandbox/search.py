@@ -60,8 +60,12 @@ REPO_IGNORE_PATTERNS = [
 # ``.upload-*.part`` is the in-flight upload suffix and stays ignored everywhere.
 USER_DATA_PATTERNS = ["*.log", "*.tmp", "*.temp", "*.bak", "*.cache", ".cache", "logs"]
 
+# In-flight uploads are repository machinery, not content: they stay hidden in
+# user data too, until publication renames them.
+STAGING_PATTERNS = [".upload-*.part"]
+
 # ``should_ignore_name`` keeps answering with the repository defaults.
-IGNORE_PATTERNS = [*REPO_IGNORE_PATTERNS, *USER_DATA_PATTERNS, ".upload-*.part"]
+IGNORE_PATTERNS = [*REPO_IGNORE_PATTERNS, *USER_DATA_PATTERNS, *STAGING_PATTERNS]
 
 # Directory walks skip files above this so one huge log cannot stall a search;
 # a file named as the search root is read whatever its size.
@@ -105,7 +109,7 @@ class IgnoreRules:
 
 
 _REPOSITORY_RULES = IgnoreRules(*_compile_ignore_patterns(IGNORE_PATTERNS))
-_CONTENT_RULES = IgnoreRules(*_compile_ignore_patterns(REPO_IGNORE_PATTERNS))
+_CONTENT_RULES = IgnoreRules(*_compile_ignore_patterns([*REPO_IGNORE_PATTERNS, *STAGING_PATTERNS]))
 
 
 def should_ignore_name(name: str) -> bool:

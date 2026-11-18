@@ -30,6 +30,13 @@ from deerflow.utils.atomic_write import publish_bytes_atomically
 
 logger = logging.getLogger(__name__)
 
+
+def _is_user_data_container(container_path: str) -> bool:
+    """Whether a mount's container path belongs to the user-data tree."""
+    normalized = container_path.rstrip("/")
+    return normalized == VIRTUAL_PATH_PREFIX or normalized.startswith(VIRTUAL_PATH_PREFIX + "/")
+
+
 # Default wall-clock timeout (seconds) for a single host bash command. A
 # blocking foreground command (for example a server started without
 # backgrounding) is terminated after this long so the agent's turn cannot hang
@@ -579,6 +586,25 @@ class LocalSandbox(Sandbox):
             return False
 
         return best_mapping.read_only
+
+    def _is_user_data_path(self, path: str) -> bool:
+        """Whether *path* is the user's own files rather than repository noise.
+
+        The public ls/glob/grep tools resolve ``/mnt/user-data/...`` to host
+        paths before they call a provider, so the virtual prefix alone would miss
+        every real entry point. Ask the mount table instead: a container path
+        under ``/mnt/user-data``, or a host path inside the local root of that
+        mapping.
+        """
+        mapping = self._find_path_mapping(path)
+        if mapping is not None:
+            return _is_user_data_container(mapping[0].container_path)
+        resolved = os.path.realpath(path)
+        for candidate in self._mappings_by_local_specificity:
+            root = self._resolved_local_paths[candidate]
+            if resolved == root or resolved.startswith(root + os.sep):
+                return _is_user_data_container(candidate.container_path)
+        return False
 
     def _find_path_mapping(self, path: str) -> tuple[PathMapping, str] | None:
         path_str = str(path)
@@ -1232,7 +1258,7 @@ class LocalSandbox(Sandbox):
                 pass
 
         try:
-            entries = list_dir(resolved_path, max_depth, user_data=path.startswith("/mnt/user-data/"))
+            entries = list_dir(resolved_path, max_depth, user_data=self._is_user_data_path(path))
         except FileNotFoundError:
             # The requested path may exist only in the container, as the
             # parent of mounted sub-directories (e.g. /mnt/skills with only
@@ -1409,7 +1435,7 @@ class LocalSandbox(Sandbox):
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         # /mnt/user-data is the user's own files: their ``*.log`` upload is
         # content, not repository noise, even if the host path sits in a checkout.
-        user_data = path.startswith("/mnt/user-data/")
+        user_data = self._is_user_data_path(path)
         try:
             mounts = self._virtual_search_mounts(path)
             if mounts is not None:
@@ -1454,7 +1480,7 @@ class LocalSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        user_data = path.startswith("/mnt/user-data/")
+        user_data = self._is_user_data_path(path)
         try:
             mounts = self._virtual_search_mounts(path)
             if mounts is not None:
