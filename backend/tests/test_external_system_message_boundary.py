@@ -107,7 +107,7 @@ def test_all_http_run_entrypoints_reject_before_starting_worker(monkeypatch, pat
     app.include_router(thread_runs.router)
     app.state.stream_bridge = SimpleNamespace()
     app.state.run_manager = SimpleNamespace(create_or_reject=AsyncMock())
-    monkeypatch.setattr(services, "get_run_context", lambda _request: SimpleNamespace(thread_store=app.state.thread_store))
+    monkeypatch.setattr(services, "get_run_context", lambda _request: SimpleNamespace(thread_store=app.state.thread_store, app_config=None))
     monkeypatch.setattr(services, "resolve_agent_factory", lambda _assistant: object())
     worker = AsyncMock()
     monkeypatch.setattr(services, "run_agent", worker)

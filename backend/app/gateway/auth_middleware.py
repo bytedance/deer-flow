@@ -10,6 +10,7 @@ Fine-grained permission checks remain in authz.py decorators.
 """
 
 import logging
+import re
 from collections.abc import Callable
 
 from fastapi import HTTPException, Request, Response
@@ -60,7 +61,11 @@ _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
 )
 
 
-def _is_public(path: str) -> bool:
+def _is_public(path: str, method: str = "GET") -> bool:
+    # A share token grants only these reads. Forks and any future write routes
+    # under /shares still pass through session authentication and permissions.
+    if method in {"GET", "HEAD"} and re.fullmatch(r"/api/shares/[A-Za-z0-9_-]{43}(?:/artifacts/.+)?", path):
+        return True
     stripped = path.rstrip("/")
     if stripped in _PUBLIC_EXACT_PATHS:
         return True
@@ -91,7 +96,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if _is_public(get_request_route_path(request)):
+        if _is_public(get_request_route_path(request), request.method):
             return await call_next(request)
 
         internal_user = None

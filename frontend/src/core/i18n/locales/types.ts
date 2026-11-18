@@ -1,6 +1,47 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
+  sharing: {
+    title: string;
+    description: string;
+    scope: string;
+    expiry: string;
+    hour: string;
+    day: string;
+    week: string;
+    month: string;
+    create: string;
+    working: string;
+    link: string;
+    copy: string;
+    copied: string;
+    links: string;
+    noLinks: string;
+    revoke: string;
+    revoked: string;
+    expired: string;
+    expires: string;
+    loading: string;
+    failed: string;
+    unavailable: string;
+    conflict: string;
+    tooLarge: string;
+    readOnly: string;
+    fork: string;
+    forking: string;
+    missing: string;
+    retry: string;
+    artifacts: string;
+    download: string;
+    preview: string;
+    close: string;
+    you: string;
+    assistant: string;
+    tool: string;
+    noPreview: string;
+    previewNote: string;
+    previewLimited: string;
+  };
   usage: {
     title: string;
     description: string;
@@ -112,6 +153,7 @@ export interface Translations {
       | "knowledgeManagement"
       | "knowledgePlatform"
       | "knowledgeCenter"
+      | "skillEvolution"
       | "weknora"
       | "lightrag"
       | "example",
@@ -316,6 +358,19 @@ export interface Translations {
     copiedToClipboard: string;
     failedToCopyToClipboard: string;
     linkCopied: string;
+  };
+
+  artifactSelection: {
+    rewrite: string;
+    instructions: string;
+    exactRequired: string;
+    review: string;
+    original: string;
+    replacement: string;
+    apply: string;
+    applied: string;
+    changed: string;
+    limit: string;
   };
 
   artifactEditing: {

@@ -29,6 +29,7 @@ Read the guide for an area before you change it.
 ```bash
 make test               # offline suite in parallel shards
 make test-blocking-io   # strict blocking-I/O suite
+make test-bundled-extensions  # behavior suites of bundled examples (not in make test)
 make lint
 make format
 make test-live          # calls real APIs; needs DEER_FLOW_RUN_LIVE_TESTS=1
@@ -60,3 +61,5 @@ default suite needs no network and no API key.
   [run interaction policy](docs/RUN_INTERACTION_POLICY.md#hitl-tool-approval).
 - **Add a schema change with `make migrate-rev MSG="..."`** and follow the
   migrations guide.
+
+- **Notification preferences are a send-time trust boundary.** Malformed provider or per-event resolver output must fail closed and remain retryable without consuming an attempt; never treat malformed data as opt-in.

@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 from deerflow_extension_api.auth import ExtensionPrincipal
 
+pytestmark = pytest.mark.bundled_extension
+
 
 @pytest.fixture
 def platform(tmp_path, monkeypatch):

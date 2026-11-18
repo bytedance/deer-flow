@@ -49,7 +49,6 @@ import { ConversationExtensionActions } from "@/components/workspace/conversatio
 import { getAPIClient } from "@/core/api";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
-import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { useProjects } from "@/core/projects";
 import { useLocalSettings } from "@/core/settings";
@@ -87,6 +86,7 @@ import {
 } from "./thread-channel-source";
 import { useThreadDeleteDialog } from "./thread-delete-dialog";
 import { VirtualThreadList } from "./thread-list-virtualizer";
+import { ThreadShareDialog } from "./thread-share-dialog";
 import { useThreadArchiveAction } from "./use-thread-archive-action";
 
 /**
@@ -139,6 +139,7 @@ export function ThreadSidebarItem({
   const [renameValue, setRenameValue] = useState("");
   const [newProjectDialogOpen, setNewProjectDialogOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
 
   const handleRenameSubmit = useCallback(() => {
     if (renameValue.trim()) {
@@ -176,24 +177,6 @@ export function ThreadSidebarItem({
       },
     );
   }, [t.chats.pinChatFailed, thread, updatePinnedThread]);
-
-  const handleShare = useCallback(async () => {
-    // Link to this deployment, the only place the thread exists. Never
-    // rewrite the origin to another host: the thread id would leave the
-    // deployment and the link would not open the thread.
-    const shareUrl = `${window.location.origin}${pathOfThread(thread)}`;
-    try {
-      const didCopy = await writeTextToClipboard(shareUrl);
-      if (!didCopy) {
-        toast.error(t.clipboard.failedToCopyToClipboard);
-        return;
-      }
-
-      toast.success(t.clipboard.linkCopied);
-    } catch {
-      toast.error(t.clipboard.failedToCopyToClipboard);
-    }
-  }, [t, thread]);
 
   const handleExport = useCallback(
     async (format: ThreadExportFormat) => {
@@ -325,7 +308,14 @@ export function ThreadSidebarItem({
               <Pencil className="text-muted-foreground" />
               <span>{t.common.rename}</span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void handleShare()}>
+            <DropdownMenuItem
+              disabled={
+                isStaticWebsiteOnly() ||
+                !hasPermission(user, PERMISSIONS.THREADS_WRITE) ||
+                !hasPermission(user, PERMISSIONS.RUNS_READ)
+              }
+              onSelect={() => setShareOpen(true)}
+            >
               <Share2 className="text-muted-foreground" />
               <span>{t.common.share}</span>
             </DropdownMenuItem>
@@ -374,6 +364,11 @@ export function ThreadSidebarItem({
         </DropdownMenu>
       )}
 
+      <ThreadShareDialog
+        threadId={thread.thread_id}
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+      />
       {/* Rename Dialog */}
       <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
         <DialogContent className="sm:max-w-[425px]">

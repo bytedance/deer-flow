@@ -18,7 +18,7 @@ This chapter is organized by **what you see**. Each entry gives the cause, the f
 | A run fails with a restart-required message | a config edit the frozen process rejects when it builds the graph | [A run fails after a config edit](#a-run-fails-after-a-config-edit) |
 | A config edit seems ignored | mode and cadence are frozen at agent-build time | [A config change appears to have no effect](#a-config-change-appears-to-have-no-effect) |
 | A history-cache edit seems ignored | the cache is built with the checkpointer at startup | [A history-cache change appears to have no effect](#a-history-cache-change-appears-to-have-no-effect) |
-| Regenerate endpoints return `500` | the run-runs router does not map the mode errors | [Regenerate endpoints return 500 instead of 409](#regenerate-endpoints-return-500-instead-of-409) |
+| Token usage is null or `/runs/wait` hides a mode mismatch | those routes do not map the mode guard | [Checkpoint-mode mismatches on auxiliary endpoints](#checkpoint-mode-mismatches-on-auxiliary-endpoints) |
 | Delta did not shrink storage | still in full mode, or the writes table was not counted | [Delta did not shrink storage](#delta-did-not-shrink-storage) |
 | Materialization got slower | snapshot cadence raised too far | [Materialization got slower after raising the cadence](#materialization-got-slower-after-raising-the-cadence) |
 | The replaced answer comes back after regenerate | delta fork replay (#4458) | [The old answer reappears after regenerate](#the-old-answer-reappears-after-regenerate) |
@@ -91,20 +91,13 @@ This is not the frozen-for-correctness case: nothing about the cache can corrupt
 
 **Fix**: restart the Gateway after editing the section — and on the embedded or TUI path, restart that process, whose checkpointer singleton is also created once and reused. Only `database.checkpoint_graph_cache.accessor_graph_max` applies without a restart, because it is re-read on every eviction check.
 
-### Regenerate endpoints return 500 instead of 409
+### Checkpoint-mode mismatches on auxiliary endpoints
 
-**Symptom**: regenerate preparation returns `500` with `detail: "Failed to read latest checkpoint"` or `detail: "Failed to inspect checkpoint history"`, even though the same thread yields `409` elsewhere.
+**Symptom**: `GET /api/threads/{thread_id}/token-usage` returns `200` with `context_usage: null`, or `/runs/wait` returns `200` with an error body, while the same thread yields `409` from the state and thread endpoints.
 
-**Cause**: `POST /api/threads/{thread_id}/runs/regenerate/prepare` (and `/runs/edit-regenerate/prepare`) build the state accessor outside any `try`, and this module does not map the checkpoint-mode errors, so a mismatch surfaces as an unhandled `500`. The log lines are
+**Cause**: these routes do not map the checkpoint-mode guard. The token-usage path logs `Failed to load checkpoint for context usage on thread %s` and returns an empty usage; `/runs/wait` reports the run's error body instead of the HTTP status. The regenerate and edit-regenerate preparation routes used to fail the same way with `500`; they now reuse the shared `checkpoint_mode_errors` mapper and return the same `409`/`503` as the state endpoints.
 
-```
-Failed to read latest checkpoint for regenerate thread %s
-Failed to list checkpoints for regenerate thread %s
-```
-
-Two other endpoints fail more quietly for the same reason: `GET /api/threads/{thread_id}/token-usage` returns `200` with `context_usage: null` (only `Failed to load checkpoint for context usage on thread %s` is logged), and `/runs/wait` returns `200` with an error body rather than `409`.
-
-**Fix**: read the `500` as a mode mismatch. Check the thread's marker, then restart the process in the thread's mode. There is no local fix that turns these into `409`.
+**Fix**: confirm the mode mismatch first — the thread/state endpoints return `409` with the mode text, and a null usage alone is not conclusive because configuration loading or token counting can fail too. Once confirmed, restart the process in the thread's mode.
 
 ## Storage and materialization
 

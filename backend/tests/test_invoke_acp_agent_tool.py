@@ -147,6 +147,47 @@ def test_missing_mcode_command_returns_install_and_login_guidance():
     assert "restart DeerFlow" in result
 
 
+@pytest.mark.parametrize("agent", ["pi", "pi_coding"])
+def test_missing_pi_command_returns_adapter_install_guidance(agent):
+    result = _format_invocation_error(agent, "pi-acp", FileNotFoundError())
+
+    assert "npm install --global pi-acp" in result
+    assert "npx -y pi-acp" in result
+    assert "Gateway PATH" in result
+
+
+def test_missing_npx_for_pi_returns_node_install_guidance():
+    result = _format_invocation_error("pi", "npx", FileNotFoundError())
+
+    assert "Command 'npx' was not found" in result
+    assert "Install Node.js" in result
+    assert "npm" in result
+    assert "Gateway PATH" in result
+    assert "container" in result
+    assert "npm install --global pi-acp" not in result
+
+
+@pytest.mark.anyio
+async def test_pi_invocation_reports_missing_npx(monkeypatch, tmp_path):
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    tool = build_invoke_acp_agent_tool({"pi": ACPAgentConfig(command="npx", args=["-y", "pi-acp"], description="Pi coding agent")})
+
+    result = await tool.coroutine(agent="pi", prompt="Inspect the repository")
+
+    assert "Command 'npx' was not found" in result
+    assert "Install Node.js" in result
+    assert "npm install --global pi-acp" not in result
+
+
 @pytest.mark.anyio
 async def test_build_invoke_tool_description_and_unknown_agent_error():
     tool = build_invoke_acp_agent_tool(

@@ -14,6 +14,53 @@ import { bundledCopy } from "@/core/extensions/documentation";
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
+  sharing: {
+    title: "Share conversation",
+    description:
+      "Anyone with the link can view this snapshot without signing in.",
+    scope:
+      "Includes visible conversation steps and presented output files. Later changes stay private. Revoke a link to stop future access; copies already downloaded or forked remain with their recipients.",
+    expiry: "Link expires after",
+    hour: "1 hour",
+    day: "1 day",
+    week: "7 days",
+    month: "30 days",
+    create: "Create snapshot link",
+    working: "Working…",
+    link: "Share link",
+    copy: "Copy link",
+    copied: "Copied",
+    links: "Created links",
+    noLinks: "No share links yet.",
+    revoke: "Revoke",
+    revoked: "Revoked",
+    expired: "Expired",
+    expires: "Expires",
+    loading: "Loading…",
+    failed: "Unable to complete this request. Try again.",
+    unavailable: "Sharing is unavailable on this server.",
+    conflict:
+      "Finish the current turn before sharing. If it is already finished, refresh or revoke an older link and try again.",
+    tooLarge:
+      "This conversation or its artifacts exceed the sharing size limit.",
+    readOnly: "Read-only snapshot",
+    fork: "Continue in my workspace",
+    forking: "Copying…",
+    missing: "This share link has expired, was revoked, or is unavailable.",
+    retry: "Retry",
+    artifacts: "Artifacts",
+    download: "Download",
+    preview: "Preview",
+    close: "Close preview",
+    you: "User",
+    assistant: "Assistant",
+    tool: "Tool result",
+    noPreview: "Download this file to open it.",
+    previewNote:
+      "Static preview. Interactive content may require downloading the file.",
+    previewLimited:
+      "Preview shows the first 512 KiB. Download for the complete file.",
+  },
   usage: {
     title: "Token usage",
     description: "View input, output and cache-hit token usage.",
@@ -151,6 +198,10 @@ export const enUS: Translations = {
       ),
       knowledgeCenter: bundledCopy(
         "deerflow-extension-knowledge-center",
+        "en-US",
+      ),
+      skillEvolution: bundledCopy(
+        "deerflow-extension-skill-evolution",
         "en-US",
       ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
@@ -371,6 +422,20 @@ export const enUS: Translations = {
     copiedToClipboard: "Copied to clipboard",
     failedToCopyToClipboard: "Failed to copy to clipboard",
     linkCopied: "Link copied to clipboard",
+  },
+
+  artifactSelection: {
+    rewrite: "Rewrite selection",
+    instructions:
+      "Describe the change, then choose Rewrite selection. To ask a regular question, use Send.",
+    exactRequired: "Switch to source to select an exact range for rewriting.",
+    review: "Review replacement",
+    original: "Selected passage",
+    replacement: "Replacement",
+    apply: "Apply to draft",
+    applied: "Selection replaced in the draft. Review and save the artifact.",
+    changed: "The file or draft changed. Select the passage again.",
+    limit: "Select up to 12,000 characters.",
   },
 
   artifactEditing: {

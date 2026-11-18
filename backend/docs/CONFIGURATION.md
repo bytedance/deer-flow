@@ -983,6 +983,8 @@ tools:
     # api_key: $TAVILY_API_KEY  # Optional
 ```
 
+Tavily search and fetch initialize their HTTPS clients on a worker thread so TLS trust loading does not block other agent runs. A tool cancelled during initialization closes its client before returning without sending a request.
+
 For Tavily, `include_domains` and `exclude_domains` are deployment-only options
 read from the `web_search` tool entry and passed directly to `TavilyClient.search`.
 For a non-empty `include_domains`, DeerFlow also sends `include_domains_mode: filter`
@@ -1657,6 +1659,8 @@ sandbox:
    ready_timeout: 30                  # create/readiness timeout seconds
    use_server_proxy: false            # proxy execd/file traffic through server
    secure_access: false               # per-sandbox endpoint token; Kubernetes + gateway mode only
+   resource: {cpu: "2", memory: 4Gi}  # sandbox limits; omitted = SDK default 1 CPU / 2Gi
+   resource_requests: {cpu: "1", memory: 2Gi}  # sandbox requests; omitted = server default
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
@@ -1668,6 +1672,19 @@ sandbox:
 `use_server_proxy` and `secure_access` accept YAML booleans. Omitted or `null`
 values default to `false`. Quoted values such as `"false"` cause a provider
 startup error.
+
+`resource` and `resource_requests` map resource names to Kubernetes quantities
+(`cpu`, `memory`, or any name the OpenSandbox runtime accepts). They become the
+sandbox's limits and requests. Without `resource`, the SDK asks for 1 CPU and
+2Gi; without `resource_requests`, the server decides the requests.
+
+Only Kubernetes runtimes apply `resource_requests`; the Docker runtime ignores
+them. On Kubernetes, a request you omit defaults to its limit, and every request
+must fit within its limit. That includes the SDK default limits: setting only
+`resource_requests: {cpu: "2", memory: 4Gi}` sends limits of 1 CPU and 2Gi, and
+the sandbox creation fails. Set `resource` whenever requests exceed those
+defaults. Blank names or quantities and zero, negative or non-finite numbers
+cause a provider startup error.
 
 Install the optional SDK before selecting this provider:
 
@@ -2112,6 +2129,8 @@ models:
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
+Search, fetch and capture providers treat an example value that `.env.example` ships (such as `your-jina-api-key`, matched exactly) as unset, in `config.yaml` and in the environment alike: a keyless provider such as the Jina Reader uses its free tier, and a provider that needs a key reports it missing. Any other value is sent as written, so a self-hosted token you chose keeps working. Browserless reads `BROWSERLESS_TOKEN` only when its `token` field is omitted, so a blank or placeholder `token` is not replaced by the variable. `make doctor` applies the same rules and names the variable or field that still holds a placeholder, including `JINA_API_KEY` and `YDC_API_KEY` for the keyless providers.
+
 ## Backend dotenv selection
 
 Set `DEER_FLOW_ENV_FILE` in the backend process environment **before startup**
@@ -2276,6 +2295,45 @@ Docker container. DeerFlow forwards enabled MCP servers to the MCode session.
 Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
 only when the agent is expected to edit files or run commands for a trusted
 task.
+
+Pi can run as an external coding agent through the community `pi-acp` adapter.
+The adapter launches the separate `pi` executable, so install both packages in
+the Gateway environment before starting DeerFlow. `pi-acp` currently requires
+Node.js 22+ and pi 0.81.0+:
+
+```bash
+npm install --global @earendil-works/pi-coding-agent
+npm install --global pi-acp
+```
+
+Configure pi's model provider and API key separately for the user that runs the
+Gateway. For interactive providers, start `pi` in that same environment, then run
+`/login` in Pi's terminal UI and select your provider. Alternatively, provide the
+provider's documented environment variables. The `pi` executable and its credentials must
+be available inside the Gateway container; installing or authenticating them
+only on the Docker host is not sufficient.
+
+```yaml
+acp_agents:
+  pi:
+    command: pi-acp
+    args: []
+    description: Pi coding agent for repository tasks and code generation
+    auto_approve_permissions: false
+```
+
+Node.js, `pi-acp`, and `pi` must be available on the Gateway process's `PATH`. When
+the Gateway runs in Docker, install them inside the Gateway image or container.
+Pi executes its filesystem and shell tools directly in its working environment.
+`auto_approve_permissions` only controls permission requests sent through ACP;
+leaving it disabled does not sandbox these direct operations. Run untrusted Pi
+tasks in an independently isolated process, container, or VM with only the
+required files, credentials, and network access. Keep
+`auto_approve_permissions` disabled for untrusted tasks. Alternatively,
+set `command: npx` and `args: ["-y", "pi-acp"]` to fetch the adapter on demand;
+this requires `npx` on the Gateway's `PATH` and may require network access at
+startup. Preinstalling the adapter lets deployment tooling control its version
+without fetching it during an invocation.
 
 
 ## HITL Tool Approval

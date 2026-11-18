@@ -50,6 +50,7 @@ from app.gateway.routers import (
     runs,
     scheduled_tasks,
     search,
+    shares,
     skill_mutations,
     skills,
     subagent_batches,
@@ -925,6 +926,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
         if batch_repo is not None:
             from app.subagent_batches.continuation import BatchContinuations
+            from app.subagent_batches.identity import resolve_batch_principal
 
             continuations = BatchContinuations(app)
             app.state.batch_continuations = continuations
@@ -936,6 +938,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 prepare_continuation=continuations.prepare,
                 dispatch_continuation=continuations.dispatch,
                 cancel_continuation=continuations.cancel,
+                resolve_principal=lambda batch: resolve_batch_principal(batch, load_user=app.state.agent_runs_host.load_user),
             )
             app.state.subagent_batch_service = batch_service
             if subagent_batches_config.enabled:
@@ -1382,6 +1385,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(search.router)
     app.include_router(threads.router)
+    app.include_router(shares.router)
 
     # Per-user activity feed (own prefix, so /api/threads/{thread_id} never captures it)
     app.include_router(thread_activity.router)

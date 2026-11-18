@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 66
+config_version: 67
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2013,6 +2013,8 @@ sandbox:
 #   # ready_timeout: 30               # finite positive create/readiness timeout seconds
 #   # use_server_proxy: false         # proxy execd/file traffic through server
 #   # secure_access: false            # per-sandbox endpoint token; needs Kubernetes + ingress gateway mode
+#   # resource: {cpu: "2", memory: 4Gi}          # sandbox limits; omitted = SDK default 1 CPU / 2Gi
+#   # resource_requests: {cpu: "1", memory: 2Gi} # sandbox requests; omitted = server default
 #   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
@@ -2030,6 +2032,10 @@ sandbox:
 # shared by ordinary `task` calls and durable batches. Waiting work is async;
 # queued subagents do not occupy a scheduler thread.
 subagent_runtime:
+  # Optional history for ordinary task delegates under a persistent parent
+  # graph. Currently supports only file-backed SQLite checkpoint storage.
+  # Restart Gateway after changing; independent of run_events.backend.
+  checkpoint_enabled: false
   max_running: 3
   max_queued: 64
   admission_policy: queue       # queue or reject when all slots are occupied
@@ -2214,6 +2220,23 @@ hitl_approval:
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
+#
+#   pi:
+#     # Pi coding agent through the community ACP adapter (`pi-acp`).
+#     # Requires Node.js 22+ and pi 0.81.0+. Install both in the Gateway environment:
+#     # npm install --global @earendil-works/pi-coding-agent pi-acp
+#     # Configure pi's model provider/API key for the Gateway user.
+#     # For interactive sign-in, start `pi` and run `/login` in its terminal UI.
+#     command: pi-acp
+#     args: []
+#     # Alternatively, fetch the adapter on demand (requires network access):
+#     # command: npx
+#     # args: ["-y", "pi-acp"]
+#     description: Pi coding agent for repository tasks and code generation
+#     # Pi performs filesystem and shell operations directly; auto_approve_permissions
+#     # only handles ACP permission requests and is not a sandbox. Isolate untrusted tasks.
+#     # auto_approve_permissions: false  # Set to true only for trusted tasks
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time
 
 # ============================================================================
 # Skills Configuration
@@ -2957,6 +2980,23 @@ scheduler:
   recursion_limit: 1000
 
 # ============================================================================
+# Per-agent MCP credentials (opt-in, deployment-managed HTTP servers only).
+# Bindings stay operator-owned here; set agent_auth: true on the matching
+# extensions_config.json server. See backend/docs/MCP_SERVER.md for the digest
+# command, GitOps rollouts, and durable-task revocation behavior.
+mcp_agent_auth: {}
+# mcp_agent_auth:
+#   research-tickets:
+#     server: ticketing
+#     agent: research-bot
+#     owners: ["member-user-id"]  # Explicit IDs; one list may cover shared copies.
+#     definition_digests: ["<approved 64-character SHA-256 digest>"]
+#     oauth:
+#       grant_type: client_credentials
+#       token_url: https://idp.example/realms/work/protocol/openid-connect/token
+#       client_id: research-bot
+#       client_secret: $RESEARCH_BOT_CLIENT_SECRET
+
 # Long-running MCP Tasks Configuration
 # ============================================================================
 # Durable runtime for ordinary MCP submit/status/cancel task toolsets. It is

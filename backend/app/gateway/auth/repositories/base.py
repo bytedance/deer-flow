@@ -144,6 +144,9 @@ class UserRepository(ABC):
             UserNotFoundError: If no row exists for ``user.id``. This is
                 a hard failure (not a no-op) so callers cannot mistake a
                 concurrent-delete race for a successful update.
+            ValueError: If the new email is already registered to another
+                user, including one that committed after the caller's
+                pre-check. Nothing is written.
         """
         raise NotImplementedError
 

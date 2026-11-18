@@ -11,7 +11,9 @@ import {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
+  useState,
   type Key,
   type ReactNode,
 } from "react";
@@ -24,6 +26,7 @@ const ESTIMATED_ROW_HEIGHT = 176;
 const GROUP_START_OFFSET = 16;
 const VIRTUAL_SCROLL_SETTLE_ATTEMPTS = 4;
 const STATIC_SCROLL_SETTLE_ATTEMPTS = 2;
+const PIN_SETTLE_FRAMES = 5;
 
 type GroupAlignment = "start" | "center";
 
@@ -42,10 +45,27 @@ type VirtualMessageListProps = {
    */
   renderAfterGroup?: (index: number) => ReactNode;
   onActiveGroupChange?: (groupIndex: number) => void;
+  /**
+   * Key of a freshly sent user group to pin to the top of the viewport
+   * (ChatGPT-style send behavior). Keyed, not indexed: history pagination
+   * prepends groups and would shift an index. While set, a flexible spacer
+   * grows at the end of the list so the pinned row can actually reach the
+   * top — it is the last row, so without the spacer the browser clamps the
+   * scroll — and the spacer shrinks as the streamed reply grows beneath it.
+   * `null` clears it.
+   */
+  pinGroupKey?: string | null;
 };
 
 export type VirtualMessageListHandle = {
   scrollToGroup: (groupIndex: number, options?: ScrollToGroupOptions) => void;
+  /**
+   * Hands scroll control back to the user immediately: cancels a running
+   * send-pin chain (escape ticks and settle frames) without clearing the
+   * pin itself. Wired to explicit user intents that do not originate as
+   * input on the scroll element, e.g. the scroll-to-bottom button.
+   */
+  cancelPinFollow: () => void;
 };
 
 function groupKey(group: MessageGroup | undefined, index: number): Key {
@@ -60,12 +80,21 @@ export const VirtualMessageList = forwardRef<
   VirtualMessageListHandle,
   VirtualMessageListProps
 >(function VirtualMessageList(
-  { groups, isLoading, renderGroup, renderAfterGroup, onActiveGroupChange },
+  {
+    groups,
+    isLoading,
+    renderGroup,
+    renderAfterGroup,
+    onActiveGroupChange,
+    pinGroupKey,
+  },
   ref,
 ) {
   const { isAtBottom, scrollRef, scrollToBottom, stopScroll } =
     useStickToBottomContext();
   const listRef = useRef<HTMLDivElement | null>(null);
+  const [pinSpacerHeight, setPinSpacerHeight] = useState(0);
+  const pinSpacerHeightRef = useRef(0);
   const activeIndex = isLoading ? groups.length - 1 : -1;
   const getItemKey = useCallback(
     (index: number) => groupKey(groups[index], index),
@@ -131,6 +160,199 @@ export const VirtualMessageList = forwardRef<
     [scrollRef],
   );
 
+  const pinnedIndex = useMemo(() => {
+    if (pinGroupKey == null) {
+      return null;
+    }
+    const index = groups.findIndex(
+      (_, groupIndex) => String(getItemKey(groupIndex)) === pinGroupKey,
+    );
+    return index >= 0 ? index : null;
+  }, [getItemKey, groups, pinGroupKey]);
+
+  const updatePinSpacer = useCallback(() => {
+    const viewport = scrollRef.current;
+    if (pinnedIndex == null || !viewport) {
+      return;
+    }
+    const row = listRef.current?.querySelector<HTMLElement>(
+      `[data-message-group-index="${pinnedIndex}"]`,
+    );
+    if (!row) {
+      return;
+    }
+    const rowRect = row.getBoundingClientRect();
+    // Everything after the pinned row, excluding this spacer itself and the
+    // row's own height: the spacer must make up whatever is missing so the
+    // row can still reach the top of the viewport.
+    const afterContent = Math.max(
+      0,
+      viewport.scrollHeight -
+        pinSpacerHeightRef.current -
+        (rowRect.bottom + viewport.scrollTop),
+    );
+    const needed = Math.max(
+      0,
+      viewport.clientHeight -
+        rowRect.height -
+        GROUP_START_OFFSET -
+        afterContent,
+    );
+    pinSpacerHeightRef.current = needed;
+    setPinSpacerHeight((previous) => (previous === needed ? previous : needed));
+  }, [pinnedIndex, scrollRef]);
+
+  // Runs the pin chain once per pin key: frame one sizes the spacer, frame
+  // two aligns, then a few settle frames re-align (the virtualized branch
+  // re-measures rows after the alignment). The whole chain — rAF ids and
+  // escape timeouts — lives in a ref and is NOT cancelled by this effect's
+  // cleanup: groups churn on every stream chunk, and a chunk landing between
+  // the frames would otherwise cancel the pending alignment mid-chain and
+  // restart it against already-grown geometry (the spacer computes to 0 and
+  // the pin collapses). Only clearing the pin or unmount cancels.
+  //
+  // The spacer is sized once and stays frozen for the run: re-measuring per
+  // chunk would shrink it in lockstep with the reply, and the net-negative
+  // resize makes use-stick-to-bottom re-lock its follow while the bottom gap
+  // is still inside its 70px band — after which every chunk drags the
+  // viewport down without user input. A frozen spacer keeps each chunk a
+  // net-positive resize (the follow stays escaped), and an explicit user
+  // scroll down re-locks normally through scroll events. The spacer
+  // collapses when the pin clears.
+  const pinChainKeyRef = useRef<string | null>(null);
+  const pinFramesRef = useRef<number[]>([]);
+  const pinEscapeTimersRef = useRef<number[]>([]);
+  // User-intent listeners, attached for the chain's lifetime: `wheel`,
+  // `touchstart` and `pointerdown` never fire for programmatic `scrollTo`, so
+  // they distinguish real scrolling (wheel/trackpad/touch, scrollbar and
+  // selection drags) from the resize-animation churn the chain defends
+  // against. The first genuine input hands scroll control back to the user.
+  const pinUserIntentBoundRef = useRef(false);
+  const cancelPinChain = useCallback(() => {
+    for (const frame of pinFramesRef.current) {
+      cancelAnimationFrame(frame);
+    }
+    pinFramesRef.current = [];
+    for (const timer of pinEscapeTimersRef.current) {
+      clearTimeout(timer);
+    }
+    pinEscapeTimersRef.current = [];
+    if (pinUserIntentBoundRef.current) {
+      pinUserIntentBoundRef.current = false;
+      const viewport = scrollRef.current;
+      if (viewport) {
+        viewport.removeEventListener("wheel", cancelPinChain);
+        viewport.removeEventListener("touchstart", cancelPinChain);
+        viewport.removeEventListener("pointerdown", cancelPinChain);
+      }
+    }
+  }, [scrollRef]);
+  const armPinUserIntent = useCallback(() => {
+    if (pinUserIntentBoundRef.current) {
+      return;
+    }
+    const viewport = scrollRef.current;
+    if (!viewport) {
+      return;
+    }
+    pinUserIntentBoundRef.current = true;
+    viewport.addEventListener("wheel", cancelPinChain, { passive: true });
+    viewport.addEventListener("touchstart", cancelPinChain, {
+      passive: true,
+    });
+    viewport.addEventListener("pointerdown", cancelPinChain, {
+      passive: true,
+    });
+  }, [cancelPinChain, scrollRef]);
+  useLayoutEffect(() => {
+    if (pinnedIndex == null) {
+      pinChainKeyRef.current = null;
+      cancelPinChain();
+      if (pinSpacerHeightRef.current !== 0) {
+        pinSpacerHeightRef.current = 0;
+        setPinSpacerHeight(0);
+      }
+      return;
+    }
+    if (pinChainKeyRef.current === pinGroupKey) {
+      // The chain already ran (or is running) for this pin; groups churn
+      // every stream chunk and must not restart it.
+      return;
+    }
+    pinChainKeyRef.current = pinGroupKey ?? null;
+    // A second send within the first chain's 2s window starts a new chain;
+    // without this cancel the old chain's pending ticks keep aligning the
+    // previous pin (and its timer array is overwritten, orphaning them so
+    // they can never be cancelled).
+    cancelPinChain();
+    armPinUserIntent();
+    const trackFrame = (callback: FrameRequestCallback) => {
+      const frame = requestAnimationFrame((time) => {
+        pinFramesRef.current = pinFramesRef.current.filter(
+          (pending) => pending !== frame,
+        );
+        callback(time);
+      });
+      pinFramesRef.current.push(frame);
+      return frame;
+    };
+    trackFrame(() => {
+      updatePinSpacer();
+      trackFrame(() => {
+        // Escaping before the alignment is not redundant even though pinning
+        // scrolls down: locking back in on a down-scroll is the library's
+        // default.
+        stopScroll();
+        alignGroupToViewport(pinnedIndex, "start", "auto");
+        // The alignment scrolls down into the spacer region while a
+        // stick-to-bottom resize animation (from the optimistic message
+        // growth) is still writing scroll offsets toward the spacer bottom.
+        // Every write's scroll event re-locks the follow, and a locked follow
+        // later chases the real bottom once the reply grows. The animation
+        // converges to the spacer bottom over ~350ms — visually close to the
+        // pinned position but not exact. So each escape tick also re-aligns:
+        // the chain spans the animation's duration plus its end-of-animation
+        // requeue, and the LAST tick runs after the animation has died, so
+        // the exact pinned offset wins. The chain spans two seconds: a send
+        // that lands while the restored thread's initial virtual positioning
+        // and row measurement are still settling interleaves with that churn,
+        // which outlasts the resize animation itself. After the chain, the
+        // user's own down-scroll re-locks normally.
+        pinEscapeTimersRef.current = [
+          0, 100, 200, 350, 500, 700, 900, 1100, 1400, 1700, 2000,
+        ].map((delay) =>
+          window.setTimeout(() => {
+            stopScroll();
+            alignGroupToViewport(pinnedIndex, "start", "auto");
+          }, delay),
+        );
+        // Settle frames re-align against post-alignment measurement shifts.
+        let pending = PIN_SETTLE_FRAMES;
+        const scheduleSettle = () => {
+          if (pending <= 0) {
+            return;
+          }
+          pending -= 1;
+          trackFrame(() => {
+            alignGroupToViewport(pinnedIndex, "start", "auto");
+            scheduleSettle();
+          });
+        };
+        scheduleSettle();
+      });
+    });
+  }, [
+    alignGroupToViewport,
+    armPinUserIntent,
+    cancelPinChain,
+    groups,
+    pinGroupKey,
+    pinnedIndex,
+    stopScroll,
+    updatePinSpacer,
+  ]);
+  useEffect(() => cancelPinChain, [cancelPinChain]);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -138,6 +360,9 @@ export const VirtualMessageList = forwardRef<
         if (groupIndex < 0 || groupIndex >= groups.length) {
           return;
         }
+        // Outline chapter navigation is explicit user intent: a running
+        // send-pin chain must not revert it on its next tick.
+        cancelPinChain();
         stopScroll();
         const behavior = options?.behavior ?? "auto";
         const align = options?.align ?? "start";
@@ -164,9 +389,13 @@ export const VirtualMessageList = forwardRef<
         };
         requestAnimationFrame(settleOnExactGroup);
       },
+      cancelPinFollow() {
+        cancelPinChain();
+      },
     }),
     [
       alignGroupToViewport,
+      cancelPinChain,
       groups.length,
       shouldVirtualize,
       stopScroll,
@@ -310,6 +539,9 @@ export const VirtualMessageList = forwardRef<
             {renderAfterGroup?.(index)}
           </div>
         ))}
+        {pinSpacerHeight > 0 && (
+          <div aria-hidden style={{ height: pinSpacerHeight }} />
+        )}
       </div>
     );
   }
@@ -337,6 +569,16 @@ export const VirtualMessageList = forwardRef<
           </div>
         );
       })}
+      {pinSpacerHeight > 0 && (
+        <div
+          aria-hidden
+          className="absolute top-0 left-0 w-full"
+          style={{
+            height: pinSpacerHeight,
+            transform: `translateY(${virtualizer.getTotalSize()}px)`,
+          }}
+        />
+      )}
     </div>
   );
 });
