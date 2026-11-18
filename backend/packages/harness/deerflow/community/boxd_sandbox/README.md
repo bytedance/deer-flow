@@ -65,7 +65,9 @@ snapshot here. New machines start from it.
   (at most 2,000 files, 512 MiB and 120 seconds per release), then the machine is
   parked in the warm pool. Names that differ only by case or Unicode
   normalization, unsafe names and linked destinations are skipped. A copy
-  failure keeps the previous copy and never blocks the release.
+  failure keeps the previous copy. Listing and downloads share the remaining
+  120-second budget. A stopped machine's copy is skipped, and recovery waits
+  for the next normal sandbox call.
 - **Reuse.** Only the same scope can reclaim a warm machine, after a health
   check. A failed check deletes the machine and creates a new one.
 - **Stopped machines** are started on the next call. A file call then runs
@@ -81,8 +83,8 @@ snapshot here. New machines start from it.
   shutdown deletes every tracked machine. A failed delete is kept and retried
   by the reaper (when `idle_timeout` is above 0) and by the next shutdown. If
   `create` raises after the server made the machine, the provider finds it by a
-  per-create label and deletes it. When every caller that acquired a machine
-  was cancelled, the machine is released to the warm pool.
+  per-create label and tracks it until deletion succeeds. When every caller
+  that acquired a machine was cancelled, the machine is released to the warm pool.
 - **Leftovers.** Machines carry the labels `deer-flow: sandbox` and
   `deer-flow-scope: <scope id>`. A Gateway that crashes cannot delete its
   machines; find them by these labels in the boxd console or with the CLI.

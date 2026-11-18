@@ -1735,10 +1735,13 @@ skill policy gets its own skills projection, and the machine sees only what was
 uploaded. Work outside `/mnt/user-data` is lost when the idle reaper deletes a
 machine. At the end of a turn, release copies
 `/mnt/user-data/outputs` back to the thread's output directory (bounded by file
-count, bytes and time), then parks the machine in an in-process warm pool. The
-same scope reclaims it after a health check; the idle reaper deletes it after
+count, bytes and one shared 120-second deadline), then parks the machine in an
+in-process warm pool. A stopped machine's output copy is skipped until a normal
+sandbox call restarts it. The same scope reclaims it after a health check;
+the idle reaper deletes it after
 `idle_timeout`. Shutdown deletes every machine the provider tracks and can be
 retried when a delete fails.
+Machines discovered after a failed create use the same tracked deletion retries.
 
 Commands run through `bash -lc`. Per-call environment variables travel as exec
 options, never inside the command string. The command deadline (the caller's

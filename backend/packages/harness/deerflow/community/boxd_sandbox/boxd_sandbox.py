@@ -211,16 +211,21 @@ class BoxdSandbox(Sandbox):
                     raise
                 time.sleep(_START_PROBE_INTERVAL)
 
-    def _call(self, op: Callable[[], Any], *, repeat: bool = True) -> Any:
+    def _call(self, op: Callable[[], Any], *, repeat: bool = True, recover: bool = True) -> Any:
         """Run one SDK call, starting the machine if it is stopped.
 
         A machine in standby or hibernation wakes on the call itself. A stopped
         machine is started, and the call is repeated once when ``repeat`` is
         true. Commands pass ``repeat=False``: a machine stopped while the
         command ran must not run it a second time, so the caller gets an error
-        and decides.
+        and decides. Budgeted mirror calls pass ``recover=False`` to skip the
+        control-plane calls used for recovery and failure confirmation.
         """
         self._ensure_open()
+        if not recover:
+            # Budgeted output copies must not enter control-plane recovery or
+            # failure probes, whose SDK calls have separate request deadlines.
+            return op()
         try:
             try:
                 return op()
@@ -241,7 +246,12 @@ class BoxdSandbox(Sandbox):
             self._note_failure(e)
             raise
 
-    def _run(self, argv: list[str], *, env: dict[str, str] | None = None, timeout: float | None = None, binary: bool = False, repeat: bool = True) -> Any:
+    def _run(self, argv: list[str], *, env: dict[str, str] | None = None, timeout: float | None = None, binary: bool = False, repeat: bool = True, deadline: float | None = None) -> Any:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("boxd output synchronization deadline exceeded")
+            timeout = min(timeout, remaining) if timeout is not None else remaining
         return self._call(
             lambda: self._client.machines.exec(
                 self._machine_id,
@@ -252,11 +262,12 @@ class BoxdSandbox(Sandbox):
                 region=self._region,
             ),
             repeat=repeat,
+            recover=deadline is None,
         )
 
-    def run_shell(self, script: str, *, timeout: float = _HELPER_TIMEOUT_SECONDS, binary: bool = False) -> Any:
+    def run_shell(self, script: str, *, timeout: float = _HELPER_TIMEOUT_SECONDS, binary: bool = False, deadline: float | None = None) -> Any:
         """Run an internal helper script with the configured environment."""
-        return self._run(["bash", "-lc", script], env=self._default_env, timeout=timeout, binary=binary)
+        return self._run(["bash", "-lc", script], env=self._default_env, timeout=timeout, binary=binary, deadline=deadline)
 
     # ── Paths ────────────────────────────────────────────────────────────
 
@@ -314,14 +325,14 @@ class BoxdSandbox(Sandbox):
 
     # ── File operations ──────────────────────────────────────────────────
 
-    def _read_bytes(self, path: str, limit: int, *, timeout: float = _READ_TIMEOUT_SECONDS) -> bytes:
+    def _read_bytes(self, path: str, limit: int, *, timeout: float = _READ_TIMEOUT_SECONDS, deadline: float | None = None) -> bytes:
         """Read at most ``limit`` bytes with a deadline.
 
         ``head -c limit+1`` bounds what the machine sends, so an oversized
         file is detected without buffering more than one byte past the cap,
         and the exec deadline bounds a stalled transfer.
         """
-        result = self._run(["head", "-c", str(limit + 1), "--", path], timeout=timeout, binary=True)
+        result = self._run(["head", "-c", str(limit + 1), "--", path], timeout=timeout, binary=True, deadline=deadline)
         data = result.stdout if isinstance(result.stdout, bytes) else _text(result.stdout).encode("utf-8")
         if result.exit_code != 0:
             message = _text(result.stderr).strip() or f"head exited with code {result.exit_code}"
@@ -379,7 +390,8 @@ class BoxdSandbox(Sandbox):
             payload = existing + data
             self._call(lambda: fs.write(self._machine_id, resolved, payload, region=self._region))
 
-    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None, deadline: float | None = None) -> bytes:
+        """Download under the size cap and optional monotonic mirror deadline."""
         limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         normalized = self._guard_path(path)
         if normalized != VIRTUAL_PATH_PREFIX and not normalized.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
@@ -387,7 +399,7 @@ class BoxdSandbox(Sandbox):
         # head -c stops one byte past the cap, so a file that grows during
         # the transfer still cannot exceed it.
         try:
-            return self._read_bytes(normalized, limit, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
+            return self._read_bytes(normalized, limit, timeout=_DOWNLOAD_TIMEOUT_SECONDS, deadline=deadline)
         except OSError as e:
             if e.errno == errno.EFBIG or is_missing_file_error(e):
                 raise

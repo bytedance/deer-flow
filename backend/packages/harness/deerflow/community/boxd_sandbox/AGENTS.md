@@ -19,6 +19,12 @@ cd backend && python -m pytest tests -q -k "boxd"
 - **Every SDK call has a deadline.** Commands run under coreutils `timeout`,
   so exit code 124 and partial output come back. `machines.fs` read streams take
   no deadline, so reads run as `head -c` through exec.
+- **Release copies share one deadline.** Pass it through listing and downloads.
+  Budgeted calls skip stopped-machine recovery and failure probes because those
+  control-plane calls have separate timeouts.
+- **Failed-create cleanup stays owned.** A machine found by generation label
+  goes through `_close_quietly`, so a failed delete is retried by the reaper
+  and shutdown.
 - **`MachineFileNotFoundError` is also a `NotFoundError`.** Test for the
   filesystem error, and confirm with `machines.get` before treating a machine
   as gone.

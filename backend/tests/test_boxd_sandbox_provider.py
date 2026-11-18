@@ -355,6 +355,31 @@ def test_create_that_raises_after_the_machine_exists_deletes_it(installed) -> No
     assert "m-1" in fake.machines
 
 
+@pytest.mark.parametrize("retry", ["reaper", "shutdown"])
+def test_failed_create_delete_remains_tracked_until_retry(installed, retry: str) -> None:
+    provider, fake = installed
+    fake.machines_api.create("someone-else", labels={"deer-flow": "sandbox"})
+    fake.create_error = BoxdError("create response lost")
+    fake.create_error_after_create = True
+    fake.delete_errors = [BoxdError("temporary delete failure")]
+    with pytest.raises(BoxdError, match="create response lost"):
+        provider.acquire("thread", user_id="owner")
+
+    assert fake.delete_calls == ["m-2"]
+    assert set(fake.machines) == {"m-1", "m-2"}
+    assert [box.machine_id for box in provider._pending_closes.values()] == ["m-2"]
+    assert provider._sandboxes == {}
+    assert provider._warm_pool == {}
+    if retry == "reaper":
+        provider._cleanup_idle_resources(0)
+    else:
+        provider.shutdown()
+    assert fake.deleted == ["m-2"]
+    assert fake.delete_calls == ["m-2", "m-2"]
+    assert set(fake.machines) == {"m-1"}
+    assert provider._pending_closes == {}
+
+
 def test_provider_enforces_agent_skill_isolation(installed) -> None:
     provider, _ = installed
     assert provider.supports_agent_skill_isolation is True
@@ -567,6 +592,100 @@ def test_release_mirrors_outputs_to_gateway(installed, paths: Paths) -> None:
     # The listing is read as bytes, so file names are never decoded lossily.
     listing = next(call for call in fake.execs if "-print0" in call["argv"][-1])
     assert listing["encoding"] == "buffer"
+
+
+@pytest.mark.parametrize("first_transfer_fails", [False, True])
+def test_output_mirror_passes_remaining_deadline_to_downloads(installed, paths: Paths, monkeypatch: pytest.MonkeyPatch, first_transfer_fails: bool) -> None:
+    provider, fake = installed
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    files = fake.files["m-1"]
+    files["/mnt/user-data/outputs/a.txt"] = b"a"
+    files["/mnt/user-data/outputs/b.txt"] = b"b"
+    outputs = paths.sandbox_outputs_dir("thread", user_id="owner")
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "a.txt").write_bytes(b"previous")
+    now = [0.0]
+    monkeypatch.setattr("deerflow.community.boxd_sandbox.boxd_sandbox_provider.time.monotonic", lambda: now[0])
+
+    def transfer(machine_id, argv, env):
+        if "-print0" in argv[-1]:
+            now[0] += provider._SYNC_DEADLINE_SECONDS - 1
+        elif argv[0] == "head":
+            now[0] += 0.75
+            if first_transfer_fails and argv[-1].endswith("a.txt"):
+                raise BoxdError("temporary download failure")
+        return None
+
+    fake.exec_override = transfer
+    provider.release(sandbox_id)
+    downloads = [call for call in fake.execs if call["argv"][0] == "head"]
+    assert [call["timeout"] for call in downloads] == [1.0, 0.25]
+    assert (outputs / "a.txt").read_bytes() == (b"previous" if first_transfer_fails else b"a")
+    assert (outputs / "b.txt").read_bytes() == b"b"
+    assert sandbox_id in provider._warm_pool
+
+
+def test_expired_output_mirror_starts_no_download(installed, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, fake = installed
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    fake.files["m-1"]["/mnt/user-data/outputs/a.txt"] = b"a"
+    now = [0.0]
+    monkeypatch.setattr("deerflow.community.boxd_sandbox.boxd_sandbox_provider.time.monotonic", lambda: now[0])
+
+    def listing(machine_id, argv, env):
+        if "-print0" in argv[-1]:
+            now[0] += provider._SYNC_DEADLINE_SECONDS
+        return None
+
+    fake.exec_override = listing
+    provider.release(sandbox_id)
+    assert all(call["argv"][0] != "head" for call in fake.execs)
+    assert sandbox_id in provider._warm_pool
+
+
+@pytest.mark.parametrize("stop_during_listing", [False, True])
+def test_output_mirror_defers_stopped_machine_recovery(installed, paths: Paths, stop_during_listing: bool) -> None:
+    provider, fake = installed
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    fake.files["m-1"]["/mnt/user-data/outputs/a.txt"] = b"new"
+    outputs = paths.sandbox_outputs_dir("thread", user_id="owner")
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "a.txt").write_bytes(b"previous")
+
+    def stop(machine_id, argv, env):
+        if "-print0" in argv[-1]:
+            fake.machines[machine_id].status = "stopped"
+        return None
+
+    if stop_during_listing:
+        fake.exec_override = stop
+    else:
+        fake.machines["m-1"].status = "stopped"
+    provider.release(sandbox_id)
+    assert fake.starts == []
+    assert (outputs / "a.txt").read_bytes() == b"previous"
+    assert sandbox_id in provider._warm_pool
+    fake.exec_override = None
+    provider.acquire("thread", user_id="owner")
+    assert fake.starts == ["m-1"]
+
+
+def test_output_mirror_rechecks_deadline_after_local_preflight(installed, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, fake = installed
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    fake.files["m-1"]["/mnt/user-data/outputs/a.txt"] = b"a"
+    now = [0.0]
+    monkeypatch.setattr("deerflow.community.boxd_sandbox.boxd_sandbox_provider.time.monotonic", lambda: now[0])
+    destination = provider._output_destination
+
+    def preflight(root, remote_path):
+        now[0] += provider._SYNC_DEADLINE_SECONDS
+        return destination(root, remote_path)
+
+    monkeypatch.setattr(provider, "_output_destination", preflight)
+    provider.release(sandbox_id)
+    assert all(call["argv"][0] != "head" for call in fake.execs)
+    assert sandbox_id in provider._warm_pool
 
 
 def test_output_sync_skips_ambiguous_and_unsafe_names(installed, paths: Paths) -> None:

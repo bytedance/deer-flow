@@ -488,7 +488,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         try:
             machine = client.machines.create(self._machine_name(sandbox_id), **create_kwargs)
         except BaseException:
-            self._delete_generation(client, generation)
+            self._delete_generation(client, generation, sandbox_id)
             raise
         sandbox = BoxdSandbox(
             sandbox_id,
@@ -512,7 +512,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         logger.info("Created boxd sandbox %s (machine %s)", sandbox_id, machine.id)
         return sandbox
 
-    def _delete_generation(self, client: Boxd, generation: str) -> None:
+    def _delete_generation(self, client: Boxd, generation: str, sandbox_id: str) -> None:
         """Delete a machine whose create raised after the server made it.
 
         The generation label is unique to one create call, so a match can
@@ -526,11 +526,8 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         for machine in found:
             if (getattr(machine, "labels", None) or {}).get(_LABEL_GENERATION) != generation:
                 continue
-            try:
-                client.machines.delete(machine.id, region=self._config["region"])
-                logger.info("Deleted boxd machine %s left by a failed create", machine.id)
-            except Exception:
-                logger.warning("Could not delete boxd machine %s left by a failed create", machine.id, exc_info=True)
+            sandbox = BoxdSandbox(sandbox_id, client, machine.id, region=self._config["region"])
+            self._close_quietly(sandbox, context="failed create")
 
     def _bootstrap(self, sandbox: BoxdSandbox) -> None:
         skills_root = shlex.quote(self._config["skills_container_path"])
@@ -828,11 +825,11 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
             raise ValueError("Output destination is not a regular file")
         return target
 
-    def _list_remote_outputs(self, sandbox: BoxdSandbox) -> list[str | None] | None:
+    def _list_remote_outputs(self, sandbox: BoxdSandbox, *, deadline: float) -> list[str | None] | None:
         """NUL-framed listing of output files; None when it is over the limit."""
         root = shlex.quote(OUTPUTS_ROOT)
         script = f"set -o pipefail; [ -d {root} ] && [ ! -L {root} ] || exit 0; find {root} -type f -print0 2>/dev/null | head -c {self._MAX_SYNC_LISTING_BYTES + 1}"
-        result = sandbox.run_shell(script, timeout=self._SYNC_DEADLINE_SECONDS, binary=True)
+        result = sandbox.run_shell(script, timeout=self._SYNC_DEADLINE_SECONDS, binary=True, deadline=deadline)
         raw = result.stdout if isinstance(result.stdout, bytes) else str(result.stdout).encode("utf-8")
         if len(raw) > self._MAX_SYNC_LISTING_BYTES:
             logger.warning("boxd output listing exceeded %d bytes; skipping synchronization", self._MAX_SYNC_LISTING_BYTES)
@@ -857,7 +854,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
 
         root = get_paths().sandbox_outputs_dir(thread_id, user_id=user_id)
         deadline = time.monotonic() + self._SYNC_DEADLINE_SECONDS
-        remote_paths = self._list_remote_outputs(sandbox)
+        remote_paths = self._list_remote_outputs(sandbox, deadline=deadline)
         if not remote_paths:
             return
         # Include records beyond the transfer cap: publishing the first of two
@@ -876,7 +873,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
             staged: Path | None = None
             try:
                 target = self._output_destination(root, remote_path)
-                data = sandbox.download_file(remote_path, max_bytes=min(DEFAULT_DOWNLOAD_LIMIT, self._MAX_SYNC_TOTAL_BYTES - total))
+                data = sandbox.download_file(remote_path, max_bytes=min(DEFAULT_DOWNLOAD_LIMIT, self._MAX_SYNC_TOTAL_BYTES - total), deadline=deadline)
                 total += len(data)
                 with tempfile.NamedTemporaryFile(prefix=".boxd-sync-", dir=target.parent, delete=False) as output:
                     staged = Path(output.name)
