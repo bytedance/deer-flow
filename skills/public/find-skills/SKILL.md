@@ -85,19 +85,21 @@ Learn more: https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practic
 
 ### Step 4: Install the Skill
 
-If the user wants to proceed, use the `install-skill.sh` script to install the skill and automatically link it to the project:
+`install-skill.sh` downloads the skill and links it into the `skills/custom` directory of a DeerFlow checkout, so it only works where that checkout is present.
 
-```bash
-bash /path/to/skill/scripts/install-skill.sh <owner/repo@skill-name>
-```
+- **Host repository**: run the script from the repository root, where `deer-flow.code-workspace` sits.
 
-For example, if the user wants to install `vercel-react-best-practices`:
+  ```bash
+  bash /path/to/skill/scripts/install-skill.sh <owner/repo@skill-name>
+  ```
 
-```bash
-bash /path/to/skill/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
-```
+  For example, to install `vercel-react-best-practices`:
 
-The script will install the skill globally to `skills/custom/`
+  ```bash
+  bash /path/to/skill/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
+  ```
+
+- **Sandbox workspace or Web session**: the workspace has no project root above it, and the skills projected under `/mnt/skills/custom` are read-only, so the script stops before downloading anything and prints the reason on stderr. Do not retry it from another directory or copy the downloaded skill into `/mnt/skills`. Tell the user to install the skill from the DeerFlow Skills page, which stores it under `{DEER_FLOW_HOME}/users/{user_id}/skills/custom/` and projects it into the next sandbox.
 
 ## Common Skill Categories
 
