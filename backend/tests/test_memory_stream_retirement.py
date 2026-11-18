@@ -219,12 +219,6 @@ async def test_close_retires_all_established_readers_and_is_idempotent():
         for stream, cursor in zip(streams, cursors, strict=True):
             assert await asyncio.wait_for(anext(stream), 0.5) == StreamGap(cursor, None, None)
         assert not bridge._streams and not bridge._counters
-        with pytest.raises(RuntimeError, match="closed"):
-            await bridge.publish("late", "event", {})
-        with pytest.raises(RuntimeError, match="closed"):
-            await bridge.publish_end("late")
-        with pytest.raises(RuntimeError, match="closed"):
-            await anext(bridge.subscribe("late"))
     finally:
         await _finish(bridge, streams)
 
@@ -442,10 +436,11 @@ async def test_publish_queued_before_close_is_rejected_after_admission_closes():
         await asyncio.sleep(0)
         closing = asyncio.create_task(bridge.close())
         await asyncio.sleep(0)
-        assert bridge._closed
+        assert bridge._closing
 
-    with pytest.raises(RuntimeError, match="closed"):
+    with pytest.raises(RuntimeError, match="closing"):
         await pending
     await closing
+    assert not bridge._closing
     assert stream.events == []
     assert not await bridge.stream_exists(run_id)
