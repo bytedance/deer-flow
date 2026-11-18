@@ -20,7 +20,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.paths import (
 )
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_memory_for_injection
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
-from deerflow.agents.memory.backends.deermem.deermem.core.updater import _select_stale_candidates
+from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater, _select_stale_candidates
 
 NOW = datetime(2026, 8, 13, tzinfo=UTC)
 
@@ -246,11 +246,7 @@ def test_hybrid_expanded_reserve_preserves_corrections_and_audit(tmp_path, confi
 
     assert len(decision.kept) == 100
     assert {"correction_0", "correction_1"} <= {fact["id"] for fact in decision.kept}
-    # All 12 preferences survive: 10 already placed inside top 100 and the 2
-    # below-cut preferences (plus the 2 corrections) are rescued within the 10
-    # reserve slots by displacing the lowest-ranked unprotected contexts.
-    assert sum(fact["category"] == "preference" for fact in decision.kept) == 12
-    assert {item.fact_id for item in decision.evicted} == {"context_86", "context_87", "context_88", "context_89"}
+    assert sum(fact["category"] == "preference" for fact in decision.kept) == 8
     assert decision.reserved_correction_slots == 2
 
     storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path), retrieval_adapter=""))
@@ -369,6 +365,84 @@ def test_end_to_end_protection_requires_eviction_staleness_and_injection_knobs(
     assert ("severe peanut allergy" in injected) is expected_injected
 
 
+def test_hybrid_reserve_stays_bounded_across_repeated_writes(tmp_path) -> None:
+    # Regression for #8331 review: writing 10 lower-scoring corrections one by
+    # one into a full 10-context store must keep the 1-slot reserve bounded at
+    # 9 contexts + 1 correction so a subsequent high-scoring context still lands.
+    config = DeerMemConfig(
+        storage_path=str(tmp_path),
+        retrieval_adapter="",
+        max_facts=10,
+        fact_eviction_policy=EVICTION_POLICY_HYBRID_V1,
+    )
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage=storage)
+
+    for i in range(10):
+        _, fact_id = updater.create_memory_fact(
+            f"High-scoring context fact {i}",
+            category="context",
+            confidence=0.95,
+            agent_name="default",
+            user_id="u",
+        )
+        assert fact_id is not None
+
+    for i in range(10):
+        updater.create_memory_fact(
+            f"Lower-scoring correction fact {i}",
+            category="correction",
+            confidence=0.20,
+            agent_name="default",
+            user_id="u",
+        )
+
+    mid_facts = storage.load("default", user_id="u")["facts"]
+    assert len(mid_facts) == 10
+    assert sum(fact["category"] == "context" for fact in mid_facts) == 9
+    assert sum(fact["category"] == "correction" for fact in mid_facts) == 1
+
+    _, new_ctx_id = updater.create_memory_fact(
+        "Subsequent higher-scoring context fact",
+        category="context",
+        confidence=0.98,
+        agent_name="default",
+        user_id="u",
+    )
+    assert new_ctx_id is not None
+    final_facts = storage.load("default", user_id="u")["facts"]
+    assert any(fact["id"] == new_ctx_id for fact in final_facts)
+    assert sum(fact["category"] == "context" for fact in final_facts) == 9
+    assert sum(fact["category"] == "correction" for fact in final_facts) == 1
+
+
+def test_hybrid_tail_reserve_stays_bounded_with_high_scoring_winners_across_writes(tmp_path) -> None:
+    # Even when 3 high-scoring preferences already win top-10 slots, repeated
+    # low-scoring preference writes can only occupy the 1 tail-reserve slot.
+    config = DeerMemConfig(
+        storage_path=str(tmp_path),
+        retrieval_adapter="",
+        max_facts=10,
+        fact_eviction_policy=EVICTION_POLICY_HYBRID_V1,
+        eviction_reserved_categories=["preference"],
+    )
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage=storage)
+
+    for i in range(3):
+        updater.create_memory_fact(f"Top preference {i}", category="preference", confidence=0.98 - i * 0.01, agent_name="default", user_id="u")
+    for i in range(7):
+        updater.create_memory_fact(f"High context {i}", category="context", confidence=0.90, agent_name="default", user_id="u")
+    for i in range(5):
+        updater.create_memory_fact(f"Low preference {i}", category="preference", confidence=0.50 - i * 0.05, agent_name="default", user_id="u")
+
+    facts = storage.load("default", user_id="u")["facts"]
+    assert len(facts) == 10
+    assert sum(fact["category"] == "context" for fact in facts) == 6
+    assert sum(fact["category"] == "preference" for fact in facts) == 4
+    assert any(fact["content"] == "Low preference 0" for fact in facts)
+
+
 @pytest.mark.parametrize(
     ("facts", "max_facts", "reserved_categories", "fraction", "reserved_max", "expected_kept", "expected_correction_slots"),
     [
@@ -392,14 +466,24 @@ def test_end_to_end_protection_requires_eviction_staleness_and_injection_knobs(
             {"pref_0", "pref_1", "corr_low"},
             1,
         ),
-        # Unprotected context is displaced before protected preference even if context scored higher.
+        # Within a 1-slot tail reserve, correction priority takes the single slot while top context stays.
         (
             [_fact("ctx_high", confidence=0.95, category="context"), _fact("pref_low", confidence=0.80, category="preference"), _fact("corr_below", confidence=0.10, category="correction")],
             2,
             ["correction", "preference"],
             0.5,
             5,
-            {"pref_low", "corr_below"},
+            {"ctx_high", "corr_below"},
+            1,
+        ),
+        # With 2 tail-reserve slots, both correction and preference outlast an unprotected higher-scored context in the tail.
+        (
+            [_fact("ctx_0", confidence=0.98, category="context"), _fact("ctx_1", confidence=0.95, category="context"), _fact("pref_low", confidence=0.80, category="preference"), _fact("corr_below", confidence=0.10, category="correction")],
+            3,
+            ["correction", "preference"],
+            0.5,
+            5,
+            {"ctx_0", "pref_low", "corr_below"},
             1,
         ),
         # Natural winner correction does not consume reserve budget or inflate reserved_correction_slots.
