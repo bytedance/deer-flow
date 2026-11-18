@@ -86,7 +86,9 @@ make check-agent-guidance                          # size budget of these guides
   because loading an extension imports code with Gateway privileges. Install
   from trusted sources only, and restart the Gateway after every extension
   change.
-- **Ship tests with every feature and bug fix.**
+- **Cover behavior changes in the owning module's suite.** Fold regression cases
+  into that module's existing suite instead of opening a one-fix test file, and
+  update or delete obsolete tests in the same change.
 - **Document behavior next to its topic, in the same change**: user-facing
   behavior in `docs/guide/` or `backend/docs/`. `README.md` is an index; change
   it only to add or re-point a link.
