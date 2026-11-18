@@ -308,6 +308,8 @@ def _search(state: dict, runtime, query: str, role: str | None, excerpts: bool, 
                     prefix.update(source_id.encode())
                 next_cursor = f"1:{next_offset}:{message_count}:{digest([snapshot, next_offset])[:32]}:{prefix.hexdigest()[:16]}"
             archived = _archived_page_records(db, batches, page, active, canonical=excerpts) if db is not None else {}
+            if any(source_id not in active and source_id not in archived for source_id, _ in page):
+                raise sqlite3.DatabaseError("Archived history source ID does not match its payload")
             results = [active.get(source_id) or archived[source_id] for source_id, _ in page]
     except (OSError, sqlite3.Error):
         if cursor is not None:

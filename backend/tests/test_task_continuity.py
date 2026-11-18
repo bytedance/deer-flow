@@ -1198,6 +1198,20 @@ def test_history_search_cursor_rejects_changed_rank_prefix(role_runtime):
     assert json.loads(history_search.invoke({**arguments, "cursor": first["next_cursor"]})) == {"results": [], "status": "stale_cursor"}
 
 
+def test_history_search_reports_unavailable_for_mismatched_archive_id(role_runtime):
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    message = HumanMessage(content="needle", id="hit")
+    role_runtime.state["task_history"] = archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))
+    path, _ = archive.scope(role_runtime)
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE sources SET id = ? WHERE rowid = 1", ["r" + "0" * 32])
+    result = json.loads(history_search.invoke({"runtime": role_runtime, "query": "needle"}))
+    assert result == {"results": [], "status": "unavailable"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_mode", [False, True])
 async def test_history_search_cursor_continues_in_live_graph(scoped, async_mode):
