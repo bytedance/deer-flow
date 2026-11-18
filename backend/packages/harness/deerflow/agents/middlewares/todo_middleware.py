@@ -141,6 +141,52 @@ def _has_tool_call_intent_or_error(message: AIMessage) -> bool:
 _SYNTHETIC_WRITE_TODOS_ID_PREFIX = "deerflow_write_todos_synthetic_"
 
 
+def _relabel_provider_tool_call_ids(
+    message: AIMessage,
+    occurrence_plans: dict[str, list[str | None]],
+) -> AIMessage:
+    """Apply the structured relabelling to the provider's own tool-call surfaces.
+
+    ``clone_ai_message_with_tool_calls`` keeps content blocks and raw
+    ``additional_kwargs.tool_calls`` entries by id but never renames them, so a
+    relabelled structured call would leave duplicate ids in the payload sent on
+    the next request. ``occurrence_plans`` maps each original id to one entry
+    per occurrence in ``tool_calls`` (``None`` for an occurrence that kept its
+    id), so the same occurrence in every surface is renamed.
+    """
+    if not occurrence_plans:
+        return message
+
+    def _rewrite(entries: list[Any], *, tool_use_only: bool) -> list[Any]:
+        counters: dict[str, int] = {}
+        rewritten: list[Any] = []
+        for entry in entries:
+            if isinstance(entry, dict) and (not tool_use_only or entry.get("type") == "tool_use"):
+                original = entry.get("id")
+                if isinstance(original, str) and original in occurrence_plans:
+                    index = counters.get(original, 0)
+                    counters[original] = index + 1
+                    plan = occurrence_plans[original]
+                    if index < len(plan) and plan[index] is not None:
+                        entry = {**entry, "id": plan[index]}
+            rewritten.append(entry)
+        return rewritten
+
+    update: dict[str, Any] = {}
+
+    additional_kwargs = dict(getattr(message, "additional_kwargs", None) or {})
+    raw_calls = additional_kwargs.get("tool_calls")
+    if isinstance(raw_calls, list):
+        additional_kwargs["tool_calls"] = _rewrite(raw_calls, tool_use_only=False)
+        update["additional_kwargs"] = additional_kwargs
+
+    content = message.content
+    if isinstance(content, list):
+        update["content"] = _rewrite(list(content), tool_use_only=True)
+
+    return message.model_copy(update=update) if update else message
+
+
 def _normalize_write_todos_ids(message: AIMessage) -> AIMessage | None:
     """Return *message* with addressable ``write_todos`` call ids, or None.
 
@@ -151,22 +197,27 @@ def _normalize_write_todos_ids(message: AIMessage) -> AIMessage | None:
     accepted but cannot be matched to its result, and a repeated id makes the
     results ambiguous. ``backend/AGENTS.md`` requires addressable call ids, so
     give those calls synthetic ids and replace the message in place (same
-    message id, so the reducer substitutes it). Only the structured
-    ``tool_calls`` are relabelled: raw provider payload blocks in
-    ``additional_kwargs`` or the message content keep their original ids.
+    message id, so the reducer substitutes it).
+
+    Ids used by another tool in the same response are reserved: a
+    ``write_todos`` call sharing one is relabelled, so every emitted result
+    has a unique address. The structured ``tool_calls`` and the provider's
+    raw/content surfaces are relabelled by occurrence.
     """
     calls = list(message.tool_calls or [])
     todo_positions = [position for position, call in enumerate(calls) if call.get("name") == "write_todos"]
     if not todo_positions:
         return None
 
-    used = {call["id"] for call in calls if isinstance(call.get("id"), str) and call["id"].strip()}
+    original_ids = [call.get("id") for call in calls]
+    other_ids = {call_id for position, call_id in enumerate(original_ids) if position not in todo_positions and isinstance(call_id, str) and call_id.strip()}
+    used = {call_id for call_id in original_ids if isinstance(call_id, str) and call_id.strip()}
     seen: set[str] = set()
-    changed = False
+    relabelled_positions: dict[int, str] = {}
     for position in todo_positions:
         call = calls[position]
-        call_id = call.get("id")
-        if isinstance(call_id, str) and call_id.strip() and call_id not in seen:
+        call_id = original_ids[position]
+        if isinstance(call_id, str) and call_id.strip() and call_id not in seen and call_id not in other_ids:
             seen.add(call_id)
             continue
 
@@ -176,11 +227,20 @@ def _normalize_write_todos_ids(message: AIMessage) -> AIMessage | None:
         used.add(synthetic)
         seen.add(synthetic)
         calls[position] = {**call, "id": synthetic}
-        changed = True
+        relabelled_positions[position] = synthetic
 
-    if not changed:
+    if not relabelled_positions:
         return None
-    return clone_ai_message_with_tool_calls(message, calls)
+
+    occurrence_plans: dict[str, list[str | None]] = {}
+    for position, call_id in enumerate(original_ids):
+        if not isinstance(call_id, str) or not call_id.strip():
+            continue
+        occurrence_plans.setdefault(call_id, []).append(relabelled_positions.get(position))
+    occurrence_plans = {call_id: plan for call_id, plan in occurrence_plans.items() if any(new is not None for new in plan)}
+
+    normalized = clone_ai_message_with_tool_calls(message, calls)
+    return _relabel_provider_tool_call_ids(normalized, occurrence_plans)
 
 
 class TodoMiddleware(TodoListMiddleware):

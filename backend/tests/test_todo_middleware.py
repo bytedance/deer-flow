@@ -411,6 +411,52 @@ class TestWriteTodosIdNormalization:
         assert ids[0] != ids[1] and ids[2] != ids[1]
         assert len(set(ids)) == 3
 
+    def test_id_shared_with_another_tool_is_relabelled(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "echo", "id": "dup", "args": {}},
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ai = result["messages"][0]
+        ids = [call["id"] for call in ai.tool_calls]
+        assert ids[0] == "dup"
+        assert ids[1] != "dup"
+        assert ids[1].startswith("deerflow_write_todos_synthetic_")
+
+    def test_provider_tool_call_surfaces_are_relabelled_by_occurrence(self):
+        mw = TodoMiddleware()
+        content = [
+            {"type": "tool_use", "id": "dup", "name": "write_todos", "input": {}},
+            {"type": "tool_use", "id": "dup", "name": "write_todos", "input": {}},
+        ]
+        raw_calls = [
+            {"id": "dup", "type": "function", "function": {"name": "write_todos", "arguments": "{}"}},
+            {"id": "dup", "type": "function", "function": {"name": "write_todos", "arguments": "{}"}},
+        ]
+        message = AIMessage(
+            id="ai-2",
+            content=content,
+            tool_calls=[
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+            ],
+            additional_kwargs={"tool_calls": raw_calls},
+        )
+
+        result = mw.after_model({"messages": [message]}, _make_runtime())
+
+        ai = result["messages"][0]
+        structured = [call["id"] for call in ai.tool_calls]
+        assert structured[0] == "dup"
+        assert structured[1] != "dup"
+        assert [block["id"] for block in ai.content if block["type"] == "tool_use"] == structured
+        assert [call["id"] for call in ai.additional_kwargs["tool_calls"]] == structured
+
     def test_well_formed_ids_are_left_to_the_base_hook(self):
         mw = TodoMiddleware()
         state = self._state(
