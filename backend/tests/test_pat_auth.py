@@ -532,6 +532,7 @@ def test_pat_agent_and_schedule_policy_admits_scoped_routes():
         ("POST", "/api/agents"),
         ("GET", "/api/agents/check"),
         ("POST", "/api/agents/import"),
+        ("GET", "/api/agents/import"),
         ("GET", "/api/agents/researcher"),
         ("PUT", "/api/agents/researcher"),
         ("DELETE", "/api/agents/researcher"),
@@ -556,7 +557,6 @@ def test_pat_agent_and_schedule_policy_admits_scoped_routes():
     denied = [
         ("GET", "/api/user-profile"),
         ("PUT", "/api/user-profile"),
-        ("GET", "/api/agents/import"),
         ("GET", "/api/agents/researcher/export/extra"),
         ("GET", "/api/scheduled-tasks/preview-cron"),
         ("GET", "/api/scheduled-tasks/task-1/unknown"),
@@ -564,6 +564,13 @@ def test_pat_agent_and_schedule_policy_admits_scoped_routes():
     ]
     for method, path in denied:
         assert not is_pat_allowed_route(method, path), f"{method} {path} must stay PAT-denied"
+
+
+def test_pat_agent_policy_admits_agent_named_import():
+    """The package-import path remains readable when ``import`` is an agent name."""
+    from app.gateway.auth.pat import is_pat_allowed_route
+
+    assert is_pat_allowed_route("GET", "/api/agents/import") is True
 
 
 def test_pat_agent_and_schedule_policy_matches_mounted_routes():

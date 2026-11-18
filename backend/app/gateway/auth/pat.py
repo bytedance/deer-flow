@@ -74,7 +74,10 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET"}), re.compile(r"^/api/agents/check$")),
     (frozenset({"POST"}), re.compile(r"^/api/agents/import$")),
     (frozenset({"GET"}), re.compile(r"^/api/agents/[^/]+/export$")),
-    (frozenset({"GET"}), re.compile(r"^/api/agents/(?!check$|import$)[^/]+$")),
+    # ``import`` is both the package-import collection endpoint for POST and
+    # a valid custom-agent name for GET, so only the non-agent ``check`` path
+    # needs to stay outside this item rule.
+    (frozenset({"GET"}), re.compile(r"^/api/agents/(?!check$)[^/]+$")),
     (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/agents/[^/]+$")),
     # Scheduled-task configuration and history. The route decorators retain
     # the existing thread/run capability checks, so these scopes add a

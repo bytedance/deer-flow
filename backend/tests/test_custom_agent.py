@@ -638,6 +638,15 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
+    def test_agent_named_import_can_be_read(self, agent_client):
+        created = agent_client.post("/api/agents", json={"name": "import", "soul": "Import agent"})
+        assert created.status_code == 201
+
+        response = agent_client.get("/api/agents/import")
+
+        assert response.status_code == 200
+        assert response.json()["name"] == "import"
+
     def test_agent_package_round_trip_preserves_portable_behavior(self, agent_client):
         payload = {
             "name": "research-lead",

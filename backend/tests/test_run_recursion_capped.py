@@ -111,7 +111,11 @@ async def _run_until_recursion_cap(tmp_path: Path, *, with_goal: bool) -> dict[s
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
-    def deny(*args, **kwargs):
+    original_connect = socket.socket.connect
+
+    def deny(self, address):
+        if isinstance(address, tuple) and address and address[0] in {"127.0.0.1", "::1", "localhost"}:
+            return original_connect(self, address)
         raise AssertionError("this regression must not use the network")
 
     monkeypatch.setattr(socket.socket, "connect", deny)

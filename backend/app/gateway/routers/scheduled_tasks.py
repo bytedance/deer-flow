@@ -233,7 +233,7 @@ def _preview_cron(body: CronPreviewRequest, reference: datetime) -> CronPreviewR
 
 @router.post("/scheduled-tasks/preview-cron", response_model=CronPreviewResponse)
 @require_permission("threads", "read")
-@require_permission("schedules", "read")
+@require_permission("schedules", "read", pat_only=True)
 async def preview_cron_schedule(request: Request, body: CronPreviewRequest):
     """Preview future cron instants without creating or dispatching a task."""
     user = await get_optional_user_from_request(request)
@@ -245,7 +245,7 @@ async def preview_cron_schedule(request: Request, body: CronPreviewRequest):
 
 @router.get("/scheduled-tasks")
 @require_permission("threads", "read")
-@require_permission("schedules", "read")
+@require_permission("schedules", "read", pat_only=True)
 async def list_scheduled_tasks(request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
@@ -257,7 +257,7 @@ async def list_scheduled_tasks(request: Request):
 @router.post("/scheduled-tasks")
 @require_permission("threads", "write")
 @require_permission("runs", "create")
-@require_permission("schedules", "write")
+@require_permission("schedules", "write", pat_only=True)
 async def create_scheduled_task(request: Request, body: ScheduledTaskCreateRequest):
     """Create a task (also used by the page's Duplicate)."""
     config = await asyncio.to_thread(get_config)
@@ -296,7 +296,7 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
 
 @router.get("/scheduled-tasks/{task_id}")
 @require_permission("threads", "read")
-@require_permission("schedules", "read")
+@require_permission("schedules", "read", pat_only=True)
 async def get_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
@@ -311,7 +311,7 @@ async def get_scheduled_task(task_id: str, request: Request):
 @router.patch("/scheduled-tasks/{task_id}")
 @require_permission("threads", "write")
 @require_permission("runs", "create")
-@require_permission("schedules", "write")
+@require_permission("schedules", "write", pat_only=True)
 async def update_scheduled_task(task_id: str, request: Request, body: ScheduledTaskUpdateRequest):
     """Edit a task; null clears goal_objective, max_runs, end_at and stop_condition.
 
@@ -362,7 +362,7 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
 
 @router.post("/scheduled-tasks/{task_id}/pause")
 @require_permission("threads", "write")
-@require_permission("schedules", "write")
+@require_permission("schedules", "write", pat_only=True)
 async def pause_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
@@ -397,7 +397,7 @@ async def pause_scheduled_task(task_id: str, request: Request):
 @router.post("/scheduled-tasks/{task_id}/resume")
 @require_permission("threads", "write")
 @require_permission("runs", "create")
-@require_permission("schedules", "write")
+@require_permission("schedules", "write", pat_only=True)
 async def resume_scheduled_task(task_id: str, request: Request, body: ScheduledTaskResumeRequest | None = None):
     """Resume a paused or finished task, optionally renewing its safety cap.
 
@@ -435,7 +435,7 @@ async def resume_scheduled_task(task_id: str, request: Request, body: ScheduledT
 @router.post("/scheduled-tasks/{task_id}/trigger")
 @require_permission("threads", "write")
 @require_permission("runs", "create")
-@require_permission("schedules", "write")
+@require_permission("schedules", "write", pat_only=True)
 async def trigger_scheduled_task(task_id: str, request: Request):
     """Start one trial run now; ``existing`` means a run was already waiting."""
     repo = get_scheduled_task_repo(request)
@@ -460,7 +460,7 @@ async def trigger_scheduled_task(task_id: str, request: Request):
 
 @router.delete("/scheduled-tasks/{task_id}")
 @require_permission("threads", "write")
-@require_permission("schedules", "write")
+@require_permission("schedules", "write", pat_only=True)
 async def delete_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
@@ -481,7 +481,7 @@ async def delete_scheduled_task(task_id: str, request: Request):
 
 @router.get("/scheduled-tasks/{task_id}/runs")
 @require_permission("threads", "read")
-@require_permission("schedules", "read")
+@require_permission("schedules", "read", pat_only=True)
 async def list_scheduled_task_runs(
     task_id: str,
     request: Request,
@@ -503,7 +503,7 @@ async def list_scheduled_task_runs(
 
 @router.get("/threads/{thread_id}/scheduled-tasks")
 @require_permission("threads", "read", owner_check=True)
-@require_permission("schedules", "read")
+@require_permission("schedules", "read", pat_only=True)
 async def list_thread_scheduled_tasks(thread_id: ThreadId, request: Request):
     """Tasks created in, running in, or run by this conversation (``thread_relation``)."""
     repo = get_scheduled_task_repo(request)
@@ -515,7 +515,7 @@ async def list_thread_scheduled_tasks(thread_id: ThreadId, request: Request):
 
 @router.get("/threads/{thread_id}/scheduled-task-events")
 @require_permission("threads", "read", owner_check=True)
-@require_permission("schedules", "read")
+@require_permission("schedules", "read", pat_only=True)
 async def list_thread_scheduled_task_events(thread_id: ThreadId, request: Request, limit: int = Query(default=50, ge=1, le=200)):
     """Lifecycle events of the caller's tasks for this originating chat, oldest first.
 
