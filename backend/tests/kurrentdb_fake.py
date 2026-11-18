@@ -5,23 +5,41 @@
 ``kurrentdbclient`` 1.3's ``KurrentDBClient`` / ``AsyncKurrentDBClient`` and use its
 real ``NewEvent``, ``RecordedEvent``, ``StreamState`` and exception types.
 
-Semantics modelled (see ``test_kurrentdb_extension_basics.py``):
+Semantics modelled (see ``test_kurrentdb_extension_basics.py``), each confirmed
+against a real KurrentDB server by ``test_kurrentdb_extension_live.py``, which runs
+the same checks on this fake and on the server:
 
 - Appends are atomic and checked against ``current_version`` (an int head,
   ``NO_STREAM``, ``EXISTS`` or ``ANY``); a mismatch raises ``WrongCurrentVersionError``
-- Re-appending the same event ids at the same place is idempotent and returns the
-  original commit position; a different event there is a conflict
+  whose ``actual_version`` is the last position ever written (``NO_STREAM`` only
+  for a stream that never had events)
+- Idempotent appends: with an int or ``NO_STREAM`` (``-1``), when the event at the
+  expected version + 1 has the batch's first id, the batch is a retry: it is
+  accepted without writing if the following ids match too, and a conflict if they
+  do not. With ``ANY`` or ``EXISTS`` the first id is looked up anywhere in the
+  stream. Positions hidden by ``$tb`` or a soft delete still count
 - Stream metadata lives in its own versioned history; ``$tb`` (truncate before)
-  hides lower positions from every read without renumbering
+  hides lower positions from every read without renumbering, and lowering it shows
+  them again. ``$tb`` past the last event leaves the stream readable but empty, and
+  then the real ``get_current_version`` fails (the sync client raises
+  ``StopIteration``, the async one ``IndexError``)
 - ``WrongCurrentVersionError`` carries ``stream_name``, ``actual_version`` and
   ``expected_version`` like the real one (metadata conflicts name ``$$<stream>``)
-- A soft delete (``delete_stream``) is conditional on the head and sets ``$tb`` to
-  the maximum int64, keeping other metadata keys; the stream then reads as missing
-  (``NotFoundError``, ``get_current_version`` -> ``NO_STREAM``). An append with
-  ``NO_STREAM``, ``ANY`` or the pre-delete head recreates it, positions continue,
-  and ``$tb`` drops to the first new event. Deleting a missing or soft-deleted
-  stream with an int or ``EXISTS`` raises ``NotFoundError``; with ``ANY`` or
-  ``NO_STREAM`` it is a no-op (an assumption, see ``test_fake_assumes_*``)
+- A soft delete (``delete_stream``) is conditional on the head and replaces the
+  metadata with ``{"$tb": <max int64>}`` (other keys are dropped); the stream then
+  reads as missing (``NotFoundError``, ``get_current_version`` -> ``NO_STREAM``). An
+  append with ``NO_STREAM``, ``ANY`` or the pre-delete head recreates it, positions
+  continue, and ``$tb`` drops to the first new event; ``EXISTS`` raises
+  ``StreamIsDeletedError``. Deleting a stream that never had events raises
+  ``NotFoundError`` whatever the expected version. Deleting a soft-deleted stream
+  again succeeds with ``ANY``, ``NO_STREAM`` or the pre-delete head (writing the
+  metadata again), raises ``StreamIsDeletedError`` with ``EXISTS`` and
+  ``WrongCurrentVersionError`` with another int
+
+Not modelled: after an append recreates a soft-deleted stream, the server lowers
+``$tb`` in a separate write, so for a few milliseconds reads may still report the
+stream as deleted (``NotFoundError``; ``get_current_version`` -> ``NO_STREAM``). An
+append is always checked against the real head, so a second recreation is rejected.
 
 Failure injection, per method name:
 
@@ -54,9 +72,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kurrentdbclient import NewEvent, RecordedEvent, StreamState
-from kurrentdbclient.exceptions import NotFoundError, WrongCurrentVersionError
+from kurrentdbclient.exceptions import NotFoundError, StreamIsDeletedError, WrongCurrentVersionError
 
 DELETED_TB = 2**63 - 1
+
+
+class _NoReadableEvent(Exception):
+    """The stream exists but ``$tb`` hides every event: the real ``get_current_version`` fails here."""
 
 
 @dataclass(frozen=True)
@@ -242,9 +264,14 @@ class FakeKurrentDB:
             return None
         return stream
 
-    def _head(self, name: str) -> int | StreamState:
+    def _current_version(self, name: str) -> int | StreamState:
+        """``get_current_version``: a backwards read of one event, like the real clients."""
         stream = self._live(name)
-        return StreamState.NO_STREAM if stream is None else stream.events[-1].stream_position
+        if stream is None:
+            return StreamState.NO_STREAM
+        if stream.events[-1].stream_position < self._tb(stream):
+            raise _NoReadableEvent(name)
+        return stream.events[-1].stream_position
 
     def _next_commit_position(self) -> int:
         self._commit_position += 1
@@ -260,7 +287,7 @@ class FakeKurrentDB:
         deleted = bool(stream.events) and self._tb(stream) == DELETED_TB
         last = stream.events[-1].stream_position if stream.events else -1
 
-        replay = self._idempotent_replay(stream, batch, current_version, deleted)
+        replay = self._idempotent_replay(name, stream, batch, current_version)
         if replay is not None:
             return replay
 
@@ -269,12 +296,15 @@ class FakeKurrentDB:
         elif current_version is StreamState.NO_STREAM:
             ok = not stream.events or deleted
         elif current_version is StreamState.EXISTS:
-            ok = bool(stream.events) and not deleted
+            if deleted:
+                raise StreamIsDeletedError(f"Stream {name!r} is deleted")
+            ok = bool(stream.events)
         else:
             # The pre-delete head stays a valid expectation after a soft delete.
             ok = bool(stream.events) and current_version == last
         if not ok:
-            actual = StreamState.NO_STREAM if deleted or not stream.events else last
+            # The server reports the last position ever written, even of a soft-deleted stream.
+            actual = StreamState.NO_STREAM if not stream.events else last
             raise WrongCurrentVersionError(f"stream {name!r}: expected {current_version!r}, current {actual!r}", stream_name=name, actual_version=actual, expected_version=current_version)
         if not batch:
             return self._commit_position
@@ -301,24 +331,29 @@ class FakeKurrentDB:
             )
         return self._commit_position
 
-    def _idempotent_replay(self, stream: _Stream, batch: list[NewEvent], current_version: int | StreamState, deleted: bool) -> int | None:
-        if not batch:
+    def _idempotent_replay(self, name: str, stream: _Stream, batch: list[NewEvent], current_version: int | StreamState) -> int | None:
+        """The commit position when ``batch`` repeats events already written (nothing is written then), else ``None``.
+
+        Physical positions count, including those hidden by ``$tb`` or a soft delete:
+        a retry of a deleted event is accepted and leaves the stream deleted.
+        """
+        if not batch or not stream.events:
             return None
         ids = [event.id for event in batch]
-        starts = [index for index, recorded in enumerate(stream.events) if recorded.id == ids[0]]
-        if not starts:
-            return None
-        start = starts[-1]
+        if current_version is StreamState.ANY or current_version is StreamState.EXISTS:
+            starts = [index for index, recorded in enumerate(stream.events) if recorded.id == ids[0]]
+            if not starts:
+                return None
+            start = starts[-1]
+        else:
+            # Positions run from 0 without gaps, so a position is an index.
+            start = 0 if current_version is StreamState.NO_STREAM else current_version + 1
+            if not 0 <= start < len(stream.events) or stream.events[start].id != ids[0]:
+                return None
         window = stream.events[start : start + len(ids)]
         if [recorded.id for recorded in window] != ids:
-            return None
-        if deleted:
-            return None
-        if isinstance(current_version, int) and start != current_version + 1:
-            return None
-        if current_version is StreamState.NO_STREAM and start not in (0, self._tb(stream)):
-            # A stream recreated after a soft delete starts at its $tb.
-            return None
+            last = stream.events[-1].stream_position
+            raise WrongCurrentVersionError(f"stream {name!r}: a partial retry at {start}, current {last!r}", stream_name=name, actual_version=last, expected_version=current_version)
         return window[-1].commit_position
 
     def _read(self, name: str, stream_position: int | None, backwards: bool, limit: int) -> tuple[RecordedEvent, ...]:
@@ -344,24 +379,22 @@ class FakeKurrentDB:
         return response
 
     def _delete(self, name: str, current_version: int | StreamState) -> None:
-        head = self._head(name)
-        if current_version is StreamState.ANY:
-            ok = True
-        elif current_version is StreamState.NO_STREAM:
-            ok = head is StreamState.NO_STREAM
-        elif current_version is StreamState.EXISTS:
-            ok = head is not StreamState.NO_STREAM
+        stream = self._streams.get(name)
+        if stream is None or not stream.events:
+            # The server reports actual version -1, which the client maps to NotFoundError, whatever was expected.
+            raise NotFoundError(f"stream {name!r} not found (expected {current_version!r})")
+        last = stream.events[-1].stream_position
+        if self._tb(stream) == DELETED_TB:
+            # Deleting again succeeds (and writes the metadata again) unless it expects a live stream.
+            if current_version is StreamState.EXISTS:
+                raise StreamIsDeletedError(f"Event stream {name!r} is deleted.")
+            ok = current_version in (StreamState.ANY, StreamState.NO_STREAM) or current_version == last
         else:
-            ok = current_version == head
+            ok = current_version in (StreamState.ANY, StreamState.EXISTS) or current_version == last
         if not ok:
-            if head is StreamState.NO_STREAM:
-                # The server reports actual version -1, which the client maps to NotFoundError.
-                raise NotFoundError(f"stream {name!r} not found (expected {current_version!r})")
-            raise WrongCurrentVersionError(f"stream {name!r}: expected {current_version!r}, current {head!r}", stream_name=name, actual_version=head, expected_version=current_version)
-        if head is StreamState.NO_STREAM:
-            return
-        stream = self._streams[name]
-        self._write_metadata(name, {**(stream.metadata[-1] if stream.metadata else {}), "$tb": DELETED_TB})
+            raise WrongCurrentVersionError(f"stream {name!r}: expected {current_version!r}, current {last!r}", stream_name=name, actual_version=last, expected_version=current_version)
+        # The delete replaces the whole metadata document: other keys are dropped.
+        self._write_metadata(name, {"$tb": DELETED_TB})
 
     def _get_metadata(self, name: str) -> tuple[dict[str, Any], int | StreamState]:
         stream = self._streams.get(name)
@@ -402,7 +435,10 @@ class FakeSyncClient:
         return self.server._invoke("read_stream", stream_name, kwargs, lambda: self.server._read_response(stream_name, stream_position, backwards, limit))
 
     def get_current_version(self, stream_name, *, timeout=None, credentials=None) -> int | StreamState:
-        return self.server._invoke("get_current_version", stream_name, {"timeout": timeout}, lambda: self.server._head(stream_name))
+        try:
+            return self.server._invoke("get_current_version", stream_name, {"timeout": timeout}, lambda: self.server._current_version(stream_name))
+        except _NoReadableEvent:
+            raise StopIteration from None  # the real sync client's next() on an empty backwards read
 
     def delete_stream(self, stream_name, *, current_version, timeout=None, credentials=None) -> None:
         return self.server._invoke("delete_stream", stream_name, {"current_version": current_version, "timeout": timeout}, lambda: self.server._delete(stream_name, current_version))
@@ -448,7 +484,10 @@ class FakeAsyncClient:
 
     async def get_current_version(self, stream_name, *, timeout=None, credentials=None) -> int | StreamState:
         await asyncio.sleep(0)
-        return self._sync.get_current_version(stream_name, timeout=timeout)
+        try:
+            return self._sync.get_current_version(stream_name, timeout=timeout)
+        except StopIteration:
+            raise IndexError("list index out of range") from None  # the real async client's events[0] on an empty read
 
     async def delete_stream(self, stream_name, *, current_version, timeout=None, credentials=None) -> None:
         await asyncio.sleep(0)
