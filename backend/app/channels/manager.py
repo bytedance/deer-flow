@@ -2815,14 +2815,15 @@ class ChannelManager:
                 msg.channel_name,
                 msg.chat_id,
             )
+            await self._send_error(msg, "An internal error occurred. Please try again.")
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
             # for the dedupe TTL -- unless the run may already be executing.
+            # Release only after the reply, so a redelivery cannot overtake it.
             # Stale /model pin admission failures are handled at the
             # run-creation sites, which know the selection the run used.
             if not self._keep_dedupe_key_after(msg, exc):
                 await self._release_inbound_dedupe_key(msg)
-            await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
 
@@ -3497,12 +3498,13 @@ class ChannelManager:
                     logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
                     if policy.buffer_followups_on_busy:
                         self._buffer_followup(thread_id, msg)
-                    else:
+                    await self._send_error(msg, THREAD_BUSY_MESSAGE)
+                    if not policy.buffer_followups_on_busy:
                         # Swallowed like the generic handler would not be: release the
                         # key so the provider's redelivery can retry once the thread
-                        # frees, instead of being dropped for the dedupe TTL.
+                        # frees, instead of being dropped for the dedupe TTL. Release
+                        # only after the reply, so the redelivery cannot overtake it.
                         await self._release_inbound_dedupe_key(msg)
-                    await self._send_error(msg, THREAD_BUSY_MESSAGE)
                     return
                 if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
                     await self._send_error(msg, recovery.text)
@@ -3537,9 +3539,10 @@ class ChannelManager:
             if _is_thread_busy_error(exc):
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
                 # Same reason as the fire-and-forget branch above: this error is
-                # handled here rather than re-raised, so release explicitly.
-                await self._release_inbound_dedupe_key(msg)
+                # handled here rather than re-raised, so release explicitly,
+                # after the reply.
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
+                await self._release_inbound_dedupe_key(msg)
                 return
             if step_limit_text := _step_limit_text(exc):
                 _note_run_confirmed()
@@ -3550,8 +3553,8 @@ class ChannelManager:
                 await self._release_inbound_dedupe_key(msg)
                 return
             if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
-                await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, recovery.text)
+                await self._release_inbound_dedupe_key(msg)
                 return
             raise
         _note_run_confirmed()
