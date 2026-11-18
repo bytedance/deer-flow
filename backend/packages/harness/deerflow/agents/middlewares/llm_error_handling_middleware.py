@@ -559,7 +559,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return True, "empty_response"
         status = _extract_status_code(exc)
         if status is None:
-            status = _extract_in_band_status(exc, include_type=False)
+            # Provider adapters can wrap an HTTP response in their own
+            # exception - the Gemini adapter wraps an HTTP 429 in
+            # ``ChatGoogleGenerativeAIError`` and leaves the HTTP response on
+            # the underlying ``ClientError`` - so the status is only reachable
+            # by walking the cause/context chain.
+            status = _find_wrapped_http_status(exc)
+            if status is None:
+                status = _extract_in_band_status(exc, include_type=False)
         code = _extract_error_code(exc)
         code = code.strip().casefold() if isinstance(code, str) else None
         if status in {401, 403}:
@@ -819,8 +826,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], ModelResponse],
         original_error: BaseException,
         fallback_model_names: tuple[str, ...],
+        *,
+        circuit_open: bool = False,
     ) -> tuple[ModelResponse | None, BaseException]:
-        if not fallback_model_names or not _is_safe_for_model_failover(original_error):
+        if not fallback_model_names or (not circuit_open and not _is_safe_for_model_failover(original_error)):
             return None, original_error
 
         last_error = original_error
@@ -855,8 +864,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
         original_error: BaseException,
         fallback_model_names: tuple[str, ...],
+        *,
+        circuit_open: bool = False,
     ) -> tuple[ModelResponse | None, BaseException]:
-        if not fallback_model_names or not _is_safe_for_model_failover(original_error):
+        if not fallback_model_names or (not circuit_open and not _is_safe_for_model_failover(original_error)):
             return None, original_error
 
         last_error = original_error
@@ -957,6 +968,20 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         admission = _CircuitAdmission()
         if self._check_circuit(probe_token=admission):
+            circuit_error = RuntimeError(self._build_circuit_breaker_message())
+            if self.fallback_model_names:
+                response, last_error = self._try_model_fallback_sync(
+                    request,
+                    handler,
+                    circuit_error,
+                    self.fallback_model_names[: self.retry_max_attempts],
+                    circuit_open=True,
+                )
+                if response is not None:
+                    return response
+                if last_error is not circuit_error:
+                    _, reason = self._classify_error(last_error)
+                    return self._build_user_fallback_message(last_error, reason)
             return self._build_error_fallback_message(
                 self._build_circuit_breaker_message(),
                 error_type="CircuitBreakerOpen",
@@ -1024,7 +1049,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                         self._release_half_open_probe(admission=admission)
                         raise
                     if response is not None:
-                        self._record_success(admission=admission)
+                        if reason in _NON_CIRCUIT_FAILURE_REASONS:
+                            self._release_half_open_probe(admission=admission)
+                        else:
+                            # The primary exhausted its retry budget even though
+                            # the authorized backup served the call: the breaker
+                            # records the primary's failure so it can eventually
+                            # spare the failing provider, while the call result
+                            # stays the backup's success.
+                            self._record_failure(admission=admission)
                         return response
                     if reason not in _NON_CIRCUIT_FAILURE_REASONS:
                         self._record_failure(admission=admission)
@@ -1045,6 +1078,20 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         admission = _CircuitAdmission()
         if self._check_circuit(probe_token=admission):
+            circuit_error = RuntimeError(self._build_circuit_breaker_message())
+            if self.fallback_model_names:
+                response, last_error = await self._try_model_fallback(
+                    request,
+                    handler,
+                    circuit_error,
+                    self.fallback_model_names[: self.retry_max_attempts],
+                    circuit_open=True,
+                )
+                if response is not None:
+                    return response
+                if last_error is not circuit_error:
+                    _, reason = self._classify_error(last_error)
+                    return self._build_user_fallback_message(last_error, reason)
             return self._build_error_fallback_message(
                 self._build_circuit_breaker_message(),
                 error_type="CircuitBreakerOpen",
@@ -1113,7 +1160,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                             self._release_half_open_probe(admission=admission)
                             raise
                         if response is not None:
-                            self._record_success(admission=admission)
+                            if reason in _NON_CIRCUIT_FAILURE_REASONS:
+                                self._release_half_open_probe(admission=admission)
+                            else:
+                                # The primary exhausted its retry budget even though
+                                # the authorized backup served the call: the breaker
+                                # records the primary's failure so it can eventually
+                                # spare the failing provider, while the call result
+                                # stays the backup's success.
+                                self._record_failure(admission=admission)
                             return response
                         if reason not in _NON_CIRCUIT_FAILURE_REASONS:
                             self._record_failure(admission=admission)
@@ -1163,14 +1218,55 @@ def _extract_status_code(exc: BaseException) -> int | None:
     return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
+def _find_wrapped_http_status(exc: BaseException) -> int | None:
+    """Return the status code of the HTTP response carried by ``exc`` or any
+    exception in its ``__cause__``/``__context__`` chain.
+
+    Provider adapters wrap transport-level failures in their own exception -
+    the Gemini adapter wraps an HTTP 429 in ``ChatGoogleGenerativeAIError``
+    and leaves the HTTP response on the underlying ``ClientError`` - so the
+    status is not on the outer exception and only reachable by walking the
+    chain. The ``id`` guard tolerates cyclic context, mirroring the chain
+    walk in ``_is_safe_for_model_failover``.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = _extract_status_code(current)
+        if status is not None:
+            return status
+        current = getattr(current, "__cause__", None)
+        if current is None:
+            current = getattr(current, "__context__", None)
+    return None
+
+
+def _is_retryable_status_code(status: int) -> bool:
+    """Return whether an HTTP status is retriable, using the same predicate
+    as ``_classify_error`` (``_RETRIABLE_STATUS_CODES`` plus every HTTP 5xx)."""
+    return status in _RETRIABLE_STATUS_CODES or 500 <= status <= 599
+
+
 def _is_safe_for_model_failover(exc: BaseException) -> bool:
-    """Only switch providers when failure is known to precede response output."""
+    """Only switch providers when failure is known to precede response output.
+
+    Failover eligibility shares retry classification's retryable-HTTP-status
+    predicate and recognizes the wrapped HTTP response (see
+    ``_find_wrapped_http_status``) the way classification does: a status the
+    classifier treats as retriable (any HTTP 5xx, or the narrow provider 4xx
+    it treats as transient) is eligible, whatever the narrow set used
+    previously. Non-retryable HTTP statuses stay out, so the guard against
+    switching after stream output (HTTP 200 in-band stream errors, which
+    carry no status) still holds.
+    """
     if isinstance(exc, AdmissionError | EmptyModelResponseError):
         return False
 
-    response = getattr(exc, "response", None)
-    status_code = getattr(response, "status_code", None)
-    if isinstance(status_code, int) and not isinstance(status_code, bool) and status_code in _RETRIABLE_STATUS_CODES:
+    status = _extract_status_code(exc)
+    if status is None:
+        status = _find_wrapped_http_status(exc)
+    if status is not None and _is_retryable_status_code(status):
         return True
 
     seen: set[int] = set()
