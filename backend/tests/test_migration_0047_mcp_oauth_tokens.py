@@ -44,10 +44,10 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_0047_remains_in_the_single_migration_chain():
-    assert bootstrap._get_head_revision() == "fa66a3bb78df"
+    assert bootstrap._get_head_revision() == "0056_coordination_task_state"
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == ["fa66a3bb78df"]
-    assert script.get_revision("fa66a3bb78df").down_revision == "0055_thread_shares"
+    assert script.get_heads() == ["0056_coordination_task_state"]
+    assert script.get_revision("0056_coordination_task_state").down_revision == "0055_thread_shares"
     assert script.get_revision("0055_thread_shares").down_revision == "0054_project_memory"
     assert script.get_revision("0054_project_memory").down_revision == "0053_tool_approvals"
     assert script.get_revision("0053_tool_approvals").down_revision == "0052_batch_continuation"

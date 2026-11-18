@@ -3,7 +3,7 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "fa66a3bb78df"
+revision = "0056_coordination_task_state"
 down_revision = "0055_thread_shares"
 branch_labels = None
 depends_on = None

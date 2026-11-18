@@ -175,7 +175,7 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     engine, _, schema = database
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
-    await asyncio.to_thread(command.upgrade, config, "fa66a3bb78df")
+    await asyncio.to_thread(command.upgrade, config, "0056_coordination_task_state")
     async with engine.connect() as conn:
 
         def diff(sync):
@@ -194,5 +194,5 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
     assert "threads_meta" in tables
     assert not {"coord_tasks", "coord_inputs"} & tables
-    await asyncio.to_thread(command.upgrade, config, "fa66a3bb78df")
+    await asyncio.to_thread(command.upgrade, config, "0056_coordination_task_state")
     assert (await repo.create("alice", request_id="root", objective="After re-upgrade"))["status"] == TaskStatus.QUEUED
