@@ -79,4 +79,9 @@ team and artifact quotas are atomic across teams. Connection loss invalidates
 the store and stops service admission. Restart and authenticated Reconnect
 recover retained work. Drain offloaded database operations and team workers
 before releasing ownership. Keep connection URLs out of diagnostics.
+Stop callers share one shielded shutdown task, but cancellation of a caller must
+propagate immediately so the Gateway can enforce its per-service stop budget.
+The background task retains ownership until draining completes; observe and
+report failures without exposing storage exception details. Test blocked
+database work, worker cleanup and connection close through the host stop path.
 Run PostgreSQL regressions with `TEST_POSTGRES_URI` against a disposable database.

@@ -326,8 +326,12 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   within the same team remain serialized, with a ten-second budget for ordinary
   job advancement. Each artifact import or capture pauses that budget and has
   its own 25-minute maximum for the bounded remote snapshot protocol (up to
-  43 chunks with 30-second command timeouts). Shutdown cancels and drains all workers before releasing the
-  database service lock.
+  43 chunks with 30-second command timeouts). Shutdown cancels and drains all
+  workers before releasing the database service lock. If the Gateway's
+  30-second service stop budget expires, it continues stopping other services.
+  Team cleanup continues in the background while the process remains alive,
+  retaining ownership until database work and workers drain. This budget does
+  not forcibly terminate a blocked synchronous database call.
 - Each conversation is serialized, including result receipts targeting a source
   shared across teams. The first unfinished job retains the conversation until
   it finishes or is cancelled. A busy host conversation stays queued without

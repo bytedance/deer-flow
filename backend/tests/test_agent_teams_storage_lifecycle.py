@@ -309,7 +309,7 @@ async def test_shutdown_waits_for_in_progress_storage_work_before_unlocking(team
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("loop_already_stopping", [False, True])
-async def test_repeated_stop_cancellation_finishes_worker_drain_and_lock_release(team_modules, loop_already_stopping):
+async def test_cancelled_stop_waiters_leave_one_worker_drain_and_lock_release(team_modules, loop_already_stopping):
     service_module, _ = team_modules
     loop = asyncio.get_running_loop()
     entered, draining, release_worker, closing = (asyncio.Event() for _ in range(4))
@@ -356,20 +356,155 @@ async def test_repeated_stop_cancellation_finishes_worker_drain_and_lock_release
             await asyncio.sleep(0)
         first_stop.cancel()
         second_stop = asyncio.create_task(service.stop())
-        await asyncio.sleep(0)
-        assert not first_stop.done() and not second_stop.done()
+        shutdown = service.shutdown_task
+        done, _ = await asyncio.wait([first_stop], timeout=3)
+        assert first_stop in done and first_stop.cancelled()
+        assert not second_stop.done() and not shutdown.done()
         assert not events
         release_worker.set()
         await asyncio.wait_for(closing.wait(), 3)
-        first_stop.cancel()
         second_stop.cancel()
-        await asyncio.sleep(0)
-        assert not first_stop.done() and not second_stop.done()
+        done, _ = await asyncio.wait([second_stop], timeout=3)
+        assert second_stop in done and second_stop.cancelled()
+        assert service.shutdown_task is shutdown and not shutdown.done()
+        assert service.process_lock is not None
         assert events == ["drained"]
     finally:
         release_worker.set()
         release_close.set()
         results = await asyncio.wait_for(asyncio.gather(first_stop, *([second_stop] if second_stop else []), return_exceptions=True), 3)
+        await asyncio.wait_for(service.stop(), 3)
     assert all(isinstance(result, asyncio.CancelledError) for result in results)
     assert events == ["drained", "closed"]
     assert service.process_lock is None and not service.workers and not service.available
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stall_at", ["database", "worker", "close"])
+async def test_gateway_stop_timeout_continues_while_team_cleanup_keeps_ownership(team_modules, stall_at):
+    from deerflow.extensions.gateway import stop_services
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    service_module, _ = team_modules
+    loop = asyncio.get_running_loop()
+    entered, draining, closing = (asyncio.Event() for _ in range(3))
+    release_worker = asyncio.Event()
+    release_storage = threading.Event()
+    events = []
+
+    class Store:
+        def acquire_service_lock(self):
+            return self
+
+        def check_service_lock(self):
+            pass
+
+        def scheduling_snapshots(self):
+            return {}
+
+        def change(self):
+            loop.call_soon_threadsafe(entered.set)
+            assert release_storage.wait(10)
+            events.append("committed")
+
+        def close(self):
+            loop.call_soon_threadsafe(closing.set)
+            if stall_at == "close":
+                assert release_storage.wait(10)
+            events.append("closed")
+
+    class OtherService:
+        async def start(self, deps):
+            pass
+
+        async def stop(self):
+            events.append("other stopped")
+
+    service = service_module.Teams(store=Store())
+    await service.start(None)
+
+    async def worker():
+        try:
+            if stall_at == "database":
+                await service.db("change")
+            else:
+                entered.set()
+                await asyncio.Future()
+        finally:
+            draining.set()
+            if stall_at == "worker":
+                await release_worker.wait()
+            events.append("drained")
+
+    service.workers["worker"] = asyncio.create_task(worker())
+    registry = ExtensionRegistry()
+    with registry.attributed_to("other:install"):
+        registry.service(OtherService())
+    with registry.attributed_to("teams:install"):
+        registry.service(service)
+    stopping = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        # Use the real host timeout path with a short budget, while an explicit
+        # barrier keeps cleanup stalled until all timeout assertions finish.
+        stopping = asyncio.create_task(stop_services(registry.build(), timeout_seconds=0.01))
+        if stall_at == "worker":
+            await asyncio.wait_for(draining.wait(), 3)
+        elif stall_at == "close":
+            await asyncio.wait_for(closing.wait(), 3)
+        done, _ = await asyncio.wait([stopping], timeout=3)
+        assert stopping in done, "Team cleanup swallowed the Gateway stop timeout"
+        diagnostics = stopping.result()
+        assert len(diagnostics) == 1
+        assert diagnostics[0].source == "teams:install"
+        assert "timed out" in diagnostics[0].message
+        assert "other stopped" in events and "closed" not in events
+        assert not service.available and service.process_lock is not None
+        assert not service.shutdown_task.done() and not service.shutdown_task.cancelling()
+    finally:
+        release_worker.set()
+        release_storage.set()
+        if stopping is not None:
+            await asyncio.wait_for(stopping, 3)
+        await asyncio.wait_for(service.stop(), 3)
+    assert events[-1] == "closed" and events.count("closed") == 1
+    assert events.index("drained") < events.index("closed")
+    if stall_at == "database":
+        assert events.index("committed") < events.index("drained")
+    assert service.process_lock is None and not service.workers
+
+
+@pytest.mark.asyncio
+async def test_detached_shutdown_failure_is_reported_without_storage_details(team_modules, caplog):
+    service_module, _ = team_modules
+    loop = asyncio.get_running_loop()
+    closing = asyncio.Event()
+    release = threading.Event()
+
+    class Store:
+        def close(self):
+            loop.call_soon_threadsafe(closing.set)
+            assert release.wait(10)
+            raise RuntimeError("private storage connection details")
+
+    service = service_module.Teams(store=Store())
+    service.process_lock = service.store
+    stopping = asyncio.create_task(service.stop())
+    try:
+        await asyncio.wait_for(closing.wait(), 3)
+        stopping.cancel()
+        done, _ = await asyncio.wait([stopping], timeout=3)
+        assert stopping in done and stopping.cancelled()
+        shutdown_done = asyncio.Event()
+        service.shutdown_task.add_done_callback(lambda _: shutdown_done.set())
+        release.set()
+        await asyncio.wait_for(shutdown_done.wait(), 3)
+        assert "Agent teams shutdown failed" in caplog.text
+        assert "private storage connection details" not in caplog.text
+        # Reporting detached failures must not consume the error for a later
+        # stop caller or replace the shared shutdown with a second attempt.
+        with pytest.raises(RuntimeError, match="private storage connection details"):
+            await service.stop()
+    finally:
+        release.set()
+        await asyncio.gather(stopping, service.shutdown_task, return_exceptions=True)

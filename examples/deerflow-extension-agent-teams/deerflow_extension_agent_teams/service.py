@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from collections import deque
 from collections.abc import Mapping
@@ -19,6 +20,14 @@ from .store import TERMINAL, Store, StoreUnavailable
 
 NAMESPACE = "community.agent-teams"
 LIMIT = 100
+logger = logging.getLogger(__name__)
+
+
+def report_shutdown_failure(task):
+    if not task.cancelled() and task.exception() is not None:
+        # Stop waiters may have timed out already. Observe the failure without
+        # logging exception details that could contain connection credentials.
+        logger.error("Agent teams shutdown failed; storage ownership may not have been released")
 
 
 async def drain_task(task):
@@ -153,14 +162,11 @@ class Teams(Artifacts):
         self.available = False
         if self.shutdown_task is None:
             self.shutdown_task = asyncio.create_task(self.shutdown())
-        try:
-            await asyncio.shield(self.shutdown_task)
-        except asyncio.CancelledError:
-            # All stop callers share one drain. Repeated cancellation must not
-            # recancel workers that are releasing host reservations or storage.
-            with suppress(Exception):
-                await drain_task(self.shutdown_task)
-            raise
+            self.shutdown_task.add_done_callback(report_shutdown_failure)
+        # All callers share one drain, but a cancelled waiter must return so
+        # the Gateway's shutdown timeout can advance to the next service.
+        # Shield keeps worker draining and lock release owned by this task.
+        await asyncio.shield(self.shutdown_task)
 
     async def shutdown(self):
         if self.task:
