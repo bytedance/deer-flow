@@ -135,8 +135,9 @@ class FileAgentStore(AgentStore):
         # not be shadowed; a per-user dir may be memory-only but still blocks).
         if agent_dir.exists() or paths.agent_dir(name).exists():
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'")
+        agent_dir.parent.mkdir(parents=True, exist_ok=True)
         try:
-            agent_dir.mkdir(parents=True, exist_ok=False)
+            agent_dir.mkdir()
         except FileExistsError as e:
             # A concurrent create passed the existence check above and reached
             # mkdir first. Surface the router's 409 (via AgentExistsError) rather

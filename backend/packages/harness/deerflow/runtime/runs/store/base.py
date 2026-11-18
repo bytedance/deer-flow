@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.utils.time import coerce_iso
@@ -65,6 +65,15 @@ def normalize_run_created_at_iso(value: str) -> str:
         if sep and offset.replace(":", "").isdigit():
             value = f"{date}T{time_part}+{offset}"
     return value
+
+
+def next_snapshot_updated_at(previous: datetime, now: datetime) -> datetime:
+    """A replacement snapshot must invalidate a receipt even within one clock tick."""
+    if previous.tzinfo is None:  # SQLite reads UTC timestamps without their offset.
+        previous = previous.replace(tzinfo=UTC)
+    if now <= previous:
+        return previous.astimezone(UTC) + timedelta(microseconds=1)
+    return now
 
 
 def canonical_run_created_at(value: str) -> str:

@@ -1219,7 +1219,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to list agents"}
-        assert str(agents_root) in caplog.text
+        assert repr(str(agents_root)) in caplog.text
 
     def test_create_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
         agents_root = self._user_dir(tmp_path) / "agents"
@@ -1230,7 +1230,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to create agent"}
-        assert str(agents_root) in caplog.text
+        assert repr(str(agents_root)) in caplog.text
 
     def test_delete_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
         from deerflow.persistence.agents.file import FileAgentStore
@@ -1244,7 +1244,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to delete agent"}
-        assert str(agent_dir) in caplog.text
+        assert repr(str(agent_dir)) in caplog.text
 
     @pytest.mark.parametrize(
         ("method", "kwargs", "detail"),
@@ -1261,7 +1261,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": detail}
-        assert str(user_md) in caplog.text
+        assert repr(str(user_md)) in caplog.text
 
 
 class TestAgentsApiDisabled:
