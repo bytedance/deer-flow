@@ -961,6 +961,18 @@ tools:
   #   # hl: en                       # Optional interface language
   #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
 
+  # Web search tool (uses SearchApi - Google Search API, requires SEARCHAPI_API_KEY)
+  # SearchApi returns live Google results and covers Google News and Google Scholar
+  # with the same key. Sign up at https://www.searchapi.io (docs: https://www.searchapi.io/docs/google)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.searchapi.tools:web_search_tool
+  #   max_results: 5                 # SearchApi accepts 1-100 per request
+  #   # vertical: search             # search (default), news, or scholar
+  #   # gl: us                       # Optional country code for the results
+  #   # hl: en                       # Optional interface language
+  #   # api_key: $SEARCHAPI_API_KEY  # Optional if the env var is set
+
   # News search tool (uses Webz.io News Search, requires WEBZ_API_KEY)
   # Recent news coverage, not general web search. Replace the active web_search entry.
   # - name: web_search
