@@ -40,9 +40,10 @@ def _read_position(expected_version: int | StreamState) -> int:
     raise ValueError(f"cannot settle an append with expected_version={expected_version!r}; only an int or NO_STREAM pins a position")
 
 
-def _decide(events, own_event_ids: set[UUID]) -> AppendOutcome:
-    if not events:
-        raise AmbiguousAppendError("fence rejected but the contested position is unreadable")
+def _decide(events, position: int, own_event_ids: set[UUID]) -> AppendOutcome:
+    # A read below a truncation point returns the first surviving event, not the contested one.
+    if not events or events[0].stream_position != position:
+        raise AmbiguousAppendError(f"contested position {position} truncated")
     return "committed" if events[0].id in own_event_ids else "not_committed"
 
 
@@ -59,7 +60,7 @@ def settle_append(client, stream: str, *, expected_version: int | StreamState, o
         events = client.get_stream(stream, stream_position=position, limit=1, timeout=timeout)
     except Exception as exc:
         raise AmbiguousAppendError(f"reading {stream!r} at {position} after a rejected fence failed: {exc}") from exc
-    return _decide(events, own_event_ids)
+    return _decide(events, position, own_event_ids)
 
 
 async def asettle_append(client, stream: str, *, expected_version: int | StreamState, own_event_ids: set[UUID], timeout: float) -> AppendOutcome:
@@ -75,4 +76,4 @@ async def asettle_append(client, stream: str, *, expected_version: int | StreamS
         events = await client.get_stream(stream, stream_position=position, limit=1, timeout=timeout)
     except Exception as exc:
         raise AmbiguousAppendError(f"reading {stream!r} at {position} after a rejected fence failed: {exc}") from exc
-    return _decide(events, own_event_ids)
+    return _decide(events, position, own_event_ids)

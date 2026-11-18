@@ -132,3 +132,18 @@ def test_every_call_passes_timeout(settle):
     target = client if settle is _settle else server.async_client()
     settle(target, "s", expected_version=0, events=own)
     assert [c.kwargs["timeout"] for c in server.calls[-2:]] == [TIMEOUT, TIMEOUT]
+
+
+def test_truncated_contested_position_is_ambiguous(settle):
+    from deerflow_extension_kurrentdb._fence import AmbiguousAppendError
+
+    server = FakeKurrentDB()
+    client = server.sync_client()
+    client.append_to_stream("s", events=[_event()], current_version=StreamState.NO_STREAM)
+    own = [_event(n="mine")]
+    _lose(server, client, "s", own, 0, after_commit=True)
+    client.append_to_stream("s", events=[_event(n="later")], current_version=1)
+    client.set_stream_metadata("s", metadata={"$tb": 2})  # truncate past the contested position 1
+    target = client if settle is _settle else server.async_client()
+    with pytest.raises(AmbiguousAppendError, match="truncated"):
+        settle(target, "s", expected_version=0, events=own)
