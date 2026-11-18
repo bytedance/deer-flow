@@ -154,6 +154,23 @@ class TaskLifecycleContributor(Protocol):
 | `parent_task_id` | `str \| None`                 | `None`  |
 | `agent_name`     | `str \| None`                 | `None`  |
 | `resumed`        | `bool`                        | `False` |
+| `metadata`       | `Mapping[str, Any]`           | 空，只读 |
+| `stop`           | `TaskStopDetail \| None`      | `None`  |
+
+### `TaskStopDetail`
+
+冻结的 dataclass，设置在传给 `on_task_stop` 的 `TaskInfo` 上。
+
+| 字段           | 类型                        | 默认值 |
+| -------------- | --------------------------- | ------ |
+| `status`       | `str`                       | 必填   |
+| `error`        | `str \| None`               | `None` |
+| `goal_verdict` | `Mapping[str, Any] \| None` | `None` |
+| `persisted`    | `bool`                      | `True` |
+
+### `ReadOnlyDict`
+
+`TaskInfo.metadata` 与 `TaskStopDetail.goal_verdict` 的类型：拒绝条目赋值和删除的 `dict` 子类。嵌套映射同样是 `ReadOnlyDict`，列表转为元组。`dataclasses.asdict()`、`copy.deepcopy()`、pickle 和 `json.dumps()` 均可使用；`dict(value)` 返回可变副本。
 
 ### `TaskOutcome`
 

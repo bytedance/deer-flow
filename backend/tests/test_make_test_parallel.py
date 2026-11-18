@@ -71,25 +71,25 @@ def run_make(project: Path, *args: str, fail_group: str = "", parallel: bool = T
 
 
 @pytest.mark.parametrize("fail_group", ["", "1"])
-def test_make_test_runs_all_four_shards_and_reports_any_failure(test_project: Path, fail_group: str, monkeypatch) -> None:
+def test_make_test_runs_all_six_shards_and_reports_any_failure(test_project: Path, fail_group: str, monkeypatch) -> None:
     monkeypatch.setenv("TEST_JOBS", "2")
     result = run_make(test_project, "test", fail_group=fail_group)
 
     assert (result.returncode == 0) == (not fail_group), result.stdout + result.stderr
-    assert {path.stem for path in test_project.glob("*.finished")} == {"1", "2", "3", "4"}
-    for group in range(1, 5):
+    assert {path.stem for path in test_project.glob("*.finished")} == {"1", "2", "3", "4", "5", "6"}
+    for group in range(1, 7):
         args = json.loads((test_project / f"{group}.started").read_text(encoding="utf-8"))
         assert args[:3] == ["run", "pytest", "-m"]
         assert args[args.index("-m") + 1] == "not live and not bundled_extension"
         assert "--ignore=tests/blocking_io" in args
-        assert args[args.index("--splits") + 1] == "4"
+        assert args[args.index("--splits") + 1] == "6"
         assert args[args.index("--group") + 1] == str(group)
         assert args[args.index("--splitting-algorithm") + 1] == "least_duration"
         assert "--store-durations" not in args
 
 
 def test_ci_can_still_run_one_shard(test_project: Path) -> None:
-    result = run_make(test_project, "test-shard", "SPLITS=4", "GROUP=2", parallel=False)
+    result = run_make(test_project, "test-shard", "SPLITS=6", "GROUP=2", parallel=False)
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert {path.stem for path in test_project.glob("*.finished")} == {"2"}
@@ -99,7 +99,7 @@ def test_make_test_can_limit_concurrency(test_project: Path) -> None:
     result = run_make(test_project, "test", "TEST_JOBS=1", parallel=False)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert {path.stem for path in test_project.glob("*.finished")} == {"1", "2", "3", "4"}
+    assert {path.stem for path in test_project.glob("*.finished")} == {"1", "2", "3", "4", "5", "6"}
 
 
 def test_make_test_reports_missing_durations(test_project: Path) -> None:

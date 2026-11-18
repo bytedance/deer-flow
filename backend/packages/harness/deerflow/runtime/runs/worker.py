@@ -359,6 +359,7 @@ async def _persist_delivery_receipt(
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR = "Scheduled goal cleanup failed"
 _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
 # Stream error frames and the /wait error envelope share one name for a run that
 # ends in error without an exception; the Gateway spells it the same way.
@@ -1052,6 +1053,8 @@ async def run_agent(
         lead_task_outcome,
         notify_task_start,
         notify_task_stop,
+        read_only_copy,
+        stopped_task_info,
     )
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
@@ -1274,6 +1277,7 @@ async def run_agent(
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
+                metadata=read_only_copy(record.metadata),
             )
             task_store = ExtensionData(task_id)
             # Seed the identity for every hook handed this store, not only
@@ -2180,7 +2184,10 @@ async def run_agent(
                         deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(cleanup_task, deferred_finalization_interrupt)
                     except Exception:
                         logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
-                        await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
+                        await run_manager.set_status(run_id, RunStatus.error, error=_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, persist=False)
+                        # Same invariant as the receipt failure above: the record
+                        # is now `error`, so the stream must not end as a success.
+                        terminal_error_frame = {"message": _SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
                     try:
@@ -2328,7 +2335,13 @@ async def run_agent(
                         notify_task_stop(
                             extensions,
                             task_store,
-                            task_info,
+                            stopped_task_info(
+                                task_info,
+                                status=record.status.value,
+                                error=record.error,
+                                goal_verdict=record.goal_verdict,
+                                persisted=not record.ownership_lost and getattr(record, "terminal_status_persisted", True),
+                            ),
                             lead_task_outcome(
                                 aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
                                 succeeded=record.status == RunStatus.success,
@@ -2414,7 +2427,12 @@ async def run_agent(
 
                 terminal_stream_authorized = not record.ownership_lost and record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True)
                 if terminal_stream_authorized:
-                    if terminal_error_frame is not None:
+                    # A staged frame predates the final outcome, and a cancellation
+                    # can still win after it was staged: an interrupt replaces the
+                    # status and a rollback replaces the message (both can land
+                    # while scheduled-goal cleanup runs). Publish only the error
+                    # the record actually committed.
+                    if terminal_error_frame is not None and record.status == RunStatus.error and record.error == terminal_error_frame.get("message"):
                         await bridge.publish(
                             run_id,
                             "error",
