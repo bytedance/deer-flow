@@ -560,6 +560,59 @@ def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):
     assert captured["executor_kwargs"]["app_config"] is app_config
 
 
+def test_bound_task_tool_sizes_poll_budget_from_its_capacity(monkeypatch):
+    """The poller waits on the injected controller, so it uses that bound.
+
+    The SDK runtime builds its own capacity and never installs a process-wide
+    snapshot; reading the startup bound here under-budgets the wait and reports
+    a healthy queued subagent as ``polling_timed_out``.
+    """
+    runtime = _make_runtime()
+    config = _make_subagent_config()
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(queue_timeout_seconds=1800))
+    budget_calls = []
+
+    def fake_budget(timeout_seconds, queue_timeout_seconds=None):
+        budget_calls.append((timeout_seconds, queue_timeout_seconds))
+        return 1
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "_main_wait_poll_budget", fake_budget)
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name, **_kwargs: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    bound_tool = task_tool_module.bind_task_tool(capacity)
+    coroutine = getattr(bound_tool, "coroutine", None)
+    assert coroutine is not None
+    asyncio.run(
+        coroutine(
+            runtime=runtime,
+            description="test",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-capacity-budget",
+        )
+    )
+
+    assert budget_calls == [(config.timeout_seconds, 1800)]
+
+
 def test_bound_task_tool_sync_path_uses_the_explicit_capacity(monkeypatch):
     """Sync invocation of the bound copy must not bypass the explicit capacity.
 
@@ -1587,9 +1640,72 @@ def test_task_tool_surfaces_stop_reason_for_capped_run(monkeypatch):
     assert events[-1]["type"] == "task_completed"
 
 
+def test_main_wait_poll_budget_includes_queue_wait(monkeypatch):
+    """Queue wait is bounded separately from execution; the poller allows for both."""
+    monkeypatch.setattr(task_tool_module, "configured_subagent_queue_timeout_seconds", lambda: 300)
+
+    assert task_tool_module._main_wait_poll_budget(900) == 252
+    assert task_tool_module._main_wait_poll_budget(1) == 72
+    # An injected controller's bound wins over the process-wide snapshot.
+    assert task_tool_module._main_wait_poll_budget(900, 1800) == 552
+
+
+def test_cleanup_poll_budget_stays_execution_only(monkeypatch):
+    """Cancellation and deferred cleanup must not inherit the queue-wait allowance."""
+    monkeypatch.setattr(task_tool_module, "configured_subagent_queue_timeout_seconds", lambda: 300)
+
+    assert task_tool_module._cleanup_poll_budget(900) == 192
+    assert task_tool_module._cleanup_poll_budget(1) == 12
+
+
+def test_pending_polls_do_not_exhaust_the_main_wait_budget(monkeypatch):
+    """A queued (PENDING) subagent may outlive its execution timeout and still run."""
+    config = _make_subagent_config()
+    config.timeout_seconds = 1
+    old_budget = (1 + 60) // 5  # 12 polls before the queue allowance
+    polls = 0
+    events = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id
+
+    def status_lookup(_execution_id):
+        nonlocal polls
+        polls += 1
+        if polls <= old_budget + 4:
+            return _make_result(FakeSubagentStatus.PENDING, ai_messages=[])
+        return _make_result(FakeSubagentStatus.COMPLETED, result="done")
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name, **_kwargs: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", status_lookup)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _task_id: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    output = _run_task_tool(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="wait in the queue",
+        subagent_type="general-purpose",
+        tool_call_id="tc-pending-budget",
+    )
+
+    message = _task_tool_message(output)
+    assert polls > old_budget, "test setup did not outlast the old poll budget"
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert message.content == "Task Succeeded. Result: done"
+
+
 def test_task_tool_polling_safety_timeout(monkeypatch):
     config = _make_subagent_config()
-    # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
+    # Keep the main-wait budget small for test speed: (300 + 1 + 60) // 5 = 72
     config.timeout_seconds = 1
     events = []
 
@@ -1632,7 +1748,7 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
 
     message = _task_tool_message(output)
     assert isinstance(message.content, str)
-    assert message.content.startswith("Task polling timed out after 0 minutes")
+    assert message.content.startswith("Task polling timed out after 6 minutes")
     assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "polling_timed_out"
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == message.content
     assert message.additional_kwargs[SUBAGENT_TOOL_RECEIPTS_KEY] == receipts
@@ -1790,7 +1906,7 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
     cooperative cancellation is requested and a deferred cleanup is scheduled.
     """
     config = _make_subagent_config()
-    # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
+    # Keep the main-wait budget small for test speed: (300 + 1 + 60) // 5 = 72
     config.timeout_seconds = 1
     events = []
     cleanup_calls = []
@@ -1844,13 +1960,56 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
 
     message = _task_tool_message(output)
     assert isinstance(message.content, str)
-    assert message.content.startswith("Task polling timed out after 0 minutes")
+    assert message.content.startswith("Task polling timed out after 6 minutes")
     # cleanup_background_task must NOT be called directly (task is still RUNNING)
     assert cleanup_calls == []
     # cooperative cancellation must be requested
     assert cancel_requests == ["tc-no-cleanup-safety-timeout"]
     # a deferred cleanup coroutine must be scheduled
     assert len(scheduled_cleanups) == 1
+
+
+def test_polling_timeout_schedules_cleanup_without_queue_allowance(monkeypatch):
+    """Deferred cleanup starts after admission, so it gets the execution-only budget."""
+    config = _make_subagent_config()
+    config.timeout_seconds = 1
+    captured_budgets = []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name, **_kwargs: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(task_tool_module, "_cleanup_poll_budget", lambda timeout_seconds: 7)
+    monkeypatch.setattr(
+        task_tool_module,
+        "_schedule_deferred_subagent_cleanup",
+        lambda runtime, execution_id, trace_id, max_polls: captured_budgets.append(max_polls),
+    )
+    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda _task_id: None)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *args, **kwargs: None)
+
+    output = _run_task_tool(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="never finish",
+        subagent_type="general-purpose",
+        tool_call_id="tc-cleanup-budget",
+    )
+
+    message = _task_tool_message(output)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "polling_timed_out"
+    assert captured_budgets == [7]
 
 
 def test_cleanup_scheduled_on_cancellation(monkeypatch):
