@@ -557,7 +557,14 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                 await self.save(owner, record)
             async with entry["slots"], self.global_slots, self.cluster_slot(entry, row):
                 if entry["cancel"].is_set() or entry["fault"]:
-                    row["status"] = "cancelled"
+                    if row.get("run_id") is None:
+                        # Admission never occurred; stopping is deterministic.
+                        row["status"] = "cancelled"
+                    elif not entry.get("lease_lost"):
+                        # The replay reattached to an admitted child — observe
+                        # its termination here, so a confirmed cancel keeps the
+                        # cancelled status and a failure stays reconcilable.
+                        await self.cancel_child(runs, row, **({"record": record} if self.clustered else {}))
                     raise ValueError("Workflow stopping")
                 if record.get("configuration_revision") is not None:
                     try:
