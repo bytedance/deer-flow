@@ -68,6 +68,32 @@ def test_numeric_per_image_tag_fails_the_render(name: str, value: str) -> None:
     assert "--set-string" in result.stderr
 
 
+def _render_as_subchart(tmp_path: Path, tag: str) -> subprocess.CompletedProcess[str]:
+    helm = shutil.which("helm")
+    if helm is None:
+        pytest.skip("helm is unavailable")
+    parent = tmp_path / "parent"
+    shutil.copytree(CHART, parent / "charts" / "deer-flow")
+    (parent / "Chart.yaml").write_text("apiVersion: v2\nname: parent\nversion: 0.1.0\n", encoding="utf-8")
+    (parent / "values.yaml").write_text(f"deer-flow:\n  image:\n    gatewayTag: {tag}\n", encoding="utf-8")
+    return subprocess.run([helm, "template", "parent", str(parent)], check=False, capture_output=True, text=True, encoding="utf-8")
+
+
+@pytest.mark.parametrize("value", ["7.0", "0123"])
+def test_numeric_per_image_tag_from_parent_chart_fails_the_render(tmp_path: Path, value: str) -> None:
+    # Helm 3.18.0 passes an unquoted number from a parent chart's values to the
+    # subchart as a json.Number (kind "string"): 7.0 and 0123 rendered as 7 and 83.
+    result = _render_as_subchart(tmp_path, value)
+    assert result.returncode != 0
+    assert "image.gatewayTag must be a string" in result.stderr
+
+
+def test_quoted_per_image_tag_from_parent_chart_renders(tmp_path: Path) -> None:
+    result = _render_as_subchart(tmp_path, '"0123"')
+    assert result.returncode == 0, result.stderr
+    assert "deer-flow-backend:0123" in result.stdout
+
+
 def test_numeric_per_image_tag_as_string_renders() -> None:
     images = _images("image.gatewayTag=20261118", set_flag="--set-string")
     assert images["gateway"] == "registry.example.com/team/deer-flow-backend:20261118"

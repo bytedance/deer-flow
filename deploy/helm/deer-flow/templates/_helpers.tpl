@@ -64,13 +64,15 @@ imagePullSecrets:
      frontendTag or provisionerTag). A tag that is not a string fails the
      render: `--set image.gatewayTag=20261118` arrives as an integer, which
      printf renders as `%!s(int64=20261118)`, and `default` would silently
-     replace an integer 0 with `image.tag`. A json.Number (Helm 3.18.0 loads
-     YAML numbers that way) is kind "string" and renders as written. */}}
+     replace an integer 0 with `image.tag`. The check is on the type, not the
+     kind: Helm 3.18.0 hands an unquoted number from a parent chart's values
+     to the subchart as a json.Number, whose kind is "string", so `7.0` and
+     `0123` would render as 7 and 83. */}}
 {{- define "deer-flow.imageTag" -}}
 {{- $value := get .Values.image .key -}}
 {{- if kindIs "invalid" $value -}}{{- .Values.image.tag -}}
-{{- else if not (kindIs "string" $value) -}}
-{{- fail (printf "image.%s must be a string (got %s %v); quote it in YAML or set it with --set-string image.%s=..." .key (kindOf $value) $value .key) -}}
+{{- else if not (typeIs "string" $value) -}}
+{{- fail (printf "image.%s must be a string (got %s %v); quote it in YAML or set it with --set-string image.%s=..." .key (typeOf $value) $value .key) -}}
 {{- else if eq (toString $value) "" -}}{{- .Values.image.tag -}}
 {{- else -}}{{- toString $value -}}
 {{- end -}}
