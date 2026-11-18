@@ -1787,8 +1787,10 @@ def test_apply_cwd_prefix_missing_workspace_path() -> None:
 
 def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
     """Workspace path containing spaces is properly shell-quoted."""
+    # The prefix follows the shell that will run it, so this POSIX assertion has
+    # to name the shell or it would depend on the host.
     thread_data = {**_THREAD_DATA, "workspace_path": "/tmp/my workspace/t1"}
-    result = _apply_cwd_prefix("echo hello", thread_data)
+    result = _apply_cwd_prefix("echo hello", thread_data, shell="/bin/bash")
     assert result == "cd '/tmp/my workspace/t1' && echo hello"
 
 

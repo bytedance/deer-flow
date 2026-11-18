@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -217,8 +218,8 @@ def test_public_bash_tool_preserves_thread_path_argument(powershell, tmp_path, m
         # Git Bash/MSYS on Windows reports as sh.exe and speaks POSIX.
         ("C:/Program Files/Git/bin/bash.exe", "cd '/tmp/thread data/workspace' && "),
         # PowerShell 7 and Windows PowerShell 5.1: the 5.1 parser has no `&&`.
-        ("/usr/local/bin/pwsh", "Set-Location -LiteralPath '/tmp/thread data/workspace'; "),
-        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "Set-Location -LiteralPath '/tmp/thread data/workspace'; "),
+        ("/usr/local/bin/pwsh", "Set-Location -LiteralPath '/tmp/thread data/workspace' -ErrorAction Stop; "),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "Set-Location -LiteralPath '/tmp/thread data/workspace' -ErrorAction Stop; "),
         # cmd.exe keeps single quotes as literal characters, so `cd '<path>'` looks
         # for a directory whose name includes them.
         ("C:\\Windows\\System32\\cmd.exe", 'cd /d "/tmp/thread data/workspace" && '),
@@ -233,10 +234,47 @@ def test_cwd_prefix_quotes_a_workspace_with_an_apostrophe():
     workspace = "/tmp/O'Brien's thread/workspace"
     assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="/bin/bash") == "cd '/tmp/O'\"'\"'Brien'\"'\"'s thread/workspace' && echo hi"
     # PowerShell escapes a literal quote by doubling it inside a single-quoted string.
-    assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="pwsh") == "Set-Location -LiteralPath '/tmp/O''Brien''s thread/workspace'; echo hi"
+    assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="pwsh") == "Set-Location -LiteralPath '/tmp/O''Brien''s thread/workspace' -ErrorAction Stop; echo hi"
 
 
 @pytest.mark.parametrize("shell", ["/bin/bash", "pwsh", "C:\\Windows\\System32\\cmd.exe"])
 def test_cwd_prefix_leaves_the_command_alone_without_a_workspace(shell):
     assert _apply_cwd_prefix("echo hi", None, shell=shell) == "echo hi"
     assert _apply_cwd_prefix("echo hi", {}, shell=shell) == "echo hi"
+
+
+def test_powershell_prefix_skips_the_command_when_the_workspace_is_gone(powershell, tmp_path):
+    """A vanished workspace must abort the command, not run it from the inherited cwd.
+
+    ``Set-Location`` reports a missing directory as a non-terminating error, so
+    without ``-ErrorAction Stop`` the ``;``-separated command still runs — from
+    whatever directory the gateway was started in.
+    """
+    missing = tmp_path / "workspace-that-was-removed"
+    command = _apply_cwd_prefix('Write-Output "SHOULD_NOT_RUN"', {"workspace_path": str(missing)}, shell=powershell)
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    assert completed.returncode != 0, completed.stdout
+    assert "SHOULD_NOT_RUN" not in completed.stdout
+
+    # Control: the same prefix does run the command once the workspace exists,
+    # so the assertion above cannot pass by the command never running at all.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ok_command = _apply_cwd_prefix('Write-Output "RAN"', {"workspace_path": str(workspace)}, shell=powershell)
+    ran = subprocess.run(
+        [powershell, "-NoProfile", "-Command", ok_command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    assert ran.returncode == 0, ran.stderr
+    assert "RAN" in ran.stdout

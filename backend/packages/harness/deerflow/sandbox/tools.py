@@ -2067,6 +2067,11 @@ def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None, *, shel
     so it looks for a directory literally named ``'<path>'``. Either way every
     ``bash`` call fails before the command runs.
 
+    Each form keeps the fail-closed behaviour of ``&&``: the PowerShell variant
+    uses ``-ErrorAction Stop`` because ``Set-Location`` otherwise reports a
+    missing workspace as a non-terminating error and lets the command run from
+    the inherited working directory.
+
     Args:
         command: The bash command to execute.
         thread_data: The thread data containing the workspace path.
@@ -2081,7 +2086,11 @@ def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None, *, shel
         return command
     resolved_shell = shell or LocalSandbox._get_shell()
     if LocalSandbox._is_powershell(resolved_shell):
-        return f"Set-Location -LiteralPath {_quote_powershell_literal(workspace)}; {command}"
+        # ``-ErrorAction Stop`` keeps the stop-on-failure semantics ``&&`` gives
+        # the POSIX form: ``Set-Location`` reports a missing directory as a
+        # non-terminating error, which would let the ``;``-separated command run
+        # from the gateway's inherited cwd.
+        return f"Set-Location -LiteralPath {_quote_powershell_literal(workspace)} -ErrorAction Stop; {command}"
     if LocalSandbox._is_cmd_shell(resolved_shell):
         return f'cd /d "{workspace}" && {command}'
     return f"cd {shlex.quote(workspace)} && {command}"
