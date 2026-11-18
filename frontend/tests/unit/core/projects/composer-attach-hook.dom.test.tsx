@@ -171,22 +171,32 @@ test("clearing after a successful send drops the pending list for good", () => {
   expect(observed.current).toEqual([]);
 });
 
-test("a denied read still mounts an empty composer and allows local attachment changes", () => {
-  rs.spyOn(window.sessionStorage, "getItem").mockImplementation(() => {
-    throw new DOMException("Read denied", "SecurityError");
-  });
-  render(
+test("a composer that could not read pending attachments keeps its changes local", () => {
+  stageProjectAttachment("thread-1", OTHER);
+  const denied = rs
+    .spyOn(window.sessionStorage, "getItem")
+    .mockImplementation(() => {
+      throw new DOMException("Read denied", "SecurityError");
+    });
+  const first = render(
     <StrictMode>
       <ComposerProbe threadId="thread-1" />
     </StrictMode>,
   );
   expect(screen.getByLabelText("Pending attachments").textContent).toBe("");
+  denied.mockRestore();
 
   act(() => observed.set([ATTACHMENT]));
 
   expect(screen.getByLabelText("Pending attachments").textContent).toBe(
     "roadmap.md",
   );
+  act(() => observed.set([]));
+  expect(screen.getByLabelText("Pending attachments").textContent).toBe("");
+
+  first.unmount();
+  render(<ComposerProbe threadId="thread-1" />);
+  expect(observed.current).toEqual([OTHER]);
 });
 
 test("quota failures still update visible attachments and the next functional updater", () => {

@@ -102,17 +102,18 @@ export function stageProjectAttachment(
 export function readProjectAttachments(
   threadId: string,
 ): AttachProjectDocumentResult[] {
-  const storage = safeSessionStorage();
-  if (!storage) {
-    return [];
-  }
-  return readStoredAttachments(storage, storageKey(threadId)) ?? [];
+  return (
+    readStoredAttachments(safeSessionStorage(), storageKey(threadId)) ?? []
+  );
 }
 
 function readStoredAttachments(
-  storage: Storage,
+  storage: Storage | null,
   key: string,
 ): AttachProjectDocumentResult[] | null {
+  if (!storage) {
+    return null;
+  }
   let raw: string | null;
   try {
     raw = storage.getItem(key);
@@ -185,11 +186,16 @@ export function useStagedProjectAttachments(threadId: string) {
     AttachProjectDocumentResult[]
   >([]);
   const pendingRef = useRef<AttachProjectDocumentResult[]>([]);
+  const loadedThreadRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const pending = readProjectAttachments(threadId);
-    pendingRef.current = pending;
-    setAttachmentsState(pending);
+    const pending = readStoredAttachments(
+      safeSessionStorage(),
+      storageKey(threadId),
+    );
+    loadedThreadRef.current = pending === null ? null : threadId;
+    pendingRef.current = pending ?? [];
+    setAttachmentsState(pendingRef.current);
   }, [threadId]);
 
   const setAttachments = useCallback(
@@ -197,7 +203,8 @@ export function useStagedProjectAttachments(threadId: string) {
       const next =
         typeof value === "function" ? value(pendingRef.current) : value;
       pendingRef.current = next;
-      const storage = safeSessionStorage();
+      const storage =
+        loadedThreadRef.current === threadId ? safeSessionStorage() : null;
       if (storage) {
         if (next.length === 0) {
           safeRemoveItem(storage, storageKey(threadId));
