@@ -379,10 +379,11 @@ def test_unknown_event_type_is_corruption(server):
     with pytest.raises(MemoryStorageCorruption):
         _storage(server).load(AGENT, user_id="bob")
 
-    # Undecodable data is a read failure, not corruption of the model.
+    # Undecodable data is persistent bad state too, not a transient read failure.
     client.append_to_stream("deerflow.memory-user.carol", events=[NewEvent(type="deerflow.memory.SummariesUpdated", data=b"\xff not json")], current_version=StreamState.NO_STREAM)
-    with pytest.raises(KurrentdbMemoryReadError):
+    with pytest.raises(MemoryStorageCorruption) as caught:
         _storage(server).load(AGENT, user_id="carol")
+    assert not isinstance(caught.value, KurrentdbMemoryReadError)
 
     # Events of an unknown type found by an incremental fold are corruption too.
     storage = _storage(server)

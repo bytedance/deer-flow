@@ -4,7 +4,8 @@
 and the stream position folded so far (``revision`` = position + 1, 0 when nothing
 was folded). Fence events advance the position and change nothing else. Unknown
 event types and payloads that break the invariants raise
-``MemoryStorageCorruption``; data that is not JSON raises ``EventDecodeError``.
+``MemoryStorageCorruption``, as does data that is not JSON: both are persistent
+bad state, not a transient read failure.
 """
 
 from __future__ import annotations
@@ -19,10 +20,6 @@ from .._fence import FENCE_EVENT_TYPE
 from . import events
 
 
-class EventDecodeError(Exception):
-    """An event's data is not a JSON object."""
-
-
 def _empty_sections() -> tuple[dict[str, Any], dict[str, Any]]:
     empty = create_empty_memory()
     return empty["user"], empty["history"]
@@ -32,7 +29,7 @@ def decode(raw: bytes) -> Any:
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EventDecodeError(str(exc)) from exc
+        raise MemoryStorageCorruption(f"Undecodable memory event data: {exc}") from exc
 
 
 class MemoryState:

@@ -39,7 +39,7 @@ from .._fence import AmbiguousAppendError, settle_append
 from .._naming import memory_stream
 from .._settings import load_settings
 from . import events
-from .fold import EventDecodeError, MemoryState
+from .fold import MemoryState
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ READ_PAGE_SIZE = 256
 
 
 class KurrentdbMemoryReadError(MemoryReadError):
-    """KurrentDB could not be read (transport, timeout, decode), or a write's outcome is unknown."""
+    """KurrentDB could not be read (transport, timeout), or a write's outcome is unknown."""
 
 
 class _Recorded(NamedTuple):
@@ -123,11 +123,8 @@ class KurrentdbMemoryStorage(MemoryStorage):
 
     @staticmethod
     def _fold(state: MemoryState, recorded: list[Any] | tuple[Any, ...], stream: str) -> MemoryState:
-        try:
-            for event in recorded:
-                state.apply(event)
-        except EventDecodeError as exc:
-            raise KurrentdbMemoryReadError(f"Undecodable event in {stream!r}: {exc}") from exc
+        for event in recorded:
+            state.apply(event)
         return state
 
     def _full_read(self, client: Any, stream: str) -> MemoryState:
