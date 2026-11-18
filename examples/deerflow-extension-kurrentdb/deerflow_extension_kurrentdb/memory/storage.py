@@ -12,6 +12,11 @@ is one append with ``current_version`` = revision - 1 (``NO_STREAM`` for 0); a
 wrong expected version is ``MemoryManifestRevisionConflict``, and an append whose
 outcome is unknown is settled by ``_fence.settle_append`` and never re-appended.
 
+``save``, ``apply_changes`` and ``clear_all`` are planned against the fold
+(``changes``) and written as one append each; a no-op appends nothing. Plans that
+delete facts or clear a scope go through ``_commit_destructive`` as a
+``MemorySnapshot`` boundary of the resulting state.
+
 ``load()`` serves a per-scope cache but checks the stream head on every call and
 folds only the new events; ``reload()`` re-reads from the newest snapshot. DeerMem
 calls storage from timer threads, so each scope's cache and writes are guarded by
@@ -23,13 +28,12 @@ from __future__ import annotations
 import copy
 import logging
 import threading
-import uuid
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
-from deerflow.agents.memory.backends.deermem.deermem.core.paths import validate_agent_name
-from deerflow.agents.memory.backends.deermem.deermem.core.storage import MemoryManifestRevisionConflict, MemoryStorage, MemoryStorageCorruption, _normalize_fact
+from deerflow.agents.memory.backends.deermem.deermem.core.paths import DEFAULT_AGENT_BUCKET, validate_agent_name
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import DOCUMENT_VERSION, MemoryManifestRevisionConflict, MemoryStorage, MemoryStorageCorruption
 from deerflow.agents.memory.manager import MemoryReadError
 from kurrentdbclient import NewEvent, StreamState
 from kurrentdbclient.exceptions import NotFoundError, WrongCurrentVersionError
@@ -38,13 +42,16 @@ from .._client import sync_client_factory
 from .._fence import AmbiguousAppendError, settle_append
 from .._naming import memory_stream
 from .._settings import load_settings
-from . import events
+from . import changes, events
+from .changes import Plan
 from .fold import MemoryState
 
 logger = logging.getLogger(__name__)
 
 # Events per backwards page when looking for the newest snapshot.
 READ_PAGE_SIZE = 256
+# Attempts of one change set across manifest conflicts it may retry (as the file storage).
+CHANGE_SET_ATTEMPTS = 3
 
 
 class KurrentdbMemoryReadError(MemoryReadError):
@@ -192,12 +199,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
                 state = self._refresh(stream)
                 if expected_revision is not None and expected_revision != state.revision:
                     raise MemoryManifestRevisionConflict(f"Expected user-memory revision {expected_revision}, found {state.revision}")
-                if agent_name is None:
-                    changes = self._summary_changes(state, memory_data)
-                else:
-                    changes = self._fact_changes(state, facts_raw, agent_name=agent_name, user_id=user_id)
-                if changes:
-                    self._append(stream, state, events.new_change_set(changes))
+                self._commit(stream, state, changes.plan_save(state, memory_data, facts_raw, agent_name=agent_name, user_id=user_id), user_id=user_id)
         except (ValueError, MemoryStorageCorruption) as exc:
             logger.error("Failed to save KurrentDB memory scope (user=%r, agent=%r): %s", user_id, agent_name, exc)
             return False
@@ -218,37 +220,12 @@ class KurrentdbMemoryStorage(MemoryStorage):
             raise ValueError("agent_name is required to persist facts")
         return copy.deepcopy(facts_raw)
 
-    @staticmethod
-    def _summary_changes(state: MemoryState, memory_data: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-        user, history = copy.deepcopy(state.user), copy.deepcopy(state.history)
-        for name, section in (("user", user), ("history", history)):
-            incoming = memory_data.get(name, {})
-            if not isinstance(incoming, dict):
-                raise ValueError(f"memory_data.{name} must be an object")
-            section.update(copy.deepcopy(incoming))
-        if user == state.user and history == state.history:
-            return []
-        return [(events.SUMMARIES_UPDATED, {"agent": None, "user": user, "history": history})]
+    def _append(self, stream: str, state: MemoryState, new_events: list[NewEvent]) -> MemoryState | None:
+        """One atomic append at the folded head; settles unknown outcomes by fencing. Caller holds the scope lock.
 
-    @staticmethod
-    def _fact_changes(state: MemoryState, facts_raw: list[dict[str, Any]], *, agent_name: str, user_id: str | None) -> list[tuple[str, dict[str, Any]]]:
-        ids = [str(fact.get("id") or "") for fact in facts_raw]
-        if len(ids) != len(set(ids)):
-            raise ValueError("Duplicate fact ids are not allowed")
-        scope = {"userId": user_id, "agentName": agent_name}
-        existing = state.agent_facts(agent_name)
-        changes: list[tuple[str, dict[str, Any]]] = []
-        for candidate in facts_raw:
-            candidate["id"] = str(candidate.get("id") or f"fact_{uuid.uuid4().hex}")
-            normalized = _normalize_fact(candidate, scope=scope, existing=existing.get(candidate["id"]))
-            if existing.get(normalized["id"]) != normalized:
-                changes.append((events.FACT_UPSERTED, {"agent": agent_name, "fact": normalized}))
-        for fact_id in sorted(set(existing) - set(ids)):
-            changes.append((events.FACT_DELETED, {"agent": agent_name, "factId": fact_id, "revision": existing[fact_id].get("revision")}))
-        return changes
-
-    def _append(self, stream: str, state: MemoryState, new_events: list[NewEvent]) -> None:
-        """One atomic append at the folded head; settles unknown outcomes by fencing. Caller holds the scope lock."""
+        Returns the committed state, or ``None`` when the append created the
+        stream (its positions are only known after a read).
+        """
         expected: int | StreamState = StreamState.NO_STREAM if state.position is None else state.position
         client = self._client()
         try:
@@ -266,9 +243,120 @@ class KurrentdbMemoryStorage(MemoryStorage):
         if state.position is None:
             # A stream recreated after a soft delete continues its old positions: read them back.
             self._states.pop(stream, None)
-            return
-        recorded = [_Recorded(event.type, event.data, state.position + 1 + index) for index, event in enumerate(new_events)]
-        self._states[stream] = self._fold(state.copy(), recorded, stream)
+            return None
+        committed = self._fold(state.copy(), self._recorded(state, new_events), stream)
+        self._states[stream] = committed
+        return committed
+
+    @staticmethod
+    def _recorded(state: MemoryState, new_events: list[NewEvent]) -> list[_Recorded]:
+        """``new_events`` as if recorded right after ``state``'s position."""
+        start = 0 if state.position is None else state.position + 1
+        return [_Recorded(event.type, event.data, start + index) for index, event in enumerate(new_events)]
+
+    def _commit(self, stream: str, state: MemoryState, plan: Plan, *, user_id: str | None) -> MemoryState | None:
+        """Write one plan as one append (nothing for a no-op); returns the committed state as ``_append`` does. Caller holds the scope lock."""
+        if not plan.changes:
+            return state
+        if plan.criteria is None:
+            return self._append(stream, state, events.new_change_set(plan.changes))
+        return self._commit_destructive(stream, state, plan, user_id=user_id)
+
+    def _commit_destructive(self, stream: str, state: MemoryState, plan: Plan, *, user_id: str | None) -> MemoryState | None:
+        """Write a plan that removes facts or clears the scope as one ``MemorySnapshot`` boundary.
+
+        The deletion engine's entry point: everything that deletes goes through
+        here, with ``plan.criteria`` naming what is removed. This interim engine
+        writes the boundary (the resulting state, in one append at the folded
+        head) and then drops the removed facts' sidecar metadata. It does not yet
+        record a deletion intent or raise ``$tb``; the full protocol replaces it.
+        Caller holds the scope lock.
+        """
+        resulting = self._fold(state.copy(), self._recorded(state, events.new_change_set(plan.changes)), stream)
+        boundary = events.new_change_set([(events.MEMORY_SNAPSHOT, {"agent": None, "state": resulting.snapshot_state()})])
+        committed = self._append(stream, state, boundary)
+        criteria = plan.criteria or {}
+        if criteria.get("op") == "delete_facts":
+            self.clear_fact_metadata(agent_name=criteria["agent"], user_id=user_id, fact_ids=list(criteria["factIds"]))
+        elif criteria.get("op") == "clear_all":
+            for agent_name in criteria["agents"]:
+                self.clear_fact_metadata(agent_name=agent_name, user_id=user_id)
+        return committed
+
+    def apply_changes(
+        self,
+        change_set: dict[str, Any],
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        expected_manifest_revision: int | None = None,
+        allow_manifest_rebase: bool = False,
+    ) -> dict[str, Any]:
+        """Commit one change set as one append and return only the applied delta.
+
+        Matches ``FileMemoryStorage.apply_changes``: ``upserts`` with
+        ``upsertRevisions`` (``None`` = must not exist), ``deletes`` with
+        ``deleteRevisions``, and ``summaries`` merged per section (on any scope).
+        Fact revisions are checked against the fold and raise
+        ``MemoryFactRevisionConflict`` before anything is written. A manifest
+        conflict is retried from a fresh fold only when no manifest revision was
+        expected, or with ``allow_manifest_rebase`` for fact-only change sets
+        whose every target revision is pinned. ``complete`` is always ``False``.
+        """
+        parsed = changes.parse_change_set(change_set, agent_name=agent_name)
+        stream = self._stream(agent_name, user_id)
+        expected = expected_manifest_revision
+        may_retry = expected_manifest_revision is None or (allow_manifest_rebase and parsed.rebase_safe)
+        for attempt in range(CHANGE_SET_ATTEMPTS):
+            try:
+                with self._scope_lock(stream):
+                    state = self._refresh(stream)
+                    if expected is not None and expected != state.revision:
+                        raise MemoryManifestRevisionConflict(f"Expected user-memory revision {expected}, found {state.revision}")
+                    plan = changes.plan_change_set(state, parsed, agent_name=agent_name, user_id=user_id)
+                    committed = self._commit(stream, state, plan, user_id=user_id)
+                    return self._delta(committed or self._refresh(stream), plan)
+            except MemoryManifestRevisionConflict as exc:
+                if not may_retry or attempt == CHANGE_SET_ATTEMPTS - 1:
+                    raise
+                expected = None
+                logger.info("Rebasing a memory change set after a revision conflict: %s", exc)
+        raise AssertionError("bounded change-set retry did not return or raise")
+
+    @staticmethod
+    def _delta(state: MemoryState, plan: Plan) -> dict[str, Any]:
+        return {
+            "complete": False,
+            "version": DOCUMENT_VERSION,
+            "revision": state.revision,
+            "lastUpdated": state.last_updated or "",
+            "upsertedFacts": copy.deepcopy(plan.upserted),
+            "deletedFactIds": list(plan.deleted),
+        }
+
+    def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """Clear the user's summaries and every agent's facts in one append; returns the default bucket's document."""
+        stream = self._stream(None, user_id)
+        for attempt in range(CHANGE_SET_ATTEMPTS):
+            try:
+                with self._scope_lock(stream):
+                    state = self._refresh(stream)
+                    self._commit(stream, state, changes.plan_clear_all(state), user_id=user_id)
+                break
+            except MemoryManifestRevisionConflict:
+                if attempt == CHANGE_SET_ATTEMPTS - 1:
+                    raise
+                logger.info("Retrying a memory clear after a revision conflict")
+        return self.load(DEFAULT_AGENT_BUCKET, user_id=user_id)
+
+    def get_fact(self, fact_id: str, *, user_id: str | None = None, agent_name: str | None = None) -> dict[str, Any] | None:
+        """One fact of one agent bucket from the fresh fold, or ``None``."""
+        if agent_name is None:
+            raise ValueError("agent_name is required to get a fact")
+        stream = self._stream(agent_name, user_id)
+        with self._scope_lock(stream):
+            fact = self._refresh(stream).agent_facts(agent_name).get(str(fact_id))
+        return copy.deepcopy(fact)
 
     # --- misc -------------------------------------------------------------------
 

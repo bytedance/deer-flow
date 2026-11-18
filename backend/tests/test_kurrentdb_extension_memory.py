@@ -1,4 +1,4 @@
-"""Event-sourced DeerMem storage on KurrentDB: stream, fold, load/reload, save, revisions."""
+"""Event-sourced DeerMem storage on KurrentDB: stream, fold, load/reload, save, change sets, clears, revisions."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from kurrentdbclient.exceptions import DeadlineExceededError, ServiceUnavailable
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     FileMemoryStorage,
+    MemoryFactRevisionConflict,
     MemoryManifestRevisionConflict,
     MemoryStorageCorruption,
     create_storage,
@@ -462,3 +463,387 @@ def test_gateway_maps_read_error_and_corruption(server, monkeypatch):
         response = get("/api/memory")
     assert response.status_code == 500
     assert response.json()["detail"] == "Stored memory data is corrupted."
+
+
+# --- change sets, clears and fact lookup ------------------------------------------
+
+
+def _appends(server: FakeKurrentDB, stream: str = ALICE_STREAM) -> int:
+    return len(server.calls_to("append_to_stream", stream))
+
+
+def _seed(storage, facts: list[dict], *, agent: str = AGENT, user: str = "alice") -> dict:
+    """Create ``facts`` in one change set and return the scope's fresh document."""
+    revision = storage.load(agent, user_id=user)["revision"]
+    storage.apply_changes({"upserts": facts, "upsertRevisions": {fact["id"]: None for fact in facts}}, agent_name=agent, user_id=user, expected_manifest_revision=revision)
+    return storage.load(agent, user_id=user)
+
+
+def _facts_by_id(document: dict) -> dict[str, dict]:
+    return {fact["id"]: fact for fact in document["facts"]}
+
+
+def test_apply_changes_multi_fact_single_append(server, tmp_path):
+    import deerflow_extension_kurrentdb.memory.changes as changes_module
+
+    from deerflow.agents.memory.backends.deermem.deermem.core import storage as deermem_storage
+
+    # Facts are normalized by DeerMem's own function, not a copy.
+    assert changes_module._normalize_fact is deermem_storage._normalize_fact
+
+    storage = _storage(server)
+    file_storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)))
+    change_set = {
+        "upserts": [_fact("fact_b", "Prefers Python"), _fact("fact_a", "Uses uv"), _fact("fact_c", "Drinks tea")],
+        "upsertRevisions": {"fact_a": None, "fact_b": None, "fact_c": None},
+        # Agent-scoped extraction updates carry summaries; they persist with the facts.
+        "summaries": _summaries(),
+    }
+    server.calls.clear()
+    result = storage.apply_changes(json.loads(json.dumps(change_set)), agent_name=AGENT, user_id="alice", expected_manifest_revision=0)
+    assert _appends(server) == 1
+    expected = file_storage.apply_changes(json.loads(json.dumps(change_set)), agent_name=AGENT, user_id="alice", expected_manifest_revision=0)
+    assert result["complete"] is False
+    assert result["revision"] == _head(server, ALICE_STREAM) + 1
+    assert set(result) >= {"complete", "version", "revision", "lastUpdated", "upsertedFacts", "deletedFactIds"}
+    assert sorted(fact["id"] for fact in result["upsertedFacts"]) == ["fact_a", "fact_b", "fact_c"]
+    assert result["deletedFactIds"] == []
+    assert sorted(result["upsertedFacts"], key=lambda fact: fact["id"]) == sorted(expected["upsertedFacts"], key=lambda fact: fact["id"])
+
+    document = _storage(server).load(AGENT, user_id="alice")
+    assert document["revision"] == result["revision"]
+    assert document["facts"] == file_storage.load(AGENT, user_id="alice")["facts"]
+    assert document["user"]["workContext"]["summary"] == "Builds DeerFlow"
+    assert document["history"]["recentMonths"]["summary"] == "Shipped KurrentDB"
+
+    # Mixed: update one, create one, delete one. Still exactly one append to the memory stream.
+    facts = _facts_by_id(document)
+    mixed = {
+        "upserts": [dict(facts["fact_a"], content="Uses uv everywhere"), _fact("fact_d", "Runs KurrentDB")],
+        "upsertRevisions": {"fact_a": 1, "fact_d": None},
+        "deletes": ["fact_b"],
+        "deleteRevisions": {"fact_b": 1},
+    }
+    server.calls.clear()
+    result = storage.apply_changes(mixed, agent_name=AGENT, user_id="alice", expected_manifest_revision=document["revision"])
+    assert _appends(server) == 1
+    assert [(fact["id"], fact["revision"]) for fact in sorted(result["upsertedFacts"], key=lambda fact: fact["id"])] == [("fact_a", 2), ("fact_d", 1)]
+    assert result["deletedFactIds"] == ["fact_b"]
+    for reader in (storage, _storage(server)):
+        after = reader.load(AGENT, user_id="alice")
+        assert after["revision"] == result["revision"] == _head(server, ALICE_STREAM) + 1
+        assert [(fact["id"], fact["revision"], fact["content"]) for fact in after["facts"]] == [("fact_a", 2, "Uses uv everywhere"), ("fact_c", 1, "Drinks tea"), ("fact_d", 1, "Runs KurrentDB")]
+        assert after["user"]["workContext"]["summary"] == "Builds DeerFlow"
+
+    # Fact changes need an agent bucket.
+    with pytest.raises(ValueError):
+        storage.apply_changes({"upserts": [_fact("fact_x", "x")]}, user_id="alice")
+
+
+def test_apply_changes_noop_keeps_revision(server):
+    storage = _storage(server)
+    document = _seed(storage, [_fact("fact_1", "one"), _fact("fact_2", "two")])
+    revision = document["revision"]
+    server.calls.clear()
+    for change_set in (
+        {},
+        {"upserts": [], "deletes": []},
+        # Re-upserting a fact unchanged at its current revision.
+        {"upserts": [document["facts"][0]], "upsertRevisions": {"fact_1": 1}},
+        # Deleting a fact that does not exist.
+        {"deletes": ["fact_missing"], "deleteRevisions": {"fact_missing": 1}},
+        # Summaries equal to the stored ones.
+        {"summaries": {"user": {}, "history": {}}},
+    ):
+        result = storage.apply_changes(change_set, agent_name=AGENT, user_id="alice", expected_manifest_revision=revision)
+        assert result["revision"] == revision
+        assert result["upsertedFacts"] == []
+        assert result["deletedFactIds"] == []
+        assert result["complete"] is False
+    assert _appends(server) == 0
+    assert storage.load(AGENT, user_id="alice")["revision"] == revision
+
+
+def test_apply_changes_fact_revision_conflict(server):
+    storage = _storage(server)
+    document = _seed(storage, [_fact("fact_1", "one")])
+    fact = document["facts"][0]
+    storage.apply_changes({"upserts": [dict(fact, content="one, revised")], "upsertRevisions": {"fact_1": 1}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=document["revision"])
+    revision = storage.load(AGENT, user_id="alice")["revision"]
+    server.calls.clear()
+    for change_set in (
+        # Stale expected fact revision.
+        {"upserts": [dict(fact, content="stale edit")], "upsertRevisions": {"fact_1": 1}},
+        # A create of a fact that already exists.
+        {"upserts": [_fact("fact_1", "duplicate create")], "upsertRevisions": {"fact_1": None}},
+        # A delete at the wrong revision.
+        {"deletes": ["fact_1"], "deleteRevisions": {"fact_1": 1}},
+    ):
+        with pytest.raises(MemoryFactRevisionConflict):
+            storage.apply_changes(change_set, agent_name=AGENT, user_id="alice", expected_manifest_revision=revision)
+        with pytest.raises(MemoryFactRevisionConflict):
+            storage.apply_changes(change_set, agent_name=AGENT, user_id="alice", expected_manifest_revision=revision, allow_manifest_rebase=True)
+    assert _appends(server) == 0
+    assert [(f["revision"], f["content"]) for f in storage.load(AGENT, user_id="alice")["facts"]] == [(2, "one, revised")]
+
+
+def test_apply_changes_manifest_conflict_without_rebase(server):
+    first, second = _storage(server), _storage(server)
+    document = _seed(first, [_fact("fact_1", "one")])
+    stale = document["revision"]
+    _seed(second, [_fact("fact_2", "two")])
+    head = _head(server, ALICE_STREAM)
+    for change_set, rebase in (
+        ({"upserts": [_fact("fact_3", "three")], "upsertRevisions": {"fact_3": None}}, False),
+        # Summaries are never rebased.
+        ({"upserts": [_fact("fact_3", "three")], "upsertRevisions": {"fact_3": None}, "summaries": _summaries()}, True),
+        ({"summaries": _summaries()}, True),
+        # Deletes without their expected revisions are never rebased.
+        ({"deletes": ["fact_1"]}, True),
+    ):
+        with pytest.raises(MemoryManifestRevisionConflict):
+            first.apply_changes(change_set, agent_name=AGENT, user_id="alice", expected_manifest_revision=stale, allow_manifest_rebase=rebase)
+    assert _head(server, ALICE_STREAM) == head
+    assert sorted(_facts_by_id(first.load(AGENT, user_id="alice"))) == ["fact_1", "fact_2"]
+
+
+def test_apply_changes_rebase_disjoint_edits(server):
+    first, second = _storage(server), _storage(server)
+    document = _seed(first, [_fact("fact_1", "one"), _fact("fact_2", "two")])
+    stale = document["revision"]
+    # Another writer moves the manifest revision with a disjoint change.
+    _seed(second, [_fact("fact_3", "three")])
+
+    result = first.apply_changes(
+        {"upserts": [dict(_facts_by_id(document)["fact_1"], content="one, revised")], "upsertRevisions": {"fact_1": 1}, "deletes": ["fact_2"], "deleteRevisions": {"fact_2": 1}},
+        agent_name=AGENT,
+        user_id="alice",
+        expected_manifest_revision=stale,
+        allow_manifest_rebase=True,
+    )
+    assert result["deletedFactIds"] == ["fact_2"]
+    after = second.load(AGENT, user_id="alice")
+    assert after["revision"] == result["revision"] == _head(server, ALICE_STREAM) + 1
+    assert [(fact["id"], fact["revision"]) for fact in after["facts"]] == [("fact_1", 2), ("fact_3", 1)]
+
+    # An overlapping edit is re-checked after the rebase and conflicts, writing nothing.
+    stale = after["revision"]
+    second.apply_changes({"upserts": [dict(_facts_by_id(after)["fact_3"], content="three, by second")], "upsertRevisions": {"fact_3": 1}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=stale)
+    head = _head(server, ALICE_STREAM)
+    with pytest.raises(MemoryFactRevisionConflict):
+        first.apply_changes({"upserts": [dict(_facts_by_id(after)["fact_3"], content="three, by first")], "upsertRevisions": {"fact_3": 1}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=stale, allow_manifest_rebase=True)
+    assert _head(server, ALICE_STREAM) == head
+    assert _facts_by_id(first.load(AGENT, user_id="alice"))["fact_3"]["content"] == "three, by second"
+
+    # A lost append fenced off is a conflict too; the rebase re-appends at the new head, once.
+    revision = first.load(AGENT, user_id="alice")["revision"]
+    server.fail_next("append_to_stream", DeadlineExceededError("request lost"))
+    result = first.apply_changes({"upserts": [_fact("fact_4", "four")], "upsertRevisions": {"fact_4": None}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=revision, allow_manifest_rebase=True)
+    assert [fact["id"] for fact in result["upsertedFacts"]] == ["fact_4"]
+    assert _types(server, ALICE_STREAM).count("deerflow.Fence") == 1
+    upserted = [json.loads(event.data)["fact"]["id"] for event in server.sync_client().get_stream(ALICE_STREAM) if event.type == "deerflow.memory.FactUpserted"]
+    assert upserted.count("fact_4") == 1
+    assert "fact_4" in _facts_by_id(_storage(server).load(AGENT, user_id="alice"))
+
+
+def test_apply_changes_never_partial_on_conflict(server):
+    storage = _storage(server)
+    document = _seed(storage, [_fact("fact_1", "one"), _fact("fact_2", "two")])
+    revision = document["revision"]
+    storage.apply_changes({"upserts": [dict(document["facts"][1], content="two, revised")], "upsertRevisions": {"fact_2": 1}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=revision)
+    revision = storage.load(AGENT, user_id="alice")["revision"]
+    head = _head(server, ALICE_STREAM)
+
+    # A valid create, a valid delete and summaries ride with one stale update: none of it lands.
+    change_set = {
+        "upserts": [_fact("fact_new", "new"), dict(document["facts"][1], content="stale")],
+        "upsertRevisions": {"fact_new": None, "fact_2": 1},
+        "deletes": ["fact_1"],
+        "deleteRevisions": {"fact_1": 1},
+        "summaries": _summaries(),
+    }
+    with pytest.raises(MemoryFactRevisionConflict):
+        storage.apply_changes(change_set, agent_name=AGENT, user_id="alice", expected_manifest_revision=revision)
+    # Invalid input is rejected before anything is written.
+    with pytest.raises(ValueError):
+        storage.apply_changes({"upserts": [_fact("fact_ok", "ok"), _fact("fact_ok", "dup")]}, agent_name=AGENT, user_id="alice", expected_manifest_revision=revision)
+    with pytest.raises(ValueError):
+        storage.apply_changes({"upserts": [_fact("fact_x", "x")], "upsertRevisions": {"fact_x": None}, "deletes": ["fact_x"]}, agent_name=AGENT, user_id="alice", expected_manifest_revision=revision)
+    assert _head(server, ALICE_STREAM) == head
+
+    # A fenced-off append without rebase raises, leaving the scope as it was.
+    server.fail_next("append_to_stream", DeadlineExceededError("request lost"))
+    with pytest.raises(MemoryManifestRevisionConflict):
+        storage.apply_changes(
+            {**change_set, "upserts": [_fact("fact_new", "new"), dict(document["facts"][1], content="lost", revision=2)], "upsertRevisions": {"fact_new": None, "fact_2": 2}},
+            agent_name=AGENT,
+            user_id="alice",
+            expected_manifest_revision=revision,
+        )
+    for reader in (storage, _storage(server)):
+        after = reader.load(AGENT, user_id="alice")
+        assert [(fact["id"], fact["content"]) for fact in after["facts"]] == [("fact_1", "one"), ("fact_2", "two, revised")]
+        assert after["user"]["workContext"]["summary"] == ""
+    assert _types(server, ALICE_STREAM)[-1] == "deerflow.Fence"
+
+
+def test_deletes_and_clears_write_a_snapshot_boundary(server):
+    """Every destructive change set is one append whose newest snapshot holds the resulting state."""
+    from deerflow_extension_kurrentdb.memory import events
+
+    storage = _storage(server)
+    _seed(storage, [_fact("fact_keep", "keep"), _fact("fact_secret", "first secret"), _fact("fact_gone", "second secret")])
+    _seed(storage, [_fact("fact_r", "third secret")], agent="researcher")
+    document = storage.load(AGENT, user_id="alice")
+    for removed, call in (
+        ("first secret", lambda: storage.apply_changes({"deletes": ["fact_secret"], "deleteRevisions": {"fact_secret": 1}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=document["revision"])),
+        ("second secret", lambda: storage.save({"facts": [_facts_by_id(storage.load(AGENT, user_id="alice"))["fact_keep"]]}, AGENT, user_id="alice")),
+        ("third secret", lambda: storage.apply_changes({"deletes": ["fact_r"], "deleteRevisions": {"fact_r": 1}}, agent_name="researcher", user_id="alice")),
+    ):
+        server.calls.clear()
+        call()
+        assert _appends(server) == 1
+        recorded = server.sync_client().get_stream(ALICE_STREAM)
+        assert recorded[-1].type == events.MEMORY_SNAPSHOT
+        assert removed not in recorded[-1].data.decode()
+        assert "keep" in recorded[-1].data.decode()
+    for reader in (storage, _storage(server)):
+        assert [fact["id"] for fact in reader.reload(AGENT, user_id="alice")["facts"]] == ["fact_keep"]
+        assert reader.load("researcher", user_id="alice")["facts"] == []
+
+    server.calls.clear()
+    storage.clear_all(user_id="alice")
+    assert _appends(server) == 1
+    recorded = server.sync_client().get_stream(ALICE_STREAM)
+    assert recorded[-1].type == events.MEMORY_SNAPSHOT
+    assert "keep" not in recorded[-1].data.decode()
+
+
+def test_clear_all_clears_every_agent_and_summaries(server):
+    storage = _storage(server)
+    assert storage.save(_summaries(), None, user_id="alice") is True
+    _seed(storage, [_fact("fact_1", "one"), _fact("fact_2", "two")])
+    _seed(storage, [_fact("fact_r", "research")], agent="researcher")
+    _seed(storage, [_fact("fact_bob", "bob's")], user="bob")
+    assert storage.save(_summaries(work="Bob's work"), None, user_id="bob") is True
+    bob_head = _head(server, "deerflow.memory-user.bob")
+
+    server.calls.clear()
+    cleared = storage.clear_all(user_id="alice")
+    assert _appends(server) == 1
+    assert cleared["facts"] == []
+    assert cleared["user"]["workContext"]["summary"] == ""
+    assert cleared["revision"] == _head(server, ALICE_STREAM) + 1
+    for reader in (storage, _storage(server)):
+        for agent in (None, AGENT, "researcher"):
+            document = reader.load(agent, user_id="alice")
+            assert document["facts"] == []
+            assert document["user"]["workContext"]["summary"] == ""
+            assert document["history"]["recentMonths"]["summary"] == ""
+            assert document["revision"] == cleared["revision"]
+    # Other users are untouched.
+    assert _head(server, "deerflow.memory-user.bob") == bob_head
+    assert [fact["id"] for fact in storage.load(AGENT, user_id="bob")["facts"]] == ["fact_bob"]
+    assert storage.load(None, user_id="bob")["user"]["workContext"]["summary"] == "Bob's work"
+
+    # Clearing an already-empty scope is a no-op.
+    server.calls.clear()
+    assert storage.clear_all(user_id="alice")["revision"] == cleared["revision"]
+    assert storage.clear_all(user_id="nobody")["revision"] == 0
+    assert server.calls_to("append_to_stream") == []
+
+    # Memory written after a clear is kept; the global scope clears the same way.
+    _seed(storage, [_fact("fact_after", "after")])
+    assert [fact["id"] for fact in _storage(server).load(AGENT, user_id="alice")["facts"]] == ["fact_after"]
+    _seed(storage, [_fact("fact_g", "global")], user=None)
+    assert storage.clear_all()["facts"] == []
+    assert _storage(server).load(AGENT)["facts"] == []
+    with pytest.raises(ValueError):
+        _storage(server, DeerMemConfig(strict_user_scope=True)).clear_all()
+
+
+def test_get_fact(server):
+    storage = _storage(server)
+    _seed(storage, [_fact("fact_1", "one")])
+    fact = storage.get_fact("fact_1", agent_name=AGENT, user_id="alice")
+    assert fact == storage.load(AGENT, user_id="alice")["facts"][0]
+    fact["content"] = "mutated by caller"
+    assert storage.get_fact("fact_1", agent_name=AGENT, user_id="alice")["content"] == "one"
+    assert storage.get_fact("fact_missing", agent_name=AGENT, user_id="alice") is None
+    assert storage.get_fact("fact_1", agent_name="researcher", user_id="alice") is None
+    assert storage.get_fact("fact_1", agent_name=AGENT, user_id="bob") is None
+    with pytest.raises(ValueError):
+        storage.get_fact("fact_1", user_id="alice")
+
+    # Fresh across instances: another instance's update and delete are visible.
+    other = _storage(server)
+    other.apply_changes({"upserts": [dict(fact, content="one, revised")], "upsertRevisions": {"fact_1": 1}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=other.load(AGENT, user_id="alice")["revision"])
+    assert storage.get_fact("fact_1", agent_name=AGENT, user_id="alice")["revision"] == 2
+    other.apply_changes({"deletes": ["fact_1"], "deleteRevisions": {"fact_1": 2}}, agent_name=AGENT, user_id="alice", expected_manifest_revision=other.load(AGENT, user_id="alice")["revision"])
+    assert storage.get_fact("fact_1", agent_name=AGENT, user_id="alice") is None
+
+
+def test_updater_end_to_end_with_kurrent_storage(server):
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
+
+    storage = _storage(server)
+    updater = MemoryUpdater(DeerMemConfig(), storage, None)
+    # The updater switches every repository path to apply_changes / clear_all / get_fact.
+    assert type(storage).apply_changes is not type(storage).__mro__[1].apply_changes
+
+    # Create.
+    _, first_id = updater.create_memory_fact("Prefers Python", "preference", 0.9, AGENT, user_id="alice")
+    _, second_id = updater.create_memory_fact("Uses uv", "preference", 0.8, AGENT, user_id="alice")
+    assert first_id and second_id
+    with pytest.raises(ValueError, match="Duplicate fact"):
+        updater.create_memory_fact("Prefers Python", "preference", 0.9, AGENT, user_id="alice")
+    assert sorted(_facts_by_id(_storage(server).load(AGENT, user_id="alice"))) == sorted([first_id, second_id])
+
+    # Update.
+    updated = updater.update_memory_fact(first_id, content="Prefers Python 3.12", agent_name=AGENT, user_id="alice")
+    assert (_facts_by_id(updated)[first_id]["content"], _facts_by_id(updated)[first_id]["revision"]) == ("Prefers Python 3.12", 2)
+
+    # Delete.
+    remaining = updater.delete_memory_fact(second_id, AGENT, user_id="alice")
+    assert list(_facts_by_id(remaining)) == [first_id]
+    with pytest.raises(KeyError):
+        updater.delete_memory_fact(second_id, AGENT, user_id="alice")
+
+    # Agent-scoped extraction: new facts and summaries land in one change set.
+    revision = storage.load(AGENT, user_id="alice")["revision"]
+    response = json.dumps(
+        {
+            "user": {"workContext": {"summary": "Builds DeerFlow", "shouldUpdate": True, "scope": "user", "durability": "durable", "authority": "descriptive"}},
+            "history": {},
+            "newFacts": [{"content": "Runs KurrentDB locally", "category": "context", "confidence": 0.95, "scope": "user", "durability": "durable", "authority": "descriptive"}],
+            "factsToRemove": [],
+        }
+    )
+    server.calls.clear()
+    assert updater._finalize_update(storage.load(AGENT, user_id="alice"), response, "thread-1", AGENT, user_id="alice") is True
+    assert _appends(server) == 1
+    extracted = _storage(server).load(AGENT, user_id="alice")
+    assert extracted["revision"] > revision
+    assert extracted["user"]["workContext"]["summary"] == "Builds DeerFlow"
+    assert sorted(fact["content"] for fact in extracted["facts"]) == ["Prefers Python 3.12", "Runs KurrentDB locally"]
+
+    # Import replaces the agent's facts (deleting the rest) and the shared summaries.
+    imported = updater.import_memory_data({**_summaries(work="Imported work"), "facts": [_fact("fact_imported", "Imported fact")]}, AGENT, user_id="alice")
+    assert [fact["id"] for fact in imported["facts"]] == ["fact_imported"]
+    assert imported["user"]["workContext"]["summary"] == "Imported work"
+
+    # Scoped clear keeps the shared summaries and the other agents.
+    _seed(storage, [_fact("fact_r", "research")], agent="researcher")
+    cleared = updater.clear_memory_data(AGENT, user_id="alice")
+    assert cleared["facts"] == []
+    assert cleared["user"]["workContext"]["summary"] == "Imported work"
+    assert [fact["id"] for fact in storage.load("researcher", user_id="alice")["facts"]] == ["fact_r"]
+
+    # Clear all.
+    everything = updater.clear_all_memory_data(user_id="alice")
+    assert everything["facts"] == []
+    cold = _storage(server)
+    for agent in (None, AGENT, "researcher"):
+        document = cold.load(agent, user_id="alice")
+        assert document["facts"] == []
+        assert document["user"]["workContext"]["summary"] == ""

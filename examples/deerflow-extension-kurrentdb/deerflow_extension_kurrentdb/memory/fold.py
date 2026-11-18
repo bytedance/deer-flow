@@ -176,6 +176,15 @@ class MemoryState:
 
     # --- reading ---------------------------------------------------------------
 
+    def snapshot_state(self) -> dict[str, Any]:
+        """The whole scope as a ``MemorySnapshot`` payload's ``state`` (facts sorted by id)."""
+        return {
+            "user": copy.deepcopy(self.user),
+            "history": copy.deepcopy(self.history),
+            "facts": {agent: [copy.deepcopy(facts[fact_id]) for fact_id in sorted(facts)] for agent, facts in sorted(self.facts.items())},
+            "lastUpdated": self.last_updated,
+        }
+
     def to_document(self, agent_name: str | None) -> dict[str, Any]:
         """DeerMem's document shape: the summaries plus one agent's facts (none for ``None``)."""
         if self.position is None:
