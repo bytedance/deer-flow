@@ -168,9 +168,12 @@ class SqlAgentStore(AgentStore):
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
         # update() upserts (setup_agent and first-time writes mint a new agent),
-        # so it must enforce the same reserved-name rule as create() — otherwise
-        # a reserved name slips in through the SQL backend's upsert path.
-        name = validate_agent_name(name, for_creation=True)
+        # so a name that reaches the insert branch must pass the same
+        # reserved-name rule as create() — otherwise a reserved name slips in
+        # through the SQL backend's upsert path. An existing row is an edit, not
+        # a mint: an agent an older release stored as ``nul`` must stay editable
+        # even though create() would now refuse that name (#7939 review).
+        name = validate_agent_name(name)
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             row = self._row(session, name, effective_user)
@@ -178,6 +181,7 @@ class SqlAgentStore(AgentStore):
                 self._apply_update(row, config, soul)
                 session.commit()
                 return
+            name = validate_agent_name(name, for_creation=True)
             # Upsert: setup_agent and any first-time write land here. Two
             # concurrent first-time updates (e.g. two setup_agent handshakes) can
             # both see row is None and both insert; UNIQUE(user_id, name) rejects

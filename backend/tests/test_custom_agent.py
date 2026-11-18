@@ -875,10 +875,49 @@ class TestAgentsAPI:
         assert agent_client.get("/api/agents").json()["agents"] == []
 
     @pytest.mark.parametrize("name", ["NUL", "CON", "COM1"])
-    def test_windows_reserved_device_name_is_rejected_on_update(self, agent_client, name):
-        """The shared validator also guards the update path, not only creation."""
+    def test_windows_reserved_device_name_update_does_not_mint(self, agent_client, name):
+        """An update that would create the agent is still refused.
+
+        update() is an upsert, so PUT on a name nobody owns is a mint — the one
+        case the reserved-device rule has to cover here. It surfaces as 404
+        (nothing to edit) and, importantly, creates nothing on disk.
+        """
         response = agent_client.put(f"/api/agents/{name}", json={"description": "x"})
-        assert response.status_code == 422
+        assert response.status_code == 404
+        assert agent_client.get("/api/agents").json()["agents"] == []
+
+    @pytest.mark.parametrize("name", ["nul", "con"])
+    def test_legacy_reserved_device_name_agent_stays_editable(self, agent_client, tmp_path, name):
+        """An agent an older release stored under a reserved name must stay editable.
+
+        Before this rule existed, a POSIX host could create an agent called
+        ``nul``. Validating the name as a new path on update would strand it: the
+        owner could read it but every write would 422/500, including the
+        ``setup_agent`` handshake that runs on each visit (#7939 review).
+        """
+        legacy_dir = tmp_path / "users" / "test-user-autouse" / "agents" / name
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text(f"name: {name}\ndescription: old\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("old soul", encoding="utf-8")
+
+        response = agent_client.put(f"/api/agents/{name}", json={"soul": "new soul"})
+
+        assert response.status_code == 200
+        assert response.json()["soul"] == "new soul"
+        assert (legacy_dir / "SOUL.md").read_text(encoding="utf-8") == "new soul"
+        # The edit must land on the existing record, not fork a second one.
+        assert agent_client.get("/api/agents").json()["agents"][0]["name"] == name
+
+    @pytest.mark.parametrize("name", ["nul", "con"])
+    def test_legacy_reserved_device_name_agent_still_deletable(self, agent_client, tmp_path, name):
+        """The same legacy agent must also remain removable, not just editable."""
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / name
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "config.yaml").write_text(f"name: {name}\ndescription: old\n", encoding="utf-8")
+        (agent_dir / "SOUL.md").write_text("old soul", encoding="utf-8")
+
+        assert agent_client.delete(f"/api/agents/{name}").status_code == 204
+        assert not agent_dir.exists()
 
     @pytest.mark.parametrize("name", ["NUL", "CON"])
     def test_windows_reserved_device_name_can_still_be_deleted(self, agent_client, name):

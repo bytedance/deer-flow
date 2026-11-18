@@ -144,9 +144,9 @@ def _validate_agent_name(name: str, *, for_creation: bool = False) -> None:
             (``NUL``, ``CON``, ``COM1``, ...); such a name becomes a directory
             under the agent root and writing ``config.yaml`` inside it fails on
             Windows hosts with ``FileNotFoundError``, which the create/update
-            handlers would otherwise surface as an opaque 500. Only creation and
-            update set this, so read and delete keep working for rows an older
-            release already created.
+            handlers would otherwise surface as an opaque 500. Only the routes
+            that mint a name set this (create, import, check); update, read and
+            delete keep working for rows an older release already created.
 
     Raises:
         HTTPException: 422 if the name is invalid.
@@ -569,7 +569,12 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         HTTPException: 404 if agent not found.
     """
     _require_agents_api_enabled()
-    _validate_agent_name(name, for_creation=True)
+    # Deliberately not for_creation=True: this route only ever edits an agent
+    # that already exists (it 404s below otherwise), and an agent an older
+    # release created as ``nul``/``con`` must stay editable. Minting is guarded
+    # where it actually happens — create_agent_endpoint, setup_agent, and both
+    # stores' create/upsert paths (#7939 review).
+    _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
 

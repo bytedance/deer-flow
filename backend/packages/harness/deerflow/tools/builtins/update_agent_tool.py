@@ -143,9 +143,9 @@ def update_agent(
         # Deliberately permissive (no for_creation=True): update_agent only
         # ever acts on an existing agent named by the running chat's context,
         # so a reserved-name agent an older release created must stay editable.
-        # New-agent minting is covered separately — setup_agent uses
-        # for_creation=True, and both stores' create/update boundaries reject
-        # reserved names regardless of backend.
+        # Minting is guarded where it happens — create/import/check validate up
+        # front, and both stores' upserts apply the reserved-device rule only
+        # when the write actually creates the record.
         agent_name = validate_agent_name(agent_name_raw)
     except ValueError as e:
         return _err(str(e))

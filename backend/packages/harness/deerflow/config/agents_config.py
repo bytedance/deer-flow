@@ -172,10 +172,11 @@ def validate_agent_name(name: str | None, *, for_creation: bool = False) -> str 
             ``COM1``. A name is a directory under the agent root and
             ``FileAgentStore.create`` writes ``config.yaml`` inside it; on
             Windows that open resolves to the device, so creation died with
-            ``FileNotFoundError`` after ``mkdir`` had appeared to succeed. Only
-            creation and update set this: reading and deleting an agent that
-            already exists must keep working, matching the documented contract
-            of ``windows_incompatible_segment()``.
+            ``FileNotFoundError`` after ``mkdir`` had appeared to succeed. Set
+            this only where a name is minted — ``create``, and an ``update``
+            whose upsert actually creates. Reading, deleting or editing an agent
+            that already exists must keep working, matching the documented
+            contract of ``windows_incompatible_segment()``.
     """
     if name is None:
         return None

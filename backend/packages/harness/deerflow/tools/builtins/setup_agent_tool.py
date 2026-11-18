@@ -91,13 +91,18 @@ def setup_agent(
     agent_name: str | None = runtime.context.get("agent_name") if runtime.context else None
 
     try:
-        agent_name = validate_agent_name(agent_name, for_creation=True)
+        # Deliberately permissive: agent_name comes from the running chat's
+        # context, i.e. an agent the caller already owns, and setup is called on
+        # every visit — not only the first. A reserved-name agent an older
+        # release created must stay usable here. The store decides whether this
+        # write mints a new record, and applies the reserved-device rule only
+        # then (setup_agent is the upsert path for a first-time handshake).
+        agent_name = validate_agent_name(agent_name)
         if agent_name:
             # Custom agents are persisted under the current user's bucket (via
             # the configured store — file or db) so different users, and
             # different nodes, resolve the same agent. setup is idempotent, so
-            # this is an upsert. for_creation=True rejects Windows reserved
-            # device names up front (this path can mint a brand-new agent).
+            # this is an upsert.
             user_id = resolve_runtime_user_id(runtime)
             config_data: dict = {"name": agent_name}
             store = get_agent_store()
