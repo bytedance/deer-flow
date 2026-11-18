@@ -46,7 +46,7 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "plugins": ("load_extensions() runs once during create_app() and the process-wide middleware registry is not rebuilt on config.yaml edits; adding, removing or reconfiguring a plugin requires a restart."),
     "database": ("init_engine_from_config() runs once during langgraph_runtime() startup; the SQLAlchemy engine holds the connection pool and is not rebuilt on config.yaml edits."),
     "checkpointer": ("make_checkpointer() binds the persistent checkpointer once at startup, including SQLite WAL / busy_timeout settings."),
-    "run_events": ("make_run_event_store() picks the memory- vs SQL-backed implementation at startup and is frozen onto app.state.run_events_config to stay paired with the underlying event store."),
+    "run_events": ("make_run_event_store() picks the run-event store backend (built-in or extension-provided) at startup and is frozen onto app.state.run_events_config to stay paired with the underlying event store."),
     "agent_storage": ("langgraph_runtime() validates agent_storage.backend against database.backend once at startup, and the db backend's synchronous SQLAlchemy engine is process-cached on first use; switching backend needs a restart."),
     "stream_bridge": ("make_stream_bridge() constructs the stream-bridge singleton once during startup."),
     "sandbox": ("get_sandbox_provider() caches the provider singleton (``_default_sandbox_provider``); a different ``sandbox.use`` class path only takes effect on next process start."),

@@ -992,7 +992,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         try:
             app.state.run_event_store = make_run_event_store(run_events_config, extensions=getattr(app.state, "extensions", None))
         except (ValueError, TypeError) as exc:
-            failed = sorted({d.source for d in getattr(app.state, "extension_diagnostics", None) or () if getattr(d, "level", None) == "error"})
+            failed = sorted({d.source for d in getattr(app.state, "extension_diagnostics", None) or () if d.level == "error"})
             detail = f"; extensions that failed to load: {', '.join(failed)}" if failed else ""
             raise RuntimeError(f"Gateway startup stopped: {exc}{detail}") from exc
         if sf is not None:
