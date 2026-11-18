@@ -9,6 +9,7 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 if TYPE_CHECKING:
     from deerflow.extensions.registry import LoadedExtensions
 
+
 def make_run_event_store(config=None, *, extensions: LoadedExtensions | None = None) -> RunEventStore:
     """Create a RunEventStore based on run_events.backend configuration.
 
