@@ -824,3 +824,36 @@ def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):
     monkeypatch.setattr(requests, "get", mock_get)
 
     assert backend._provisioner_discover("abc123") is None
+
+
+def test_provisioner_create_forwards_sandbox_environment(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        environment={"DISABLE_JUPYTER": "true", "DISABLE_CODE_SERVER": "true"},
+    )
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    seen = {}
+
+    def mock_post(url, json, timeout, headers=None):
+        seen.update(json)
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create("thread-1", "abc123")
+    assert seen["environment"] == {"DISABLE_JUPYTER": "true", "DISABLE_CODE_SERVER": "true"}
+
+
+def test_provisioner_create_omits_environment_when_unconfigured(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    seen = {}
+
+    def mock_post(url, json, timeout, headers=None):
+        seen.update(json)
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create("thread-1", "abc123")
+    assert "environment" not in seen

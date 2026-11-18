@@ -70,6 +70,37 @@ the same workload and record:
 | Cleanup | Release, idle timeout, process restart, and orphan cleanup free resources |
 | Operations | Deployment prerequisites, privileged components, networking, storage, and upgrade path |
 
+## AIO idle baseline and the lean profile
+
+Measured on `all-in-one-sandbox:1.11.0` with a local Docker run, no workload,
+and `/v1/sandbox` answering 200 in every configuration:
+
+| Configuration | Idle memory |
+| --- | --- |
+| Image defaults | 725 MiB |
+| `DISABLE_JUPYTER=true`, `DISABLE_CODE_SERVER=true` | 281 MiB |
+| The two above plus `DISABLE_BROWSER`, `DISABLE_MCP_BROWSER`, `DISABLE_VNC`, `DISABLE_NODEJS_REPL` | 165 MiB |
+
+The image also reads `DISABLE_BROWSER`, `DISABLE_MCP_BROWSER`, `DISABLE_VNC` and
+`DISABLE_NODEJS_REPL`. Turning those off removes browser screenshots, the
+browser MCP server, the desktop view and Node REPL execution, so decide per
+deployment whether the agent stack needs them.
+
+Deployments set these through `sandbox.environment`, which reaches local Docker
+containers and, through the provisioner, Kubernetes sandbox Pods:
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  environment:
+    DISABLE_JUPYTER: "true"
+    DISABLE_CODE_SERVER: "true"
+```
+
+Keep a measured record of any other combination before recommending it. The
+numbers above are idle figures; the workload samples in the first section decide
+whether a lean profile still serves the tools an agent uses.
+
 ## PR Guidance
 
 Do not claim that a new provider fixes high-concurrency memory usage until the
