@@ -28,6 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   ScheduledTaskScheduleInput,
@@ -82,6 +83,7 @@ export type TaskFormState = {
   endAtLocal: string;
   schedule: ScheduleValue;
   assistantId: string;
+  subagentEnabled: boolean;
   contextMode: ContextMode;
   chatId: string;
   notificationGroupConnectionId: string;
@@ -133,6 +135,7 @@ export function initialFormState(
         endAtLocal: "",
         schedule: DEFAULT_SCHEDULE,
         assistantId: DEFAULT_ASSISTANT_ID,
+        subagentEnabled: false,
         contextMode: "fresh_thread_per_run",
         chatId: "",
         notificationGroupConnectionId: "",
@@ -161,6 +164,7 @@ export function initialFormState(
           : "",
       schedule,
       assistantId: task.assistant_id ?? DEFAULT_ASSISTANT_ID,
+      subagentEnabled: task.subagent_enabled ?? false,
       contextMode: task.context_mode,
       chatId: task.thread_id ?? "",
       notificationGroupConnectionId:
@@ -270,6 +274,7 @@ export function createPayload(
   };
   const goal = reuse ? null : normalizeText(state.goal);
   if (goal) payload.goal_objective = goal;
+  if (state.subagentEnabled) payload.subagent_enabled = true;
   if (valid.maxRuns != null) payload.max_runs = valid.maxRuns;
   if (valid.endAt) payload.end_at = valid.endAt;
   const stop = normalizeText(state.stopCondition);
@@ -302,6 +307,9 @@ export function updatePayload(
   }
   if (state.assistantId !== (task.assistant_id ?? DEFAULT_ASSISTANT_ID)) {
     updates.assistant_id = state.assistantId;
+  }
+  if (state.subagentEnabled !== (task.subagent_enabled ?? false)) {
+    updates.subagent_enabled = state.subagentEnabled;
   }
   const reuse = state.contextMode === "reuse_thread";
   if (state.contextMode !== task.context_mode) {
@@ -419,6 +427,13 @@ function TaskForm({
     return options;
   }, [agentsQuery.data, state.assistantId, st.create.leadAgent]);
 
+  const selectedAgent = agentsQuery.data?.find(
+    (agent) => agent.name === state.assistantId,
+  );
+  const canEnableSubagents = selectedAgent
+    ? selectedAgent.allowed_subagents?.length !== 0
+    : state.assistantId === DEFAULT_ASSISTANT_ID;
+
   const createTask = useCreateScheduledTask();
   const updateTask = useUpdateScheduledTask(task?.id ?? "");
   const pending = createTask.isPending || updateTask.isPending;
@@ -435,7 +450,9 @@ function TaskForm({
     !state.maxRuns.trim() &&
     !state.endAtLocal;
   const [advancedOpen, setAdvancedOpen] = useState(
-    reuse || state.assistantId !== DEFAULT_ASSISTANT_ID,
+    reuse ||
+      state.subagentEnabled ||
+      state.assistantId !== DEFAULT_ASSISTANT_ID,
   );
   const timeZone = state.schedule.timezone || browserTimeZone();
 
@@ -730,6 +747,21 @@ function TaskForm({
                 </SelectContent>
               </Select>
             </Field>
+            {canEnableSubagents && (
+              <div className="flex items-center gap-2">
+                <Switch
+                  id={id("subagents")}
+                  checked={state.subagentEnabled}
+                  onCheckedChange={(value) => set("subagentEnabled", value)}
+                />
+                <label
+                  htmlFor={id("subagents")}
+                  className="text-sm font-medium"
+                >
+                  {st.form.enableSubagents}
+                </label>
+              </div>
+            )}
             <div
               className="flex flex-wrap gap-2"
               role="group"

@@ -1235,6 +1235,7 @@ export const zhCN: Translations = {
       schedule: "运行时间",
       agent: "智能体",
       advanced: "高级选项",
+      enableSubagents: "启用子智能体",
       contextFresh: "每次运行新建对话",
       contextReuse: "在已有对话中运行",
       chatId: "对话 ID",

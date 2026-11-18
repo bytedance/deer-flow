@@ -14,6 +14,7 @@ export type ScheduledTask = {
   thread_id: string | null;
   context_mode: "fresh_thread_per_run" | "reuse_thread";
   assistant_id: string | null;
+  subagent_enabled?: boolean;
   title: string;
   /** The user's task instructions exactly as stored; never contains the stop rule. */
   prompt: string;

@@ -87,6 +87,7 @@ export type ScheduledTaskPayload = {
   context_mode: "fresh_thread_per_run" | "reuse_thread";
   thread_id?: string | null;
   assistant_id?: string | null;
+  subagent_enabled?: boolean;
   title: string;
   /** Task instructions only; the stop condition is always its own field. */
   prompt: string;

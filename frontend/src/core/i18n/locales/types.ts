@@ -1100,6 +1100,7 @@ export interface Translations {
       schedule: string;
       agent: string;
       advanced: string;
+      enableSubagents: string;
       contextFresh: string;
       contextReuse: string;
       chatId: string;
