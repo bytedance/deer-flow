@@ -86,6 +86,21 @@ The image also reads `DISABLE_BROWSER`, `DISABLE_MCP_BROWSER`, `DISABLE_VNC` and
 browser MCP server, the desktop view and Node REPL execution, so decide per
 deployment whether the agent stack needs them.
 
+The same image was measured in a temporary Kubernetes 1.31.5 cluster (k3d,
+one node) with no workload. Every Pod answered `/v1/sandbox` with 200 after
+90 seconds of idle time, and memory came from the Pod's cgroup
+`memory.current`:
+
+| Configuration | Kubernetes idle memory |
+| --- | --- |
+| Image defaults | 544 MiB |
+| `DISABLE_JUPYTER=true`, `DISABLE_CODE_SERVER=true` | 317 MiB |
+| The two above plus `DISABLE_BROWSER`, `DISABLE_MCP_BROWSER`, `DISABLE_VNC`, `DISABLE_NODEJS_REPL` | 191 MiB |
+
+Kubernetes adds kubelet and container-runtime overhead and can report different
+values from `docker stats`. Compare profiles in the same cluster; the relative
+reduction is what decides whether the lean profile fits the deployment.
+
 Deployments set these through `sandbox.environment`, which reaches local Docker
 containers and, through the provisioner, Kubernetes sandbox Pods:
 
