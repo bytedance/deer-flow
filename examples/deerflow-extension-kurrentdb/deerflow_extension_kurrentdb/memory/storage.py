@@ -362,13 +362,17 @@ class KurrentdbMemoryStorage(MemoryStorage):
         else:
             new_events = []
             committed = self._commit_destructive(stream, state, plan, user_id=user_id)
-        self._schedule_canonical(stream, plan, committed, new_events, user_id=user_id)
+        self._schedule_canonical(stream, state, plan, committed, new_events, user_id=user_id)
         return committed
 
     # --- canonical events ---------------------------------------------------------
 
-    def _schedule_canonical(self, stream: str, plan: Plan, committed: MemoryState | None, new_events: list[NewEvent], *, user_id: str | None) -> None:
-        """Queue ``FactRetained`` for the plan's upserts, off the caller's thread; never raises. Caller holds the scope lock.
+    def _schedule_canonical(self, stream: str, before: MemoryState, plan: Plan, committed: MemoryState | None, new_events: list[NewEvent], *, user_id: str | None) -> None:
+        """Queue ``FactRetained`` for the plan's created facts and content changes, off the caller's thread; never raises.
+
+        Upserts that keep a fact's content (confidence, category, topics,
+        confirmations) emit nothing: ``FactRetained`` carries only the content.
+        Caller holds the scope lock.
 
         Jobs are queued under the scope lock, so the worker emits in commit order.
         The global scope has no canonical stream and emits nothing. After the append
@@ -382,7 +386,10 @@ class KurrentdbMemoryStorage(MemoryStorage):
             if canonical is None:
                 return
             agent = next((data.get("agent") for event_type, data in plan.changes if event_type == events.FACT_UPSERTED), None)
-            upserted = copy.deepcopy(plan.upserted)
+            previous = before.agent_facts(agent) if agent is not None else {}
+            upserted = [copy.deepcopy(fact) for fact in plan.upserted if (previous.get(str(fact.get("id"))) or {}).get("content") != fact.get("content")]
+            if not upserted:
+                return
             origin = committed.revision if committed is not None else self._revision_after(stream, {event.id for event in new_events})
             if origin is None:
                 logger.warning("Canonical emission for %r skipped: the commit's revision could not be found", stream)

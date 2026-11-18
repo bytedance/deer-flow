@@ -52,6 +52,8 @@ cd backend && uv run pytest tests -q -m bundled_extension -k kurrentdb
   run events: `AsyncChains`), pre-check against `committed_intents_for`, append
   with an expected version, post-check and `reopen_canonical`, all within
   `MAX_LIFETIME_SECONDS` of the commit. Never fence a canonical stream: it holds
-  only schema event types. The global memory scope emits nothing
+  only schema event types. The global memory scope emits nothing, an
+  upsert that keeps a fact's content emits nothing, and a thread is one session:
+  `SessionStarted` only opens a newly created session stream (no per-run events)
 - **Test against `backend/tests/kurrentdb_fake.py`.** When the live suite shows
   a divergence, fix the fake first, then the code

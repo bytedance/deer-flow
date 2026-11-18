@@ -8,7 +8,8 @@ twin) never raises. Each attempt:
    intent's exclusive cutoff). Intents count whether open or done, never abandoned
    (``committed_intents_for``), so a delivery delayed past a finished cleanup is
    still suppressed
-2. append the rest at the canonical stream's current head (an expected version,
+2. append the rest at the canonical stream's current head (when the stream does
+   not exist yet, preceded by ``opening(pending)``, e.g. a session's ``SessionStarted``) (an expected version,
    never ``StreamState.ANY``); a conflict re-reads the head and retries, up to
    ``APPEND_ATTEMPTS`` in all
 3. **post-check** (also after an append whose outcome is unknown): if an intent
@@ -79,6 +80,17 @@ def _covering(events: Sequence[CanonicalEvent], intents: Sequence[Any]) -> list[
     return [intent for intent in intents if any(matches_intent(intent, event.metadata) for event in events)]
 
 
+# ``opening(pending)``: the event that opens a stream this emission creates (a session's ``SessionStarted``).
+Opening = Callable[[list[CanonicalEvent]], CanonicalEvent | None]
+
+
+def _with_opening(pending: list[CanonicalEvent], head: int | StreamState, opening: Opening | None) -> list[CanonicalEvent]:
+    if opening is None or head is not StreamState.NO_STREAM:
+        return pending
+    first = opening(pending)
+    return pending if first is None else [first, *pending]
+
+
 def _head(value: Any) -> int | StreamState:
     return StreamState.NO_STREAM if isinstance(value, StreamState) else int(value)
 
@@ -91,14 +103,14 @@ class CanonicalEmitter:
         self._engine = engine
         self._timeout = timeout
 
-    def emit(self, stream: str, events: Sequence[CanonicalEvent], *, primary: str, deadline: float) -> Outcome:
+    def emit(self, stream: str, events: Sequence[CanonicalEvent], *, primary: str, deadline: float, opening: Opening | None = None) -> Outcome:
         try:
-            return self._emit(stream, list(events), primary, deadline)
+            return self._emit(stream, list(events), primary, deadline, opening)
         except Exception:
             logger.warning("Canonical emission of %d event(s) to %r failed", len(events), stream, exc_info=True)
             return "failed"
 
-    def _emit(self, stream: str, pending: list[CanonicalEvent], primary: str, deadline: float) -> Outcome:
+    def _emit(self, stream: str, pending: list[CanonicalEvent], primary: str, deadline: float, opening: Opening | None) -> Outcome:
         if not pending:
             return "empty"
         engine = self._engine()
@@ -117,15 +129,16 @@ class CanonicalEmitter:
             remaining = _remaining(deadline)
             if remaining <= 0:
                 continue
+            batch = _with_opening(pending, head, opening)
             try:
-                client.append_to_stream(stream, events=[event.new_event() for event in pending], current_version=head, timeout=min(self._timeout, remaining))
+                client.append_to_stream(stream, events=[event.new_event() for event in batch], current_version=head, timeout=min(self._timeout, remaining))
             except WrongCurrentVersionError:
                 continue
             except Exception:
                 logger.warning("Canonical append to %r has an unknown outcome; checking for stale deliveries", stream, exc_info=True)
-                self._post_check(engine, stream, pending, primary)
+                self._post_check(engine, stream, batch, primary)
                 return "failed"
-            self._post_check(engine, stream, pending, primary)
+            self._post_check(engine, stream, batch, primary)
             return "appended"
         if _remaining(deadline) <= 0:
             logger.warning("Canonical emission to %r outlived its %ss lifetime; dropped", stream, MAX_LIFETIME_SECONDS)
@@ -150,14 +163,14 @@ class AsyncCanonicalEmitter:
         self._engine = engine  # engine(client)
         self._timeout = timeout
 
-    async def emit(self, stream: str, events: Sequence[CanonicalEvent], *, primary: str, deadline: float) -> Outcome:
+    async def emit(self, stream: str, events: Sequence[CanonicalEvent], *, primary: str, deadline: float, opening: Opening | None = None) -> Outcome:
         try:
-            return await self._emit(stream, list(events), primary, deadline)
+            return await self._emit(stream, list(events), primary, deadline, opening)
         except Exception:
             logger.warning("Canonical emission of %d event(s) to %r failed", len(events), stream, exc_info=True)
             return "failed"
 
-    async def _emit(self, stream: str, pending: list[CanonicalEvent], primary: str, deadline: float) -> Outcome:
+    async def _emit(self, stream: str, pending: list[CanonicalEvent], primary: str, deadline: float, opening: Opening | None) -> Outcome:
         if not pending:
             return "empty"
         client = await self._client()
@@ -176,15 +189,16 @@ class AsyncCanonicalEmitter:
             remaining = _remaining(deadline)
             if remaining <= 0:
                 continue
+            batch = _with_opening(pending, head, opening)
             try:
-                await client.append_to_stream(stream, events=[event.new_event() for event in pending], current_version=head, timeout=min(self._timeout, remaining))
+                await client.append_to_stream(stream, events=[event.new_event() for event in batch], current_version=head, timeout=min(self._timeout, remaining))
             except WrongCurrentVersionError:
                 continue
             except Exception:
                 logger.warning("Canonical append to %r has an unknown outcome; checking for stale deliveries", stream, exc_info=True)
-                await self._post_check(engine, stream, pending, primary)
+                await self._post_check(engine, stream, batch, primary)
                 return "failed"
-            await self._post_check(engine, stream, pending, primary)
+            await self._post_check(engine, stream, batch, primary)
             return "appended"
         if _remaining(deadline) <= 0:
             logger.warning("Canonical emission to %r outlived its %ss lifetime; dropped", stream, MAX_LIFETIME_SECONDS)
@@ -262,6 +276,7 @@ class AsyncChains:
     def submit(self, key: str, factory: Callable[[], Awaitable[Any]]) -> bool:
         """Queue ``factory`` behind earlier submissions for ``key``; call from the running loop."""
         loop = asyncio.get_running_loop()
+        self._prune()
         if sum(len(queue) for queue in self._queues.values()) >= self._max_pending:
             logger.warning("Canonical emission chains are full (%d); dropping an emission", self._max_pending)
             return False
@@ -270,6 +285,13 @@ class AsyncChains:
         if chain not in self._tasks:
             self._tasks[chain] = loop.create_task(self._drain(chain), name=f"{WORKER_THREAD_NAME}:{key}")
         return True
+
+    def _prune(self) -> None:
+        """Forget chains whose drain finished or whose loop closed with a drain still pending."""
+        for chain, task in list(self._tasks.items()):
+            if task.done() or task.get_loop().is_closed():
+                self._tasks.pop(chain, None)
+                self._queues.pop(chain, None)
 
     async def _drain(self, chain: tuple[int, str]) -> None:
         queue = self._queues[chain]

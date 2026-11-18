@@ -4,7 +4,8 @@ Pure functions, no I/O. Payloads are schema messages only, serialized with the
 schema's own ``to_json``; DeerFlow identities ride in the KurrentDB event
 **metadata** (JSON, outside the payload), so the payload stays canonical:
 
-- every event: ``schema_version`` (``SCHEMA_VERSION``) and ``deerflow.origin``, the
+- every event: ``$schema_version`` (the schema package's documented stamp, ruling
+  R15) and ``schema_version`` (July's key), both ``SCHEMA_VERSION``, and ``deerflow.origin``, the
   primary position the event came from: the memory revision of the commit that
   produced it, or the run event's ``seq``. A deletion's exclusive ``cutoff`` is
   compared with it
@@ -22,9 +23,15 @@ Memory: ``FactRetained`` for every created or updated fact (0.5 has no revise or
 forget event). The global scope (``user_id=None``) has no canonical stream: the
 schema's memory stream is per user, so nothing is emitted for it.
 
-Sessions (``agent_session_stream(thread_id)``, one canonical session per thread):
+Sessions (``agent_session_stream(thread_id)``, one canonical session per thread,
+ruling R16):
 
-- ``run.start`` -> ``SessionStarted``; ``run.end`` / ``run.error`` -> ``SessionEnded``
+- ``SessionStarted`` (``session_started``) is written only when an emission creates
+  the session stream (first emission, or the first after a thread deletion
+  soft-deleted it), with ``user_id`` = the record owner. Its metadata has
+  ``deerflow.seq``/``deerflow.origin`` of the first record it precedes and no
+  ``deerflow.run_id``, so a run deletion never removes it and a thread deletion does
+- ``run.start`` / ``run.end`` / ``run.error`` map to nothing (no per-run session events)
 - user message (``llm.human.input``, ``human_message``) -> ``UserMessageReceived``
 - assistant message (``llm.ai.response``, ``ai_message``) -> ``AssistantToolCallsGenerated``
   when it calls tools, else ``AssistantTextGenerated`` when it has text; middleware
@@ -50,7 +57,6 @@ from kurrent_agent_schema import (
     AssistantTextGenerated,
     AssistantToolCallsGenerated,
     FactRetained,
-    SessionEnded,
     SessionStarted,
     ToolCallInfo,
     ToolResultReceived,
@@ -64,6 +70,7 @@ from kurrentdbclient import NewEvent
 APP_NAME = "deerflow"
 
 SCHEMA_VERSION_KEY = "schema_version"
+SCHEMA_VERSION_STAMP = "$schema_version"
 ORIGIN = "deerflow.origin"
 FACT_ID = "deerflow.fact_id"
 FACT_REVISION = "deerflow.fact_revision"
@@ -80,8 +87,6 @@ _NAMESPACE = uuid.UUID("6f1d2c1e-6b0a-5c55-9d1e-6b8a3f1e2d40")
 _USER_MESSAGE_TYPES = frozenset({"llm.human.input", "human_message"})
 _ASSISTANT_MESSAGE_TYPES = frozenset({"llm.ai.response", "ai_message"})
 _TOOL_RESULT_TYPES = frozenset({"llm.tool.result", "tool_message"})
-_RUN_START = "run.start"
-_RUN_END_TYPES = frozenset({"run.end", "run.error"})
 
 
 class CanonicalEvent(NamedTuple):
@@ -140,7 +145,7 @@ def matches(op: str, criteria: Mapping[str, Any], metadata: Mapping[str, Any]) -
     if op == "delete_run":
         return metadata.get(RUN_ID) == criteria.get("run_id")
     if op == "delete_thread":
-        return RUN_ID in metadata
+        return SEQ in metadata
     return False
 
 
@@ -190,6 +195,10 @@ def _text(content: Any) -> str:
     return ""
 
 
+def _versions() -> dict[str, int]:
+    return {SCHEMA_VERSION_STAMP: SCHEMA_VERSION, SCHEMA_VERSION_KEY: SCHEMA_VERSION}
+
+
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
@@ -223,7 +232,7 @@ def memory_events(change_set_result: Any, *, user_id: str | None, agent: str | N
             continue
         fact_id, revision = str(fact.get("id")), fact.get("revision")
         retained_at = _timestamp(fact.get("updatedAt")) or _timestamp(fact.get("createdAt")) or _now()
-        metadata = {SCHEMA_VERSION_KEY: SCHEMA_VERSION, ORIGIN: origin, FACT_ID: fact_id, FACT_REVISION: revision, AGENT: agent}
+        metadata = {**_versions(), ORIGIN: origin, FACT_ID: fact_id, FACT_REVISION: revision, AGENT: agent}
         events.append(CanonicalEvent(FactRetained(fact=content, retained_at=retained_at), metadata, _event_id("memory", user_id, agent, fact_id, revision, origin)))
     return events
 
@@ -249,18 +258,6 @@ def _session_message(record: Mapping[str, Any]) -> Message | None:
     metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
     raw = record.get("content")
     content: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {"content": raw}
-    if event_type == _RUN_START:
-        fields = {"app_name": APP_NAME}
-        for name, keys in (("agent_name", ("agent_name", "assistant_id")), ("model", ("model_name", "model"))):
-            value = next((metadata[key] for key in keys if isinstance(metadata.get(key), str) and metadata[key]), None)
-            if value is not None:
-                fields[name] = value
-        stamp = _timestamp(record.get("created_at"))
-        return SessionStarted(**fields, **({"timestamp": stamp} if stamp else {}))
-    if event_type in _RUN_END_TYPES:
-        reason = metadata.get("status") if event_type == "run.end" else "error"
-        stamp = _timestamp(record.get("created_at"))
-        return SessionEnded(reason=str(reason or "completed"), **({"timestamp": stamp} if stamp else {}))
     if record.get("category") != "message":
         return None
     text = _text(content.get("content"))
@@ -294,7 +291,7 @@ def session_events(records: Iterable[Mapping[str, Any]]) -> list[CanonicalEvent]
         seq, run_id = record.get("seq"), record.get("run_id")
         redacted = redact_metadata_secrets(record.get("metadata"))
         metadata = {
-            SCHEMA_VERSION_KEY: SCHEMA_VERSION,
+            **_versions(),
             ORIGIN: seq,
             RUN_ID: run_id,
             SEQ: seq,
@@ -303,3 +300,16 @@ def session_events(records: Iterable[Mapping[str, Any]]) -> list[CanonicalEvent]
         }
         events.append(CanonicalEvent(message, metadata, _event_id("session", record.get("thread_id"), run_id, seq)))
     return events
+
+
+def session_started(first: Mapping[str, Any], *, user_id: str | None) -> CanonicalEvent:
+    """The ``SessionStarted`` that opens a session stream, ahead of the committed record ``first``."""
+    fields: dict[str, Any] = {"app_name": APP_NAME}
+    if user_id:
+        fields["user_id"] = user_id
+    stamp = _timestamp(first.get("created_at"))
+    if stamp is not None:
+        fields["timestamp"] = stamp
+    seq = first.get("seq")
+    metadata = {**_versions(), ORIGIN: seq, SEQ: seq, EVENT_TYPE: "session.start"}
+    return CanonicalEvent(SessionStarted(**fields), metadata, _event_id("session-start", first.get("thread_id"), seq))

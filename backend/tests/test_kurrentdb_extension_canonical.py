@@ -216,7 +216,11 @@ def test_fact_retained_on_create_and_update(server):
     storage.save({"facts": [_fact("f1", "Prefers green tea", revision=2), _fact("f2", "Lives in Oslo"), _fact("f3", "Plays chess")]}, AGENT, user_id="alice")
     # Nothing canonical for: a no-op, summaries only, deletions, and the global scope (no per-user stream).
     storage.apply_changes({"upserts": [_fact("f3", "Plays chess")], "upsertRevisions": {"f3": 1}}, user_id="alice", agent_name=AGENT)
+    # Same content, new confidence and confirmations: a new fact revision, but nothing canonical (FactRetained is content only).
+    changed = storage.apply_changes({"upserts": [_fact("f3", "Plays chess", confidence=0.4, confirmationCount=3)], "upsertRevisions": {"f3": 1}}, user_id="alice", agent_name=AGENT)
+    assert [fact["revision"] for fact in changed["upsertedFacts"]] == [2]
     storage.apply_changes({"summaries": {"user": {"workContext": {"summary": "Builds DeerFlow", "updatedAt": "2026-11-01T00:00:00Z"}}}}, user_id="alice")
+    assert storage.flush_canonical(timeout=5)  # f2 is emitted before its deletion (a later emission would be suppressed)
     storage.apply_changes({"deletes": ["f2"]}, user_id="alice", agent_name=AGENT)
     _create(storage, _fact("g1", "Global fact"), user_id=None)
     assert storage.flush_canonical(timeout=5)
@@ -257,20 +261,22 @@ async def test_session_events_live_on_put(server):
     # Emission runs after the put returned (off the critical path): nothing canonical yet.
     assert _events(server, agent_session_stream("t0")) == []
     await store.flush_canonical()
-    assert len(_events(server, agent_session_stream("t0"))) == 1
+    assert [event.type for event in _events(server, agent_session_stream("t0"))] == ["SessionStarted", "AssistantTextGenerated"]
     await _conversation(store)
     await store.flush_canonical()
     decoded = _decoded(server, T1_CANONICAL)
-    assert [type_name for type_name, _, _ in decoded] == ["SessionStarted", "UserMessageReceived", "AssistantToolCallsGenerated", "ToolResultReceived", "AssistantTextGenerated", "SessionEnded"]
-    started, user, calls, result, text, ended = (message for _, message, _ in decoded)
-    assert (started.app_name, started.agent_name, started.model) == ("deerflow", "lead_agent", "gpt-x")
+    # One canonical session per thread (R16): SessionStarted opens the stream; run.start/run.end map to nothing.
+    assert [type_name for type_name, _, _ in decoded] == ["SessionStarted", "UserMessageReceived", "AssistantToolCallsGenerated", "ToolResultReceived", "AssistantTextGenerated"]
+    started, user, calls, result, text = (message for _, message, _ in decoded)
+    owner = json.loads(_events(server, "deerflow.run-events-t1")[1].metadata)["user_id"]  # the context user of the creating put
+    assert owner and (started.app_name, started.user_id) == ("deerflow", owner)
+    assert decoded[0][2]["deerflow.seq"] == 2 and "deerflow.run_id" not in decoded[0][2]  # precedes the first mapped record
     assert (user.content, user.message_id) == ("What is KurrentDB?", "r1-h")
     assert [(call.call_id, call.tool_name, dict(call.arguments)) for call in calls.tool_calls] == [("call-1", "web_search", {"q": "kurrentdb"})]
     assert (result.call_id, result.tool_name, result.result, result.message_id) == ("call-1", "web_search", "KurrentDB is an event store", "tool-1")
     assert (text.content, text.message_id) == ("An event-native database.", "r1-a2")
-    assert ended.reason == "success"
 
-    # put_batch and put_if_absent emit too, in commit order.
+    # put_batch and put_if_absent emit too, in commit order; a second run opens no second session.
     await store.put_batch(
         [
             {"thread_id": "t1", "run_id": "r2", "event_type": "human_message", "category": "message", "content": "plain text"},
@@ -280,11 +286,49 @@ async def test_session_events_live_on_put(server):
     await store.put_if_absent(thread_id="t1", run_id="r2", event_type="run.end", category="outputs", content={}, metadata={"status": "success"})
     await store.put_if_absent(thread_id="t1", run_id="r2", event_type="run.end", category="outputs", content={}, metadata={"status": "success"})
     await store.flush_canonical()
-    assert [(type_name, metadata["deerflow.run_id"]) for type_name, _, metadata in _decoded(server, T1_CANONICAL)][6:] == [
+    assert [(type_name, metadata.get("deerflow.run_id")) for type_name, _, metadata in _decoded(server, T1_CANONICAL)][5:] == [
         ("UserMessageReceived", "r2"),
         ("AssistantTextGenerated", "r2"),
-        ("SessionEnded", "r2"),
     ]
+    # The session's user is the owner of the record that created the stream.
+    await store.put_batch([{"thread_id": "t2", "run_id": "r1", "event_type": "human_message", "category": "message", "content": "hi", "user_id": "alice"}])
+    await store.flush_canonical()
+    (_, opened, _), _ = _decoded(server, agent_session_stream("t2"))
+    assert opened.user_id == "alice"
+
+
+def test_chains_forget_a_closed_loops_pending_drain():
+    from deerflow_extension_kurrentdb.canonical import AsyncChains
+
+    chains = AsyncChains()
+    started = []
+
+    async def never_finishes():
+        started.append(True)
+        await asyncio.Event().wait()
+
+    async def submit_and_leave():
+        chains.submit("t1", never_finishes)
+        await asyncio.sleep(0)
+
+    old = asyncio.new_event_loop()
+    old.run_until_complete(submit_and_leave())
+    old.close()  # the drain task is still pending
+    assert started and len(chains._tasks) == 1
+
+    async def submit_again():
+        ran = asyncio.Event()
+
+        async def job():
+            ran.set()
+
+        chains.submit("t1", job)
+        assert all(not task.get_loop().is_closed() for task in chains._tasks.values())
+        await chains.flush()
+        assert ran.is_set()
+
+    asyncio.run(submit_again())
+    assert chains._tasks == {} and chains._queues == {}
 
 
 # --- provenance ---------------------------------------------------------------
@@ -300,8 +344,8 @@ async def test_canonical_metadata_provenance(server):
     recorded = _events(server, ALICE_CANONICAL)
     metadata = [json.loads(event.metadata) for event in recorded]
     assert metadata == [
-        {"schema_version": SCHEMA_VERSION, "deerflow.origin": first["revision"], "deerflow.fact_id": "f1", "deerflow.fact_revision": 1, "deerflow.agent": AGENT},
-        {"schema_version": SCHEMA_VERSION, "deerflow.origin": second["revision"], "deerflow.fact_id": "f1", "deerflow.fact_revision": 2, "deerflow.agent": AGENT},
+        {"$schema_version": SCHEMA_VERSION, "schema_version": SCHEMA_VERSION, "deerflow.origin": first["revision"], "deerflow.fact_id": "f1", "deerflow.fact_revision": 1, "deerflow.agent": AGENT},
+        {"$schema_version": SCHEMA_VERSION, "schema_version": SCHEMA_VERSION, "deerflow.origin": second["revision"], "deerflow.fact_id": "f1", "deerflow.fact_revision": 2, "deerflow.agent": AGENT},
     ]
     # Deterministic event ids: mapping the same commit again gives the same ids.
     again = mapping.memory_events(second, user_id="alice", agent=AGENT, origin=second["revision"])
@@ -312,9 +356,11 @@ async def test_canonical_metadata_provenance(server):
     secret = {"caller": "lead_agent", "auth_token": "s3cret", "task_id": "x"}
     record = await store.put(thread_id="t1", run_id="r1", event_type="llm.human.input", category="message", content=_human("hello"), metadata=secret)
     await store.flush_canonical()
-    (event,) = _events(server, T1_CANONICAL)
+    opened, event = _events(server, T1_CANONICAL)
+    assert json.loads(opened.metadata) == {"$schema_version": SCHEMA_VERSION, "schema_version": SCHEMA_VERSION, "deerflow.origin": record["seq"], "deerflow.seq": record["seq"], "deerflow.event_type": "session.start"}
     session_metadata = json.loads(event.metadata)
     assert session_metadata == {
+        "$schema_version": SCHEMA_VERSION,
         "schema_version": SCHEMA_VERSION,
         "deerflow.origin": record["seq"],
         "deerflow.run_id": "r1",
@@ -432,7 +478,9 @@ async def test_stale_emitter_suppressed_after_cleanup_done(server):
     _mark_cleanup_done(server, run_intent)
     await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message", content="r1 again, after the deletion")
     await chains.run_all()
-    assert [(metadata["deerflow.run_id"], message.content) for _, message, metadata in _decoded(server, T1_CANONICAL)] == [("r2", "kept"), ("r1", "r1 again, after the deletion")]
+    decoded = _decoded(server, T1_CANONICAL)
+    assert [type_name for type_name, _, _ in decoded][:1] == ["SessionStarted"]
+    assert [(metadata["deerflow.run_id"], message.content) for _, message, metadata in decoded[1:]] == [("r2", "kept"), ("r1", "r1 again, after the deletion")]
     assert not _intent_ids(server, "CanonicalCleanupReopened")
 
 
@@ -465,7 +513,7 @@ async def test_post_append_recheck_reopens(server):
     await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message", content="stale")
     await chains.run_all()
     thread_intent = _intent_ids(server)[-1]
-    assert [message.content for _, message, _ in _decoded(server, T1_CANONICAL)] == ["stale"]  # recreated
+    assert [(type_name, getattr(message, "content", None)) for type_name, message, _ in _decoded(server, T1_CANONICAL)] == [("SessionStarted", None), ("AssistantTextGenerated", "stale")]  # recreated, reopened
     assert _intent_ids(server, "CanonicalCleanupReopened") == [intent_id, thread_intent]
     # Each reopen is its own index event, so a second stale delivery reopens again.
     reopened = [event for event in _events(server, INDEX) if event.type.endswith("CanonicalCleanupReopened")]
@@ -479,6 +527,7 @@ async def test_consumer_deserializes_every_event(server):
     storage = _storage(server)
     _create(storage, _fact("f1", "Prefers tea"), _fact("f2", "Lives in Oslo"))
     storage.apply_changes({"upserts": [_fact("f1", "Prefers green tea")], "upsertRevisions": {"f1": 1}}, user_id="alice", agent_name=AGENT)
+    assert storage.flush_canonical(timeout=5)  # emitted before the delete (a later emission would be suppressed)
     storage.apply_changes({"deletes": ["f2"]}, user_id="alice", agent_name=AGENT)
     store = _store(server)
     await _conversation(store, run_id="r1")
@@ -497,8 +546,8 @@ async def test_consumer_deserializes_every_event(server):
             message = from_json(message_type, event.data.decode("utf-8"))
             assert EVENT_TYPE_NAMES[type(message)] == event.type
             metadata = json.loads(event.metadata)
-            assert metadata["schema_version"] == SCHEMA_VERSION and isinstance(metadata["deerflow.origin"], int)
+            assert metadata["$schema_version"] == metadata["schema_version"] == SCHEMA_VERSION and isinstance(metadata["deerflow.origin"], int)
             counted += 1
-    assert counted == 3 + 6
-    assert {metadata["deerflow.run_id"] for _, _, metadata in _decoded(server, T1_CANONICAL)} == {"r3"}
+    assert counted == 3 + 5  # three fact versions; the recreated session: SessionStarted + four messages of r3
+    assert {metadata.get("deerflow.run_id") for _, _, metadata in _decoded(server, T1_CANONICAL)} == {None, "r3"}
     assert not [task for task in asyncio.all_tasks() if task.get_name().startswith(WORKER_THREAD)]  # no emission task left behind

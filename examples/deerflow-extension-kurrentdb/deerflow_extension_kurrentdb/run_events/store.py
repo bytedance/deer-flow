@@ -419,20 +419,28 @@ class KurrentRunEventStore(RunEventStore):
             return [json.loads(event.data) for event in events], None
         raise _GroupFailed(_NOT_COMMITTED, RuntimeError(f"{stream}: append conflicted {MAX_APPEND_ATTEMPTS} times with other writers")) from conflict
 
-    async def _after_commit(self, thread_id: str, records: list[dict]) -> None:
+    async def _after_commit(self, thread_id: str, records: list[dict], owners: list[str | None]) -> None:
         """Queue the live canonical session events of committed records (runs inside the thread's lock).
 
         Only queues: the emission runs in the thread's ``AsyncChains`` task after the
         lock is released, in commit order, within ``MAX_LIFETIME_SECONDS`` of the commit.
+        ``owners[i]`` is the owner of ``records[i]``; an emission that creates the
+        thread's session stream opens it with ``SessionStarted`` for that owner.
         """
         if not self._canonical_enabled:
             return
         deadline = canonical_emitter.deadline_from_now()
 
+        by_seq = {record.get("seq"): (record, owner) for record, owner in zip(records, owners)}
+
+        def opening(pending: list) -> Any:
+            record, owner = by_seq[pending[0].metadata[canonical_mapping.SEQ]]
+            return canonical_mapping.session_started(record, user_id=owner)
+
         async def emit() -> None:
             canonical_events = canonical_mapping.session_events(records)
             if canonical_events:
-                await self._canonical.emit(canonical_mapping.session_stream(thread_id), canonical_events, primary=run_events_stream(thread_id), deadline=deadline)
+                await self._canonical.emit(canonical_mapping.session_stream(thread_id), canonical_events, primary=run_events_stream(thread_id), deadline=deadline, opening=opening)
 
         self._canonical_chains.submit(thread_id, emit)
 
@@ -440,18 +448,18 @@ class KurrentRunEventStore(RunEventStore):
         """Wait for this loop's queued canonical emissions (tests, shutdown)."""
         await self._canonical_chains.flush()
 
-    async def _notify(self, thread_id: str, records: list[dict]) -> None:
+    async def _notify(self, thread_id: str, records: list[dict], drafts: list[_Draft]) -> None:
         if not records:
             return
         try:
-            await self._after_commit(thread_id, copy.deepcopy(records))
+            await self._after_commit(thread_id, copy.deepcopy(records), [draft.owner for draft in drafts])
         except Exception:
             logger.warning("Post-commit hook for %d run event(s) of thread %s failed", len(records), thread_id, exc_info=True)
 
     async def _write_group(self, thread_id: str, drafts: list[_Draft]) -> list[dict]:
         async with self._lock_for(thread_id):
             records, _ = await self._write(thread_id, drafts)
-            await self._notify(thread_id, records)
+            await self._notify(thread_id, records, drafts)
             return records
 
     @staticmethod
@@ -530,7 +538,7 @@ class KurrentRunEventStore(RunEventStore):
                 self._raise_single(failure, f"run event {event_type} for {thread_id}/{run_id}")
             if found is not None:
                 return found, False
-            await self._notify(thread_id, records)
+            await self._notify(thread_id, records, [draft])
             return records[0], True
 
     # --- read API ------------------------------------------------------------
