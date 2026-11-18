@@ -313,7 +313,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):
@@ -357,7 +357,7 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: _FakeThreadStore())
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):
@@ -396,7 +396,7 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):
@@ -427,3 +427,70 @@ async def test_recovered_stream_end_retry_does_not_recreate_stream_cleaned_durin
     assert stream_bridge.publish_end_calls == []
     assert stream_bridge.cleanup_calls == []
     assert stream_bridge.expired_producer_cleanup_calls == ["run-1"]
+
+
+def _patch_startup_to_event_store(monkeypatch):
+    """Stub everything langgraph_runtime builds before the run-event store."""
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    _FakeRunManager.instances.clear()
+    _FakeRunManager.recovered_runs = []
+    monkeypatch.setattr(engine_module, "init_engine_from_config", noop)
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
+    monkeypatch.setattr(engine_module, "close_engine", noop)
+    monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(_FakeStreamBridge()))
+    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
+    monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
+    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: _FakeThreadStore())
+    monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
+
+
+def _startup_config(backend: str):
+    from deerflow.config.run_events_config import RunEventsConfig
+
+    return SimpleNamespace(
+        database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
+        run_events=RunEventsConfig(backend=backend),
+        stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
+    )
+
+
+@pytest.mark.anyio
+async def test_startup_fails_for_unknown_backend(monkeypatch):
+    from deerflow.extensions import EMPTY_EXTENSIONS
+
+    _patch_startup_to_event_store(monkeypatch)
+    app = FastAPI()
+    app.state.extensions = EMPTY_EXTENSIONS
+    app.state.extension_diagnostics = []
+
+    with pytest.raises(RuntimeError, match="run_events.backend 'kurrent'") as exc_info:
+        async with gateway_deps.langgraph_runtime(app, _startup_config("kurrent")):
+            pytest.fail("startup must not serve with an unresolved run-event backend")
+    assert "memory" in str(exc_info.value)
+    assert not hasattr(app.state, "run_event_store")
+    assert _FakeRunManager.instances == []
+
+
+@pytest.mark.anyio
+async def test_startup_fails_when_optional_provider_plugin_failed(monkeypatch):
+    from deerflow.extensions import load_extensions
+    from deerflow.extensions.loader import ExtensionSpec
+
+    _patch_startup_to_event_store(monkeypatch)
+    # An optional (required: false) plugin that fails to load is skipped with a
+    # diagnostic; the backend it would have provided must not fall back.
+    loaded, diagnostics = load_extensions([ExtensionSpec(use="missing_kurrent_provider_pkg:install")])
+    app = FastAPI()
+    app.state.extensions = loaded
+    app.state.extension_diagnostics = diagnostics
+
+    with pytest.raises(RuntimeError) as exc_info:
+        async with gateway_deps.langgraph_runtime(app, _startup_config("kurrent")):
+            pytest.fail("startup must not serve with an unresolved run-event backend")
+    message = str(exc_info.value)
+    assert "'kurrent'" in message
+    assert "missing_kurrent_provider_pkg:install" in message
+    assert not hasattr(app.state, "run_event_store")

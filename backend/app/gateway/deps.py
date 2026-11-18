@@ -985,7 +985,16 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # so the configured event store must exist before those services start.
         run_events_config = getattr(config, "run_events", None)
         app.state.run_events_config = run_events_config
-        app.state.run_event_store = make_run_event_store(run_events_config)
+        # A non-built-in backend resolves against this app's own extension
+        # snapshot (create_app loads extensions after config validation). An
+        # unresolvable name stops startup: events are persistent state, so
+        # silently falling back to another backend would split the history.
+        try:
+            app.state.run_event_store = make_run_event_store(run_events_config, extensions=getattr(app.state, "extensions", None))
+        except (ValueError, TypeError) as exc:
+            failed = sorted({d.source for d in getattr(app.state, "extension_diagnostics", None) or () if getattr(d, "level", None) == "error"})
+            detail = f"; extensions that failed to load: {', '.join(failed)}" if failed else ""
+            raise RuntimeError(f"Gateway startup stopped: {exc}{detail}") from exc
         if sf is not None:
             from deerflow.persistence.run.producer import validate_producer_fencing
 

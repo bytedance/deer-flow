@@ -9,6 +9,10 @@ Backends:
   Suitable for production deployments.
 - jsonl: Append-only JSONL files. Lightweight alternative for
   single-node deployments that need persistence without a database.
+- any other name: an extension-provided store. Config load checks only the
+  name's syntax, because extensions load after config; the Gateway resolves the
+  name against its loaded extensions at startup and refuses to start when no
+  loaded extension provides it.
 """
 
 from __future__ import annotations
@@ -18,6 +22,9 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
+
+#: Syntax for ``run_events.backend``: built-in names and extension-provided ones.
+RUN_EVENTS_BACKEND_PATTERN = r"^[a-z][a-z0-9_-]{0,63}$"
 
 
 class RunEventsConfig(BaseModel):
@@ -30,9 +37,13 @@ class RunEventsConfig(BaseModel):
             raise ValueError("Strict producer fencing requires backend=db and an explicit offline cutover ID")
         return self
 
-    backend: Literal["memory", "db", "jsonl"] = Field(
+    backend: str = Field(
         default="memory",
-        description="Storage backend for run events. 'memory' for development (no persistence), 'db' for production (SQL queries), 'jsonl' for lightweight single-node persistence.",
+        pattern=RUN_EVENTS_BACKEND_PATTERN,
+        description=(
+            "Storage backend for run events. 'memory' for development (no persistence), 'db' for production (SQL queries), 'jsonl' for lightweight single-node persistence, "
+            "or the name of a store an enabled extension registers (resolved at Gateway startup)."
+        ),
     )
     max_trace_content: int = Field(
         default=10240,

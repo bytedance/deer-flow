@@ -43,6 +43,14 @@ def test_strict_requires_db_backend_and_explicit_cutover():
         RunEventsConfig(backend="db", producer_fencing="strict")
 
 
+def test_strict_fencing_still_requires_db():
+    # The backend name widened to extension-provided stores; strict fencing
+    # is a SQL RunStore guarantee and still accepts only the built-in db.
+    with pytest.raises(ValueError, match="backend=db"):
+        RunEventsConfig(backend="kurrent", producer_fencing="strict", producer_cutover_id="upgrade-1")
+    assert RunEventsConfig(backend="db", producer_fencing="strict", producer_cutover_id="upgrade-1").backend == "db"
+
+
 @pytest.mark.asyncio
 async def test_unaware_sql_writer_is_rejected_after_cutover(cutover_db):
     from deerflow.persistence.run.producer import activate_producer_fencing

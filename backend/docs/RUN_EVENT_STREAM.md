@@ -172,6 +172,15 @@ coverage contract. Consumers claiming this protocol must validate the event
 inside the captured boundary; a code upgrade or Seal state alone is insufficient.
 Later recovery appends do not silently upgrade that historical coverage.
 
+`run_events.backend` names one of the built-in stores (`memory`, `db`,
+`jsonl`) or a store an enabled extension registers with
+`ExtensionRegistry.run_event_store(name, factory)`. Config load checks only the
+name's syntax (`^[a-z][a-z0-9_-]{0,63}$`), because extensions load after config.
+The Gateway resolves the name against its own loaded extensions at startup and
+stops when none provides it, naming the backend, the extension-provided
+backends and any extension that failed to load. It never falls back to another
+backend. `producer_fencing: strict` still requires `db`.
+
 Confirmation is limited to the Store's declared failure and concurrency model:
 
 | Backend | Guarantee boundary |
@@ -180,6 +189,7 @@ Confirmation is limited to the Store's declared failure and concurrency model:
 | JSONL | File-backed within the declared single-process mutation boundary; no multi-process guarantee. |
 | SQLite | Database-backed confirmation with per-thread in-process serialization; this does not establish PostgreSQL or multi-Gateway concurrency semantics. |
 | PostgreSQL | Database-backed confirmation with per-thread transaction advisory locking across independent connections/processes; concurrency validation requires real sessions. |
+| Extension-provided | Defined by the extension that registers the store; the core guarantees only that the name resolves to that extension's `RunEventStore` at Gateway startup, or startup stops. |
 
 Singleton insertion and RunRow terminal commit are separate transactions.
 `RecoveryTerminalPublisher` backfills an error terminal only after a successful

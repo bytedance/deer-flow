@@ -2903,6 +2903,7 @@ database:
 # backend: memory  -- No persistence, data lost on restart (default)
 # backend: db      -- SQL database via ORM, full query capability (production)
 # backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
+# backend: <name>  -- A store an enabled extension registers; startup stops if none provides it
 #
 # run_events:
 #   backend: memory

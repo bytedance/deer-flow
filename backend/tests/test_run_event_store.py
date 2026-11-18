@@ -1389,12 +1389,106 @@ class TestMakeRunEventStore:
     async def test_unknown_backend_raises(self):
         from unittest.mock import MagicMock
 
+        from deerflow.extensions import EMPTY_EXTENSIONS
         from deerflow.runtime.events.store import make_run_event_store
 
         config = MagicMock()
         config.backend = "redis"
         with pytest.raises(ValueError, match="Unknown"):
-            make_run_event_store(config)
+            make_run_event_store(config, extensions=EMPTY_EXTENSIONS)
+
+
+def _snapshot_with_store(name, factory, source="ext:install"):
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to(source):
+        assert registry.run_event_store(name, factory) is True
+    return registry.build()
+
+
+class TestRunEventsConfigBackend:
+    """``run_events.backend`` is a syntax-checked name; resolution happens at startup."""
+
+    @pytest.mark.parametrize("name", ["memory", "db", "jsonl", "kurrent", "my_store-2", "a" * 64])
+    def test_backend_accepts_extension_name_syntax(self, name):
+        from deerflow.config.run_events_config import RunEventsConfig
+
+        assert RunEventsConfig(backend=name).backend == name
+
+    @pytest.mark.parametrize("name", ["", "Kurrent", "2store", "-store", "my store", "a.b", "a" * 65, "kurrent\n"])
+    def test_backend_rejects_bad_syntax(self, name):
+        from pydantic import ValidationError
+
+        from deerflow.config.run_events_config import RunEventsConfig
+
+        with pytest.raises(ValidationError):
+            RunEventsConfig(backend=name)
+
+
+class TestMakeRunEventStoreExtensions:
+    """Extension-provided backends resolve against an explicit snapshot."""
+
+    def test_factory_resolves_extension_store(self):
+        from deerflow.config.run_events_config import RunEventsConfig
+        from deerflow.runtime.events.store import make_run_event_store
+
+        seen = []
+        built = MemoryRunEventStore()
+
+        def factory(cfg):
+            seen.append(cfg)
+            return built
+
+        config = RunEventsConfig(backend="kurrent")
+        store = make_run_event_store(config, extensions=_snapshot_with_store("kurrent", factory))
+        assert store is built
+        assert seen == [config]
+
+    def test_factory_unknown_name_lists_registered(self):
+        from deerflow.config.run_events_config import RunEventsConfig
+        from deerflow.runtime.events.store import make_run_event_store
+
+        snapshot = _snapshot_with_store("other", lambda cfg: MemoryRunEventStore(), source="other_ext:install")
+        with pytest.raises(ValueError) as exc_info:
+            make_run_event_store(RunEventsConfig(backend="kurrent"), extensions=snapshot)
+        message = str(exc_info.value)
+        assert "'kurrent'" in message
+        for name in ("memory", "db", "jsonl", "other"):
+            assert name in message
+        assert "other_ext:install" in message
+
+    def test_factory_extension_name_without_snapshot_raises(self):
+        from deerflow.config.run_events_config import RunEventsConfig
+        from deerflow.runtime.events.store import make_run_event_store
+
+        with pytest.raises(ValueError, match=r"run_events\.backend 'kurrent' is provided by an extension; pass the loaded extensions"):
+            make_run_event_store(RunEventsConfig(backend="kurrent"))
+
+    def test_factory_rejects_non_store_result(self):
+        from deerflow.config.run_events_config import RunEventsConfig
+        from deerflow.runtime.events.store import make_run_event_store
+
+        snapshot = _snapshot_with_store("kurrent", lambda cfg: object())
+        with pytest.raises(TypeError, match="kurrent"):
+            make_run_event_store(RunEventsConfig(backend="kurrent"), extensions=snapshot)
+
+    def test_two_snapshots_resolve_independently(self):
+        from deerflow.config.run_events_config import RunEventsConfig
+        from deerflow.extensions import EMPTY_EXTENSIONS
+        from deerflow.runtime.events.store import make_run_event_store
+
+        store_a, store_b = MemoryRunEventStore(), MemoryRunEventStore()
+        snapshot_a = _snapshot_with_store("kurrent", lambda cfg: store_a, source="a:install")
+        snapshot_b = _snapshot_with_store("kurrent", lambda cfg: store_b, source="b:install")
+        config = RunEventsConfig(backend="kurrent")
+
+        assert make_run_event_store(config, extensions=snapshot_a) is store_a
+        assert make_run_event_store(config, extensions=snapshot_b) is store_b
+        with pytest.raises(ValueError, match="Unknown"):
+            make_run_event_store(config, extensions=EMPTY_EXTENSIONS)
+        # Built-ins never consult the snapshot.
+        assert type(make_run_event_store(RunEventsConfig(backend="memory"), extensions=snapshot_a)) is MemoryRunEventStore
 
 
 # -- JSONL-specific tests --

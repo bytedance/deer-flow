@@ -271,7 +271,7 @@ async def test_gateway_runtime_rejects_mode_different_from_frozen_process(
     )
     monkeypatch.setattr(
         "deerflow.runtime.events.store.make_run_event_store",
-        lambda _config: object(),
+        lambda _config, **_kwargs: object(),
     )
     monkeypatch.setattr(
         "deerflow.persistence.thread_meta.make_thread_store",
