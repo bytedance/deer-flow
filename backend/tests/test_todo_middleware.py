@@ -529,6 +529,58 @@ class TestBeforeModelLegacyAndCleared:
         assert _rendered_todo_section(msgs[0].content) == ""
         assert "Old task" not in msgs[0].content
 
+    def test_returns_none_when_last_write_already_cleared_the_plan(self):
+        # willem-bd P3 on #8171 (2026-11-17): the normal
+        # `write_todos(todos=[])` tool call already cleared the plan
+        # itself, so persisting a clear notice after it would claim an
+        # edit that never happened.
+        mw = TodoMiddleware()
+        state = {
+            "messages": [_ai_with_write_todos_args([])],
+            "todos": [],
+        }
+        assert mw.before_model(state, _make_runtime()) is None
+
+    def test_removes_stale_reminder_when_last_write_already_cleared_the_plan(self):
+        # willem-bd P3 on #8171 (2026-11-17): the stale reminder still
+        # goes away, but it is simply removed — the empty write already
+        # tells the model the plan is gone, so no clear notice replaces it.
+        mw = TodoMiddleware()
+        current = _build_todo_reminder(_format_todos(_sample_todos()), edited_after_write=False, message_id="reminder-1")
+        state = {
+            "messages": [_ai_with_write_todos_args([]), current],
+            "todos": [],
+        }
+        result = mw.before_model(state, _make_runtime())
+        assert result is not None
+        assert isinstance(result["messages"][0], RemoveMessage)
+        assert result["messages"][0].id == "reminder-1"
+
+    def test_removes_stale_legacy_reminder_when_last_write_already_cleared_the_plan(self):
+        # Same as above for a pre-stamp reminder.
+        mw = TodoMiddleware()
+        legacy = _legacy_reminder_msg("- [pending] Old task")
+        state = {
+            "messages": [_ai_with_write_todos_args([]), legacy],
+            "todos": [],
+        }
+        result = mw.before_model(state, _make_runtime())
+        assert result is not None
+        assert isinstance(result["messages"][0], RemoveMessage)
+        assert result["messages"][0].id == "legacy-1"
+
+    def test_returns_none_when_last_write_args_unreadable_and_plan_cleared(self):
+        # A malformed last write cannot prove a non-empty plan was
+        # superseded, so the clear notice is skipped like the matching
+        # fast path — never claim a clearing the history does not show.
+        mw = TodoMiddleware()
+        malformed = AIMessage(
+            content="",
+            tool_calls=[{"name": "write_todos", "id": "tc_1", "args": {"todos": "not-a-list"}}],
+        )
+        state = {"messages": [malformed], "todos": []}
+        assert mw.before_model(state, _make_runtime()) is None
+
 
 def _ai_with_write_todos_args(todos: list[dict[str, str]]):
     return AIMessage(

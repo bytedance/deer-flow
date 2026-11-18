@@ -104,6 +104,19 @@ def _last_write_todos(messages: list[Any]) -> list[Mapping[str, Any]] | None:
     return last
 
 
+def _last_write_holds_superseded_plan(messages: list[Any]) -> bool:
+    """Return True when the last visible write_todos call wrote a non-empty list.
+
+    A cleared state only superseded a visible plan when the last call
+    actually wrote one: the normal ``write_todos(todos=[])`` tool call
+    already cleared the plan itself, so no clear notice is needed for it.
+    An unreadable argument degrades to "cannot prove a plan was written"
+    and skips the notice, like the matching-write fast path.
+    """
+    last = _last_write_todos(messages)
+    return last is not None and len(last) > 0
+
+
 def _same_todos(a: Iterable[Mapping[str, Any]], b: Iterable[Mapping[str, Any]]) -> bool:
     """Return True when two todo lists carry the same items in the same order.
 
@@ -412,9 +425,11 @@ class TodoMiddleware(TodoListMiddleware):
         instead of being left in history. A reminder persisted before
         provenance stamps existed is migrated or superseded the same way, and
         an explicitly cleared list removes any persisted reminder that still
-        renders a plan — while the last write is still visible, a stamped
-        clear-state notice takes its place, so the visible plan reflects the
-        saved state.
+        renders a plan — while the last visible write still shows a
+        non-empty plan, a stamped clear-state notice takes its place, so the
+        visible plan reflects the saved state; when the last write already
+        cleared the plan itself (``write_todos(todos=[])``), the reminder is
+        simply removed and no notice is added.
         """
         if not self._todo_capability_enabled:
             # write_todos was denied for this build; context-loss detection only
@@ -426,19 +441,23 @@ class TodoMiddleware(TodoListMiddleware):
             # An explicitly cleared list is a plan replacement too. A
             # persisted reminder still rendering the old list would keep
             # steering the model toward tasks the state no longer holds,
-            # so it is removed — but when the last write_todos call is
-            # still visible, removing the reminder alone leaves the model
-            # staring at the old plan with nothing contradicting it, so a
-            # stamped clear-state notice takes its place instead. A notice
-            # already rendering the current (empty) list is kept; a legacy
-            # one rendering the same empty list is migrated to a stamped
-            # notice, so it stops reading as user text.
+            # so it is removed — but when the last visible write_todos call
+            # still shows a non-empty plan, removing the reminder alone
+            # leaves the model staring at the old plan with nothing
+            # contradicting it, so a stamped clear-state notice takes its
+            # place instead. When the last write already cleared the plan
+            # itself (write_todos(todos=[])), the call already tells the
+            # model the plan is gone: the reminder is simply removed and
+            # no notice is added. A notice already rendering the current
+            # (empty) list is kept; a legacy one rendering the same empty
+            # list is migrated to a stamped notice, so it stops reading as
+            # user text.
             existing = _find_todo_reminder(messages)
             if existing is not None:
                 if existing.id is not None and isinstance(existing.content, str) and _rendered_todo_section(existing.content) == _format_todos(todos):
                     return None
                 if existing.id is not None:
-                    if _todos_in_messages(messages):
+                    if _last_write_holds_superseded_plan(messages):
                         # The stale reminder is removed, but the old plan is
                         # still visible in the last write_todos call: removing
                         # it alone leaves the model with that plan and nothing
@@ -452,11 +471,11 @@ class TodoMiddleware(TodoListMiddleware):
                 if legacy.id is not None and isinstance(legacy.content, str) and _rendered_todo_section(legacy.content) == _format_todos(todos):
                     return {"messages": [_build_todo_cleared_notice(message_id=legacy.id)]}
                 if legacy.id is not None:
-                    if _todos_in_messages(messages):
+                    if _last_write_holds_superseded_plan(messages):
                         return {"messages": [_build_todo_cleared_notice(message_id=legacy.id)]}
                     return {"messages": [RemoveMessage(id=legacy.id)]}
                 return None
-            if _todos_in_messages(messages):
+            if _last_write_holds_superseded_plan(messages):
                 return {"messages": [_build_todo_cleared_notice()]}
             return None
 
