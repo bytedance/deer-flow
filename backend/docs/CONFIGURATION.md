@@ -1315,8 +1315,82 @@ operator handling has not been verified here. Upstream operators are best-effort
 offline mocked tests verify request composition and local filtering, not provider
 retrieval behavior. No paid API calls are needed for the regression suite.
 
+#### DeepSeek Web Search
+
+DeepSeek's `web_search` provider calls the official Chat Completions endpoint
+with the server-side `deepseek_web_search` tool. Set `DEEPSEEK_API_KEY` in the
+Gateway environment and replace the active search provider in `config.yaml`:
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.deepseek.tools:web_search_tool
+    api_key: $DEEPSEEK_API_KEY
+    model: deepseek-flash
+    thinking: false
+    max_results: 5
+    timeout_seconds: 180
+    max_tokens: 8192
+```
+
+Set `thinking: true` to enable DeepSeek's multi-step thinking search. This
+controls the model inside the search tool independently of the main DeerFlow
+model. Boolean strings such as `"false"` are accepted for environment-variable
+configuration. The default model is `deepseek-flash`; use a model that supports
+DeepSeek's server-side web tools. See the official
+[web tools documentation](https://api-docs.deepseek.com/zh-cn/guides/web_tools/).
+
+The tool accepts `query` and `max_results` and returns JSON with `query`,
+`total_results`, `results` (`title`, `url`, `snippet`), `answer`, and `truncated`.
+Source URLs use the shared public-URL policy and are deduplicated. Sources cited
+by the generated answer take priority, with search snippets preserved when
+available. When retained sources have valid citation ranges, each result also
+has a response-local `source_id`, and a top-level `citations` list pairs each
+`excerpt` with its supporting `source_ids`. Resolve those IDs to the returned
+source titles and URLs when citing a claim. For example:
+
+```json
+{"excerpt": "A claim supported by two pages.", "source_ids": [1, 2]}
+```
+
+Each distinct original range is represented once, in answer order, even when
+several sources cite it. Identical text at different ranges remains separate.
+Excerpts stay paired with their sources through tool-result sanitization and
+optional PII redaction. If either boundary falls inside a redacted value, the
+excerpt includes the whole placeholder. Responses without valid retained ranges
+omit `citations` and `source_id`, keeping their usual fields. Long answers or
+distinct long overlapping excerpts still use the normal tool-output budget and
+externalization policy. `max_results` defaults to 5 and is capped at 50.
+A configured value takes precedence over the tool argument. It limits returned
+source links, while DeepSeek controls how many searches it executes and what
+answer it generates.
+
+`timeout_seconds` bounds the request, including server-side search and reasoning.
+`max_tokens` bounds generated output, including thinking. Both accept positive
+numeric values or environment-variable strings. Boolean limits are rejected.
+The API key can also be set directly through the tool's `api_key` field.
+Configured keys take precedence over `DEEPSEEK_API_KEY`.
+
+DeepSeek decides whether to search. A completed response with no usable public
+sources returns `No results found`. Provider failures, malformed payloads,
+timeouts and output-budget exhaustion return structured errors. A partial
+response with usable sources sets `truncated: true` when it reaches its output
+limit. Cancellation waits for HTTP transport cleanup to complete, including when
+the caller is cancelled repeatedly during client teardown. Requests have no
+automatic retries. DeepSeek bills model inference and server-side search/fetch
+calls.
+
+Offline regression tests use HTTPX mock transports. To explicitly run the paid
+API checks for both thinking modes, export `DEEPSEEK_API_KEY` and run from
+`backend/`:
+
+```bash
+DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
+```
+
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
