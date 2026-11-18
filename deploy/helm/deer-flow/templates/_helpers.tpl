@@ -42,18 +42,38 @@ imagePullSecrets:
      When `image.registry` is empty, omit the prefix so the ref is
      `deer-flow-gateway:latest` (local-image mode, imagePullPolicy: Never). */}}
 {{- define "deer-flow.gatewayImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.gatewayImage (.Values.image.gatewayTag | default .Values.image.tag) -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.gatewayImage (.Values.image.gatewayTag | default .Values.image.tag) -}}{{- end -}}
+{{- $tag := include "deer-flow.imageTag" (dict "Values" .Values "key" "gatewayTag") -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.gatewayImage $tag -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.gatewayImage $tag -}}{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.frontendImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendImage (.Values.image.frontendTag | default .Values.image.tag) -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.frontendImage (.Values.image.frontendTag | default .Values.image.tag) -}}{{- end -}}
+{{- $tag := include "deer-flow.imageTag" (dict "Values" .Values "key" "frontendTag") -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendImage $tag -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.frontendImage $tag -}}{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.provisionerImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.provisionerImage (.Values.image.provisionerTag | default .Values.image.tag) -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.provisionerImage (.Values.image.provisionerTag | default .Values.image.tag) -}}{{- end -}}
+{{- $tag := include "deer-flow.imageTag" (dict "Values" .Values "key" "provisionerTag") -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.provisionerImage $tag -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.provisionerImage $tag -}}{{- end -}}
+{{- end -}}
+
+{{/* Tag of one DeerFlow image: `image.<key>` when it is a non-empty string,
+     otherwise `image.tag`. Takes a dict with `Values` and `key` (gatewayTag,
+     frontendTag or provisionerTag). A tag that is not a string fails the
+     render: `--set image.gatewayTag=20261118` arrives as an integer, which
+     printf renders as `%!s(int64=20261118)`, and `default` would silently
+     replace an integer 0 with `image.tag`. A json.Number (Helm 3.18.0 loads
+     YAML numbers that way) is kind "string" and renders as written. */}}
+{{- define "deer-flow.imageTag" -}}
+{{- $value := get .Values.image .key -}}
+{{- if kindIs "invalid" $value -}}{{- .Values.image.tag -}}
+{{- else if not (kindIs "string" $value) -}}
+{{- fail (printf "image.%s must be a string (got %s %v); quote it in YAML or set it with --set-string image.%s=..." .key (kindOf $value) $value .key) -}}
+{{- else if eq (toString $value) "" -}}{{- .Values.image.tag -}}
+{{- else -}}{{- toString $value -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.nginxImage" -}}

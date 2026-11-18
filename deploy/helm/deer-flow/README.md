@@ -62,6 +62,9 @@ pull secret (step 1) and reference it via `image.pullSecrets`.
 `image.gatewayTag`, `image.frontendTag` and `image.provisionerTag` override
 `image.tag` for one image, e.g. a backend you rebuild on top of a release
 (`v2.2.0-custom.1`) while the frontend stays on the published `v2.2.0`.
+They must be strings: `--set image.gatewayTag=20261118` passes an integer and
+fails the render, so quote a numeric tag in YAML (`gatewayTag: "20261118"`) or
+use `--set-string image.gatewayTag=20261118`.
 
 ## 1. Build & push images (custom builds only)
 
