@@ -78,7 +78,7 @@ the text before its first dash.
 
 | Stream | Category | Holds |
 | --- | --- | --- |
-| `deerflow.memory-global`, `deerflow.memory-user.{user}` | `deerflow.memory` | Memory per scope: `deerflow.memory.FactUpserted`, `FactDeleted`, `SummariesUpdated`, `MemoryCleared`, `MemoryImported`, `MemorySnapshot` |
+| `deerflow.memory-global`, `deerflow.memory-user.{user}` | `deerflow.memory` | Memory per scope: `deerflow.memory.SummariesUpdated`, `FactUpserted`, `MemorySnapshot` (a deletion writes only a snapshot) |
 | `deerflow.memory-meta-global`, `deerflow.memory-meta-user.{user}` | `deerflow.memory` | Memory sidecar: fact usage, capacity evictions, extraction watermarks |
 | `deerflow.run-events-{thread}` | `deerflow.run` | Run events (`deerflow.run-events.RunEvent`) and deletion boundaries (`RunsCompacted`, `ThreadCleared`) |
 | `deerflow.kurrent-deletions` | `deerflow.kurrent` | Deletion intents and their progress |
@@ -102,12 +102,19 @@ truncate-before (`$tb`) to that boundary. Every step is recorded in
 `deerflow.kurrent-deletions`, so another process or the next Gateway start
 finishes a deletion that a crash interrupted.
 
-- **Primary streams: immediate.** Once the call returns, DeerFlow no longer
-  serves the deleted content, and neither do readers of the named streams or
-  their categories. When a crash interrupts a deletion after its boundary is
-  written, DeerFlow still never serves the deleted content, but raw reads of the
-  stream keep returning it until recovery raises `$tb`: on the next deletion of
-  that stream, at Gateway startup, or in the recovery service's next pass
+- **Primary streams: immediate for DeerFlow.** Once the call returns, DeerFlow
+  no longer serves the deleted content. Readers of the named streams or their
+  categories stop seeing it once `$tb` is raised, which normally happens before
+  the call returns. Raw reads keep returning deleted content after the call
+  returns when a crash or a failing step (for example a failed `$tb` write)
+  interrupts the deletion, or when an earlier deletion of the same stream is
+  still unfinished, for example during a sidecar-stream outage, because `$tb`
+  is raised in deletion order. Recovery raises it on the next deletion of that
+  stream, at Gateway startup, or in the recovery service's next pass
+- **Editing a fact keeps its old text in the stream.** Earlier revisions stay
+  readable in the memory stream, and in canonical `FactRetained` events, until
+  a deletion of that scope truncates them. Use a deletion, not an edit, to
+  remove content
 - **Canonical streams: eventual.** A cleanup rewrites the canonical stream with
   the surviving events and truncates it, or deletes it when nothing survives.
   A deletion is complete for canonical readers once
@@ -136,13 +143,17 @@ finishes a deletion that a crash interrupted.
   unknown (for example a lost acknowledgement) is settled by appending a fence
   at the same position, never by a read alone. A concurrent memory write
   surfaces as DeerMem's revision conflict, as with the file storage
-- **Several processes share memory safely**: every `load()` checks the stream
-  head and folds only new events
+- **Several processes share memory safely**: every `load()` and `reload()`
+  checks the stream head and folds only new events. The recovery service owns
+  its own storage instances, so a recovery pass that fences an in-flight
+  deletion surfaces in the Gateway as a revision conflict
 - **Read failures** (KurrentDB unreachable, a timeout) raise
   `KurrentdbMemoryReadError`, a `MemoryReadError`, and the Gateway answers a
-  plain 500, as it does for other remote memory backends. A memory write whose
-  outcome stays unknown because the fence also failed raises the same error;
-  reload before retrying
+  plain 500, as it does for other remote memory backends. A memory read waits
+  at most one timeout for a write to the same scope to finish, then raises the
+  same error, so a read takes at most about twice the timeout. A memory write
+  whose outcome stays unknown because the fence also failed raises the same
+  error; reload before retrying
 - **Undecodable or unexpected stored data is corruption**, not an empty
   answer: memory raises `MemoryStorageCorruption` (the Gateway answers 500,
   `Stored memory data is corrupted.`), run-event reads raise
@@ -180,10 +191,32 @@ after the primary commit; a failure is logged and never fails a turn.
 
 - Each memory `load()` reads the stream head; each write also reads the
   deletions index and the head before appending
-- Every memory deletion writes a snapshot of the scope's full resulting state
+- Every memory deletion writes a snapshot of the scope's full resulting state.
+  DeerMem deletes facts on most extraction turns once a user reaches
+  `max_facts`, so deletions are frequent
+- **The deletions index grows without bound.** Every deletion appends an
+  intent and its completion, plus `CanonicalCleanupDone` and
+  `CanonicalCleanupVerified` even with canonical events off. Nothing compacts
+  it: each process reads it from the start on first use and keeps every
+  intent in memory
+- **Canonical memory cleanup rewrites the user's canonical history** on each
+  fact deletion: every surviving `FactRetained`, including earlier revisions,
+  is copied in one append. A very large history can exceed `MaxAppendSize`;
+  that cleanup then fails on every pass and the deletion never verifies, so
+  the deleted fact stays readable in the canonical stream
 - `delete_by_run` copies every surviving event of the thread in one append. On
   a very long thread that append can exceed the server's maximum append size
   (`MaxAppendSize`), and the deletion fails
+- Recording a run's terminal event reads the thread back to its newest
+  deletion boundary
+- The memory storage caches each user scope it has seen for the life of the
+  process
+- Stream names have no deployment prefix: use one KurrentDB per DeerFlow
+  deployment
+- While KurrentDB is unreachable, Gateway startup waits up to one timeout for
+  each of memory and run-event recovery. A `kurrentdb+discover://` connection
+  string runs gossip discovery when the client is created, which
+  `KURRENTDB_TIMEOUT_SECONDS` does not bound
 - Fact search uses DeerMem's substring fallback over `load()`
 - Run-event values that are not JSON are stored as their string form
 
