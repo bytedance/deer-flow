@@ -72,6 +72,21 @@ async def test_handle_rechecks_user_and_shutdown_before_dispatch(host, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_handle_rechecks_current_account_disablement(host, monkeypatch):
+    control, request, load_user = host
+    runs = control.bind(request)
+    handler = AsyncMock(return_value=SimpleNamespace(thread_id="thread-a"))
+    monkeypatch.setattr("app.gateway.routers.threads.create_thread", handler)
+    assert await runs.create_thread() == "thread-a"
+    # Disabling the account leaves token_version unchanged, so the per-operation
+    # guard must observe the current disabled state, not only the mint-time one.
+    load_user.return_value = request.state.user.model_copy(update={"disabled": True})
+    with pytest.raises(AgentRunError, match="revoked"):
+        await runs.create_thread()
+    assert handler.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_permissions_are_intersected_with_original_grant_and_current_policy(host, monkeypatch):
     control, request, _ = host
     request.state.auth.permissions = ["runs:read"]
@@ -667,3 +682,97 @@ async def test_configuration_revision_canonicalizes_sets_but_preserves_list_orde
     assert before == await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)
     data["tools"].reverse()
     assert before != await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+
+
+@pytest.mark.asyncio
+async def test_capture_authority_snapshots_the_session_ceiling(host, monkeypatch):
+    control, request, _ = host
+    runs = control.bind(request)
+    handler = AsyncMock(return_value=SimpleNamespace(thread_id="thread-a"))
+    monkeypatch.setattr("app.gateway.routers.threads.create_thread", handler)
+    assert await runs.create_thread() == "thread-a"
+    captured = runs.capture_authority()
+    assert captured == {
+        "token_version": request.state.user.token_version,
+        "source": "session",
+        "permissions": sorted(request.state.auth.permissions),
+    }
+
+
+@pytest.mark.asyncio
+async def test_restore_delegated_authority_enforces_validator_per_operation(host, monkeypatch):
+    control, request, load_user = host
+    handler = AsyncMock(return_value=SimpleNamespace(thread_id="thread-a"))
+    monkeypatch.setattr("app.gateway.routers.threads.create_thread", handler)
+    calls = []
+
+    async def validator():
+        calls.append(1)
+        if len(calls) > 1:
+            raise PermissionError("grant revoked by the owner")
+
+    runs = await control.restore_delegated_authority(
+        user_id=str(request.state.user.id),
+        grant={"token_version": request.state.user.token_version, "source": "session", "permissions": ["threads:write"]},
+        validator=validator,
+        plugin_namespace="workflows",
+    )
+    assert await runs.create_thread() == "thread-a"
+    with pytest.raises(AgentRunError, match="Delegated authorization revoked"):
+        await runs.create_thread()
+    assert handler.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_restore_delegated_authority_maps_validator_errors_to_403(host, monkeypatch):
+    control, request, _ = host
+    handler = AsyncMock(return_value=SimpleNamespace(thread_id="thread-a"))
+    monkeypatch.setattr("app.gateway.routers.threads.create_thread", handler)
+
+    async def validator():
+        raise AgentRunError(403, "Workflow recovery grant expired or revoked")
+
+    runs = await control.restore_delegated_authority(
+        user_id=str(request.state.user.id),
+        grant={"token_version": request.state.user.token_version, "source": "session", "permissions": ["threads:write"]},
+        validator=validator,
+    )
+    with pytest.raises(AgentRunError, match="grant expired or revoked"):
+        await runs.create_thread()
+    assert handler.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_restore_delegated_authority_rejects_stale_grants(host):
+    control, request, load_user = host
+    user = request.state.user
+    load_user.return_value = user.model_copy(update={"token_version": user.token_version + 1})
+    with pytest.raises(AgentRunError, match="Delegated authorization revoked"):
+        await control.restore_delegated_authority(
+            user_id=str(user.id),
+            grant={"token_version": user.token_version, "source": "session", "permissions": ["threads:write"]},
+        )
+    with pytest.raises(AgentRunError, match="Invalid delegated authority"):
+        await control.restore_delegated_authority(
+            user_id=str(user.id),
+            grant={"token_version": user.token_version, "source": "pat", "permissions": ["threads:write"]},
+        )
+    with pytest.raises(AgentRunError, match="Invalid delegated authority"):
+        await control.restore_delegated_authority(
+            user_id=str(user.id),
+            grant={"token_version": user.token_version, "source": "session", "permissions": [1]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_restored_delegated_handle_is_plugin_scoped_with_extension_origin(host):
+    control, request, _ = host
+    runs = await control.restore_delegated_authority(
+        user_id=str(request.state.user.id),
+        grant={"token_version": request.state.user.token_version, "source": "session", "permissions": ["threads:write"]},
+        plugin_namespace="workflows",
+    )
+    assert runs.for_plugin("workflows") is runs
+    assert runs._origin == {"kind": "extension", "namespace": "workflows"}
+    with pytest.raises(AgentRunError, match="already bound"):
+        runs.for_plugin("other")

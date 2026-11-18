@@ -53,6 +53,30 @@ logger = logging.getLogger(__name__)
 # timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 
+# Upper bound (seconds) a delegated-restore call may wait for the AgentRuns
+# host to be installed during Gateway startup. Startup normally signals within
+# its first seconds; the bound only fails a stuck startup instead of leaving
+# unattended recovery hanging, and per-record failures keep manual recovery.
+_EXTENSION_RESTORE_READY_TIMEOUT_SECONDS = 60.0
+
+
+async def _agent_runs_host_after_install(app, installed: asyncio.Event):
+    """Resolve the AgentRuns host once startup has installed it.
+
+    Extension services start before the run-admission stack (thread store, run
+    manager, AgentRuns host) exists, and unattended restoration can run during
+    that window, so wait for the explicit installation signal instead of
+    failing the whole recovery scan.
+    """
+    try:
+        await asyncio.wait_for(installed.wait(), _EXTENSION_RESTORE_READY_TIMEOUT_SECONDS)
+    except TimeoutError:
+        pass
+    host = getattr(app.state, "agent_runs_host", None)
+    if host is None:
+        raise RuntimeError("Agent run host unavailable")
+    return host
+
 
 def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
     """Return whether process-local agentic browser sessions are configured."""
@@ -1020,6 +1044,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Register cleanup before starting: start() can partially acquire
         # resources and then fail or be cancelled.
         stack.push_async_callback(stop_extension_services)
+
+        agent_runs_host_installed = asyncio.Event()
+
+        async def restore_agent_runs_authority(*, user_id: str, grant: dict, validator=None, plugin_namespace: str | None = None):
+            host = await _agent_runs_host_after_install(app, agent_runs_host_installed)
+            return await host.restore_delegated_authority(user_id=user_id, grant=grant, validator=validator, plugin_namespace=plugin_namespace)
+
         record_runtime_diagnostics(
             await start_services(
                 extensions,
@@ -1028,6 +1059,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 run_evidence_reader=app.state.run_evidence_reader,
                 host_capabilities=host_capabilities.bindings,
                 attempted_services=attempted_services,
+                agent_runs_restore=restore_agent_runs_authority,
             )
         )
 
@@ -1125,6 +1157,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.agent_runs_host = GatewayAgentRunsHost(app, load_user=SQLiteUserRepository(sf).get_user_by_id if sf is not None else None)
         stack.callback(app.state.agent_runs_host.close)
+        # Extension unattended recovery waits on this before restoring grants;
+        # past it, the whole run-admission stack above is ready.
+        agent_runs_host_installed.set()
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
