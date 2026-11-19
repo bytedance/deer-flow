@@ -238,7 +238,7 @@ async def acapture(*args) -> dict:
         raise
 
 
-def _exact_source_rows(db: sqlite3.Connection, batches: list[str], placeholders: str, source_id: str):
+def _exact_source_row(db: sqlite3.Connection, batches: list[str], placeholders: str, source_id: str) -> tuple[str] | None:
     if _has_source_lookup(db) and _source_lookup_current(db):
         # Match the FTS row identity too: SQLite can reuse rowids after deletion.
         row = db.execute(
@@ -248,10 +248,10 @@ def _exact_source_rows(db: sqlite3.Connection, batches: list[str], placeholders:
             [*batches, source_id],
         ).fetchone()
         if row is None:
-            return ()
+            return None
         if row[0] is not None:
-            return (row,)
-    return db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
+            return row
+    return db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id]).fetchone()
 
 
 def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False) -> dict:
@@ -278,7 +278,8 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 if present != len(batches) and status != "unavailable":
                     status = "partially_expired"
                 if source_id:
-                    rows = _exact_source_rows(db, batches, placeholders, source_id)
+                    exact_row = _exact_source_row(db, batches, placeholders, source_id)
+                    rows = (exact_row,) if exact_row is not None else ()
                 else:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""

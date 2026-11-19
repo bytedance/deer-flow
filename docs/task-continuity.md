@@ -132,8 +132,15 @@ Exact source-ID reads use an auxiliary SQLite index to locate original archive
 rows. Older archives and batches added by an older DeerFlow process stay readable
 by scanning until capture builds the index for retained rows. Capture and
 eviction maintain the index in the same write transaction. The index counts
-toward the archive's page ceiling. If SQLite runs out of space, capture retries
-with the original scan-based layout.
+toward the archive's page ceiling. If SQLite runs out of space, writers with
+the index retry using the original scan-based layout.
+
+During a downgrade or mixed-version rollout, older writers invalidate index
+coverage when they add a batch, but the index still occupies pages. Those
+writers can hit `SQLITE_FULL` even when the batch would fit without the index.
+They report history as `unavailable` for that capture. Ordinary compaction
+continues, and that batch is unavailable through task-history recall. The
+failed transaction rolls back and preserves previously archived batches.
 
 Checkpoint state holds batch references and the user/thread scope binding.
 Every history reader validates this metadata, including source lookup, capture

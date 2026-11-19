@@ -236,6 +236,51 @@ def test_legacy_writer_invalidates_index_until_next_capture(scoped):
         assert not db.execute("SELECT 1 FROM source_lookup WHERE batch=?", (first["batches"][0],)).fetchone()
 
 
+def test_legacy_writer_at_page_ceiling_can_write_after_dropping_optional_index(scoped):
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    config = TaskContinuityConfig(enabled=True)
+    current = HumanMessage(content="indexed checkpoint", id="current")
+    legacy = HumanMessage(content="legacy padding " * 1000, id="legacy")
+    history = archive.capture({}, scoped, [current], config)
+    current_source, legacy_source = archive.records([current, legacy])
+    path, owner = archive.scope(scoped)
+    legacy_batch = archive.digest([owner, [legacy_source]])
+
+    def legacy_insert(db: sqlite3.Connection) -> None:
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO batches VALUES (?, ?)", (legacy_batch, 2))
+            db.execute("INSERT INTO sources VALUES (?, ?, ?, ?)", (legacy_batch, legacy_source["id"], json.dumps(legacy_source, ensure_ascii=False), archive.index_text(legacy_source["text"])))
+
+    with closing(sqlite3.connect(path)) as db, closing(sqlite3.connect(":memory:")) as probe:
+        # Derive the bound from the same write on this SQLite build's page layout.
+        db.backup(probe)
+        legacy_insert(probe)
+        page_limit = probe.execute("PRAGMA page_count").fetchone()[0] - 1
+        assert db.execute(f"PRAGMA max_page_count={page_limit}").fetchone()[0] == page_limit
+
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            legacy_insert(db)
+        assert raised.value.sqlite_errorcode == sqlite3.SQLITE_FULL
+        assert db.execute("SELECT id FROM batches").fetchall() == [(history["batches"][0],)]
+        assert db.execute("SELECT id FROM sources").fetchall() == [(current_source["id"],)]
+
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DROP TRIGGER source_lookup_invalidate")
+            db.execute("DROP TRIGGER source_lookup_evict")
+            db.execute("DROP TABLE source_lookup")
+        legacy_insert(db)
+        assert db.execute("PRAGMA page_count").fetchone()[0] <= page_limit
+
+    scoped.state = {"task_history": {**history, "batches": [*history["batches"], legacy_batch]}}
+    assert json.loads(history_read.func(scoped, current_source["id"]))["text"] == current.content
+    assert json.loads(history_read.func(scoped, legacy_source["id"]))["text"] == legacy_source["text"][:4000]
+
+
 def test_archive_at_page_ceiling_can_capture_without_optional_index(scoped, monkeypatch):
     import json
     import sqlite3
