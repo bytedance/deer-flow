@@ -158,7 +158,9 @@ def _tool_failed(content: Any) -> bool:
     if content.get("is_error") is True or content.get("error") is True:
         return True
     text = _content_text(content).lstrip()
-    return text.startswith(("Error:", "Error "))
+    # A bare "Error " prefix is prose ("Error handling in this tool ..."),
+    # not a marker; only the structured fields above and "Error:" signal it.
+    return text.startswith("Error:")
 
 
 def _delivery_summary(content: Any) -> DeliverySummary:
@@ -214,8 +216,13 @@ def _summary(event: CompletedRunEvent, content: Any) -> str:
     return _text(_content_text(content) or event.content_json)
 
 
-def build_postmortem(snapshot: CompletedRunSnapshot, events: list[CompletedRunEvent] | tuple[CompletedRunEvent, ...]) -> Postmortem:
-    """Derive the bounded report from a snapshot and the events read for it."""
+def build_postmortem(snapshot: CompletedRunSnapshot, events: list[CompletedRunEvent] | tuple[CompletedRunEvent, ...], *, max_events: int | None = None) -> Postmortem:
+    """Derive the bounded report from a snapshot and the events read for it.
+
+    ``max_events`` is the caller's read bound (``None`` when unbounded), so a
+    short read caused by that bound is reported as ``evidence_bounded`` rather
+    than as retention or sealing damage.
+    """
     counts_by_category: dict[str, int] = {}
     counts_by_type: dict[str, int] = {}
     message_counts = {"user": 0, "assistant": 0, "tool_results": 0}
@@ -279,14 +286,21 @@ def build_postmortem(snapshot: CompletedRunSnapshot, events: list[CompletedRunEv
         anomalies.append(Anomaly("stopped_early", f"stop_reason={snapshot.stop_reason}"))
     if subagents_started > subagents_ended:
         anomalies.append(Anomaly("subagent_unfinished", f"{subagents_started} started, {subagents_ended} ended; background completion may be outside this evidence"))
-    if len(events) < snapshot.event_count or any(entry.truncated for entry in timeline):
-        anomalies.append(Anomaly("evidence_truncated", f"read {len(events)} of {snapshot.event_count} retained event(s); some payloads are truncated"))
+    if any(entry.truncated for entry in timeline):
+        anomalies.append(Anomaly("evidence_truncated", "some event payloads were truncated by the evidence reader"))
+    if len(events) < snapshot.event_count:
+        if max_events is not None and len(events) >= max_events:
+            anomalies.append(Anomaly("evidence_bounded", f"read {len(events)} of {snapshot.event_count} retained event(s); bounded by max_events={max_events}"))
+        else:
+            anomalies.append(Anomaly("evidence_incomplete", f"read {len(events)} of {snapshot.event_count} retained event(s); the remainder is not available in this snapshot"))
 
     caveats = list(snapshot.coverage_limits)
     if snapshot.expires_at:
         caveats.append(f"Evidence expires at {snapshot.expires_at}.")
     if not events:
         caveats.append("No run events were retained for this snapshot.")
+    if max_events is not None and len(events) >= max_events and len(events) < snapshot.event_count:
+        caveats.append(f"Report bounded by max_events={max_events}; raise the bound for a longer timeline.")
 
     return Postmortem(
         thread_id=snapshot.thread_id,

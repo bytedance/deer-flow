@@ -69,17 +69,13 @@ class PostmortemService:
     def ready(self) -> bool:
         return self._evidence is not None
 
-    async def snapshot(self, *, thread_id: str, run_id: str, max_events: int = DEFAULT_MAX_EVENTS) -> CompletedRunSnapshot:
-        evidence = self._require_evidence()
-        return await evidence.get_snapshot(thread_id=thread_id, run_id=run_id, limits=EvidenceLimits(max_events=max_events))
-
     async def postmortem(self, *, thread_id: str, run_id: str, max_events: int = DEFAULT_MAX_EVENTS) -> Postmortem:
         if not isinstance(max_events, int) or not 1 <= max_events <= MAX_EVENTS:
             raise PostmortemError("BAD_REQUEST", f"max_events must be an integer between 1 and {MAX_EVENTS}")
         evidence = self._require_evidence()
         limits = EvidenceLimits(max_events=max_events)
         snapshot = await evidence.get_snapshot(thread_id=thread_id, run_id=run_id, limits=limits)
-        return build_postmortem(snapshot, await self._read_events(evidence, snapshot, limits))
+        return build_postmortem(snapshot, await self._read_events(evidence, snapshot, limits), max_events=max_events)
 
     async def _read_events(self, evidence: CompletedRunEvidenceReader, snapshot: CompletedRunSnapshot, limits: EvidenceLimits) -> list[CompletedRunEvent]:
         """Follow the event cursor until the snapshot ends or the cap is met."""

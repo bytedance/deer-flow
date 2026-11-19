@@ -7,7 +7,7 @@ import json
 
 from deerflow_extension_api import CompletedRunEvent, CompletedRunEventPage, CompletedRunSnapshot, EvidenceLimits, ExtensionPrincipal, ExtensionRuntimeDeps, HostCapabilityError
 from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY
-from deerflow_extension_api.run_evidence import RunPage
+from deerflow_extension_api.run_evidence import RUN_EVIDENCE_READER_RESOLVER_KEY, RunPage, RunStatusView
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -22,11 +22,13 @@ class FakeEvidence:
     def __init__(self, *, owner: str = "alice", missing: bool = False) -> None:
         self.owner = owner
         self.missing = missing
+        self.snapshot_calls = 0
 
     async def list_changed_runs(self, *, cursor: str | None = None, limit: int = 200) -> RunPage:
         return RunPage(items=())
 
     async def get_snapshot(self, *, thread_id: str, run_id: str, limits: EvidenceLimits = EvidenceLimits()) -> CompletedRunSnapshot:
+        self.snapshot_calls += 1
         if self.missing:
             raise HostCapabilityError("NOT_FOUND", "run is unavailable in this scope")
         return CompletedRunSnapshot(snapshot_ref="snap", evidence_revision="rev", thread_id=thread_id, run_id=run_id, owner_id=self.owner, agent_id="lead_agent", origin="interactive", status="error", seal_state="sealed", event_count=2)
@@ -99,3 +101,43 @@ def test_out_of_range_max_events_is_rejected():
     response = client_for(FakeEvidence()).get("/api/extension-run-postmortem/runs/t1/r1?max_events=0")
 
     assert response.status_code == 422
+
+
+class _InvisibleRunReader:
+    """A request-scoped reader for which the anchor run does not exist."""
+
+    async def get_run_status(self, *, thread_id: str, run_id: str):
+        return None
+
+
+class _VisibleRunReader:
+    """A request-scoped reader that confirms the anchor run is visible."""
+
+    async def get_run_status(self, *, thread_id: str, run_id: str):
+        return RunStatusView(thread_id=thread_id, run_id=run_id, status="success")
+
+
+def install_visibility_reader(client: TestClient, reader) -> None:
+    setattr(client.app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, lambda request: reader)
+
+
+def test_an_invisible_run_is_refused_before_any_evidence_is_read():
+    evidence = FakeEvidence()
+    client = client_for(evidence)
+    install_visibility_reader(client, _InvisibleRunReader())
+
+    response = client.get("/api/extension-run-postmortem/runs/t1/r1")
+
+    assert response.status_code == 404
+    assert evidence.snapshot_calls == 0
+
+
+def test_a_visible_run_proceeds_through_the_reader_branch():
+    evidence = FakeEvidence()
+    client = client_for(evidence)
+    install_visibility_reader(client, _VisibleRunReader())
+
+    response = client.get("/api/extension-run-postmortem/runs/t1/r1")
+
+    assert response.status_code == 200
+    assert evidence.snapshot_calls == 1

@@ -32,7 +32,10 @@ GET /api/extension-run-postmortem/runs/{thread_id}/{run_id}/markdown
 
 Anomaly codes: `evidence_partial` (seal not complete), `run_failed`,
 `run_or_model_errors`, `guardrail_triggered`, `delivery_incomplete`,
-`tool_failures`, `stopped_early`, `subagent_unfinished`, `evidence_truncated`.
+`tool_failures`, `stopped_early`, `subagent_unfinished`, plus three distinct
+read-bound signals: `evidence_bounded` (the caller's `max_events` cut the read),
+`evidence_incomplete` (the snapshot retains more events than it returned), and
+`evidence_truncated` (the host truncated event payloads).
 
 The Markdown route renders the same data as a document that can be attached to
 an incident ticket. Query `max_events` (1–2000, default 200) bounds the work.

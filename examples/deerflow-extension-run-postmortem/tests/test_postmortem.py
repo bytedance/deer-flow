@@ -72,7 +72,7 @@ def test_error_run_surfaces_every_failure_signal():
         "delivery_incomplete",
         "tool_failures",
         "stopped_early",
-        "evidence_truncated",
+        "evidence_incomplete",
     } <= codes
     assert postmortem.timeline[1].summary == "assistant → present_files"
     assert postmortem.tool_failures == 1
@@ -119,3 +119,33 @@ def test_unparsable_event_content_falls_back_to_the_raw_string():
     postmortem = build_postmortem(snapshot(event_count=1), [raw])
 
     assert postmortem.timeline[0].summary == "{not json"
+
+
+def test_bounded_read_is_reported_as_the_caller_bound_not_as_damage():
+    events = [event(1, "run.start", "trace", {}), event(2, "run.end", "outputs", {"status": "success"})]
+    postmortem = build_postmortem(snapshot(event_count=512), events, max_events=2)
+
+    codes = {anomaly.code for anomaly in postmortem.anomalies}
+    assert "evidence_bounded" in codes
+    assert "evidence_incomplete" not in codes
+    assert "evidence_truncated" not in codes
+    assert any("bounded by max_events=2" in anomaly.detail for anomaly in postmortem.anomalies)
+    assert any("max_events=2" in caveat for caveat in postmortem.caveats)
+
+
+def test_truncated_payloads_are_reported_on_their_own():
+    truncated = CompletedRunEvent(event_id="e1", seq=1, event_type="llm.ai.response", category="message", content_json='{"content": "x"}', content_bytes=1, content_sha256="", truncated=True)
+    postmortem = build_postmortem(snapshot(event_count=1), [truncated])
+
+    assert {anomaly.code for anomaly in postmortem.anomalies} == {"evidence_truncated"}
+
+
+def test_prose_starting_with_error_is_not_a_tool_failure():
+    prose = event(1, "llm.tool.result", "message", {"name": "read_file", "content": "Error handling in this tool is documented here."})
+    marker = event(2, "llm.tool.result", "message", {"name": "read_file", "content": "Error: file not found"})
+
+    prose_only = build_postmortem(snapshot(event_count=1), [prose])
+    marker_only = build_postmortem(snapshot(event_count=1), [marker])
+
+    assert prose_only.tool_failures == 0
+    assert marker_only.tool_failures == 1
