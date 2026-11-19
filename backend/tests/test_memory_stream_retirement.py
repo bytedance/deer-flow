@@ -444,3 +444,49 @@ async def test_publish_queued_before_close_is_rejected_after_admission_closes():
     assert not bridge._closing
     assert stream.events == []
     assert not await bridge.stream_exists(run_id)
+
+
+@pytest.mark.asyncio
+async def test_overlapping_close_keeps_admission_fenced_until_every_drain_exits(monkeypatch):
+    bridge = MemoryStreamBridge()
+    run_id = "overlapping-close"
+    await bridge.publish(run_id, "before", {})
+    condition = bridge._streams[run_id].condition
+    real_acquire = condition.acquire
+    first_waiting = asyncio.Event()
+    second_waiting = asyncio.Event()
+    close_tasks = []
+
+    async def observe_acquire():
+        current = asyncio.current_task()
+        if current is close_tasks[0]:
+            first_waiting.set()
+        elif current is close_tasks[1]:
+            second_waiting.set()
+        return await real_acquire()
+
+    try:
+        async with condition:
+            monkeypatch.setattr(condition, "acquire", observe_acquire)
+            close_tasks.append(asyncio.create_task(bridge.close()))
+            await asyncio.wait_for(first_waiting.wait(), 1)
+            close_tasks.append(asyncio.create_task(bridge.close()))
+            await asyncio.wait_for(second_waiting.wait(), 1)
+
+            close_tasks[1].cancel()
+            await asyncio.gather(close_tasks[1], return_exceptions=True)
+            assert bridge._closing
+
+            with pytest.raises(RuntimeError, match="closing"):
+                await bridge.publish("new-run-during-drain", "late", {})
+
+        await asyncio.wait_for(close_tasks[0], 1)
+        assert not bridge._closing
+        await bridge.publish("new-run-after-drain", "fresh", {})
+        assert await bridge.stream_exists("new-run-after-drain")
+    finally:
+        for task in close_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*close_tasks, return_exceptions=True)
+        await bridge.close()
