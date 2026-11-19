@@ -1,6 +1,7 @@
 """Integration tests for ``main`` dispatch (headless paths), with a fake session."""
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -188,9 +189,11 @@ class _BrokenStdout:
 
 def test_main_print_broken_pipe_exits_without_traceback(monkeypatch):
     monkeypatch.setattr(cli, "_make_session", _FakeSession)
-    monkeypatch.setattr(cli.sys, "stdout", _BrokenStdout())
-    rc = cli.main(["--print", "hello"])
-    assert rc == 1
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    with os.fdopen(write_fd, "w", encoding="utf-8") as stdout:
+        monkeypatch.setattr(cli.sys, "stdout", stdout)
+        assert cli.main(["--print", "hello"]) == 1
 
 
 def test_main_json_broken_pipe_error_record_fails_silently(monkeypatch):
