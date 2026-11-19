@@ -1,9 +1,7 @@
 """Tests for LoopDetectionMiddleware."""
 
-import asyncio
 import copy
-import random
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,35 +9,19 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain.agents import create_agent
-from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import tool as as_tool
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import Command
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares import loop_detection_middleware as loop_detection_module
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
     _MAX_PENDING_WARNINGS_PER_RUN,
-    LOOP_CAP_STATE_KEY,
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
-from deerflow.agents.middlewares.run_input_middleware import RunInputAdmissionMiddleware, RunInputMiddleware
-from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
-from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
-from deerflow.agents.thread_state import ThreadState
-from deerflow.approvals.middleware import ToolApprovalMiddleware
-from deerflow.config.app_config import AppConfig
-from deerflow.config.hitl_approval_config import HitlApprovalConfig
-from deerflow.config.token_budget_config import TokenBudgetConfig
-from deerflow.runtime.runs.input_control import RunInputControl
-from deerflow.runtime.runs.inputs import INPUT_CONTEXT_KEY, RunInputs
-from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 def _make_runtime(thread_id="test-thread", run_id="test-run"):
@@ -114,19 +96,15 @@ class _CapturingFakeMessagesListChatModel(FakeMessagesListChatModel):
         )
 
 
-def _make_state(tool_calls=None, content="", loop_cap=None):
+def _make_state(tool_calls=None, content=""):
     """Build a minimal AgentState dict with an AIMessage.
 
     Deep-copies *content* when it is mutable (e.g. list) so that
-    successive calls never share the same object reference. ``loop_cap`` is the
-    checkpointed cap record a real graph would carry between hooks.
+    successive calls never share the same object reference.
     """
     safe_content = copy.deepcopy(content) if isinstance(content, list) else content
     msg = AIMessage(content=safe_content, tool_calls=tool_calls or [])
-    state = {"messages": [msg]}
-    if loop_cap is not None:
-        state[LOOP_CAP_STATE_KEY] = loop_cap
-    return state
+    return {"messages": [msg]}
 
 
 def _bash_call(cmd="ls"):
@@ -739,20 +717,6 @@ class TestLoopDetection:
 
         assert mw.consume_stop_reason("test-run") is None
 
-    def test_tool_frequency_hard_stop_stamps_loop_capped(self):
-        """The per-tool frequency hard-stop also stamps ``loop_capped`` — it is
-        the same hard-stop path, just a different detector catching the same
-        tool *type* called many times with varying arguments."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        # Same tool type, varying args -> frequency detector, not hash detector.
-        for i in range(3):
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            if i < 2:
-                assert result is None, f"unexpected hard stop at call {i}"
-
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
-
     def test_hard_stop_stamps_loop_capped_with_explicit_none_run_id(self):
         """Regression: a subagent whose ``run_id`` is genuinely ``None`` must
         still round-trip its ``loop_capped`` stop reason.
@@ -893,7 +857,7 @@ class TestLoopDetection:
             mw._apply(_make_state(tool_calls=call), runtime)
 
         assert len(mw._history[_scope_key()]) <= 4
-        assert set(mw._warned[_scope_key()]).issubset(set(mw._history[_scope_key()]))
+        assert set(mw._warned[_scope_key()]).issubset({entry.key for entry in mw._history[_scope_key()]})
         assert len(mw._warned[_scope_key()]) <= 4
 
     def test_pending_warning_keys_are_capped(self):
@@ -1025,24 +989,6 @@ class TestRunScopedTracking:
         assert len(mw._warned[_scope_key("shared-thread", "run-1")]) == 1
         assert len(mw._warned[_scope_key("shared-thread", "run-2")]) == 1
 
-    def test_tool_frequency_warning_suppression_is_run_scoped(self):
-        mw = LoopDetectionMiddleware(
-            warn_threshold=100,
-            hard_limit=200,
-            tool_freq_warn=2,
-            tool_freq_hard_limit=100,
-        )
-
-        for run_id in ("run-1", "run-2"):
-            runtime = _make_runtime("shared-thread", run_id)
-            for suffix in ("first", "second"):
-                assert mw._apply(_make_state(tool_calls=[_bash_call(f"{run_id}-{suffix}")]), runtime) is None
-            assert mw._pending_warnings.get(_pending_key("shared-thread", run_id))
-            mw.after_agent({"messages": []}, runtime)
-
-        assert mw._tool_freq_warned[_scope_key("shared-thread", "run-1")] == {"bash"}
-        assert mw._tool_freq_warned[_scope_key("shared-thread", "run-2")] == {"bash"}
-
     def test_reset_thread_clears_every_run_scope_and_preserves_other_threads(self):
         mw = LoopDetectionMiddleware(
             warn_threshold=2,
@@ -1068,7 +1014,7 @@ class TestRunScopedTracking:
             mw._warned,
             mw._tool_name_history,
             mw._tool_name_counter,
-            mw._tool_freq_warned,
+            mw._tool_freq_reported,
             mw._pending_warnings,
             mw._pending_warning_touch_order,
         ):
@@ -1243,75 +1189,6 @@ class TestLoopDetectionRunEvents:
             "is_subagent": False,
             "agent_id": None,
             "detection_layer": "identical_call_set",
-            "tool_names": ["bash"],
-            "count": 3,
-            "threshold": 3,
-        }
-
-    def test_tool_frequency_warning_records_once(self):
-        journal = MagicMock()
-        runtime = self._runtime_with_journal(journal)
-        mw = LoopDetectionMiddleware(
-            warn_threshold=100,
-            hard_limit=200,
-            tool_freq_warn=2,
-            tool_freq_hard_limit=10,
-        )
-
-        # Vary the arguments so the identical-call detector cannot fire.
-        for index in range(3):
-            result = mw._apply(
-                _make_state(tool_calls=[_bash_call(f"command-{index}")]),
-                runtime,
-            )
-            assert result is None
-
-        journal.record_middleware.assert_called_once()
-        recorded = journal.record_middleware.call_args
-
-        assert recorded.kwargs["action"] == "warn"
-        assert recorded.kwargs["changes"] == {
-            "is_subagent": False,
-            "agent_id": None,
-            "detection_layer": "tool_frequency",
-            "tool_names": ["bash"],
-            "count": 2,
-            "threshold": 2,
-        }
-
-    def test_tool_frequency_hard_stop_records_event(self):
-        journal = MagicMock()
-        runtime = self._runtime_with_journal(journal)
-        mw = LoopDetectionMiddleware(
-            warn_threshold=100,
-            hard_limit=200,
-            tool_freq_warn=2,
-            tool_freq_hard_limit=3,
-        )
-
-        for index in range(2):
-            assert (
-                mw._apply(
-                    _make_state(tool_calls=[_bash_call(f"command-{index}")]),
-                    runtime,
-                )
-                is None
-            )
-
-        result = mw._apply(
-            _make_state(tool_calls=[_bash_call("command-2")]),
-            runtime,
-        )
-
-        assert result is not None
-        assert journal.record_middleware.call_count == 2
-
-        recorded = journal.record_middleware.call_args_list[-1]
-        assert recorded.kwargs["action"] == "hard_stop"
-        assert recorded.kwargs["changes"] == {
-            "is_subagent": False,
-            "agent_id": None,
-            "detection_layer": "tool_frequency",
             "tool_names": ["bash"],
             "count": 3,
             "threshold": 3,
@@ -1765,319 +1642,110 @@ class TestHardStopWithListContent:
 
 
 class TestToolFrequencyDetection:
-    """Tests for per-tool-type frequency detection (Layer 2).
-
-    This catches the case where an agent calls the same tool type many times
-    with *different* arguments (e.g. read_file on 40 different files), which
-    bypasses hash-based detection.
-    """
+    """Tool-name frequency is an observability metric, never a loop decision."""
 
     def _read_call(self, path):
         return {"name": "read_file", "id": f"call_read_{path}", "args": {"path": path}}
 
-    def test_below_freq_warn_returns_none(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
+    def test_thresholds_are_observed_without_warning_or_stop(self, caplog):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=5)
         runtime = _make_runtime()
 
-        for i in range(4):
-            result = mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-            assert result is None
+        with caplog.at_level("INFO"):
+            for i in range(6):
+                result = mw._apply(
+                    _make_state(tool_calls=[self._read_call(f"/file_{i}.py")]),
+                    runtime,
+                )
+                assert result is None
 
-    def test_freq_warn_at_threshold(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
+        assert not mw._pending_warnings
+        assert not mw._stop_reason
+        assert mw._tool_name_counter[_scope_key()]["read_file"] == 6
+        records = [record for record in caplog.records if record.message == "Tool frequency metric reached"]
+        assert [(record.metric, record.threshold, record.action) for record in records] == [
+            ("warn", 3, "observe_only"),
+            ("hard_limit", 5, "observe_only"),
+        ]
+
+    def test_window_decay_rearms_each_metric(self, caplog):
+        mw = LoopDetectionMiddleware(
+            tool_freq_warn=2,
+            tool_freq_hard_limit=3,
+            window_size=4,
+        )
         runtime = _make_runtime()
 
-        for i in range(4):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+        with caplog.at_level("INFO"):
+            sequence = [
+                ("read_file", 0),
+                ("read_file", 1),
+                ("read_file", 2),
+                ("bash", 0),
+                ("bash", 1),
+                ("bash", 2),
+                ("bash", 3),
+                ("read_file", 3),
+                ("read_file", 4),
+                ("read_file", 5),
+            ]
+            for name, value in sequence:
+                call = self._read_call(f"/{value}.py") if name == "read_file" else _bash_call(str(value))
+                assert mw._apply(_make_state(tool_calls=[call]), runtime) is None
 
-        # 5th call queues a per-tool-type frequency warning; state untouched.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_4.py")]), runtime)
-        assert result is None
-        queued = mw._pending_warnings.get(_pending_key(), [])
-        assert queued
-        assert "read_file" in queued[0]
-        assert "LOOP DETECTED" in queued[0]
+        records = [record for record in caplog.records if record.message == "Tool frequency metric reached"]
+        assert [(record.tool_name, record.metric) for record in records] == [
+            ("read_file", "warn"),
+            ("read_file", "hard_limit"),
+            ("bash", "warn"),
+            ("bash", "hard_limit"),
+            ("read_file", "warn"),
+            ("read_file", "hard_limit"),
+        ]
 
-    def test_freq_warn_only_queued_once(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
+    def test_different_tools_and_runs_are_isolated(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=5)
+        runtime_a = _make_runtime("thread-A", "run-A")
+        runtime_b = _make_runtime("thread-B", "run-B")
 
         for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+            assert mw._apply(_make_state(tool_calls=[self._read_call(f"/a_{i}.py")]), runtime_a) is None
+            assert mw._apply(_make_state(tool_calls=[_bash_call(f"b_{i}")]), runtime_b) is None
 
-        # 3rd queues a frequency warning.
-        mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
-        assert len(mw._pending_warnings[_pending_key()]) == 1
+        assert mw._tool_name_counter[_scope_key("thread-A", "run-A")]["read_file"] == 2
+        assert mw._tool_name_counter[_scope_key("thread-B", "run-B")]["bash"] == 2
+        assert _scope_key("thread-B", "run-B") not in mw._tool_name_counter or "read_file" not in mw._tool_name_counter[_scope_key("thread-B", "run-B")]
 
-        # 4th: same tool name, no additional enqueue.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_3.py")]), runtime)
-        assert result is None
-        assert len(mw._pending_warnings[_pending_key()]) == 1
-
-    def test_freq_hard_stop_at_limit(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=6)
-        runtime = _make_runtime()
-
-        for i in range(5):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-
-        # 6th call triggers hard stop
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_5.py")]), runtime)
-        assert result is not None
-        msg = result["messages"][0]
-        assert isinstance(msg, AIMessage)
-        assert msg.tool_calls == []
-        assert "FORCED STOP" in msg.content
-        assert "read_file" in msg.content
-
-    def test_windowed_frequency_decay_avoids_hard_stop_when_interleaved(self):
-        """More than ``window_size`` total calls to one tool type must NOT hard-stop
-        as long as they are spread out.
-
-        Interleaving read_file with another tool keeps the per-window count under
-        the hard limit, so the windowed counter decays instead of accumulating
-        monotonically. The old monotonic counter would hard-stop on the 4th
-        read_file regardless of spacing.
-        """
-        mw = LoopDetectionMiddleware(tool_freq_warn=100, tool_freq_hard_limit=4, window_size=5)
-        runtime = _make_runtime()
-
-        # Alternate read_file with bash. In any window of 5 consecutive calls the
-        # read_file count peaks at 3 (< hard_limit=4), so no hard stop fires even
-        # though total read_file calls (8) exceeds window_size (5). Distinct args
-        # keep the Layer-1 hash detector from firing, isolating Layer 2.
-        read_count = 0
-        for i in range(8):
-            result = mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-            assert result is None, f"read call {i} unexpectedly hard-stopped"
-            read_count += 1
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            assert result is None, f"bash call {i} unexpectedly hard-stopped"
-
-        assert read_count == 8  # more than window_size total read_file calls, no hard stop
-
-    def test_rapid_identical_tool_type_in_one_window_still_hard_stops(self):
-        """The decay must not weaken the guard: ``window_size``+ rapid calls to the
-        same tool type within one window still trip the frequency hard-stop."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=100, tool_freq_hard_limit=4, window_size=5)
-        runtime = _make_runtime()
-
-        # Distinct args each call -> the hash-based (Layer 1) detector never fires,
-        # isolating the per-tool-type frequency layer.
-        for i in range(3):
-            assert mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}.py")]), runtime) is None
-
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/f_3.py")]), runtime)
-        assert result is not None
-        msg = result["messages"][0]
-        assert isinstance(msg, AIMessage)
-        assert msg.tool_calls == []
-        assert "FORCED STOP" in msg.content
-        assert "read_file" in msg.content
-
-    def test_different_tools_tracked_independently(self):
-        """read_file and bash should have independent frequency counters."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
-
-        # 2 read_file calls
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-
-        # 2 bash calls — should not trigger (bash count = 2, read_file count = 2)
-        for i in range(2):
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            assert result is None
-
-        # 3rd read_file triggers — warning is queued (state unchanged).
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
-        assert result is None
-        assert "read_file" in mw._pending_warnings[_pending_key()][0]
-
-    def test_freq_reset_clears_state(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
-
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-
-        mw.reset()
-
-        # After reset, count restarts — should not trigger
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_new.py")]), runtime)
-        assert result is None
-
-    def test_freq_reset_per_thread_clears_only_target(self):
-        """reset(thread_id=...) should clear frequency state for that thread only."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime_a = _make_runtime("thread-A")
-        runtime_b = _make_runtime("thread-B")
-
-        # 2 calls on each thread
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/a_{i}.py")]), runtime_a)
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/b_{i}.py")]), runtime_b)
-
-        # Reset only thread-A
-        mw.reset(thread_id="thread-A")
-
-        assert _scope_key("thread-A") not in mw._tool_name_history
-
-        # thread-B state should still be intact — 3rd call queues a warn.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/b_2.py")]), runtime_b)
-        assert result is None
-        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-B")][0]
-
-        # thread-A restarted from 0 — should not trigger
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/a_new.py")]), runtime_a)
-        assert result is None
-
-    def test_freq_per_thread_isolation(self):
-        """Frequency counts should be independent per thread."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime_a = _make_runtime("thread-A")
-        runtime_b = _make_runtime("thread-B")
-
-        # 2 calls on thread A
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime_a)
-
-        # 2 calls on thread B — should NOT push thread A over threshold
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/other_{i}.py")]), runtime_b)
-
-        # 3rd call on thread A — queues a warning (count=3 for thread A only).
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime_a)
-        assert result is None
-        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-A")][0]
-        assert not mw._pending_warnings.get(_pending_key("thread-B"))
-
-    def test_freq_counter_cleared_on_eviction(self):
-        """LRU eviction must drop the per-tool frequency counter along with the
-        window deque. Otherwise a reused thread id resumes from a stale count
-        and its first fresh tool call is force-stopped as if the evicted calls
-        never rotated out.
-        """
+    def test_reset_and_lru_eviction_clear_metric_state(self):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3, max_tracked_threads=2)
-        evicted = _make_runtime("thread-evicted")
-
-        # Build the thread's frequency counter up toward the hard limit.
+        evicted = _make_runtime("evicted", "run")
         for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), evicted)
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/old_{i}.py")]), evicted)
+        mw._apply(_make_state(tool_calls=[_bash_call("a")]), _make_runtime("a", "run"))
+        mw._apply(_make_state(tool_calls=[_bash_call("b")]), _make_runtime("b", "run"))
+        assert _scope_key("evicted", "run") not in mw._tool_freq_reported
 
-        # Two other threads push it out of the LRU window (max_tracked_threads=2).
-        mw._apply(_make_state(tool_calls=[_bash_call("ls")]), _make_runtime("thread-a"))
-        mw._apply(_make_state(tool_calls=[_bash_call("ls")]), _make_runtime("thread-b"))
-        assert _scope_key("thread-evicted") not in mw._tool_name_history
-        assert _scope_key("thread-evicted") not in mw._tool_name_counter
+        mw.reset(thread_id="a")
+        assert _scope_key("a", "run") not in mw._tool_freq_reported
+        mw.reset()
+        assert not mw._tool_freq_reported
 
-        # Thread id reused: its first fresh read_file must not force-stop.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), evicted)
-        assert result is None
-
-    def test_freq_counter_cleared_on_reset(self):
-        """reset() must clear the per-tool frequency counter, not just the
-        window deque, so a restarted thread counts from zero.
-        """
-        # Per-thread reset.
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime("thread-A")
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-        mw.reset(thread_id="thread-A")
-        assert _scope_key("thread-A") not in mw._tool_name_counter
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), runtime)
-        assert result is None
-
-        # Full reset.
-        mw2 = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime2 = _make_runtime("thread-B")
-        for i in range(2):
-            mw2._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}.py")]), runtime2)
-        mw2.reset()
-        assert not mw2._tool_name_counter
-        result = mw2._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), runtime2)
-        assert result is None
-
-    def test_multi_tool_single_response_counted(self):
-        """When a single response has multiple tool calls, each is counted."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
-
-        # Response 1: 2 read_file calls → count = 2
-        call = [self._read_call("/a.py"), self._read_call("/b.py")]
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is None
-
-        # Response 2: 2 more → count = 4
-        call = [self._read_call("/c.py"), self._read_call("/d.py")]
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is None
-
-        # Response 3: 1 more → count = 5 → queues warn.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/e.py")]), runtime)
-        assert result is None
-        assert "read_file" in mw._pending_warnings[_pending_key()][0]
-
-    def test_override_tool_uses_override_thresholds(self):
-        """A tool in tool_freq_overrides uses its own thresholds, not the global ones."""
+    def test_overrides_only_change_observation_thresholds(self, caplog):
         mw = LoopDetectionMiddleware(
-            tool_freq_warn=5,
-            tool_freq_hard_limit=10,
-            tool_freq_overrides={"bash": (50, 100)},
+            tool_freq_warn=2,
+            tool_freq_hard_limit=3,
+            tool_freq_overrides={"bash": (4, 6)},
         )
         runtime = _make_runtime()
-
-        # 10 bash calls — would hit global hard_limit=10, but bash override is 100
-        for i in range(10):
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            assert result is None, f"unexpected trigger on call {i + 1}"
-
-    def test_non_override_tool_falls_back_to_global(self):
-        """A tool NOT in tool_freq_overrides uses the global warn/hard_limit."""
-        mw = LoopDetectionMiddleware(
-            tool_freq_warn=3,
-            tool_freq_hard_limit=6,
-            tool_freq_overrides={"bash": (50, 100)},
-        )
-        runtime = _make_runtime()
-
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-
-        # 3rd read_file call hits global warn=3 (read_file has no override).
-        # Warning delivery is deferred to wrap_model_call so the just-emitted
-        # AIMessage(tool_calls=...) is not mutated before ToolMessages exist.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
-        assert result is None
-        queued = mw._pending_warnings.get(_pending_key(), [])
-        assert queued
-        assert "read_file" in queued[0]
-
-    def test_hash_detection_takes_priority(self):
-        """Hash-based hard stop fires before frequency check for identical calls."""
-        mw = LoopDetectionMiddleware(
-            warn_threshold=2,
-            hard_limit=3,
-            tool_freq_warn=100,
-            tool_freq_hard_limit=200,
-        )
-        runtime = _make_runtime()
-        call = [self._read_call("/same_file.py")]
-
-        for _ in range(2):
-            mw._apply(_make_state(tool_calls=call), runtime)
-
-        # 3rd identical call → hash hard_limit=3 fires (not freq)
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is not None
-        msg = result["messages"][0]
-        assert isinstance(msg, AIMessage)
-        assert _HARD_STOP_MSG in msg.content
+        with caplog.at_level("INFO"):
+            for i in range(6):
+                assert mw._apply(_make_state(tool_calls=[_bash_call(f"cmd-{i}")]), runtime) is None
+        records = [r for r in caplog.records if r.message == "Tool frequency metric reached"]
+        assert [(r.metric, r.threshold) for r in records] == [("warn", 4), ("hard_limit", 6)]
 
 
 class TestToolCallBatchDecisions:
-    """A soft warning must not skip accounting or mask a hard stop in a batch."""
+    """Frequency accounting must not mask identical-call detection."""
 
     @staticmethod
     def _call(name, value):
@@ -2089,1184 +1757,48 @@ class TestToolCallBatchDecisions:
             args = {"value": value}
         return {"name": name, "id": f"call_{name}_{value}", "args": args}
 
-    def test_single_batch_crossing_hard_limit_runs_only_calls_within_limit(self):
+    def test_batch_counts_all_tool_names_without_creating_decision(self, caplog):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        journal = MagicMock()
-        runtime.context["__run_journal"] = journal
-        calls = [self._call("read_file", i) for i in range(4)]
-
-        result = mw.after_model(_make_state(tool_calls=calls), runtime)
-
-        assert result is not None
-        kept = result["messages"][0]
-        assert [tc["id"] for tc in kept.tool_calls] == ["call_read_file_0", "call_read_file_1"]
-        assert kept.content == ""
-        # Only the calls that will run count toward the window.
-        assert dict(mw._tool_name_counter[_scope_key()]) == {"read_file": 2}
-        # The cap and its explanation are checkpointed, not queued in memory.
-        assert result[LOOP_CAP_STATE_KEY] == {
-            "run_id": "test-run",
-            "tools": {"read_file": 3},
-            "notice": {"total": 4, "skipped": 2, "tools": ["read_file"]},
-        }
-        assert not mw._pending_warnings.get(_pending_key())
-        # A run that dropped calls at a limit is capped, even though it goes on.
-        # The admitted calls still run, so the run context, which other
-        # middlewares read as "the run is ending", is written when it ends.
-        assert "stop_reason" not in runtime.context
-        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: result[LOOP_CAP_STATE_KEY]}, runtime)
-        assert runtime.context["stop_reason"] == "loop_capped"
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
-        journal.record_middleware.assert_called_once()
-        recorded = journal.record_middleware.call_args.kwargs
-        assert recorded["action"] == "reject_excess"
-        assert recorded["changes"]["detection_layer"] == "tool_frequency"
-        assert recorded["changes"]["tool_names"] == ["read_file"]
-        assert recorded["changes"]["count"] == 3
-        assert recorded["changes"]["threshold"] == 3
-
-    def test_batch_with_no_room_left_still_hard_stops(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        mw.after_model(_make_state(tool_calls=[self._call("read_file", i) for i in range(4)]), runtime)
-
-        result = mw.after_model(_make_state(tool_calls=[self._call("read_file", 9), self._call("read_file", 10)]), runtime)
-
-        assert result is not None
-        assert result["messages"][0].tool_calls == []
-        assert "[FORCED STOP] Tool read_file called 3 times" in result["messages"][0].content
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
-
-    @pytest.mark.parametrize(("batch_size", "expected_kept"), [(49, None), (50, 49), (60, 49)])
-    def test_default_limit_keeps_the_calls_that_fit_in_one_large_batch(self, batch_size, expected_kept):
-        mw = LoopDetectionMiddleware()
-        runtime = _make_runtime()
-        calls = [{"name": "write_file", "id": f"call_{i}", "args": {"path": f"/mnt/user-data/outputs/f{i:02d}.txt", "content": str(i**3)}} for i in range(1, batch_size + 1)]
-
-        result = mw.after_model(_make_state(tool_calls=calls), runtime)
-
-        if expected_kept is None:
-            assert result is None
-            assert mw.consume_stop_reason("test-run") is None
-            return
-        kept = result["messages"][0]
-        assert [tc["id"] for tc in kept.tool_calls] == [f"call_{i}" for i in range(1, expected_kept + 1)]
-        assert "FORCED STOP" not in str(kept.content)
-        assert result[LOOP_CAP_STATE_KEY]["notice"] == {"total": batch_size, "skipped": batch_size - expected_kept, "tools": ["write_file"]}
-        # Both report channels are written when the run ends.
-        assert mw.consume_stop_reason("test-run") is None
-        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: result[LOOP_CAP_STATE_KEY]}, runtime)
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
-
-    @pytest.mark.parametrize("seed", range(40))
-    def test_admission_matches_a_sliding_window_reference(self, seed):
-        """Random call sequences against a plain sliding window.
-
-        A call is admitted exactly when the window, after taking it in and
-        dropping its oldest entry, holds fewer calls to that tool than the hard
-        limit. A dropped call is not counted, and later calls to its tool in
-        the same response are dropped too.
-        """
-        rng = random.Random(seed)
-        hard = rng.randint(3, 8)
-        overrides = {"t0": (2, rng.randint(6, 10))} if seed % 3 == 0 else {}
-        mw = LoopDetectionMiddleware(warn_threshold=50, hard_limit=100, window_size=rng.randint(2, 12), tool_freq_warn=2, tool_freq_hard_limit=hard, tool_freq_overrides=overrides)
-        runtime = _make_runtime()
-        window: deque[str] = deque()
-        uid = 0
-
-        for _ in range(80):
-            names = [f"t{rng.randint(0, 3)}" for _ in range(rng.choice([1, 1, 1, 2, 3, 5]))]
-            calls = [{"name": name, "id": f"call_{(uid := uid + 1)}", "args": {"value": uid}} for name in names]
-
-            expected, blocked = [], set()
-            for call in calls:
-                name = call["name"]
-                if name in blocked:
-                    continue
-                trial = deque(window)
-                trial.append(name)
-                while len(trial) > mw._tool_freq_window:
-                    trial.popleft()
-                if trial.count(name) >= overrides.get(name, (2, hard))[1]:
-                    blocked.add(name)
-                    continue
-                window = trial
-                expected.append(call["id"])
-
-            result = mw.after_model(_make_state(tool_calls=calls), runtime)
-
-            kept = [tc["id"] for tc in result["messages"][0].tool_calls] if result and "messages" in result else [call["id"] for call in calls]
-            assert kept == expected
-            if blocked:
-                # From here a real graph carries the cap record, which this loop does not thread.
-                return
-            assert list(mw._tool_name_history[_scope_key()]) == list(window)
-
-    @pytest.mark.parametrize("hard_stop_first", [False, True])
-    def test_one_tools_warning_cannot_admit_another_tools_excess_call(self, hard_stop_first):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        mw._apply(_make_state(tool_calls=[self._call("bash", 0)]), runtime)
-        mw._apply(_make_state(tool_calls=[self._call("read_file", 0), self._call("bash", 1)]), runtime)
-        calls = [self._call("read_file", 1), self._call("bash", 2)]
-        if hard_stop_first:
-            calls.reverse()
-
-        decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
-
-        assert decision is not None and decision.action == "reject_excess"
-        assert decision.tool_names == ("bash",)
-        assert decision.count == 3
-        assert [calls[i]["id"] for i in decision.rejected_indices] == ["call_bash_2"]
-        assert mw._tool_name_counter[_scope_key()]["bash"] == 2
-
-    def test_identical_call_warning_cannot_mask_frequency_hard_stop(self):
-        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=5, tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        calls = [self._call("read_file", 0), self._call("read_file", 1)]
-        mw._apply(_make_state(tool_calls=calls), runtime)
-
-        decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
-
-        assert decision is not None and decision.hard_stop
-        assert decision.detection_layer == "tool_frequency"
-        assert decision.count == 3
-        assert not mw._warned.get(_scope_key())
-
-    def test_warning_batch_counts_all_calls_and_only_marks_selected_warning(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=10)
         runtime = _make_runtime()
         calls = [self._call("read_file", i) for i in range(3)] + [self._call("bash", i) for i in range(2)]
 
-        first = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+        with caplog.at_level("INFO"):
+            decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
 
-        assert first is not None and first.action == "warn"
-        assert first.tool_names == ("read_file",)
+        assert decision is None
         assert list(mw._tool_name_history[_scope_key()]) == ["read_file"] * 3 + ["bash"] * 2
         assert dict(mw._tool_name_counter[_scope_key()]) == {"read_file": 3, "bash": 2}
-        assert mw._tool_freq_warned[_scope_key()] == {"read_file"}
+        assert not mw._pending_warnings
+        assert {record.tool_name for record in caplog.records if record.message == "Tool frequency metric reached"} == {"read_file", "bash"}
 
-        second = mw._track_and_check(_make_state(tool_calls=[self._call("bash", 2)]), runtime)
-        assert second is not None and second.action == "warn"
-        assert second.tool_names == ("bash",)
-        assert second.count == 3
+    def test_identical_call_detection_still_hard_stops(self):
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=3, tool_freq_warn=1, tool_freq_hard_limit=2)
+        runtime = _make_runtime()
+        calls = [self._call("read_file", 0)]
+        mw._apply(_make_state(tool_calls=calls), runtime)
+        mw._apply(_make_state(tool_calls=calls), runtime)
 
-    def test_hash_warning_preserves_frequency_accounting_and_pending_warning(self):
+        result = mw._apply(_make_state(tool_calls=calls), runtime)
+
+        assert result is not None
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    def test_hash_warning_preserves_frequency_metrics(self, caplog):
         mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=10, tool_freq_warn=2, tool_freq_hard_limit=5)
         runtime = _make_runtime()
         calls = [self._call("read_file", 0)]
         assert mw._track_and_check(_make_state(tool_calls=calls), runtime) is None
 
-        hash_warning = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+        with caplog.at_level("INFO"):
+            warning = mw._track_and_check(_make_state(tool_calls=calls), runtime)
 
-        assert hash_warning is not None and hash_warning.detection_layer == "identical_call_set"
+        assert warning is not None and warning.detection_layer == "identical_call_set"
         assert mw._tool_name_counter[_scope_key()]["read_file"] == 2
-        assert not mw._tool_freq_warned.get(_scope_key())
-
-        freq_warning = mw._track_and_check(_make_state(tool_calls=[self._call("read_file", 1)]), runtime)
-        assert freq_warning is not None and freq_warning.detection_layer == "tool_frequency"
-        assert freq_warning.count == 3
-
-    def test_warning_that_decays_within_batch_can_warn_on_next_burst(self):
-        mw = LoopDetectionMiddleware(window_size=4, tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        calls = [self._call(name, i) for i, name in enumerate(["a", "b", "a", "c", "d"])]
-
-        first = mw._track_and_check(_make_state(tool_calls=calls), runtime)
-
-        assert first is not None and first.tool_names == ("a",)
-        assert mw._tool_name_counter[_scope_key()]["a"] == 1
-        assert "a" not in mw._tool_freq_warned[_scope_key()]
-        second = mw._track_and_check(_make_state(tool_calls=[self._call("a", 5)]), runtime)
-        assert second is not None and second.action == "warn"
-        assert second.tool_names == ("a",)
-
-    def test_other_tool_eviction_rearms_frequency_warning(self):
-        mw = LoopDetectionMiddleware(window_size=3, tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-
-        first = mw._track_and_check(
-            _make_state(tool_calls=[self._call(name, i) for i, name in enumerate(["a", "b", "a"])]),
-            runtime,
-        )
-        assert first is not None and first.tool_names == ("a",)
-
-        second = mw._track_and_check(_make_state(tool_calls=[self._call("b", 3)]), runtime)
-        assert second is not None and second.tool_names == ("b",)
-        assert mw._tool_name_counter[_scope_key()]["a"] == 1
-        assert "a" not in mw._tool_freq_warned[_scope_key()]
-
-        third = mw._track_and_check(_make_state(tool_calls=[self._call("a", 4)]), runtime)
-        assert third is not None and third.tool_names == ("a",)
-
-    def test_cross_tool_eviction_rearms_at_evicted_tools_override_threshold(self):
-        mw = LoopDetectionMiddleware(
-            window_size=3,
-            tool_freq_warn=2,
-            tool_freq_hard_limit=5,
-            tool_freq_overrides={"bash": (3, 4)},
-        )
-        runtime = _make_runtime()
-
-        first = mw._track_and_check(
-            _make_state(tool_calls=[self._call("bash", i) for i in range(3)]),
-            runtime,
-        )
-        assert first is not None and first.tool_names == ("bash",)
-        assert mw._tool_freq_warned[_scope_key()] == {"bash"}
-
-        second = mw._track_and_check(
-            _make_state(tool_calls=[self._call("read_file", i) for i in range(3)]),
-            runtime,
-        )
-        assert second is not None and second.tool_names == ("read_file",)
-        assert mw._tool_name_counter[_scope_key()]["bash"] == 2
-        assert "bash" not in mw._tool_freq_warned[_scope_key()]
-
-        third = mw._track_and_check(
-            _make_state(tool_calls=[self._call("bash", i) for i in range(3, 6)]),
-            runtime,
-        )
-        assert third is not None and third.tool_names == ("bash",)
-        assert third.count == 3
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_async", [False, True])
-    async def test_batch_crossing_hard_limit_runs_only_calls_within_limit_in_real_agent_graph(self, use_async):
-        executed = []
-
-        @as_tool
-        def read_file(path: str) -> str:
-            """Read a fake file without touching the filesystem."""
-            executed.append(path)
-            return path
-
-        calls = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(4)]
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=calls), AIMessage(content="done")])
-        graph = create_agent(model=model, tools=[read_file], middleware=[mw], checkpointer=InMemorySaver())
-        inputs = {"messages": [("user", "inspect these files")]}
-        config = {"configurable": {"thread_id": "batch-thread"}, "recursion_limit": 10}
-        context = {"thread_id": "batch-thread", "run_id": "batch-run"}
-
-        result = await graph.ainvoke(inputs, config, context=context) if use_async else graph.invoke(inputs, config, context=context)
-
-        # The tool node runs a batch in parallel, so completion order varies.
-        assert sorted(executed) == ["/0.py", "/1.py"]
-        assert len(model.seen_messages) == 2
-        warnings = [m for m in model.seen_messages[1] if isinstance(m, HumanMessage) and m.name == "loop_warning"]
-        assert len(warnings) == 1
-        # Admission is reported, not execution: the tool results say what ran.
-        assert "skipped 2 of the 4 tool calls" in warnings[0].content
-        assert "The other 2 were passed on" in warnings[0].content
-        assert "read_file (limit 3)" in warnings[0].content
-        assert loop_detection_module._WRAP_UP_INSTRUCTIONS in warnings[0].content
-        assert result["messages"][-1].content == "done"
-        # The record is private to the graph, and the delivered notice is gone.
-        assert LOOP_CAP_STATE_KEY not in result
-        assert graph.get_state(config).values[LOOP_CAP_STATE_KEY] == {"run_id": "batch-run", "tools": {"read_file": 3}}
-        assert context["stop_reason"] == "loop_capped"
-        assert mw.consume_stop_reason("batch-run") == "loop_capped"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_async", [False, True])
-    async def test_batch_with_no_room_left_executes_nothing_in_real_agent_graph(self, use_async):
-        executed = []
-
-        @as_tool
-        def read_file(path: str) -> str:
-            """Read a fake file without touching the filesystem."""
-            executed.append(path)
-            return path
-
-        first = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(4)]
-        second = [{"name": "read_file", "id": "read_again", "args": {"path": "/again.py"}}]
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=first), AIMessage(content="", tool_calls=second), AIMessage(content="done")])
-        graph = create_agent(model=model, tools=[read_file], middleware=[mw])
-        inputs = {"messages": [("user", "inspect these files")]}
-        kwargs = {"context": {"thread_id": "batch-thread", "run_id": "batch-run"}, "config": {"recursion_limit": 10}}
-
-        result = await graph.ainvoke(inputs, **kwargs) if use_async else graph.invoke(inputs, **kwargs)
-
-        # The tool node runs a batch in parallel, so completion order varies.
-        assert sorted(executed) == ["/0.py", "/1.py"]
-        assert len(model.seen_messages) == 2
-        assert result["messages"][-1].tool_calls == []
-        assert "FORCED STOP" in result["messages"][-1].content
-        assert mw.consume_stop_reason("batch-run") == "loop_capped"
-
-
-class TestPerToolCapState:
-    """A tool that reached its limit stays blocked for the rest of the execution."""
-
-    CAP = {"run_id": "test-run", "tools": {"a": 3}}
-
-    @staticmethod
-    def _call(name, value):
-        return {"name": name, "id": f"call_{name}_{value}", "args": {"value": value}}
-
-    def test_capped_tool_stays_blocked_after_other_calls_evict_it_from_the_window(self):
-        mw = LoopDetectionMiddleware(window_size=3, tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        capped = mw.after_model(_make_state(tool_calls=[self._call("a", i) for i in range(4)]), runtime)
-        cap = capped[LOOP_CAP_STATE_KEY]
-        assert cap["tools"] == {"a": 3}
-        # Three calls to other tools push every "a" entry out of the window.
-        mw.after_model(_make_state(tool_calls=[self._call("b", 0), self._call("c", 0), self._call("d", 0)], loop_cap=cap), runtime)
-        assert "a" not in mw._tool_name_counter[_scope_key()]
-        calls = [self._call("a", 9), self._call("b", 1)]
-
-        # The window alone would let the tool run again.
-        assert mw._track_and_check(_make_state(tool_calls=calls), _make_runtime(run_id="window-only")) is None
-        result = mw.after_model(_make_state(tool_calls=calls, loop_cap=cap), runtime)
-
-        assert [tc["id"] for tc in result["messages"][0].tool_calls] == ["call_b_1"]
-        assert result[LOOP_CAP_STATE_KEY] == {"run_id": "test-run", "tools": {"a": 3}, "notice": {"total": 2, "skipped": 1, "tools": ["a"]}}
-        # The rejected call is not counted either.
-        assert "a" not in mw._tool_name_counter[_scope_key()]
-
-    def test_response_with_only_capped_calls_hard_stops(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-
-        result = mw.after_model(_make_state(tool_calls=[self._call("a", 9)], loop_cap=self.CAP), runtime)
-
-        stopped = result["messages"][0]
-        assert stopped.tool_calls == []
-        assert "[FORCED STOP] Tool a reached its per-tool safety limit of 3 calls earlier in this run" in stopped.content
-        assert runtime.context["stop_reason"] == "loop_capped"
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
-
-    def test_only_the_first_rejection_of_a_tool_is_audited(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        journal = MagicMock()
-        runtime.context["__run_journal"] = journal
-
-        mw.after_model(_make_state(tool_calls=[self._call("a", 9), self._call("b", 0)], loop_cap=self.CAP), runtime)
-
-        journal.record_middleware.assert_not_called()
-
-    def test_model_answer_clears_the_delivered_notice(self):
-        mw = LoopDetectionMiddleware()
-        runtime = _make_runtime()
-        pending = {**self.CAP, "notice": {"total": 4, "skipped": 2, "tools": ["a"]}}
-
-        assert mw.after_model(_make_state(content="done", loop_cap=pending), runtime) == {LOOP_CAP_STATE_KEY: self.CAP}
-        assert mw.after_model(_make_state(content="done", loop_cap=self.CAP), runtime) is None
-
-    def test_notice_is_read_from_state_on_every_model_call(self):
-        """It does not depend on the trimmed AIMessage, which compaction may remove, and a retry gets it again."""
-        mw = LoopDetectionMiddleware()
-        runtime = _make_runtime(run_id="resumed-run")
-        request = _make_request([HumanMessage(content="summary of earlier work", name="summary")], runtime)
-        request.state = {LOOP_CAP_STATE_KEY: {"run_id": "paused-run", "tools": {"a": 3}, "notice": {"total": 4, "skipped": 2, "tools": ["a"]}}}
-        captured, handler = _capture_handler()
-
-        mw.wrap_model_call(request, handler)
-        mw.wrap_model_call(request, handler)
-
-        for sent in captured:
-            assert [m.name for m in sent.messages] == ["summary", "loop_warning"]
-            assert "skipped 2 of the 4 tool calls" in sent.messages[-1].content
-        # The resumed run reports the cap when it ends, not while it runs.
-        assert "stop_reason" not in runtime.context
-        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: request.state[LOOP_CAP_STATE_KEY]}, runtime)
-        assert runtime.context["stop_reason"] == "loop_capped"
-        assert mw.consume_stop_reason("resumed-run") == "loop_capped"
-
-    def test_carried_cap_does_not_replace_another_guards_stop_reason(self):
-        mw = LoopDetectionMiddleware()
-        runtime = _make_runtime()
-        runtime.context["stop_reason"] = "token_capped"
-        request = _make_request([HumanMessage(content="hi")], runtime)
-        request.state = {LOOP_CAP_STATE_KEY: self.CAP}
-
-        mw.wrap_model_call(request, _capture_handler()[1])
-        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: self.CAP}, runtime)
-
-        assert runtime.context["stop_reason"] == "token_capped"
-
-    @pytest.mark.parametrize(
-        ("run_id", "stored", "expected"),
-        [
-            ("test-run", {"run_id": "test-run", "tools": {"a": 3}}, None),
-            ("next-run", {"run_id": "test-run", "tools": {"a": 3}}, {LOOP_CAP_STATE_KEY: None}),
-            # Without a run id, two tasks cannot be told apart.
-            (None, {"run_id": None, "tools": {"a": 3}}, {LOOP_CAP_STATE_KEY: None}),
-            ("test-run", "not a record", {LOOP_CAP_STATE_KEY: None}),
-            ("test-run", None, None),
-        ],
-        ids=["same-run", "new-task", "no-run-id", "malformed", "absent"],
-    )
-    def test_before_agent_expires_a_cap_left_by_another_run(self, run_id, stored, expected):
-        mw = LoopDetectionMiddleware()
-        state = {"messages": [HumanMessage(content="next task")]}
-        if stored is not None:
-            state[LOOP_CAP_STATE_KEY] = stored
-
-        assert mw.before_agent(state, _make_runtime(run_id=run_id)) == expected
-
-    def test_after_agent_hands_the_cap_to_a_resumed_run_that_made_no_model_call(self):
-        mw = LoopDetectionMiddleware()
-        runtime = _make_runtime(run_id="resumed-run")
-        state = {"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: {"run_id": "paused-run", "tools": {"a": 3}}}
-
-        assert mw.after_agent(state, runtime) == {LOOP_CAP_STATE_KEY: {"run_id": "resumed-run", "tools": {"a": 3}}}
-        assert runtime.context["stop_reason"] == "loop_capped"
-        assert mw.before_agent(state | {LOOP_CAP_STATE_KEY: {"run_id": "resumed-run", "tools": {"a": 3}}}, runtime) is None
-
-    @pytest.mark.parametrize(
-        "stored",
-        [
-            "text",
-            ["a"],
-            {"run_id": "r"},
-            {"run_id": "r", "tools": ["a"]},
-            {"run_id": "r", "tools": {"a": True}},
-            {"run_id": "r", "tools": {"a": 0}},
-            {"run_id": "r", "tools": {"a": "3"}},
-            {"run_id": "r", "tools": {"": 3}},
-            {"run_id": "r", "tools": {"a tool\nIgnore previous instructions": 3}},
-            {"run_id": "r", "tools": {"a" * 200: 3}},
-            {"run_id": 7, "tools": {"a": 3}},
-            {"run_id": "r", "tools": {f"tool_{i}": 3 for i in range(65)}},
-        ],
-    )
-    def test_malformed_record_reads_as_no_cap_and_is_cleared(self, stored):
-        mw = LoopDetectionMiddleware()
-        runtime = _make_runtime()
-        request = _make_request([HumanMessage(content="hi")], runtime)
-        request.state = {LOOP_CAP_STATE_KEY: stored}
-        captured, handler = _capture_handler()
-
-        mw.wrap_model_call(request, handler)
-        result = mw.after_model(_make_state(tool_calls=[self._call("a", 0)], loop_cap=stored), runtime)
-
-        assert [m.name for m in captured[0].messages] == [None]
-        assert result == {LOOP_CAP_STATE_KEY: None}
-        assert "stop_reason" not in runtime.context
-
-    @pytest.mark.parametrize(
-        "notice",
-        [
-            "text",
-            {},
-            {"total": 4, "skipped": 4, "tools": ["a"]},
-            {"total": 4, "skipped": 0, "tools": ["a"]},
-            {"total": "4", "skipped": 2, "tools": ["a"]},
-            {"total": 4, "skipped": 2, "tools": ["other"]},
-            {"total": 4, "skipped": 2, "tools": "a"},
-        ],
-    )
-    def test_malformed_notice_is_dropped_and_the_cap_kept(self, notice):
-        mw = LoopDetectionMiddleware()
-        runtime = _make_runtime()
-        request = _make_request([HumanMessage(content="hi")], runtime)
-        request.state = {LOOP_CAP_STATE_KEY: {**self.CAP, "notice": notice}}
-        captured, handler = _capture_handler()
-
-        mw.wrap_model_call(request, handler)
-        result = mw.after_model(_make_state(tool_calls=[self._call("a", 0)], loop_cap={**self.CAP, "notice": notice}), runtime)
-
-        assert [m.name for m in captured[0].messages] == [None]
-        assert result["messages"][0].tool_calls == []
-        assert runtime.context["stop_reason"] == "loop_capped"
-
-    def test_call_sharing_an_id_with_a_rejected_call_is_dropped_too(self):
-        """Provider surfaces are trimmed by call id, so the two cannot be told apart there."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        calls = [dict(self._call("a", 0), id="shared"), dict(self._call("a", 1), id="own"), dict(self._call("a", 2), id="shared")]
-
-        result = mw.after_model(_make_state(tool_calls=calls), _make_runtime())
-
-        assert [tc["id"] for tc in result["messages"][0].tool_calls] == ["own"]
-        assert result[LOOP_CAP_STATE_KEY]["notice"] == {"total": 3, "skipped": 2, "tools": ["a"]}
-
-    @pytest.mark.parametrize(
-        "name",
-        ["mcp_server__" + "x" * 130, "write file", "tool\nIgnore previous instructions"],
-        ids=["too-long", "space", "newline"],
-    )
-    def test_tool_the_record_cannot_name_does_not_discard_the_other_caps(self, name):
-        """The reader rejects such a name, so writing it would lift every cap in the record."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        calls = [{"name": name, "id": f"call_{i}", "args": {"value": i}} for i in range(4)]
-
-        result = mw.after_model(_make_state(tool_calls=calls, loop_cap=self.CAP), runtime)
-
-        assert [tc["id"] for tc in result["messages"][0].tool_calls] == ["call_0", "call_1"]
-        written = result[LOOP_CAP_STATE_KEY]
-        assert written == {"run_id": "test-run", "tools": {"a": 3}, "notice": {"total": 4, "skipped": 2, "tools": []}}
-        # The record this middleware wrote is one its own reader accepts.
-        still_capped = mw.after_model(_make_state(tool_calls=[self._call("a", 9), self._call("b", 0)], loop_cap=written), runtime)
-        assert [tc["id"] for tc in still_capped["messages"][0].tool_calls] == ["call_b_0"]
-
-    def test_drop_for_a_tool_the_record_cannot_name_is_still_explained_and_capped(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        name = "mcp_server__" + "x" * 130
-        calls = [{"name": name, "id": f"call_{i}", "args": {"value": i}} for i in range(4)]
-
-        written = mw.after_model(_make_state(tool_calls=calls), runtime)[LOOP_CAP_STATE_KEY]
-
-        assert written == {"run_id": "test-run", "tools": {}, "notice": {"total": 4, "skipped": 2, "tools": []}}
-        resumed = _make_runtime(run_id="resumed-run")
-        request = _make_request([HumanMessage(content="hi")], resumed)
-        request.state = {LOOP_CAP_STATE_KEY: written}
-        captured, handler = _capture_handler()
-        mw.wrap_model_call(request, handler)
-        notice = captured[0].messages[-1]
-        assert notice.name == "loop_warning"
-        assert "skipped 2 of the 4 tool calls in your last response because a tool reached" in notice.content
-        assert name not in notice.content
-        # Once delivered, the record stays as the mark of a capped execution.
-        delivered = mw.after_model(_make_state(content="done", loop_cap=written), resumed)
-        assert delivered == {LOOP_CAP_STATE_KEY: {"run_id": "resumed-run", "tools": {}}}
-        mw.after_agent({"messages": [AIMessage(content="done")], **delivered}, resumed)
-        assert resumed.context["stop_reason"] == "loop_capped"
-
-    def test_more_tools_than_a_record_holds_keeps_the_existing_caps(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=2)
-        runtime = _make_runtime()
-        calls = [self._call(f"tool_{t}", i) for t in range(65) for i in range(2)]
-
-        written = mw.after_model(_make_state(tool_calls=calls, loop_cap={"run_id": "test-run", "tools": {"a": 3}}), runtime)[LOOP_CAP_STATE_KEY]
-
-        assert len(written["tools"]) == 64
-        assert written["tools"]["a"] == 3
-        assert set(written["notice"]["tools"]) <= set(written["tools"])
-        still_capped = mw.after_model(_make_state(tool_calls=[self._call("a", 9), self._call("b", 0)], loop_cap=written), runtime)
-        assert [tc["id"] for tc in still_capped["messages"][0].tool_calls] == ["call_b_0"]
-
-    def test_each_tool_that_reaches_its_limit_is_audited_with_its_own_count(self):
-        """An already capped tool ahead in the batch must not lend its limit to the new crossings."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3, tool_freq_overrides={"slow": (4, 5)})
-        runtime = _make_runtime()
-        journal = MagicMock()
-        runtime.context["__run_journal"] = journal
-        calls = [self._call("a", 9), *[self._call("fast", i) for i in range(4)], *[self._call("slow", i) for i in range(6)]]
-
-        mw.after_model(_make_state(tool_calls=calls, loop_cap={"run_id": "test-run", "tools": {"a": 50}}), runtime)
-
-        rows = [call.kwargs for call in journal.record_middleware.call_args_list]
-        assert [row["action"] for row in rows] == ["reject_excess", "reject_excess"]
-        assert [(row["changes"]["tool_names"], row["changes"]["count"], row["changes"]["threshold"]) for row in rows] == [(["fast"], 3, 3), (["slow"], 5, 5)]
-
-    def test_call_that_replaces_its_own_oldest_window_entry_is_admitted(self):
-        """49 reads and one other call fill the 50-entry window; the next read drops the oldest read and stays at 49."""
-        mw = LoopDetectionMiddleware()
-        runtime = _make_runtime()
-
-        def read(i):
-            return _make_state(tool_calls=[{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/src/f{i}.py"}}])
-
-        for i in range(49):
-            mw.after_model(read(i), runtime)
-        mw.after_model(_make_state(tool_calls=[_bash_call("make build")]), runtime)
-
-        admitted = 0
-        for i in range(100, 160):
-            result = mw.after_model(read(i), runtime)
-            if result is not None:
-                break
-            admitted += 1
-
-        # Each of those reads replaced a read; the 50th one replaces the bash call.
-        assert admitted == 49
-        assert result["messages"][0].tool_calls == []
-        assert "[FORCED STOP] Tool read_file called 50 times" in result["messages"][0].content
-        assert LOOP_CAP_STATE_KEY not in result
-        assert len(mw._tool_name_history[_scope_key()]) == 50
-
-    def test_response_left_without_calls_by_a_shared_id_stops_the_run(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        calls = [dict(self._call("a", i), id="shared") for i in range(3)]
-
-        result = mw.after_model(_make_state(tool_calls=calls), runtime)
-
-        stopped = result["messages"][0]
-        assert stopped.tool_calls == []
-        # No call is left to guard, so this is a terminal stop: reported at once.
-        assert runtime.context["stop_reason"] == "loop_capped"
-        assert "[FORCED STOP] Tool a called 3 times" in stopped.content
-        assert result[LOOP_CAP_STATE_KEY] == {"run_id": "test-run", "tools": {"a": 3}}
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_async", [False, True])
-    async def test_mixed_tool_sequence_cannot_restart_a_capped_tool_in_real_agent_graph(self, use_async):
-        executed = []
-
-        @as_tool
-        def read_file(path: str) -> str:
-            """Read a fake file without touching the filesystem."""
-            executed.append(("read_file", path))
-            return path
-
-        @as_tool
-        def ls(path: str) -> str:
-            """List a fake directory."""
-            executed.append(("ls", path))
-            return path
-
-        @as_tool
-        def glob(pattern: str) -> str:
-            """Match fake paths."""
-            executed.append(("glob", pattern))
-            return pattern
-
-        reads = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(4)]
-        others = [{"name": "ls", "id": f"ls_{i}", "args": {"path": f"/d{i}"}} for i in range(2)] + [{"name": "glob", "id": f"glob_{i}", "args": {"pattern": f"*.{i}"}} for i in range(2)]
-        again = [{"name": "read_file", "id": "read_again", "args": {"path": "/again.py"}}, {"name": "ls", "id": "ls_again", "args": {"path": "/again"}}]
-        mw = LoopDetectionMiddleware(window_size=3, tool_freq_warn=2, tool_freq_hard_limit=3)
-        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=reads), AIMessage(content="", tool_calls=others), AIMessage(content="", tool_calls=again), AIMessage(content="done")])
-        graph = create_agent(model=model, tools=[read_file, ls, glob], middleware=[mw], checkpointer=InMemorySaver())
-        inputs = {"messages": [("user", "inspect these files")]}
-        config = {"configurable": {"thread_id": "mixed-thread"}, "recursion_limit": 14}
-        context = {"thread_id": "mixed-thread", "run_id": "mixed-run"}
-
-        result = await graph.ainvoke(inputs, config, context=context) if use_async else graph.invoke(inputs, config, context=context)
-
-        # The four other calls pushed read_file out of the three-entry window.
-        assert "read_file" not in mw._tool_name_counter[("mixed-thread", "mixed-run")]
-        assert sorted(path for name, path in executed if name == "read_file") == ["/0.py", "/1.py"]
-        assert ("ls", "/again") in executed
-        last_request = [m for m in model.seen_messages[3] if isinstance(m, HumanMessage) and m.name == "loop_warning"]
-        assert len(last_request) == 1 and "skipped 1 of the 2 tool calls" in last_request[0].content
-        assert result["messages"][-1].content == "done"
-        assert context["stop_reason"] == "loop_capped"
-
-    @pytest.mark.parametrize("mode", ["full", "delta"])
-    def test_cap_record_is_checkpointed_under_the_thread_state_schema(self, mode):
-        """Delta mode rewrites each middleware's state schema; the private channel must survive that."""
-        from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
-
-        @as_tool
-        def read_file(path: str) -> str:
-            """Read a fake file without touching the filesystem."""
-            return path
-
-        calls = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(4)]
-        middleware = normalize_middleware_state_schemas([LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)], mode)
-        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=calls), AIMessage(content="done")])
-        graph = create_agent(model=model, tools=[read_file], middleware=middleware, state_schema=get_thread_state_schema(mode), checkpointer=InMemorySaver())
-        config = {"configurable": {"thread_id": f"schema-{mode}"}, "recursion_limit": 10}
-
-        result = graph.invoke({"messages": [("user", "inspect these files")]}, config, context={"thread_id": f"schema-{mode}", "run_id": "schema-run"})
-
-        assert LOOP_CAP_STATE_KEY not in result
-        assert graph.get_state(config).values[LOOP_CAP_STATE_KEY] == {"run_id": "schema-run", "tools": {"read_file": 3}}
-
-    @pytest.mark.asyncio
-    async def test_files_are_presented_after_calls_were_dropped_at_a_limit(self):
-        written, presented = [], []
-
-        @as_tool
-        def write_file(path: str) -> str:
-            """Write a fake file."""
-            written.append(path)
-            return "ok"
-
-        @as_tool
-        def present_files(filepaths: list[str]) -> str:
-            """Record the files presented to the user."""
-            presented.extend(filepaths)
-            return "presented"
-
-        writes = [{"name": "write_file", "id": f"write_{i}", "args": {"path": f"/mnt/user-data/outputs/f{i}.txt"}} for i in range(4)]
-        present = {"name": "present_files", "id": "present", "args": {"filepaths": ["/mnt/user-data/outputs/f0.txt", "/mnt/user-data/outputs/f1.txt"]}}
-        loop = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=writes), AIMessage(content="", tool_calls=[present]), AIMessage(content="Two of the four files were written.")])
-        graph = create_agent(model=model, tools=[write_file, present_files], middleware=[loop])
-
-        result = await graph.ainvoke({"messages": [("user", "Write four files.")]}, context={"thread_id": "present-thread", "run_id": "present-run"}, config={"recursion_limit": 12})
-
-        notice = [m for m in model.seen_messages[1] if isinstance(m, HumanMessage) and m.name == "loop_warning"]
-        assert len(notice) == 1 and "present_files call before answering" in notice[0].content
-        assert sorted(written) == ["/mnt/user-data/outputs/f0.txt", "/mnt/user-data/outputs/f1.txt"]
-        assert presented == ["/mnt/user-data/outputs/f0.txt", "/mnt/user-data/outputs/f1.txt"]
-        assert result["messages"][-1].content == "Two of the four files were written."
-        assert loop.consume_stop_reason("present-run") == "loop_capped"
-
-
-class _SteerableBatchModel(BaseChatModel):
-    """First answers with ``first``; once a run input arrives, applies it; otherwise wraps up."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    first: list
-    entered: Any = None
-    release: Any = None
-    calls: int = 0
-
-    @property
-    def _llm_type(self):
-        return "steerable-batch"
-
-    def bind_tools(self, tools, **kwargs):
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        if any(m.additional_kwargs.get("run_input_id") for m in messages):
-            applied = any(isinstance(m, ToolMessage) and m.name == "apply_extra" for m in messages)
-            message = AIMessage(content="New requirement applied") if applied else AIMessage(content="", tool_calls=[{"name": "apply_extra", "args": {}, "id": "extra"}])
-        else:
-            self.calls += 1
-            message = AIMessage(content="", tool_calls=self.first) if self.calls == 1 else AIMessage(content="Wrapped up")
-        return ChatResult(generations=[ChatGeneration(message=message)])
-
-    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-        if self.entered is not None and self.calls == 0:
-            self.entered.set()
-            await self.release.wait()
-        return self._generate(messages)
-
-
-class TestPartialCapKeepsRunGuards:
-    """Calls that survive a partial cap still run, so the checks other middlewares apply to calls must still apply.
-
-    Those middlewares read ``stop_reason`` in the run context as "the run is ending" and skip their checks.
-    Middleware order follows the lead chain: input admission first, the todo middleware before loop
-    detection, end-of-graph input handling last.
-    """
-
-    BATCH = [{"name": "write_out", "args": {"value": f"old-{i}"}, "id": f"old_{i}"} for i in range(4)]
-
-    @staticmethod
-    async def _input_control():
-        store = MemoryRunStore()
-        await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
-        inputs = RunInputs(store, "run", "owner", "worker")
-        return inputs, RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=InMemorySaver())
-
-    @staticmethod
-    def _tools(executed):
-        @as_tool
-        async def write_out(value: str) -> str:
-            """Write a value."""
-            executed.append(value)
-            return "ok"
-
-        @as_tool
-        async def apply_extra() -> str:
-            """Apply the new requirement."""
-            executed.append("new")
-            return "updated"
-
-        return [write_out, apply_extra]
-
-    @pytest.mark.asyncio
-    async def test_input_that_arrives_during_inference_cancels_the_admitted_calls(self):
-        inputs, control = await self._input_control()
-        executed, entered, release = [], asyncio.Event(), asyncio.Event()
-        model = _SteerableBatchModel(first=self.BATCH, entered=entered, release=release)
-        middleware = [RunInputAdmissionMiddleware(), LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3), RunInputMiddleware()]
-        context = {INPUT_CONTEXT_KEY: control, "thread_id": "thread", "run_id": "run"}
-        graph = create_agent(model, tools=self._tools(executed), middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=control.checkpointer)
-        run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context=context))
-        try:
-            await asyncio.wait_for(entered.wait(), 3)
-            await inputs.submit("update", "Do the new work instead", "steer")
-            release.set()
-            await asyncio.wait_for(run, 5)
-        finally:
-            release.set()
-            await asyncio.gather(run, return_exceptions=True)
-            await control.close()
-
-        # The two calls the cap admitted are obsolete after the steer and must not run.
-        assert executed == ["new"]
-        # None of the trimmed response's calls ran, so it leaves no cap behind.
-        assert "stop_reason" not in context
-        assert graph.get_state({"configurable": {"thread_id": "thread"}}).values.get(LOOP_CAP_STATE_KEY) is None
-
-    @pytest.mark.asyncio
-    async def test_input_that_arrives_as_the_run_finishes_is_applied(self, monkeypatch):
-        inputs, control = await self._input_control()
-        closing, release = asyncio.Event(), asyncio.Event()
-        original_close = inputs.close
-
-        async def gated_close(delivered=None):
-            if not closing.is_set():
-                closing.set()
-                await release.wait()
-            return await original_close(delivered)
-
-        monkeypatch.setattr(inputs, "close", gated_close)
-        executed = []
-        middleware = [RunInputAdmissionMiddleware(), LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3), RunInputMiddleware()]
-        context = {INPUT_CONTEXT_KEY: control, "thread_id": "thread", "run_id": "run"}
-        graph = create_agent(_SteerableBatchModel(first=self.BATCH), tools=self._tools(executed), middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=control.checkpointer)
-        run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context=context))
-        try:
-            await asyncio.wait_for(closing.wait(), 5)
-            await inputs.submit("last", "Apply this correction", "steer")
-            release.set()
-            await asyncio.wait_for(run, 5)
-            state = await inputs.read()
-        finally:
-            release.set()
-            await asyncio.gather(run, return_exceptions=True)
-            await control.close()
-
-        assert sorted(executed) == ["new", "old-0", "old-1"]
-        assert [item["status"] for item in state["items"]] == ["applied"]
-        assert context["stop_reason"] == "loop_capped"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_async", [False, True])
-    async def test_parallel_write_todos_next_to_a_dropped_call_are_still_rejected(self, use_async):
-        executed = []
-
-        @as_tool
-        def write_out(value: str) -> str:
-            """Write a value."""
-            executed.append(value)
-            return "ok"
-
-        batch = [
-            {"name": "write_todos", "args": {"todos": [{"content": "plan A", "status": "in_progress"}]}, "id": "todo_a"},
-            {"name": "write_todos", "args": {"todos": [{"content": "plan B", "status": "in_progress"}]}, "id": "todo_b"},
-            *self.BATCH,
+        assert ("read_file", "warn") in mw._tool_freq_reported[_scope_key()]
+        metric_records = [record for record in caplog.records if record.message == "Tool frequency metric reached"]
+        assert [(record.tool_name, record.metric, record.threshold) for record in metric_records] == [
+            ("read_file", "warn", 2),
         ]
-        middleware = [TodoMiddleware(), LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)]
-        context = {"thread_id": "todo-thread", "run_id": "todo-run"}
-        graph = create_agent(_SteerableBatchModel(first=batch), tools=[write_out], middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=InMemorySaver())
-        inputs, config = {"messages": [HumanMessage(content="Plan and write")]}, {"configurable": {"thread_id": "todo-thread"}}
-
-        result = await graph.ainvoke(inputs, config, context=context) if use_async else graph.invoke(inputs, config, context=context)
-
-        todo_results = [m.status for m in result["messages"] if isinstance(m, ToolMessage) and m.tool_call_id in ("todo_a", "todo_b")]
-        # Each call replaces the whole plan, so two in one response are rejected rather than raced.
-        assert todo_results == ["error", "error"]
-        assert not result.get("todos")
-        assert sorted(executed) == ["old-0", "old-1"]
-        assert context["stop_reason"] == "loop_capped"
-
-
-class _ScriptedSteerModel(BaseChatModel):
-    """Answers with ``script`` in order; pauses on call ``gate_at``; once a run input arrives, writes ``corrected`` with the same tool."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    script: list
-    gate_at: int = 0
-    entered: Any = None
-    release: Any = None
-    calls: int = 0
-
-    @property
-    def _llm_type(self):
-        return "scripted-steer"
-
-    def bind_tools(self, tools, **kwargs):
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        if any(m.additional_kwargs.get("run_input_id") for m in messages):
-            done = any(isinstance(m, ToolMessage) and m.tool_call_id == "corrected" for m in messages)
-            message = AIMessage(content="Correction written") if done else AIMessage(content="", tool_calls=[{"name": "write_out", "args": {"value": "corrected"}, "id": "corrected"}])
-        else:
-            message = AIMessage(content="", tool_calls=self.script[self.calls]) if self.calls < len(self.script) else AIMessage(content="Wrapped up")
-            self.calls += 1
-        return ChatResult(generations=[ChatGeneration(message=message)])
-
-    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-        if self.entered is not None and self.calls == self.gate_at and not self.entered.is_set():
-            self.entered.set()
-            await self.release.wait()
-        return self._generate(messages)
-
-
-class TestDiscardedResponseLeavesNoAccounting:
-    """Calls that another middleware discards before they run must not count toward a limit or leave a cap behind."""
-
-    @staticmethod
-    def _call(name, value):
-        return {"name": name, "id": f"call_{name}_{value}", "args": {"value": value}}
-
-    @staticmethod
-    def _state(calls, message_id="response-1", loop_cap=None):
-        state = {"messages": [AIMessage(content="", tool_calls=calls, id=message_id)]}
-        if loop_cap is not None:
-            state[LOOP_CAP_STATE_KEY] = loop_cap
-        return state
-
-    @staticmethod
-    def _next_model_call(mw, runtime, state):
-        request = _make_request(state["messages"], runtime)
-        request.state = state
-        captured, handler = _capture_handler()
-        mw.wrap_model_call(request, handler)
-        return captured[0]
-
-    async def _steered_run(self, script, gate_at):
-        store = MemoryRunStore()
-        await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
-        inputs = RunInputs(store, "run", "owner", "worker")
-        control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=InMemorySaver())
-        executed, entered, release = [], asyncio.Event(), asyncio.Event()
-
-        @as_tool
-        async def write_out(value: str) -> str:
-            """Write a value."""
-            executed.append(("write_out", value))
-            return "ok"
-
-        @as_tool
-        async def note(value: str) -> str:
-            """Keep a note."""
-            executed.append(("note", value))
-            return "ok"
-
-        model = _ScriptedSteerModel(script=script, gate_at=gate_at, entered=entered, release=release)
-        middleware = [RunInputAdmissionMiddleware(), LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3), RunInputMiddleware()]
-        context = {INPUT_CONTEXT_KEY: control, "thread_id": "thread", "run_id": "run"}
-        graph = create_agent(model, tools=[write_out, note], middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=control.checkpointer)
-        config = {"configurable": {"thread_id": "thread"}}
-        run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, config, context=context))
-        try:
-            await asyncio.wait_for(entered.wait(), 3)
-            await inputs.submit("update", "Write only the corrected value", "steer")
-            release.set()
-            await asyncio.wait_for(run, 5)
-            items = (await inputs.read())["items"]
-        finally:
-            release.set()
-            await asyncio.gather(run, return_exceptions=True)
-            await control.close()
-        return executed, [item["status"] for item in items], graph.get_state(config).values.get(LOOP_CAP_STATE_KEY), context.get("stop_reason")
-
-    @pytest.mark.asyncio
-    async def test_steer_replacement_can_use_the_tool_the_discarded_response_capped(self):
-        batch = [{"name": "write_out", "args": {"value": f"old-{i}"}, "id": f"old_{i}"} for i in range(4)]
-
-        executed, steer, cap, stop_reason = await self._steered_run([batch], gate_at=0)
-
-        assert executed == [("write_out", "corrected")]
-        assert steer == ["applied"]
-        assert cap is None
-        assert stop_reason is None
-
-    @pytest.mark.asyncio
-    async def test_undo_keeps_a_cap_from_an_earlier_response(self):
-        notes = [{"name": "note", "args": {"value": f"n{i}"}, "id": f"note_{i}"} for i in range(4)]
-        writes = [{"name": "write_out", "args": {"value": f"old-{i}"}, "id": f"old_{i}"} for i in range(4)]
-
-        executed, steer, cap, stop_reason = await self._steered_run([notes, writes], gate_at=1)
-
-        assert sorted(executed) == [("note", "n0"), ("note", "n1"), ("write_out", "corrected")]
-        assert steer == ["applied"]
-        assert cap == {"run_id": "run", "tools": {"note": 3}}
-        assert stop_reason == "loop_capped"
-
-    def test_discarded_response_below_the_limit_is_not_counted(self):
-        """The same holds without a cap: calls that never ran must not push a later call over the limit."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        first = [self._call("a", 0), self._call("a", 1)]
-        assert mw.after_model(self._state(first), runtime) is None
-        assert mw._tool_name_counter[_scope_key()]["a"] == 2
-
-        # Another middleware replaced the response (same id) with one that has no calls.
-        self._next_model_call(mw, runtime, self._state([]))
-
-        assert mw._tool_name_counter[_scope_key()].get("a", 0) == 0
-        assert mw.after_model(self._state([self._call("a", 2), self._call("a", 3)], message_id="response-2"), runtime) is None
-
-    def test_response_whose_calls_stand_keeps_its_accounting(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        first = [self._call("a", 0), self._call("a", 1)]
-        mw.after_model(self._state(first), runtime)
-
-        self._next_model_call(mw, runtime, self._state(first))
-        result = mw.after_model(self._state([self._call("a", 2), self._call("a", 3)], message_id="response-2"), runtime)
-
-        assert result["messages"][0].tool_calls == []
-        assert "[FORCED STOP] Tool a called 3 times" in result["messages"][0].content
-
-    def test_response_no_longer_in_the_history_keeps_its_accounting(self):
-        """Compaction can remove the response; without it there is no evidence its calls were discarded."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        mw.after_model(self._state([self._call("a", 0), self._call("a", 1)]), runtime)
-
-        self._next_model_call(mw, runtime, {"messages": [HumanMessage(content="summary", name="summary")]})
-
-        assert mw._tool_name_counter[_scope_key()]["a"] == 2
-
-    def test_undone_cap_is_not_explained_to_the_model(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        trimmed = mw.after_model(self._state([self._call("a", i) for i in range(4)]), runtime)
-        assert trimmed[LOOP_CAP_STATE_KEY]["notice"]["skipped"] == 2
-
-        sent = self._next_model_call(mw, runtime, self._state([], loop_cap=trimmed[LOOP_CAP_STATE_KEY]))
-
-        assert [m.name for m in sent.messages] == [None]
-        assert mw.after_model(self._state([], message_id="response-2", loop_cap=trimmed[LOOP_CAP_STATE_KEY]) | {"messages": [AIMessage(content="ok", id="response-2")]}, runtime) == {LOOP_CAP_STATE_KEY: None}
-
-
-class TestCapReportNamesTheGuardThatStopped:
-    """Both report channels name the same guard, so a subagent result agrees with the run context."""
-
-    class _TokenHeavyModel(BaseChatModel):
-        model_config = ConfigDict(arbitrary_types_allowed=True)
-        calls: int = 0
-
-        @property
-        def _llm_type(self):
-            return "token-heavy"
-
-        def bind_tools(self, tools, **kwargs):
-            return self
-
-        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                calls = [{"name": "write_out", "args": {"value": f"v{i}"}, "id": f"w{i}"} for i in range(4)]
-                usage = {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}
-            else:
-                calls = [{"name": "note", "args": {"text": "more"}, "id": f"note_{self.calls}"}]
-                usage = {"input_tokens": 5000, "output_tokens": 10, "total_tokens": 5010}
-            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=calls, usage_metadata=usage))])
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_async", [False, True])
-    async def test_later_token_budget_stop_is_what_the_subagent_reports(self, use_async):
-        @as_tool
-        def write_out(value: str) -> str:
-            """Write a value."""
-            return "ok"
-
-        @as_tool
-        def note(text: str) -> str:
-            """Keep a note."""
-            return "noted"
-
-        # Subagent chain order: loop detection before the token budget. The executor
-        # (``SubagentExecutor._consume_guard_stop_reason``) asks them in that order
-        # and reports the first reason it gets.
-        loop = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        budget = TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True, max_tokens=1000))
-        middlewares = [loop, budget]
-        context = {"thread_id": "sub-thread", "run_id": "sub-run"}
-        graph = create_agent(self._TokenHeavyModel(), tools=[write_out, note], middleware=middlewares, state_schema=ThreadState, context_schema=dict)
-        payload, config = {"messages": [HumanMessage(content="Do it")]}, {"recursion_limit": 20}
-
-        await graph.ainvoke(payload, config, context=context) if use_async else graph.invoke(payload, config, context=context)
-
-        assert context["stop_reason"] == "token_capped"
-        # Loop detection only trimmed a batch; the token budget stopped the run.
-        assert loop.consume_stop_reason("sub-run") is None
-        assert budget.consume_stop_reason("sub-run") == "token_capped"
-
-    def test_partial_cap_with_another_guards_reason_reports_nothing_of_its_own(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        written = mw.after_model(_make_state(tool_calls=[{"name": "a", "id": f"c{i}", "args": {"v": i}} for i in range(4)]), runtime)[LOOP_CAP_STATE_KEY]
-        runtime.context["stop_reason"] = "model_length_capped"
-
-        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: written}, runtime)
-
-        assert runtime.context["stop_reason"] == "model_length_capped"
-        assert mw.consume_stop_reason("test-run") is None
-
-
-class TestCapSurvivesApprovalPauseAndRestart:
-    """Drive a real approval pause and checkpoint resume; each step builds a new graph and new middleware."""
-
-    THREAD = "cap-thread"
-
-    @staticmethod
-    def _build(saver, responses, executed):
-        @as_tool
-        def external_write(value: str) -> str:
-            """Write externally."""
-            executed.append(("external_write", value))
-            return "written"
-
-        @as_tool
-        def note(text: str) -> str:
-            """Keep a note."""
-            executed.append(("note", text))
-            return "noted"
-
-        policy = HitlApprovalConfig(enabled=True, tools=["external_write"], allow_tools=["note"], default_mode="ask", allowed_modes=["ask", "auto", "full"])
-        approval = ToolApprovalMiddleware(policy, app_config=AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, hitl_approval=policy))
-        loop = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=2)
-        model = _CapturingFakeMessagesListChatModel(responses=responses)
-        graph = create_agent(model, tools=[external_write, note], middleware=[approval, loop], checkpointer=saver)
-        return graph, model, loop
-
-    @staticmethod
-    def _pending_call_ids(paused):
-        return [action["tool_call_id"] for pending in paused["__interrupt__"] for action in pending.value["actions"]]
-
-    @staticmethod
-    def _approve(paused):
-        action = paused["__interrupt__"][0].value["actions"][0]
-        return Command(resume={"responses": [{"tool_call_id": action["tool_call_id"], "request_id": action["request_id"], "option_id": "approve"}]})
-
-    @staticmethod
-    def _notices(messages):
-        return [m.content for m in messages if isinstance(m, HumanMessage) and m.name == "loop_warning"]
-
-    @pytest.mark.parametrize("use_async", [False, True])
-    def test_cap_notice_and_stop_reason_survive_and_a_new_task_starts_fresh(self, use_async):
-        def run(graph, payload, context):
-            config = {"configurable": {"thread_id": self.THREAD}, "recursion_limit": 12}
-            return asyncio.run(graph.ainvoke(payload, config, context=context)) if use_async else graph.invoke(payload, config, context=context)
-
-        def cap_record(graph):
-            return graph.get_state({"configurable": {"thread_id": self.THREAD}}).values.get(LOOP_CAP_STATE_KEY)
-
-        saver = InMemorySaver()
-        executed = []
-
-        # 1. Three writes against a limit that admits one. The admitted call pauses for approval.
-        writes = [{"name": "external_write", "id": f"w{i}", "args": {"value": f"v{i}"}} for i in range(3)]
-        graph, _, _ = self._build(saver, [AIMessage(content="", tool_calls=writes)], executed)
-        paused_context = {"thread_id": self.THREAD, "run_id": "paused-run"}
-        paused = run(graph, {"messages": [("user", "write three values")]}, paused_context)
-
-        assert not executed
-        assert self._pending_call_ids(paused) == ["w0"]
-        assert cap_record(graph) == {"run_id": "paused-run", "tools": {"external_write": 2}, "notice": {"total": 3, "skipped": 2, "tools": ["external_write"]}}
-        # The admitted call is still pending, so the run is not reported as ending.
-        assert "stop_reason" not in paused_context
-
-        # 2. Restart, then resume under a new run id. The model retries the capped tool next to another call.
-        retry = [{"name": "external_write", "id": "w9", "args": {"value": "v9"}}, {"name": "note", "id": "n0", "args": {"text": "kept"}}]
-        graph, model, loop = self._build(saver, [AIMessage(content="", tool_calls=retry), AIMessage(content="done")], executed)
-        resumed_context = {"thread_id": self.THREAD, "run_id": "resumed-run"}
-        result = run(graph, self._approve(paused), resumed_context)
-
-        # This run's own window is empty, so only the checkpointed cap can reject w9.
-        assert sorted(executed) == [("external_write", "v0"), ("note", "kept")]
-        after_resume, after_retry = (self._notices(messages) for messages in model.seen_messages)
-        assert len(after_resume) == 1 and "skipped 2 of the 3 tool calls" in after_resume[0]
-        assert len(after_retry) == 1 and "skipped 1 of the 2 tool calls" in after_retry[0]
-        assert result["messages"][-1].content == "done"
-        assert cap_record(graph) == {"run_id": "resumed-run", "tools": {"external_write": 2}}
-        assert resumed_context["stop_reason"] == "loop_capped"
-        assert loop.consume_stop_reason("resumed-run") == "loop_capped"
-
-        # 3. A later task on the same thread gets a fresh budget: its write reaches approval.
-        later = [{"name": "external_write", "id": "w10", "args": {"value": "v10"}}]
-        graph, _, loop = self._build(saver, [AIMessage(content="", tool_calls=later)], executed)
-        later_context = {"thread_id": self.THREAD, "run_id": "later-run"}
-        paused = run(graph, {"messages": [("user", "write one more value")]}, later_context)
-
-        assert self._pending_call_ids(paused) == ["w10"]
-        assert cap_record(graph) is None
-        assert "stop_reason" not in later_context
-        assert loop.consume_stop_reason("later-run") is None
 
 
 class TestFromConfig:
@@ -3328,31 +1860,30 @@ class TestFromConfig:
         mw = LoopDetectionMiddleware.from_config(self._config(tool_freq_overrides={"bash": {"warn": 60, "hard_limit": 120}}))
         assert mw._tool_freq_window >= 120
 
-    def test_tight_burst_hard_stops_under_default_config(self):
-        """Under the real default config, one tool type called many times with
-        *distinct* args (which Layer 1's name+args hash never catches) must still
-        be hard-stopped by Layer 2. This fails if the freq window is capped at
-        ``window_size`` (20) below the hard limit (50)."""
+    def test_tight_burst_records_metric_under_default_config(self, caplog):
+        """The default frequency threshold is observable and never stops work."""
         mw = LoopDetectionMiddleware.from_config(self._config())
         runtime = _make_runtime()
         hard = mw.tool_freq_hard_limit  # 50 by default
 
         # Distinct args every call -> unique hashes -> Layer 1 (hash) never trips.
-        # Only Layer 2 (per-tool-type frequency) can catch this tight burst.
-        for i in range(hard - 1):
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            assert result is None, f"unexpected hard stop before the limit at call {i}"
+        with caplog.at_level("INFO"):
+            for i in range(hard):
+                result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
+                assert result is None, f"frequency metric unexpectedly changed control flow at call {i}"
 
-        # The call that pushes freq_count to the hard limit fires the stop.
-        result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{hard}")]), runtime)
-        assert result is not None
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
+        records = [record for record in caplog.records if record.message == "Tool frequency metric reached"]
+        assert [(record.metric, record.threshold, record.action) for record in records] == [
+            ("warn", mw.tool_freq_warn, "observe_only"),
+            ("hard_limit", hard, "observe_only"),
+        ]
+        assert mw.consume_stop_reason("test-run") is None
 
 
 class TestWarningLetsAgentSaveResultsFirst:
     """F67: a warn-level loop message must not make a subagent drop the
     file it was asked to write. The warning asks for one last save through a
-    file-writing tool before the final answer; the hard stop is unchanged."""
+    file-writing tool before the final answer."""
 
     @staticmethod
     def _write_call(path="/mnt/user-data/workspace/out.md"):
@@ -3373,44 +1904,31 @@ class TestWarningLetsAgentSaveResultsFirst:
         assert "write_file" in warning
         assert warning.index("write what you have collected") < warning.index("produce your final answer")
 
-    def test_freq_warning_names_the_looping_tool_and_allows_saving(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+    def test_save_call_after_hash_warning_is_not_stripped(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
         runtime = _make_runtime()
-        for i in range(3):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}")]), runtime)
-        warning = mw._pending_warnings[_pending_key()][0]
-        assert "Stop calling read_file" in warning
-        assert "Stop calling tools and produce your final answer now" not in warning
-        assert "write_file" in warning
-
-    def test_save_call_after_warning_is_not_stripped(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
-        for i in range(3):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}")]), runtime)
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=[_bash_call("ls")]), runtime)
         assert mw._pending_warnings[_pending_key()]
-        # The follow-up write is a different tool and a different call set:
-        # neither detection layer acts on it, so the write reaches the tools node.
+        # The follow-up write is a different tool and call set, so it reaches the tools node.
         assert mw._apply(_make_state(tool_calls=[self._write_call()]), runtime) is None
 
-    @pytest.mark.parametrize("layer", ["hash", "frequency"])
-    def test_warning_allows_a_bounded_read_before_write_recovery(self, layer):
-        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+    def test_warning_allows_a_bounded_read_before_write_recovery(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=20)
         runtime = _make_runtime()
         for i in range(3):
-            mw._apply(_make_state(tool_calls=[_bash_call("ls" if layer == "hash" else f"cmd_{i}")]), runtime)
+            mw._apply(_make_state(tool_calls=[_bash_call("ls")]), runtime)
         warning = mw._pending_warnings[_pending_key()][0]
         assert "read-before-write" in warning
         assert "read the target file" in warning
         assert "retry the save once" in warning
         assert warning.index("retry the save once") < warning.index("produce your final answer")
 
-    @pytest.mark.parametrize("layer", ["hash", "frequency"])
-    def test_looping_writer_requires_an_alternative_or_an_unsaved_result(self, layer):
-        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+    def test_looping_writer_requires_an_alternative_or_an_unsaved_result(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=20)
         runtime = _make_runtime()
         for i in range(3):
-            mw._apply(_make_state(tool_calls=[self._write_call("/out.md" if layer == "hash" else f"/out_{i}.md")]), runtime)
+            mw._apply(_make_state(tool_calls=[self._write_call("/out.md")]), runtime)
         warning = mw._pending_warnings[_pending_key()][0]
         assert "unless it is the looping tool" in warning
         assert "different available file-writing tool" in warning
@@ -3418,14 +1936,13 @@ class TestWarningLetsAgentSaveResultsFirst:
         assert "include the collected results in your final answer" in warning
         assert "file was not saved" in warning
 
-    @pytest.mark.parametrize("layer", ["hash", "frequency"])
-    def test_warning_asks_to_present_created_outputs_before_answering(self, layer):
+    def test_warning_asks_to_present_created_outputs_before_answering(self):
         # Told only to stop calling tools, agents skipped present_files for
         # outputs they had already created, so the run failed its delivery check.
-        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=20)
         runtime = _make_runtime()
         for i in range(3):
-            mw._apply(_make_state(tool_calls=[_bash_call("ls" if layer == "hash" else f"cmd_{i}")]), runtime)
+            mw._apply(_make_state(tool_calls=[_bash_call("ls")]), runtime)
         warning = mw._pending_warnings[_pending_key()][0]
         assert "If present_files is available" in warning
         assert "already created in /mnt/user-data/outputs" in warning
@@ -3493,8 +2010,8 @@ class TestWarningLetsAgentSaveResultsFirst:
             presented.extend(filepaths)
             return "presented"
 
-        loop = LoopDetectionMiddleware(warn_threshold=10, hard_limit=20, tool_freq_warn=3, tool_freq_hard_limit=10)
-        calls = [dict(_bash_call(f"python build_{i}.py"), id=f"build_{i}") for i in range(3)]
+        loop = LoopDetectionMiddleware(warn_threshold=3, hard_limit=20, tool_freq_warn=10, tool_freq_hard_limit=20)
+        calls = [dict(_bash_call("python build.py"), id=f"build_{i}") for i in range(3)]
         calls.append({"name": "present_files", "id": "present", "args": {"filepaths": ["/mnt/user-data/outputs/report.docx"]}})
         model = _CapturingFakeMessagesListChatModel(responses=[*[AIMessage(content="", tool_calls=[call]) for call in calls], AIMessage(content="The report is ready.")])
         graph = create_agent(model=model, tools=[bash, present_files], middleware=[loop])
@@ -3510,7 +2027,6 @@ class TestWarningLetsAgentSaveResultsFirst:
         "name,expected",
         [
             ("_HARD_STOP_MSG", "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."),
-            ("_TOOL_FREQ_HARD_STOP_MSG", "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."),
         ],
     )
     def test_hard_stop_message_unchanged(self, name, expected):
