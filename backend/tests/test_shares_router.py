@@ -468,7 +468,8 @@ async def test_imported_nested_files_have_sandbox_write_permissions(share_app):
 async def test_artifact_import_off_posix_is_refused_before_any_state(share_app, monkeypatch):
     ctx = share_app
     share = await make_share(ctx)
-    assert share["artifacts"]
+    snapshot = await ctx.client.get(f"/api/shares/{share['token']}")
+    assert snapshot.json()["artifacts"]
     url = f"/api/shares/{share['token']}/fork"
     request_id = str(uuid4())
     monkeypatch.setattr(share_fork, "_ARTIFACT_IMPORT_SUPPORTED", False)
