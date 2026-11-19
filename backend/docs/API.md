@@ -92,8 +92,9 @@ Content-Type: application/json
 ```
 
 - `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
-  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`, `agents:read`,
-  `agents:write`, `schedules:read`, `schedules:write`. A PAT can only
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`, `projects:read`,
+  `projects:write`, `projects:delete`, `agents:read`, `agents:write`,
+  `schedules:read`, `schedules:write`. A PAT can only
   *narrow* its owning user's permissions, never widen them.
 - `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
 
@@ -139,8 +140,8 @@ Revocation is immediate.
   creation (the default `reject` stays at `runs:create`). Joining a run's
   stream is pure observation — an observer disconnecting never cancels the run.
 - **Route-level default-deny:** PAT requests are admitted only to the
-  thread/run lifecycle routes and the explicitly scoped agent and scheduled-task
-  routes — `POST /api/threads`
+  explicitly listed thread, run, project, agent and scheduled-task routes.
+  The thread/run lifecycle includes `POST /api/threads`
   (create), `POST /api/threads/search` (list), `GET/PATCH/DELETE
   /api/threads/{thread_id}`, the thread `goal`/`state`/`compact`/`history`/
   `branches` subroutes, and exactly the implemented `/runs` subroutes
@@ -151,11 +152,13 @@ Revocation is immediate.
   `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
-  Agent access covers the user-scoped `/api/agents` catalog, tool-group
-  metadata and package import/export routes. Scheduled-task access covers
-  `/api/scheduled-tasks` and the thread schedule history routes. These require
-  `agents:read|write` or `schedules:read|write` together with the existing
-  thread/run permissions enforced by each handler.
+  For personal agents, a PAT can list and create agents (`GET/POST /api/agents`)
+  and update or delete a named agent (`PUT/DELETE /api/agents/{name}`). Listing
+  requires `agents:read`. The three mutations require `agents:write`. A PAT
+  can also list, create, update, delete, pause and resume the owner's scheduled
+  tasks (see [Scheduled Tasks](#scheduled-tasks)). Agent detail and name checks,
+  tool-group lookup, package import/export and the remaining scheduler routes
+  are available to interactive sessions.
   Every other authenticated route — memory, user profiles, models, MCP/skills
   config, integrations, channels, uploads — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
@@ -1745,9 +1748,11 @@ GET /api/threads/{thread_id}/artifacts/{path}
 
 Owner-scoped task management for `/workspace/scheduled-tasks`. Reads need
 `threads:read`; mutations need `threads:write`, and create, update, resume and
-trigger also need `runs:create`. PAT callers additionally need
-`schedules:read` for reads and `schedules:write` for mutations. The existing
-thread and run permissions still apply to PAT requests.
+trigger also need `runs:create`. A PAT can list tasks with `schedules:read`,
+or create, update, delete, pause and resume them with `schedules:write`.
+The corresponding thread and run permissions still apply. Task detail, manual
+trigger, cron preview, run history and the per-thread task and event lists
+remain session-only.
 
 ```http
 GET    /api/scheduled-tasks

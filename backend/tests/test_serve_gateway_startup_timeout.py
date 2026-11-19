@@ -25,7 +25,7 @@ powershell.exe() { return 1; }
 lsof() {
     case "$*" in
         *-iTCP:8001*)
-            if [ -f "$TEST_STARTED" ] && [ "$TEST_CLOCK" -ge "$TEST_READY_AT" ]; then
+            if [ -f "$TEST_STARTED" ] && [ "$(cat "$TEST_CLOCK")" -ge "$TEST_READY_AT" ]; then
                 echo 12345
                 return 0
             fi
@@ -33,7 +33,7 @@ lsof() {
     esac
     return 1
 }
-sleep() { TEST_CLOCK=$((TEST_CLOCK + 1)); }
+sleep() { printf '%s\n' "$(( $(cat "$TEST_CLOCK") + 1 ))" > "$TEST_CLOCK"; }
 python3() { "$TEST_PYTHON" "$@"; }
 env() {
     if [ "$1" = python3 ]; then shift; python3 "$@"; else command env "$@"; fi
@@ -48,15 +48,10 @@ sh() {
 }
 nohup() { sh "$@"; }
 bash() {
-    if [ "$1" = ./scripts/wait-for-port.sh ]; then
-        if [ "$2" != 8001 ]; then return 0; fi
-        # The exported lsof and sleep supply the entire simulated probe.
-        PATH= "$TEST_BASH" "$@"
-        return $?
-    fi
+    if [ "$1" = ./scripts/wait-for-port.sh ] && [ "$2" != 8001 ]; then return 0; fi
     command "$TEST_BASH" "$@"
 }
-export -f lsof sleep
+export -f lsof sleep ss netstat powershell.exe
 source "$@"
 """
 
@@ -72,12 +67,13 @@ def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, a
     (scripts / "config-upgrade.sh").write_text("exit 0\n", encoding="utf-8", newline="\n")
     (scripts / "cleanup-containers.sh").write_text('printf "cleanup\\n" >> "$TEST_CLEANUP"\n', encoding="utf-8", newline="\n")
     (checkout / "config.yaml").write_text("models: []\n", encoding="utf-8", newline="\n")
+    (tmp_path / "clock").write_text("0\n", encoding="utf-8", newline="\n")
     bash = require_script_bash()
     env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV", "DEER_FLOW_GATEWAY_STARTUP_TIMEOUT", "DEER_FLOW_ENV_FILE"}}
     env.update(
         TEST_BASH=bash,
         TEST_PYTHON=Path(sys.executable).as_posix(),
-        TEST_CLOCK="0",
+        TEST_CLOCK=(tmp_path / "clock").as_posix(),
         TEST_STARTED=(tmp_path / "started").as_posix(),
         TEST_CLEANUP=(tmp_path / "cleanup").as_posix(),
         TEST_READY_AT=str(ready_at),

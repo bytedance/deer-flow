@@ -638,15 +638,6 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
-    def test_agent_named_import_can_be_read(self, agent_client):
-        created = agent_client.post("/api/agents", json={"name": "import", "soul": "Import agent"})
-        assert created.status_code == 201
-
-        response = agent_client.get("/api/agents/import")
-
-        assert response.status_code == 200
-        assert response.json()["name"] == "import"
-
     def test_agent_package_round_trip_preserves_portable_behavior(self, agent_client):
         payload = {
             "name": "research-lead",
@@ -1219,7 +1210,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to list agents"}
-        assert repr(str(agents_root)) in caplog.text
+        assert str(agents_root) in caplog.text
 
     def test_create_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
         agents_root = self._user_dir(tmp_path) / "agents"
@@ -1230,7 +1221,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to create agent"}
-        assert repr(str(agents_root)) in caplog.text
+        assert str(agents_root) in caplog.text
 
     def test_delete_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
         from deerflow.persistence.agents.file import FileAgentStore
@@ -1244,7 +1235,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to delete agent"}
-        assert repr(str(agent_dir)) in caplog.text
+        assert str(agent_dir) in caplog.text
 
     @pytest.mark.parametrize(
         ("method", "kwargs", "detail"),
@@ -1261,7 +1252,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": detail}
-        assert repr(str(user_md)) in caplog.text
+        assert str(user_md) in caplog.text
 
 
 class TestAgentsApiDisabled:

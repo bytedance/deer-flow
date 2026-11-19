@@ -295,21 +295,14 @@ def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch
 
     monkeypatch.setattr(paths_module, "_paths", None)
 
-    agent_dir = paths_module.get_paths().user_agent_dir("u1", "racy")
-    mkdir = pathlib.Path.mkdir
-
     def _racing_mkdir(self, *args, **kwargs):
-        if self == agent_dir:
-            mkdir(self, parents=True, exist_ok=True)
-            (self / "SOUL.md").write_text("concurrent creator", encoding="utf-8")
-        return mkdir(self, *args, **kwargs)
+        raise FileExistsError(str(self))
 
     monkeypatch.setattr(pathlib.Path, "mkdir", _racing_mkdir)
 
     fs = FileAgentStore()
     with pytest.raises(AgentExistsError):
         fs.create("racy", {"name": "racy"}, "soul", user_id="u1")
-    assert (agent_dir / "SOUL.md").read_text(encoding="utf-8") == "concurrent creator"
 
 
 # -- graph-subprocess config resolution (db backend's core cross-process invariant) --

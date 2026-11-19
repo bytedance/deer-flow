@@ -25,7 +25,6 @@ from deerflow.runtime.runs.store.base import (
     RunStore,
     StatusFinalization,
     canonical_run_created_at,
-    next_snapshot_updated_at,
     normalize_run_created_at_iso,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
@@ -237,7 +236,6 @@ class RunRepository(RunStore):
                 row = RunRow(run_id=run_id, created_at=created, evidence_seal_state="pending", run_incarnation=uuid4().hex, producer_epoch=uuid4().hex, producer_state="open", **values)
                 session.add(row)
             else:
-                values["updated_at"] = next_snapshot_updated_at(row.updated_at, now)
                 for key, value in values.items():
                     setattr(row, key, value)
             await session.flush()

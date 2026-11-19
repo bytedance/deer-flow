@@ -70,7 +70,7 @@ async def history(monkeypatch):
         @app.middleware("http")
         async def authenticate(request, call_next):
             user = None if request.headers.get("x-test-auth") == "anonymous" else SimpleNamespace(id="user-1")
-            permissions = [] if request.headers.get("x-test-auth") == "denied" else ["threads:read", "schedules:read"]
+            permissions = [] if request.headers.get("x-test-auth") == "denied" else ["threads:read"]
             request.state.auth = AuthContext(user=user, permissions=permissions)
             return await call_next(request)
 

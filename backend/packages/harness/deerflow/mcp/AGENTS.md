@@ -59,7 +59,9 @@ make test-blocking-io
 ## Results
 
 - **Never put base64 payloads in text.** Unsupported content (inline audio) raises
-  a recoverable tool error.
+  a recoverable tool error, and the stdio conversion reports an error result with
+  no text block by content shape, never the payload. sse/http tools keep
+  `langchain-mcp-adapters`' conversion, which still stringifies that fallback.
 - **`ResourceLink` items do not become URL-sourced `file` blocks.** Chat
   Completions serialization rejects them, and a checkpointed block would break
   every later turn of the thread.

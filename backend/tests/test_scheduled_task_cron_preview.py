@@ -24,7 +24,7 @@ async def client(monkeypatch):
     @app.middleware("http")
     async def authenticate(request, call_next):
         user = None if request.headers.get("x-test-auth") == "anonymous" else SimpleNamespace(id="preview-user")
-        permissions = [] if request.headers.get("x-test-auth") == "denied" else ["threads:read", "schedules:read"]
+        permissions = [] if request.headers.get("x-test-auth") == "denied" else ["threads:read"]
         request.state.auth = AuthContext(user=user, permissions=permissions)
         return await call_next(request)
 

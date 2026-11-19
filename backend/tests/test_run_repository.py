@@ -250,20 +250,6 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_replacing_an_answered_snapshot_after_clock_rollback_invalidates_its_receipt(self, tmp_path):
-        repo = await _make_repo(tmp_path)
-        timestamp = datetime.now(UTC) + timedelta(days=1)
-        original = {"hitl_approval": {"request_id": "approval-1"}}
-        try:
-            await repo.put("run", thread_id="t1", status="waiting_for_input", metadata=original)
-            assert await repo.answer_approval("run", metadata={}, answered_updated_at=timestamp.isoformat())
-            await repo.put("run", thread_id="t1", status="success", metadata={})
-            assert not await repo.restore_approval("run", metadata=original, expected_updated_at=timestamp.isoformat())
-            assert (await repo.get("run"))["status"] == "success"
-        finally:
-            await _cleanup()
-
-    @pytest.mark.anyio
     async def test_answer_approval_is_single_winner_and_restores_exact_pause(self, tmp_path):
         repo = await _make_repo(tmp_path)
         original_metadata = {"hitl_approval": {"request_id": "approval-1"}, "retained": True}

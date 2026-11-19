@@ -1,13 +1,11 @@
 """Real SQLite, host assembly, evidence, projection and public-only consumer."""
 
 import importlib.util
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from deerflow_extension_api import ExtensionData, ExtensionRuntimeDeps, HostPolicySnapshot
-from deerflow_extension_api.host_capabilities import HostCapabilityError
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -64,11 +62,6 @@ async def test_public_consumer_end_to_end_and_plugin_removed_restart(tmp_path, m
     config = SimpleNamespace(database=database, plugins=[spec])
     host = HostCapabilities(config, RunRepository(sf), DbRunEventStore(sf), root=tmp_path, storage_factory=lambda _: storage)
     try:
-        if os.name != "posix":
-            with pytest.raises(HostCapabilityError, match="UNSUPPORTED_TOPOLOGY"):
-                await host.start()
-            assert host.runtime is None
-            return
         await host.start()
         evidence, mutations = host.bindings[spec.use]
         deps = ExtensionRuntimeDeps(app_store=ExtensionData("fixture"), policy=HostPolicySnapshot(), completed_run_evidence=evidence, skill_mutations=mutations)

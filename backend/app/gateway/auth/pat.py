@@ -52,12 +52,9 @@ PAT_MAX_NAME_LENGTH = 128
 # Default-deny route boundary for PAT callers (#5041 review P1-1): scope
 # intersection in AuthMiddleware only constrains routes that consult
 # ``request.state.auth.permissions`` (``@require_permission``). Authenticated
-# mutation routes without that decorator — memory deletion, agent creation,
-# credential switching, channel configuration — would otherwise accept a
-# PAT holding a single read scope. A route is reachable by PAT only when it
-# is explicitly listed here, and only together with the thread/run lifecycle
-# plus explicitly scoped agent and scheduled-task routes; everything else
-# answers 403 regardless of scopes.
+# routes without that decorator could otherwise accept a PAT holding a
+# single read scope. Only the methods and paths listed here can be used
+# with a PAT. All other routes return 403 regardless of the token's scopes.
 _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"POST"}), re.compile(r"^/api/threads$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/search$")),
@@ -66,29 +63,13 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/state$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/(compact|history|branches)$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/move$")),
-    # Custom-agent management. The user-profile route remains session-only,
-    # while the agent catalog, package import/export and tool-group metadata
-    # are useful to deployment automation and already enforce per-user scope.
-    (frozenset({"GET"}), re.compile(r"^/api/agent-tool-groups$")),
+    # Personal agent and scheduled-task deployment. Preserve the session
+    # boundary for package management, manual triggers and history.
     (frozenset({"GET", "POST"}), re.compile(r"^/api/agents$")),
-    (frozenset({"GET"}), re.compile(r"^/api/agents/check$")),
-    (frozenset({"POST"}), re.compile(r"^/api/agents/import$")),
-    (frozenset({"GET"}), re.compile(r"^/api/agents/[^/]+/export$")),
-    # ``import`` is both the package-import collection endpoint for POST and
-    # a valid custom-agent name for GET, so only the non-agent ``check`` path
-    # needs to stay outside this item rule.
-    (frozenset({"GET"}), re.compile(r"^/api/agents/(?!check$)[^/]+$")),
     (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/agents/[^/]+$")),
-    # Scheduled-task configuration and history. The route decorators retain
-    # the existing thread/run capability checks, so these scopes add a
-    # resource boundary without widening run creation or mutation rights.
     (frozenset({"GET", "POST"}), re.compile(r"^/api/scheduled-tasks$")),
-    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks/preview-cron$")),
-    (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/scheduled-tasks/(?!preview-cron$)[^/]+$")),
-    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks/[^/]+/(pause|resume|trigger)$")),
-    (frozenset({"GET"}), re.compile(r"^/api/scheduled-tasks/[^/]+/runs$")),
-    (frozenset({"GET"}), re.compile(r"^/api/threads/[^/]+/scheduled-tasks$")),
-    (frozenset({"GET"}), re.compile(r"^/api/threads/[^/]+/scheduled-task-events$")),
+    (frozenset({"PATCH", "DELETE"}), re.compile(r"^/api/scheduled-tasks/(?!preview-cron$)[^/]+$")),
+    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks/[^/]+/(pause|resume)$")),
     # Projects subtree: same enumerated-no-dead-methods precision as the
     # threads/runs rules — only the methods the projects router implements
     # are admitted, so a future projects route is default-denied until

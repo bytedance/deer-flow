@@ -85,7 +85,7 @@ class Permissions:
     AGENTS_READ = "agents:read"
     AGENTS_WRITE = "agents:write"
 
-    # Scheduled task configuration and history
+    # Scheduled task deployment
     SCHEDULES_READ = "schedules:read"
     SCHEDULES_WRITE = "schedules:write"
 

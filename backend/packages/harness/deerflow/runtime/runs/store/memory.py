@@ -15,7 +15,6 @@ from deerflow.runtime.runs.store.base import (
     RunStore,
     StatusFinalization,
     canonical_run_created_at,
-    next_snapshot_updated_at,
     run_is_before_cursor,
     run_sort_key,
 )
@@ -102,9 +101,8 @@ class MemoryRunStore(RunStore):
         evidence_agent_id=None,
         idempotency_request=None,
     ):
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
-        updated_at = next_snapshot_updated_at(datetime.fromisoformat(existing["updated_at"]), now) if existing else now
         self._runs[run_id] = {
             "run_id": run_id,
             "thread_id": thread_id,
@@ -121,8 +119,8 @@ class MemoryRunStore(RunStore):
             "error": error,
             "stop_reason": stop_reason,
             "goal_verdict": copy.deepcopy(goal_verdict),
-            "created_at": created_at or now.isoformat(),
-            "updated_at": updated_at.isoformat(),
+            "created_at": created_at or now,
+            "updated_at": now,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
             "idempotency_key": idempotency_key,

@@ -38,7 +38,7 @@ from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_AT
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
-from app.gateway.utils import constant_time_equals
+from app.gateway.utils import constant_time_equals, sanitize_log_param
 from deerflow.config.auth_config import OIDCAuthConfig, OIDCProviderConfig
 from deerflow.persistence.login_throttle import LoginThrottleStore
 
@@ -1052,7 +1052,14 @@ async def oauth_callback(
 
     # ── Provider error ───────────────────────────────────────────────
     if error:
-        logger.warning("OIDC provider returned error for %s: %s (description: %s)", provider, error, error_description)
+        # This branch runs before any check, so all three values come straight
+        # from an unauthenticated request.
+        logger.warning(
+            "OIDC provider returned error for %s: %s (description: %s)",
+            sanitize_log_param(provider),
+            sanitize_log_param(error),
+            sanitize_log_param(error_description) if error_description is not None else None,
+        )
         redirect = _build_error_redirect(oidc_config.frontend_base_url, "sso_failed")
         return RedirectResponse(url=redirect, status_code=status.HTTP_302_FOUND)
 

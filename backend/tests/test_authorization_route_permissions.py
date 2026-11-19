@@ -9,10 +9,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
-from app.gateway.auth_disabled import AUTH_SOURCE_PAT
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.authz import (
-    AuthContext,
     Permissions,
     _authenticate,
     _get_cached_route_provider,
@@ -449,8 +447,8 @@ def _make_scheduled_tasks_app() -> FastAPI:
 @pytest.mark.parametrize(
     ("permissions", "denied_permission"),
     [
-        ([Permissions.THREADS_WRITE, Permissions.SCHEDULES_WRITE], Permissions.RUNS_CREATE),
-        ([Permissions.RUNS_CREATE, Permissions.SCHEDULES_WRITE], Permissions.THREADS_WRITE),
+        ([Permissions.THREADS_WRITE], Permissions.RUNS_CREATE),
+        ([Permissions.RUNS_CREATE], Permissions.THREADS_WRITE),
     ],
 )
 def test_scheduled_run_creation_requires_thread_write_and_runs_create(monkeypatch, method, path, payload, permissions, denied_permission):
@@ -465,77 +463,6 @@ def test_scheduled_run_creation_requires_thread_write_and_runs_create(monkeypatc
 
     assert response.status_code == 403
     assert response.json() == {"detail": f"Permission denied: {denied_permission}"}
-
-
-@pytest.mark.asyncio
-async def test_pat_only_permission_still_requires_scope_for_pat_callers():
-    async def endpoint(request: Request):
-        return {"ok": True}
-
-    guarded = require_permission("schedules", "read", pat_only=True)(endpoint)
-    request = SimpleNamespace(
-        state=SimpleNamespace(
-            auth_source=AUTH_SOURCE_PAT,
-            auth=AuthContext(user=_user(), permissions=[Permissions.THREADS_READ]),
-        )
-    )
-
-    with pytest.raises(HTTPException) as excinfo:
-        await guarded(request=request)
-
-    assert excinfo.value.status_code == 403
-    assert excinfo.value.detail == "Permission denied: schedules:read"
-
-
-def test_session_cookie_scheduled_task_reads_keep_existing_thread_permission(monkeypatch):
-    """The PAT schedule scopes must not break existing session callers."""
-    user = SimpleNamespace(id="session-user", system_role="user", disabled=False)
-    repo = SimpleNamespace(
-        list_by_user_and_thread=AsyncMock(return_value=[]),
-        automatic_runs_used_for=AsyncMock(return_value={}),
-        active_run_status_for=AsyncMock(return_value={}),
-    )
-    event_repo = SimpleNamespace(list_for_thread=AsyncMock(return_value=[]))
-    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
-
-    async def current_user(request):
-        return user
-
-    async def route_user(request):
-        return request.state.auth.user
-
-    app = FastAPI()
-    app.add_middleware(AuthMiddleware)
-    app.include_router(scheduled_tasks.router)
-    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
-    monkeypatch.setattr("app.gateway.deps.get_current_user_from_request", current_user)
-    monkeypatch.setattr(
-        "app.gateway.auth_middleware.resolve_route_permissions",
-        AsyncMock(return_value=[Permissions.THREADS_READ]),
-    )
-    monkeypatch.setattr(scheduled_tasks, "get_optional_user_from_request", route_user)
-    monkeypatch.setattr(scheduled_tasks, "get_scheduled_task_repo", lambda request: repo)
-    monkeypatch.setattr(scheduled_tasks, "get_scheduled_task_event_repo", lambda request: event_repo)
-    monkeypatch.setattr(scheduled_tasks, "get_thread_store", lambda request: thread_store)
-    monkeypatch.setattr("app.gateway.deps.get_thread_store", lambda request: thread_store)
-
-    with TestClient(app) as client:
-        tasks = client.get(
-            "/api/threads/thread-1/scheduled-tasks",
-            cookies={"access_token": "session-token"},
-        )
-        events = client.get(
-            "/api/threads/thread-1/scheduled-task-events",
-            cookies={"access_token": "session-token"},
-        )
-
-    assert tasks.status_code == 200
-    assert tasks.json() == []
-    assert events.status_code == 200
-    assert events.json() == {"events": []}
-    assert thread_store.check_access.await_count == 2
-    assert repo.list_by_user_and_thread.await_count == 1
-    assert event_repo.list_for_thread.await_count == 1
 
 
 # ── Provider cache tests ────────────────────────────────────────────────

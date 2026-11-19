@@ -20,9 +20,6 @@ HELPER="$REPO_ROOT/scripts/dev_multi_instance.py"
 
 STATE_DIR="${DEERFLOW_MI_STATE_DIR:-$REPO_ROOT/.deer-flow/multi-instance}"
 # Gateways run from backend/, so every path handed to them must be absolute.
-if command -v cygpath >/dev/null 2>&1; then
-    STATE_DIR="$(cygpath -u -- "$STATE_DIR")"
-fi
 case "$STATE_DIR" in
     /*) ;;
     *) STATE_DIR="$PWD/$STATE_DIR" ;;
