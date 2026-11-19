@@ -62,7 +62,7 @@ All paths below are relative to `/api`.
 | `DELETE /threads/{id}/shares/{share_id}` | Owner with `threads:write`; revokes access and removes stored snapshot bytes. |
 | `GET /shares/{token}` | Anonymous capability read; returns visible messages, artifact manifest, checkpoint and sequence. |
 | `GET`, `HEAD /shares/{token}/artifacts/{path}` | Reads only a copied manifest entry. Supports byte ranges and `?download=true`. |
-| `POST /shares/{token}/fork` | Signed-in visitor with `threads:write`; body contains a UUID `request_id`. Returns the new `thread_id`. Retrying the same request reuses a completed import. |
+| `POST /shares/{token}/fork` | Signed-in visitor with `threads:write`; body contains a UUID `request_id`. Returns the new `thread_id`. Retrying the same request reuses a completed import. Importing a share that carries artifacts requires a POSIX host; other hosts answer `422` before creating any state. |
 
 Creation captures the latest idle root checkpoint and its persisted visible
 history under exclusive thread admission. `checkpoint_id`, when supplied, is
