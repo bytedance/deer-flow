@@ -1858,12 +1858,14 @@ async def run_agent(
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
 
-        def mark_goal_participation(_goal: GoalState) -> None:
-            """Record that this run saw an active goal, before evaluation persists.
+        def mark_goal_participation(_goal: GoalState | None) -> None:
+            """Record that this run took part in a goal, before evaluation persists.
 
             The verdict callback only fires after the checkpoint write succeeds,
             so a transient write failure must not downgrade delivery enforcement
-            to advisory for a run that actually took part in a goal.
+            to advisory for a run that actually took part in a goal. ``None``
+            means the goal state could not be read: unknown is not absent, so
+            delivery stays required.
             """
             nonlocal goal_participated
             goal_participated = True
@@ -2952,7 +2954,7 @@ async def _prepare_goal_continuation_input(
     interaction_policy: RunInteractionPolicy | None = None,
     expected_goal: GoalState | None = None,
     verdict_callback: Callable[[GoalState, GoalEvaluation, str | None], None] | None = None,
-    participation_callback: Callable[[GoalState], None] | None = None,
+    participation_callback: Callable[[GoalState | None], None] | None = None,
     usage_callback: Callable[[list[dict[str, int | str | None]]], None] | None = None,
 ) -> dict[str, Any] | _GoalCompletionCandidate | None:
     """Return a continuation input or a completion candidate for finalization.
@@ -2967,11 +2969,21 @@ async def _prepare_goal_continuation_input(
     if abort_event is not None and abort_event.is_set():
         return None
 
-    try:
-        goal = await read_thread_goal(checkpointer, thread_id)
-    except Exception:
-        logger.warning("Could not read goal for thread %s after run %s", thread_id, run_id, exc_info=True)
-        return None
+    goal: GoalState | None = None
+    for attempt in range(2):
+        try:
+            goal = await read_thread_goal(checkpointer, thread_id)
+            break
+        except Exception:
+            if attempt == 0:
+                continue
+            logger.warning("Could not read goal for thread %s after run %s", thread_id, run_id, exc_info=True)
+            # The goal state is unknown, not absent: keep delivery required for
+            # this run instead of downgrading an interactive goal run to
+            # advisory when a transient checkpoint read fails.
+            if participation_callback is not None:
+                participation_callback(None)
+            return None
     if not goal or goal.get("status") != "active":
         return None
     if expected_goal is not None and not _goal_instance_matches(expected_goal, goal):

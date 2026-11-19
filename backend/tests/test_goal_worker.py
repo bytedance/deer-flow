@@ -1564,3 +1564,31 @@ async def test_participation_callback_skips_a_run_without_a_goal():
 
     assert result is None
     assert participated == []
+
+
+@pytest.mark.asyncio
+async def test_participation_callback_fires_when_the_goal_read_fails(monkeypatch):
+    """An unreadable goal is unknown, not absent: delivery stays required."""
+    saver = InMemorySaver()
+    thread_id = "participation-goal-read-fails"
+    await _seed_goal_thread(saver, thread_id=thread_id, goal_text="Finish the controlled task")
+    participated: list = []
+
+    async def failing_read(*_args, **_kwargs):
+        raise RuntimeError("checkpoint read failed")
+
+    monkeypatch.setattr(worker, "read_thread_goal", failing_read)
+
+    result = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(saver),
+        bridge=_CollectingBridge(),
+        checkpointer=saver,
+        thread_id=thread_id,
+        run_id="run-1",
+        model_name=None,
+        app_config=None,
+        participation_callback=participated.append,
+    )
+
+    assert result is None
+    assert participated == [None]
