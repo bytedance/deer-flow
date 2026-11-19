@@ -61,6 +61,9 @@ gateway:
   # Rollout strategy. Surge-then-drain keeps one Pod serving while a peer
   # starts; with run-ownership heartbeats the new Pod leaves the old Pod's live
   # runs alone (their leases keep renewing) while the old Pod drains them.
+  # `type: Recreate` (e.g. a single gateway on a ReadWriteOnce home PVC that
+  # can't attach to two nodes) drops `rollingUpdate`, so setting the type alone
+  # is enough, also from a parent chart.
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -181,6 +184,7 @@ provisioner:
   # Rollout strategy. Surge-then-drain keeps one Pod answering sandbox calls
   # while a peer starts; a replica has nothing to hand over beyond its
   # in-flight requests, so the default termination grace period is enough.
+  # `type: Recreate` drops `rollingUpdate`, as for the gateway.
   strategy:
     type: RollingUpdate
     rollingUpdate:
