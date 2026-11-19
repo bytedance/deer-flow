@@ -18,6 +18,7 @@ re-freezing the literals, so any other drift still goes red.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 from pathlib import Path
@@ -160,6 +161,31 @@ def test_direct_replacer_normalizes_nested_tail_to_virtual_posix_style() -> None
         )
         == "see /mnt/skills/pkg/a.md"
     )
+
+
+def test_direct_replacer_enforces_max_bytes_while_substituting() -> None:
+    # A byte budget aborts the substitution mid-scan: with a virtual root
+    # far longer than the host base, repeated matches expand the output
+    # far beyond the budget, and the scanner must refuse before
+    # materializing the expanded string (Codex P2 on #8260).
+    calls: list[str] = []
+
+    def replacement(matched: str) -> str:
+        calls.append(matched)
+        return "v" * 100
+
+    text = " ".join(["/h/f.txt"] * 100)
+    with pytest.raises(OSError) as excinfo:
+        path_patterns_module.replace_output_path_matches(
+            text,
+            "/h",
+            replacement,
+            separator_agnostic=True,
+            max_bytes=200,
+        )
+    assert excinfo.value.errno == errno.EFBIG
+    # Only a prefix of the matches was substituted before the budget ran out.
+    assert len(calls) < 100
 
 
 def _regex_mask(output: str, base: str, virtual: str) -> str:
@@ -362,3 +388,37 @@ def test_local_sandbox_forward_patterns_require_a_path_start() -> None:
     assert url in content
     assert "/mnt/user-data/outputs/x" not in content
     assert resolved.split(":", 1)[-1] in content
+
+
+def test_multi_base_scan_keeps_per_base_cursors(monkeypatch) -> None:
+    """Codex P2 on #8260: rescanning every base from search_from on each
+    iteration makes a path-dense download quadratic in the number of
+    references whenever some mounts are absent. Per-base next-match cursors
+    scan an absent mount once, and a present mount once per match it yields.
+    """
+    present = "/host/present"
+    absent = ["/host/absent-a", "/host/absent-b", "/host/absent-c"]
+    refs = 200
+    output = "header\n" + f"cat {present}/data.csv\n" * refs
+    expected = "header\n" + "cat /mnt/present/data.csv\n" * refs
+
+    calls = 0
+    original = path_patterns_module._next_path_match
+
+    def counting_match(*args):
+        nonlocal calls
+        calls += 1
+        return original(*args)
+
+    monkeypatch.setattr(path_patterns_module, "_next_path_match", counting_match)
+
+    result = path_patterns_module.replace_output_path_matches_all(
+        output,
+        [present, *absent],
+        lambda matched: "/mnt/present" + matched[len(present) :],
+    )
+
+    assert result == expected
+    # One scan per present match plus one first scan per base; the old
+    # rescan-everything loop needed (refs + 1) * 4 scans here.
+    assert calls <= refs + 2 * len(absent) + 2
