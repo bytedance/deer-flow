@@ -3070,6 +3070,7 @@ def _bash_command_result(runtime: Runtime, output: str, content: str) -> str | T
         additional_kwargs={
             "deerflow_tool_meta": {
                 "status": status,
+                "exit_code": output.exit_code,
                 "error_type": "unknown" if status == "error" else None,
                 "recoverable_by_model": True,
                 "recommended_next_action": "try_alternative" if status == "error" else "continue",

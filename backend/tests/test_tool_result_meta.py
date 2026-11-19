@@ -123,6 +123,7 @@ async def test_native_bash_producer_status_reaches_graph_and_receipt(tmp_path, m
         assert message.status == expected
         assert message.additional_kwargs[TOOL_META_KEY]["status"] == expected
         assert message.additional_kwargs[TOOL_META_KEY]["source"] == "tool_return"
+        assert message.additional_kwargs[TOOL_META_KEY]["exit_code"] == exit_code
         assert message.additional_kwargs["deerflow_tool_receipt"]["status"] == expected
         projected = next(m for m in captured.messages[-1] if isinstance(m, ToolMessage) and m.name == "bash")
         assert json.loads(projected.content) == {TOOL_META_KEY: {"status": expected, "source": "tool_return"}, "content": message.content}
