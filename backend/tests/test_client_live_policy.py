@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -110,6 +111,16 @@ def _assert_collection_skipped(result: subprocess.CompletedProcess[str], reason:
     assert all(node_id not in output for node_id in REPRESENTATIVE_LIVE_NODE_IDS)
 
 
+# These tests dry-run the root Makefile through `make -n`, which native Windows
+# dev hosts without GNU make cannot execute at all (the call raises FileNotFoundError
+# before the assertions run). Ubuntu CI has make and still runs them.
+_MAKE_ON_PATH = shutil.which("make") is not None
+_skip_without_make = pytest.mark.skipif(
+    not _MAKE_ON_PATH,
+    reason="these policy tests dry-run the root Makefile through 'make -n'; GNU make is not installed on this host",
+)
+
+
 def _dry_run_make_target(target: str, *extra: str) -> str:
     result = subprocess.run(
         ["make", "-n", target, *extra],
@@ -200,6 +211,7 @@ def test_child_env_stays_isolated_but_bootable_on_windows(monkeypatch: pytest.Mo
         assert not extra
 
 
+@_skip_without_make
 def test_make_targets_keep_default_tests_offline_and_support_live_opt_in() -> None:
     default_command = _dry_run_make_target("test")
     live_command = _dry_run_make_target("test-live")
@@ -241,6 +253,7 @@ def test_default_ci_workflow_does_not_opt_in_to_live_tests() -> None:
     assert LIVE_OPT_IN not in workflow
 
 
+@_skip_without_make
 def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
     import yaml
 
@@ -272,6 +285,7 @@ def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
     assert LIVE_OPT_IN not in full_command
 
 
+@_skip_without_make
 def test_duration_baseline_target_replaces_stale_entries() -> None:
     command = _dry_run_make_target("test-shard-durations")
 
@@ -280,6 +294,7 @@ def test_duration_baseline_target_replaces_stale_entries() -> None:
     assert "--durations-path=.test_durations" in command
 
 
+@_skip_without_make
 def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
     command = _dry_run_make_target("test-blocking-io")
     workflow = (REPO_ROOT / ".github" / "workflows" / "backend-blocking-io-tests.yml").read_text(encoding="utf-8")
