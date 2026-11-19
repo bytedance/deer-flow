@@ -48,6 +48,7 @@ from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
 from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
@@ -643,12 +644,12 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
-#: ``loop_cap`` is loop detection's record of capped tools; a caller copy could
-#: lift a cap or block a tool.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", "loop_cap"})
+#: Older checkpoints can contain loop detection's record of frequency-capped
+#: tools. Reserve its channel for server-owned state.
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY})
 
 #: The ``write_todos`` status contract the todo middleware renders.
-_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
+_TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
 
 
 def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, Any]] | None:
@@ -673,7 +674,7 @@ def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, An
             raise HTTPException(status_code=400, detail=f"{location}[{index}].content must be a string")
         status = entry.get("status", "pending")
         if not isinstance(status, str) or status not in _TODO_STATUSES:
-            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, or completed")
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, completed, blocked, or waiting")
         normalized.append({**entry, "content": content, "status": status})
     return normalized
 
