@@ -210,6 +210,61 @@ def test_public_bash_tool_preserves_thread_path_argument(powershell, tmp_path, m
     assert not result.startswith("Error:"), result
 
 
+def _workspace_runtime(workspace, monkeypatch, *, filename="marker.txt"):
+    workspace.mkdir()
+    (workspace / filename).write_text("workspace-marker", encoding="utf-8")
+    sandbox = LocalSandbox("local", [PathMapping("/mnt/user-data/workspace", str(workspace))])
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+    return SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": {"workspace_path": str(workspace)}, "thread_directories_created": True},
+        context={"thread_id": "workspace-test"},
+    )
+
+
+@pytest.mark.parametrize("apostrophe", ["\u2018", "\u2019"])
+def test_public_bash_tool_enters_powershell_workspace_with_curly_apostrophe(powershell, tmp_path, monkeypatch, apostrophe):
+    runtime = _workspace_runtime(tmp_path / f"O{apostrophe}Brien workspace", monkeypatch)
+    assert bash_tool.func(runtime=runtime, command="Get-Content marker.txt").strip() == "workspace-marker"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows cmd.exe execution")
+def test_public_bash_tool_enters_cmd_workspace_with_spaces(tmp_path, monkeypatch):
+    shell = shutil.which("cmd.exe")
+    assert shell is not None
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: shell))
+    workspace = tmp_path / "workspace with spaces"
+    runtime = _workspace_runtime(workspace, monkeypatch, filename="marker file.txt")
+    command = 'type "marker file.txt"'
+    assert bash_tool.func(runtime=runtime, command=command).strip() == "workspace-marker"
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "marker file.txt").write_text("inherited-directory-marker", encoding="utf-8")
+    workspace.rename(tmp_path / "renamed workspace")
+    result = bash_tool.func(runtime=runtime, command=command)
+    assert result.startswith("Error:"), result
+    assert "inherited-directory-marker" not in result
+
+
+def test_public_bash_tool_passes_cmd_workspace_to_process_launch(tmp_path, monkeypatch):
+    from deerflow.sandbox.local import local_sandbox
+
+    workspace = tmp_path / "workspace with spaces"
+    runtime = _workspace_runtime(workspace, monkeypatch)
+    monkeypatch.setattr("deerflow.sandbox.tools._is_windows", lambda: True)
+    monkeypatch.setattr(local_sandbox, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "cmd.exe"))
+    calls = []
+
+    def run(args, timeout, env, **kwargs):
+        calls.append((args, kwargs.get("cwd")))
+        return "workspace-marker", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(run))
+    assert bash_tool.func(runtime=runtime, command='type "marker file.txt"') == "workspace-marker"
+    assert calls == [('cmd.exe /d /s /c "type "marker file.txt""', str(workspace))]
+
+
 @pytest.mark.parametrize(
     ("shell", "expected_prefix"),
     [
@@ -235,6 +290,13 @@ def test_cwd_prefix_quotes_a_workspace_with_an_apostrophe():
     assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="/bin/bash") == "cd '/tmp/O'\"'\"'Brien'\"'\"'s thread/workspace' && echo hi"
     # PowerShell escapes a literal quote by doubling it inside a single-quoted string.
     assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="pwsh") == "Set-Location -LiteralPath '/tmp/O''Brien''s thread/workspace' -ErrorAction Stop; echo hi"
+
+
+@pytest.mark.parametrize("apostrophe", ["\u2018", "\u2019"])
+def test_cwd_prefix_quotes_a_workspace_with_a_curly_apostrophe(apostrophe):
+    workspace = f"/tmp/O{apostrophe}Brien workspace"
+    prefix = _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="powershell.exe")
+    assert prefix == f"Set-Location -LiteralPath '/tmp/O{apostrophe * 2}Brien workspace' -ErrorAction Stop; echo hi"
 
 
 @pytest.mark.parametrize("shell", ["/bin/bash", "pwsh", "C:\\Windows\\System32\\cmd.exe"])

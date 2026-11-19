@@ -110,7 +110,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | --- | --- |
 | Models, providers, `config.yaml`, environment variables | [Configuration](docs/guide/configuration.md) |
 | Docker, local development, upgrades, production deployment | [Running the Application](docs/guide/deployment.md) |
-| Sandbox modes, file system, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
+| Sandbox modes, Windows local execution, file system, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
 | Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
