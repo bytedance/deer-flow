@@ -210,6 +210,7 @@ async def test_worker_admission_is_atomic_with_cancellation_and_replay(database)
     workers = CoordinationWorkerRepository(sessions)
     runs = RunRepository(sessions)
     task = await workers.create("alice", request_id="dispatch", objective="Review")
+    await workers.append_input("alice", task["id"], request_id="input:follow-up", content="Check the result")
     first, retry = await asyncio.gather(*(workers.prepare("alice", task["id"], "lead_agent") for _ in range(2)))
     assert first == retry
     worker, execution, project = first
@@ -222,6 +223,10 @@ async def test_worker_admission_is_atomic_with_cancellation_and_replay(database)
         await workers.view("bob", task["id"])
     with pytest.raises(TaskNotFound):
         await workers.list_artifacts("bob", task["id"], limit=1, offset=0)
+    with pytest.raises(TaskNotFound):
+        await workers.list_worker_inputs("bob", task["id"], after=0, limit=1)
+    (pending,) = await workers.list_worker_inputs("alice", task["id"], after=0, limit=1)
+    assert (pending["source"], pending["status"], pending["run_id"]) == ("task_api", "pending", None)
     assert await workers.list_artifacts("alice", task["id"], limit=1, offset=0) == []
     current = await workers.get("alice", task["id"])
     admitted, cancelled = await asyncio.gather(
@@ -231,10 +236,13 @@ async def test_worker_admission_is_atomic_with_cancellation_and_replay(database)
     )
     assert cancelled["status"] == TaskStatus.CANCELLING
     stopped = await workers.cancellations("alice", task["id"])
+    (receipt,) = await workers.list_worker_inputs("alice", task["id"], after=0, limit=1)
     if isinstance(admitted, ConflictError):
         assert stopped == [] and await runs.get("native", user_id="alice") is None
+        assert (receipt["status"], receipt["run_id"]) == ("not_admitted", None)
     else:
         assert not isinstance(admitted, BaseException) and stopped == [(worker["thread_id"], "native")]
         assert (await workers.view("alice", task["id"]))["execution"]["run_id"] == "native"
+        assert (receipt["status"], receipt["run_id"]) == ("admitted", "native")
     with pytest.raises(ConflictError):
         await runs.create_thread_operation_atomic("late", **kwargs, idempotency_key=RUN_KEY_PREFIX + uuid4().hex)

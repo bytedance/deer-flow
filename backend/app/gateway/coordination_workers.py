@@ -9,10 +9,12 @@ from deerflow_extension_api.agent_runs import AgentRunError
 from fastapi import HTTPException
 
 from app.gateway.deps import get_agent_runs
+from deerflow.persistence.coordination.model import TaskStatus
 from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
 from deerflow.persistence.coordination.workers import THREAD_PREFIX
 
 logger = logging.getLogger(__name__)
+CANCEL_RESPONSE_TIMEOUT = 5
 
 
 class CoordinationWorkers:
@@ -20,12 +22,13 @@ class CoordinationWorkers:
         self.repo = repository
         self._drivers = {}
         self._wakeups = set()
+        self._cancellations = {}
 
     async def close(self):
-        drivers = list(self._drivers.values())
-        for job in drivers:
+        jobs = [*self._drivers.values(), *self._cancellations.values()]
+        for job in jobs:
             job.cancel()
-        await asyncio.gather(*drivers, return_exceptions=True)
+        await asyncio.gather(*jobs, return_exceptions=True)
 
     async def dispatch(self, runs, owner, task_id, assistant_id):
         turn = await self.repo.prepare(owner, task_id, assistant_id)
@@ -110,6 +113,38 @@ class CoordinationWorkers:
 
     async def cancel(self, runs, owner, task_id, revision):
         task = await self.repo.request_cancel(owner, task_id, expected_revision=revision)
+        if task["status"] == TaskStatus.CANCELLED:
+            return task
+        key = (owner, task_id)
+        job = self._cancellations.get(key)
+        if job is None or job.done():
+            job = asyncio.create_task(self._finish_cancellation(runs, owner, task_id, task["execution_epoch"]))
+            self._cancellations[key] = job
+
+            def finished(completed):
+                if self._cancellations.get(key) is completed:
+                    self._cancellations.pop(key)
+                if not completed.cancelled() and (error := completed.exception()) is not None:
+                    logger.warning("Coordination cancellation stopped for task %s (%s)", task_id, type(error).__name__)
+
+            job.add_done_callback(finished)
+        # asyncio.wait leaves the tracked job running after the response deadline.
+        done, _ = await asyncio.wait({job}, timeout=CANCEL_RESPONSE_TIMEOUT)
+        return job.result() if done else task
+
+    async def _finish_cancellation(self, runs, owner, task_id, epoch):
+        delay = 1
+        while True:
+            try:
+                await self._stop_subtree(runs, owner, task_id)
+                return await self.repo.confirm_cancel(owner, task_id, execution_epoch=epoch)
+            except AgentRunError as exc:
+                if exc.status_code < 500:
+                    raise
+                await asyncio.sleep(delay)
+                delay = min(30, delay * 2)
+
+    async def _stop_subtree(self, runs, owner, task_id):
         active = await self.repo.cancellations(owner, task_id)
         for thread, run_id in active:
             run = await runs.get(thread_id=thread, run_id=run_id)
@@ -128,7 +163,6 @@ class CoordinationWorkers:
                     continue
         for batch in await self.repo.active_batches(owner, task_id):
             await runs.cancel_worker_batch(thread_id=batch.thread_id, batch_id=batch.id)
-        return await self.repo.confirm_cancel(owner, task_id, execution_epoch=task["execution_epoch"])
 
 
 def worker_context(request):

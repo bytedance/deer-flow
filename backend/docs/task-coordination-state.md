@@ -51,6 +51,14 @@ view with `GET /api/coordination/tasks/{task_id}`. Add a follow-up with
 the same queue. Streaming and wait callers observe the run that consumes
 their message. An interrupted graph requires an explicit resume command.
 
+The task owner can poll `GET /api/coordination/tasks/{task_id}/inputs`
+to read the inbox in sequence order. Pass the last seen `sequence` as
+`after` and set `limit` up to 100. Rows include the content, creation
+time, and source (`task_api`, `run_input`, or `worker_chat`).
+An input is `pending` while it can still enter a Run, `admitted`
+with its `run_id` once a Run has accepted the turn, or `not_admitted`
+when the task has closed to further work.
+
 The Gateway freezes each turn before admission. The SQL transaction that
 creates the native run locks the task tree, verifies the execution epoch,
 and records the run ID. A follow-up that arrives during a turn advances
@@ -61,8 +69,12 @@ batches can run local work. A batch cannot schedule an independent follow-up
 run on a managed thread; the task owns the next turn.
 
 `POST /api/coordination/tasks/{task_id}/cancel` accepts `expected_revision`.
-It fences the owned subtree, stops its active runs and requests cancellation
-of its native background batches before confirming the task cancellation.
+It fences the owned subtree before requesting run and native batch
+cancellation. If confirmation takes longer than five seconds after the
+fence is committed, the response is HTTP 202 with status `cancelling`.
+The Gateway continues confirming in the background and publishes
+`cancelled` once the runs have stopped and batch cancellation is requested.
+Poll `GET /api/coordination/tasks/{task_id}` for the status.
 
 A completed task links to the producing run's messages. For presented output
 files, the Gateway stores the captured bytes with their SHA-256 hashes and

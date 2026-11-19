@@ -12,6 +12,7 @@ from deerflow.persistence.coordination.sql import CoordinationTaskRepository, Ta
 
 THREAD_PREFIX = "coord-worker-"
 RUN_KEY_PREFIX = "coord-execution:"
+INPUT_SOURCES = {"input": "task_api", "chat": "worker_chat", "run-input": "run_input"}
 
 
 async def bind_admitted_worker(session, thread_id, owner_id, key, run_id):
@@ -202,10 +203,31 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             await self._finish_locked(session, task, outcome, result_ref or f"/api/coordination/tasks/{task_id}")
             execution.status = status
 
+    @staticmethod
+    def _admitted_run(task_id, sequence):
+        return select(Execution.run_id).where(Execution.task_id == task_id, Execution.covered_seq >= sequence, Execution.run_id.is_not(None)).order_by(Execution.turn).limit(1)
+
+    async def list_worker_inputs(self, owner, task_id, *, after, limit):
+        async with self._sessions() as session:
+            task = await self._lookup(session, owner, task_id)
+            admitted = self._admitted_run(task_id, CoordinationInputRow.sequence).scalar_subquery()
+            query = select(CoordinationInputRow, admitted).where(CoordinationInputRow.task_id == task_id, CoordinationInputRow.sequence > after).order_by(CoordinationInputRow.sequence).limit(limit)
+            return [
+                {
+                    "sequence": row.sequence,
+                    "content": row.content,
+                    "created_at": row.created_at,
+                    "source": INPUT_SOURCES.get(row.request_id.partition(":")[0], "unknown"),
+                    "status": "admitted" if run_id else "pending" if task.status in (TaskStatus.QUEUED, TaskStatus.RUNNING) else "not_admitted",
+                    "run_id": run_id,
+                }
+                for row, run_id in (await session.execute(query)).all()
+            ]
+
     async def input_receipts(self, owner, task_id):
         async with self._sessions() as session:
             task = await self._lookup(session, owner, task_id)
-            consuming = select(Execution.run_id).where(Execution.task_id == task_id, Execution.covered_seq >= CoordinationInputRow.sequence).order_by(Execution.turn).limit(1).scalar_subquery()
+            consuming = self._admitted_run(task_id, CoordinationInputRow.sequence).scalar_subquery()
             query = select(CoordinationInputRow, consuming).filter(CoordinationInputRow.task_id == task_id, CoordinationInputRow.request_id.startswith("run-input:")).order_by(CoordinationInputRow.sequence.desc()).limit(32)
             results = [(row.to_dict(), run) for row, run in (await session.execute(query)).all() if row.request_id.count(":") >= 2]
             execution = await session.scalar(self._latest(task_id))
@@ -215,7 +237,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
     async def run_for_input(self, owner, task_id, sequence):
         async with self._sessions() as session:
             task = await self._lookup(session, owner, task_id)
-            run_id = await session.scalar(select(Execution.run_id).where(Execution.task_id == task_id, Execution.covered_seq >= sequence).order_by(Execution.turn).limit(1))
+            run_id = await session.scalar(self._admitted_run(task_id, sequence))
             if run_id is None and task.status not in (TaskStatus.RUNNING, TaskStatus.QUEUED):
                 raise TaskConflict("Task stopped before this input could run")
             return run_id

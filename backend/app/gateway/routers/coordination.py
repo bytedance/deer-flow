@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from app.gateway.authz import require_permission
 from app.gateway.coordination_workers import worker_context, worker_error
+from deerflow.persistence.coordination.model import TaskStatus
 from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
 from deerflow.utils.file_io import await_drained
 
@@ -72,14 +73,27 @@ async def add_worker_input(task_id: str, body: WorkerInput, request: Request):
         raise worker_error(exc) from exc
 
 
-@router.post("/{task_id}/cancel")
+@router.get("/{task_id}/inputs")
+@require_permission("runs", "read")
+async def list_worker_inputs(task_id: str, request: Request, after: int = Query(0, ge=0, le=2**63 - 1), limit: int = Query(100, ge=1, le=100)):
+    service, owner, _runs = worker_context(request)
+    try:
+        return await service.repo.list_worker_inputs(owner, task_id, after=after, limit=limit)
+    except TaskNotFound as exc:
+        raise HTTPException(404, "Task not found") from exc
+
+
+@router.post("/{task_id}/cancel", responses={202: {"description": "Cancellation is still in progress"}})
 @require_permission("runs", "cancel")
-async def cancel_worker_task(task_id: str, body: CancelTask, request: Request):
+async def cancel_worker_task(task_id: str, body: CancelTask, request: Request, response: Response):
     service, owner, runs = worker_context(request)
     try:
-        return await await_drained(service.cancel(runs, owner, task_id, body.expected_revision))
+        task = await await_drained(service.cancel(runs, owner, task_id, body.expected_revision))
     except (TaskConflict, TaskNotFound, AgentRunError) as exc:
         raise worker_error(exc) from exc
+    if task["status"] == TaskStatus.CANCELLING:
+        response.status_code = 202
+    return task
 
 
 @router.get("/{task_id}/artifacts")
