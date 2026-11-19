@@ -117,6 +117,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if isinstance(message, dict):
             # Apply the same authorship rules to checkpoint metadata.
             message = HumanMessage(content="", name=message.get("name"), additional_kwargs=message.get("additional_kwargs") or {})
+        # RunInputControl stamps instructions appended while the current run is active.
+        if isinstance(message, HumanMessage) and message.additional_kwargs.get("run_input_id") and message.additional_kwargs.get("run_input_source") == "user":
+            return False
         return is_genuine_user_message(message)
 
     @staticmethod

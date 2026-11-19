@@ -2253,7 +2253,8 @@ async def run_agent(
                     except Exception:
                         logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
 
-                if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+                needs_local_title = record.status == RunStatus.interrupted or (record.status == RunStatus.error and getattr(record, "stop_reason", None) == _RECURSION_CAPPED_STOP_REASON)
+                if started and not record.ownership_lost and checkpointer is not None and needs_local_title and not _is_edit_replay_run(record):
                     try:
                         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                         if not await run_manager.has_later_started_run(thread_id, run_id):

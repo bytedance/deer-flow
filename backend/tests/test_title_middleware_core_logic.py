@@ -122,6 +122,27 @@ def test_compaction_reminder_preserves_first_user_turn_for_fallback(serialized):
     assert middleware.after_agent({"messages": messages}, MagicMock()) is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("serialized", [False, True])
+async def test_user_instruction_during_tool_execution_stays_in_first_turn(monkeypatch, serialized):
+    title_model = AsyncMock(return_value=AIMessage(content="Report title"))
+    monkeypatch.setattr(title_middleware_module, "create_chat_model", lambda **_: SimpleNamespace(ainvoke=title_model))
+    middleware = TitleMiddleware(title_config=TitleConfig(model_name="title-model"))
+    instruction = HumanMessage(content="Include totals", additional_kwargs={"run_input_id": "i1", "run_input_source": "user", "run_id": "r1"})
+    messages = [
+        HumanMessage(content="Prepare the report"),
+        AIMessage(content="", tool_calls=[{"name": "lookup", "args": {}, "id": "tool1"}]),
+        instruction.model_dump() if serialized else instruction,
+        AIMessage(content="The total is ten"),
+    ]
+    assert await middleware.aafter_agent({"messages": messages}, MagicMock()) == {"title": "Report title"}
+    prompt = title_model.await_args.args[0]
+    assert "Prepare the report" in prompt and "The total is ten" in prompt
+    messages.append(HumanMessage(content="Start a different report"))
+    assert await middleware.aafter_agent({"messages": messages}, MagicMock()) is None
+    title_model.assert_awaited_once()
+
+
 def _clone_title_config(config: TitleConfig) -> TitleConfig:
     # Avoid mutating shared global config objects across tests.
     return TitleConfig(**config.model_dump())
