@@ -1525,7 +1525,7 @@ def test_goal_mutations_map_checkpoint_mode_errors(monkeypatch, method, failure_
 
 def test_goal_mutations_reject_run_owned_by_another_worker() -> None:
     """PUT and DELETE goal writes share the durable thread-operation boundary."""
-    import httpx
+    import httpx2 as httpx
 
     from app.channels.manager import ChannelManager
     from deerflow.runtime import RunManager, RunStatus

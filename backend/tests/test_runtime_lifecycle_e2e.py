@@ -844,7 +844,7 @@ def test_static_breakpoint_resumes_with_null_input(isolated_app, checkpoint_mode
             elif endpoint == "/stream":
                 assert not any(event["event"] == "error" for event in _parse_sse(resumed.text)), resumed.text
         else:
-            import httpx
+            import httpx2 as httpx
             from langgraph_sdk.client import SyncLangGraphClient
 
             def send_to_gateway(request):
