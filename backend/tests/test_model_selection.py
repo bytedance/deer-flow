@@ -110,6 +110,8 @@ def test_model_as_a_common_noun_stays_task_text(text):
         "Use v2 API for this turn: fetch the data",
         "Use the v12 API to fetch the data",
         "Use v2.1.3 SDK to fetch the data",
+        "Use API v12 to fetch the data",
+        "Use SDK v2.1.3 to fetch the data",
         "这次用 v10 接口帮我测试",
     ],
 )
@@ -117,6 +119,20 @@ def test_versioned_tool_reference_in_a_task_stays_task_text(text):
     result = resolve_model_control(text, [DS, OPUS])
     assert result["status"] == "none"
     assert result["task_offset"] == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use the Claude Sonnet model for this turn: summarize this report",
+        "Use Claude Sonnet model for this turn: summarize this report",
+        "用 GPT-4 模型总结这段内容",
+    ],
+)
+def test_explicitly_named_model_outside_the_catalog_is_unavailable(text):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "unavailable"
+    assert result["model_name"] is None
 
 
 def test_scoped_versioned_name_still_asks_instead_of_using_the_default():

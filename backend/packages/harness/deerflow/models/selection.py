@@ -11,9 +11,14 @@ from typing import Any, Literal
 
 ModelScope = Literal["task", "turn", "conversation"]
 
-# A version followed by one of these heads names an API, SDK or service, not a
-# chat model: "v2 of the API", "v3 SDK for this turn", "这次用 v2 接口".
-_NON_MODEL_VERSION = re.compile(r"\bv\d+(?:\.\d+)*(?:\s+of)?\s+(?:the\s+)?(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?|versions?|接口|服务)", re.IGNORECASE)
+# A version next to one of these heads names an API, SDK or service, not a
+# chat model: "v2 of the API", "v3 SDK for this turn", "API v12 to fetch the
+# data", "这次用 v2 接口".
+_NON_MODEL_VERSION = re.compile(
+    r"\bv\d+(?:\.\d+)*(?:\s+of)?\s+(?:the\s+)?(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?|versions?|接口|服务)"
+    r"|\b(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?)\s+v\d+(?:\.\d+)*",
+    re.IGNORECASE,
+)
 
 _PATTERNS = (
     ("conversation", r"^(?:请)?(?:以后|今后|接下来)(?:这个对话|这段对话|这里)?(?:都|一直|默认)?(?:用|使用|改用|换成)\s*(.+?)(?:模型)?(?:[，。：:]|$)"),
@@ -53,6 +58,21 @@ def _matches(query: str, model: Any) -> bool:
     return False
 
 
+def _names_a_model(query: str) -> bool:
+    """A model noun names a choice only when a specific name sits next to it.
+
+    "the Claude Sonnet model" and "用 GPT-4 模型" select a model. "a regression
+    model", "the attached model" and "回归模型" are ordinary task wording.
+    """
+    if not re.search(r"\bmodels?\b|模型", query, re.IGNORECASE):
+        return False
+    # A capitalised word or a token carrying digits is a product name; the
+    # articles and adjectives in common-noun phrases are lower-case words.
+    if re.search(r"[A-Z][A-Za-z0-9._\-]*|[A-Za-z][A-Za-z0-9._\-]*\d", query):
+        return True
+    return re.search(r"[A-Za-z][A-Za-z0-9._\-]*\s*模型", query) is not None
+
+
 def resolve_model_control(text: str, models: list[Any], *, model_name: str | None = None, scope: ModelScope | None = None) -> dict[str, Any]:
     """Return a read-only decision; explicit selections are checked afresh.
 
@@ -80,7 +100,7 @@ def resolve_model_control(text: str, models: list[Any], *, model_name: str | Non
     # regression model to analyze"), and a version on an API or SDK is a tool
     # reference; blocking either would drop the user's task wording.
     versioned = re.search(r"\bv\d", query, re.IGNORECASE) is not None and _NON_MODEL_VERSION.search(query) is None
-    if not candidates and model_name is None and not versioned:
+    if not candidates and model_name is None and not versioned and not _names_a_model(query):
         return result
     offset = len(text) - len(text.lstrip()) + match.end()
     if match.groupdict().get("action") in {"处理", "计算", "回答", "分析", "生成", "写", "做"}:
