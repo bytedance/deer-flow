@@ -40,6 +40,7 @@ class MemoryStreamBridge(StreamBridge):
         self._streams: dict[str, _RunStream] = {}
         self._counters: dict[str, int] = {}
         self._closing = False
+        self._active_closes = 0
 
     # -- helpers ---------------------------------------------------------------
 
@@ -237,9 +238,13 @@ class MemoryStreamBridge(StreamBridge):
         # Fence admission while draining, but keep the bridge reusable after
         # close returns: callers may create a fresh generation for a later run.
         # A cancelled close releases the fence so a later close can retry.
+        # Overlapping closes own independent drain references. One cancelled or
+        # faster close must not reopen admission while another drain is active.
+        self._active_closes += 1
         self._closing = True
         try:
             for run_id in tuple(self._streams):
                 await self.cleanup(run_id)
         finally:
-            self._closing = False
+            self._active_closes -= 1
+            self._closing = self._active_closes > 0
