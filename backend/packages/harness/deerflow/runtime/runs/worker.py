@@ -1716,13 +1716,19 @@ async def run_agent(
             against that baseline.
             """
             nonlocal fallback_boundary_ids
-            if not snapshot_capture_failed or checkpointer is None or mode not in {"values", "updates"}:
+            if not snapshot_capture_failed or checkpointer is None:
+                return pre_existing_message_ids
+            if mode in {"checkpoints", "debug"}:
+                # Introspection snapshots can contain the full pre-run state.
+                # They seed the boundary but never decide the current status.
+                fallback_boundary_ids = (fallback_boundary_ids or set()) | _collect_message_ids_deep(chunk)
+                return None
+            if mode not in {"values", "updates"}:
                 return pre_existing_message_ids
             if fallback_boundary_ids is None:
-                frame_ids = _collect_message_ids_deep(chunk)
-                if not frame_ids:
-                    return None
-                fallback_boundary_ids = frame_ids
+                # Establish the boundary even when the frame is empty: a new
+                # thread's first message-bearing frame can be the current fallback.
+                fallback_boundary_ids = _collect_message_ids_deep(chunk)
                 return None
             return pre_existing_message_ids | fallback_boundary_ids
 

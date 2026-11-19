@@ -3595,6 +3595,111 @@ async def test_run_agent_ignores_replayed_fallback_in_updates_frame(tmp_path, st
     assert fetched.status == RunStatus.success
 
 
+@pytest.mark.parametrize("stream_modes", [["values"], ["updates"], ["values", "updates"]], ids=["values-only", "updates-only", "values+updates"])
+@pytest.mark.anyio
+async def test_run_agent_keeps_fresh_fallback_after_empty_boundary_frame(stream_modes):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    fallback = AIMessage(
+        id="fresh-boundary-fallback",
+        content="Provider unavailable.",
+        additional_kwargs={"deerflow_error_fallback": True, "error_detail": "Connection error."},
+    )
+
+    class MinimalCheckpointer:
+        async def aget_tuple(self, _config):
+            return None
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            raise RuntimeError("snapshot capture failed")
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            frames = []
+            if "values" in stream_modes:
+                frames.append(("values", {"messages": []}))
+            else:
+                frames.append(("updates", {}))
+            if "updates" in stream_modes:
+                frames.append(("updates", {"model": {"messages": [fallback]}}))
+            else:
+                frames.append(("values", {"messages": [fallback]}))
+            for mode, frame in frames:
+                if isinstance(stream_mode, (list, tuple)):
+                    yield (mode, frame)
+                elif mode == stream_mode:
+                    yield frame
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=MinimalCheckpointer()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=stream_modes,
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.error
+    assert fetched.error == "Connection error."
+
+
+@pytest.mark.parametrize("inspect_mode", ["checkpoints", "debug"], ids=["checkpoints", "debug"])
+@pytest.mark.anyio
+async def test_run_agent_filters_checkpoint_history_before_values(inspect_mode):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    stale_fallback = AIMessage(
+        id="checkpoint-stale-fallback",
+        content="Old failure.",
+        additional_kwargs={"deerflow_error_fallback": True, "error_detail": "old"},
+    )
+
+    class MinimalCheckpointer:
+        async def aget_tuple(self, _config):
+            return None
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            raise RuntimeError("snapshot capture failed")
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            frames = [
+                (inspect_mode, {"values": {"messages": [stale_fallback]}}),
+                ("values", {"messages": [stale_fallback, AIMessage(id="fresh-ok", content="The run succeeded.")]}),
+            ]
+            for mode, frame in frames:
+                yield (mode, frame)
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=MinimalCheckpointer()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=[inspect_mode, "values"],
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+
+
 class _FakeCheckpointTuple:
     """Minimal stand-in for ``CheckpointTuple`` used by ``_ensure_interrupted_title``."""
 
