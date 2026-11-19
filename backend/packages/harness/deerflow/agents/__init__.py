@@ -1,4 +1,9 @@
+from typing import TYPE_CHECKING, Any
+
 from .features import Next, Prev, RuntimeFeatures
+
+if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableConfig
 
 __all__ = [
     "create_deerflow_agent",
@@ -7,8 +12,23 @@ __all__ = [
     "Prev",
     "make_lead_agent",
     "SandboxState",
+    "DeltaThreadState",
     "ThreadState",
 ]
+
+
+def make_lead_agent(config: "RunnableConfig") -> Any:
+    """Build the lead graph while keeping package-root imports lightweight.
+
+    LangGraph Server resolves configured graph factories directly from a
+    module's ``__dict__``, so this entrypoint must be a concrete module-level
+    function rather than a value supplied only through ``__getattr__``.
+    """
+    from .lead_agent import make_lead_agent as factory
+    from .lead_agent.prompt import prime_enabled_skills_cache
+
+    prime_enabled_skills_cache()
+    return factory(config)
 
 
 def __getattr__(name: str):
@@ -17,21 +37,14 @@ def __getattr__(name: str):
 
         globals()[name] = create_deerflow_agent
         return create_deerflow_agent
-    if name == "make_lead_agent":
-        from .lead_agent import make_lead_agent
-        from .lead_agent.prompt import prime_enabled_skills_cache
+    if name in {"DeltaThreadState", "SandboxState", "ThreadState"}:
+        from .thread_state import DeltaThreadState, SandboxState, ThreadState
 
-        # LangGraph resolves deerflow.agents:make_lead_agent when registering
-        # the graph. Prime at that explicit entrypoint instead of at package
-        # import time so lightweight submodules can be imported without pulling
-        # in the whole tool/subagent graph.
-        prime_enabled_skills_cache()
-        globals()[name] = make_lead_agent
-        return make_lead_agent
-    if name in {"SandboxState", "ThreadState"}:
-        from .thread_state import SandboxState, ThreadState
-
-        exports = {"SandboxState": SandboxState, "ThreadState": ThreadState}
+        exports = {
+            "DeltaThreadState": DeltaThreadState,
+            "SandboxState": SandboxState,
+            "ThreadState": ThreadState,
+        }
         globals().update(exports)
         return exports[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

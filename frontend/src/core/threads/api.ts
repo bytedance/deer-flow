@@ -1,7 +1,7 @@
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { ThreadTokenUsageResponse } from "./types";
+import type { AgentThread, ThreadTokenUsageResponse } from "./types";
 
 export type ThreadCompactResponse = {
   thread_id: string;
@@ -17,6 +17,7 @@ export type ThreadCompactResponse = {
 export type CompactThreadContextOptions = {
   signal?: AbortSignal;
   agentName?: string | null;
+  modelName?: string | null;
 };
 
 export type ThreadBranchResponse = {
@@ -32,6 +33,19 @@ export type BranchThreadFromTurnInput = {
   messageIds?: string[];
   title?: string;
 };
+
+export type ThreadMetadataPatch = Record<string, unknown>;
+
+/**
+ * The subset of thread fields the Gateway ``PATCH /api/threads/{id}`` handler
+ * returns with meaningful values. The endpoint's ``ThreadResponse`` model also
+ * serializes default ``values`` and ``interrupts``, but PATCH leaves those empty;
+ * callers that need state should read it via a full thread fetch instead.
+ */
+export type ThreadMetadataPatchResponse = Pick<
+  AgentThread,
+  "thread_id" | "status" | "created_at" | "updated_at" | "metadata"
+>;
 
 async function readThreadAPIError(
   response: Response,
@@ -96,6 +110,78 @@ export async function branchThreadFromTurn(
   return (await response.json()) as ThreadBranchResponse;
 }
 
+export async function patchThreadMetadata(
+  threadId: string,
+  metadata: ThreadMetadataPatch,
+): Promise<ThreadMetadataPatchResponse> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ metadata }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to update conversation."),
+    );
+  }
+
+  return (await response.json()) as ThreadMetadataPatchResponse;
+}
+
+export async function createThread(
+  threadId: string,
+  projectId?: string,
+): Promise<AgentThread> {
+  const response = await fetchWithAuth(`${getBackendBaseURL()}/api/threads`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      thread_id: threadId,
+      ...(projectId ? { project_id: projectId } : {}),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to create conversation."),
+    );
+  }
+
+  return (await response.json()) as AgentThread;
+}
+
+export async function moveThreadToProject(
+  threadId: string,
+  projectId: string | null,
+): Promise<ThreadMetadataPatchResponse> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/move`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ project_id: projectId }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to move conversation."),
+    );
+  }
+
+  return (await response.json()) as ThreadMetadataPatchResponse;
+}
+
 export async function compactThreadContext(
   threadId: string,
   options: CompactThreadContextOptions = {},
@@ -110,6 +196,7 @@ export async function compactThreadContext(
       body: JSON.stringify({
         force: true,
         ...(options.agentName ? { agent_name: options.agentName } : {}),
+        ...(options.modelName ? { model_name: options.modelName } : {}),
       }),
       signal: options.signal,
     },
@@ -122,4 +209,34 @@ export async function compactThreadContext(
   }
 
   return (await response.json()) as ThreadCompactResponse;
+}
+
+/** Gateway extension not forwarded by the LangGraph SDK's search method. */
+export async function searchThreadsByArchive({
+  archived,
+  metadata,
+  status,
+  limit,
+  offset,
+}: {
+  archived: boolean;
+  metadata?: Record<string, unknown>;
+  status?: string;
+  limit: number;
+  offset: number;
+}): Promise<AgentThread[]> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/search`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived, metadata, status, limit, offset }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to load conversations."),
+    );
+  }
+  return (await response.json()) as AgentThread[];
 }

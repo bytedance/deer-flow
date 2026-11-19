@@ -1,5 +1,7 @@
 """Tests for user-scoped path resolution in Paths."""
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,10 @@ class TestValidateUserId:
     def test_rejects_empty(self, paths: Paths):
         with pytest.raises(ValueError, match="Invalid user_id"):
             paths.user_dir("")
+
+    def test_rejects_trailing_newline(self, paths: Paths):
+        with pytest.raises(ValueError, match="Invalid user_id"):
+            paths.user_dir("alice\n")
 
 
 class TestMakeSafeUserId:
@@ -64,6 +70,43 @@ class TestMakeSafeUserId:
 
         with pytest.raises(ValueError, match="non-empty"):
             make_safe_user_id("")
+
+
+class TestValidateIntegrationId:
+    def test_accepts_dotted_integration_id(self):
+        from deerflow.config.paths import _validate_integration_id
+
+        assert _validate_integration_id("lark-cli") == "lark-cli"
+        assert _validate_integration_id("some.integration") == "some.integration"
+
+    @pytest.mark.parametrize("integration_id", [".", ".."])
+    def test_rejects_dot_and_dotdot(self, integration_id):
+        from deerflow.config.paths import _validate_integration_id
+
+        with pytest.raises(ValueError, match="Invalid integration_id"):
+            _validate_integration_id(integration_id)
+
+    def test_rejects_trailing_newline(self):
+        from deerflow.config.paths import _validate_integration_id
+
+        with pytest.raises(ValueError, match="Invalid integration_id"):
+            _validate_integration_id("lark-cli\n")
+
+    @pytest.mark.parametrize("integration_id", [".", ".."])
+    def test_host_integration_config_dir_rejects_dot_traversal(self, paths: Paths, integration_id):
+        with pytest.raises(ValueError, match="Invalid integration_id"):
+            paths.host_user_integration_config_dir("alice", integration_id)
+
+    @pytest.mark.parametrize("integration_id", [".", ".."])
+    def test_host_integration_data_dir_rejects_dot_traversal(self, paths: Paths, integration_id):
+        with pytest.raises(ValueError, match="Invalid integration_id"):
+            paths.host_user_integration_data_dir("alice", integration_id)
+
+
+class TestValidateProjectId:
+    def test_rejects_trailing_newline(self, paths: Paths):
+        with pytest.raises(ValueError, match="Invalid project_id"):
+            paths.user_project_dir("alice", "project\n")
 
 
 class TestUserDir:
@@ -223,6 +266,65 @@ class TestEnsureAndDeleteWithUserId:
 
     def test_delete_thread_dir_idempotent(self, paths: Paths):
         paths.delete_thread_dir("nonexistent", user_id="u1")  # should not raise
+
+    def test_delete_thread_dir_retries_read_only_files(self, paths: Paths, monkeypatch):
+        """Windows refuses a read-only file even though the parent is writable."""
+        paths.ensure_thread_dirs("t1", user_id="u1")
+        artifact = paths.sandbox_outputs_dir("t1", user_id="u1") / "report.pdf"
+        artifact.write_text("quarterly")
+        artifact.chmod(0o444)
+        real_unlink = os.unlink
+
+        def windows_unlink(path, *args, **kwargs):
+            # POSIX deletes through ``os.unlink(name, dir_fd=...)``, so the refusal
+            # has to key on that call shape to fire anywhere but Windows.
+            dir_fd = kwargs.get("dir_fd")
+            try:
+                if dir_fd is not None:
+                    mode = os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode
+                else:
+                    mode = os.stat(path).st_mode
+            except FileNotFoundError:
+                return real_unlink(path, *args, **kwargs)
+            if stat.S_ISREG(mode) and not mode & stat.S_IWRITE:
+                raise PermissionError(13, "Access is denied", str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", windows_unlink)
+        paths.delete_thread_dir("t1", user_id="u1")
+        assert not paths.thread_dir("t1", user_id="u1").exists()
+
+    def test_delete_thread_dir_keeps_raising_when_the_file_stays_locked(self, paths: Paths, monkeypatch):
+        """A file still held open is a real failure; the retry must not swallow it."""
+        paths.ensure_thread_dirs("t1", user_id="u1")
+        (paths.sandbox_uploads_dir("t1", user_id="u1") / "notes.txt").write_text("x")
+
+        def locked_unlink(path, *args, **kwargs):
+            raise PermissionError(13, "The process cannot access the file", str(path))
+
+        monkeypatch.setattr(os, "unlink", locked_unlink)
+        with pytest.raises(PermissionError):
+            paths.delete_thread_dir("t1", user_id="u1")
+        assert paths.thread_dir("t1", user_id="u1").exists()
+
+    def test_delete_thread_dir_uses_extended_length_path(self, paths: Paths, monkeypatch):
+        """``shutil.rmtree`` receives the path resolved through ``extended_length_path``.
+
+        The fix for the ``MAX_PATH`` deletion failure is a single line: resolve
+        the thread directory through ``extended_length_path`` before removing it.
+        That call is a no-op on POSIX, so this pins the wiring by patching the
+        resolver to return a marker and asserting ``shutil.rmtree`` receives it.
+        """
+        from deerflow.config import paths as paths_module
+
+        marker = object()
+        monkeypatch.setattr(paths_module, "extended_length_path", lambda _path: marker)
+        received = []
+        monkeypatch.setattr(paths_module.shutil, "rmtree", lambda path, *args, **kwargs: received.append(path))
+
+        paths.ensure_thread_dirs("t1", user_id="u1")
+        paths.delete_thread_dir("t1", user_id="u1")
+        assert received == [marker]
 
     def test_ensure_thread_dirs_legacy_still_works(self, paths: Paths):
         paths.ensure_thread_dirs("t1")

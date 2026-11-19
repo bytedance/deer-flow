@@ -6,16 +6,46 @@ import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from typing import Any
 
 import httpx
 import requests
+
+from deerflow.utils.http_policy import control_plane_trust_env
 
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
 
+# The policy lives in ``deerflow.utils.http_policy`` so Gateway-side callers can
+# apply it without importing this package (whose ``__init__`` loads the whole
+# sandbox provider stack). Kept as a module-level name for the existing sandbox
+# call sites and for tests that patch it here.
+sandbox_http_trust_env = control_plane_trust_env
 
-def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
+
+# The readiness deadline the local-container provider paths (sync and async)
+# enforce before destroying a sandbox that never became ready. Tests that
+# validate the shipped image must use this same budget: a longer one can
+# pass while every real acquisition still fails.
+SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT = 60
+
+
+class SandboxCreationError(RuntimeError):
+    """Preserve a rejected creation result for ownership-fenced cleanup."""
+
+    def __init__(self, message: str, *, info: SandboxInfo):
+        super().__init__(message)
+        self.info = info
+
+
+def wait_for_sandbox_ready(
+    sandbox_url: str,
+    timeout: int = 30,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
     """Poll sandbox health endpoint until ready or timeout.
 
     Args:
@@ -25,19 +55,86 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     Returns:
         True if sandbox is ready, False otherwise.
     """
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(f"{sandbox_url}/v1/sandbox", timeout=5)
-            if response.status_code == 200:
-                return True
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(1)
+    # Measure the readiness budget on the monotonic clock and honor it the way
+    # the async twin does. ``timeout`` is an elapsed-time budget, so a backward
+    # wall-clock step (NTP correction, VM resume, manual change) must not stretch
+    # the wait — which on the acquisition path would pin the thread far past
+    # ``timeout`` — and a forward jump must not cut it short and destroy a sandbox
+    # that was about to become ready. Clamp both the per-probe request timeout and
+    # the inter-probe sleep to the remaining budget (``min(5.0, remaining)`` /
+    # ``min(1.0, remaining)``) so a single slow probe plus its backoff cannot
+    # overshoot ``timeout``, mirroring ``wait_for_sandbox_ready_async``.
+    deadline = time.monotonic() + timeout
+    with requests.Session() as session:
+        session.trust_env = sandbox_http_trust_env(sandbox_url)
+        if headers:
+            session.headers.update(headers)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
+                if response.status_code == 200:
+                    return True
+            except requests.exceptions.RequestException:
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, remaining))
     return False
 
 
-async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll_interval: float = 1.0) -> bool:
+async def _settle(future: asyncio.Future[Any]) -> Any:
+    """Await a future that owns a resource, even if this task is cancelled again.
+
+    Cleanup must not be the thing that gets abandoned: the caller remembers its
+    own cancellation and re-raises it once the resource is released.
+    """
+    while True:
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            if future.cancelled():
+                raise
+
+
+async def _open_client(**kwargs: Any) -> httpx.AsyncClient:
+    """Build an ``httpx.AsyncClient`` without loading TLS trust on the event loop.
+
+    The constructor resolves the system trust store synchronously, so it has to
+    run in a thread. That alone is not enough: a cancellation can arrive while
+    the worker is still inside the constructor, and then the await is abandoned
+    while the thread goes on to hand back a live client that nobody closes. So
+    own the construction as a task and, once cancelled, wait for it and close
+    whatever it produced before the cancellation propagates. If either owned
+    task fails or is itself cancelled, log it and re-raise the caller's original
+    cancellation.
+    """
+    construction: asyncio.Task[httpx.AsyncClient] = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, **kwargs))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+        try:
+            late_client = await _settle(construction)
+        except (Exception, asyncio.CancelledError) as error:
+            logger.error("Sandbox readiness HTTPX client construction failed after cancellation: %r", error)
+        else:
+            try:
+                await _settle(asyncio.create_task(late_client.aclose()))
+            except (Exception, asyncio.CancelledError) as error:
+                logger.error("Closing a sandbox readiness HTTPX client built after cancellation failed: %r", error)
+        raise
+
+
+async def wait_for_sandbox_ready_async(
+    sandbox_url: str,
+    timeout: int = 30,
+    poll_interval: float = 1.0,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
     """Async variant of sandbox readiness polling.
 
     Use this from async runtime paths so sandbox startup waits do not block the
@@ -47,7 +144,15 @@ async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
-    async with httpx.AsyncClient(timeout=5) as client:
+    client_kwargs: dict[str, object] = {
+        "timeout": 5,
+        "trust_env": sandbox_http_trust_env(sandbox_url),
+    }
+    if headers:
+        client_kwargs["headers"] = dict(headers)
+    # Construction loads TLS trust synchronously, off the loop, and owns the
+    # client even when this coroutine is cancelled mid-construction.
+    async with await _open_client(**client_kwargs) as client:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -81,6 +186,8 @@ class SandboxBackend(ABC):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         user_id: str | None = None,
+        provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """Create/provision a new sandbox.
 
@@ -90,6 +197,13 @@ class SandboxBackend(ABC):
             extra_mounts: Additional volume mounts as (host_path, container_path, read_only) tuples.
                 Ignored by backends that don't manage containers (e.g., remote).
             user_id: User bucket that the sandbox should mount or provision for.
+            provision_lark_cli_runtime: Ask the backend to provision the sandbox
+                lark-cli runtime via its native mechanism (e.g. the provisioner's
+                init container + emptyDir). Backends that can't do this ignore it.
+            provision_lark_cli_broker: Ask the backend to provision a lark-cli
+                broker sidecar (Pattern B, issue #4338) so credentials stay out of
+                the sandbox. Supersedes ``provision_lark_cli_runtime`` when the
+                backend supports it; backends that can't do this ignore it.
 
         Returns:
             SandboxInfo with connection details.
@@ -131,9 +245,40 @@ class SandboxBackend(ABC):
             sandbox_id: The deterministic sandbox ID to look for.
 
         Returns:
-            SandboxInfo if found and healthy, None otherwise.
+            SandboxInfo if found, including ``requires_replacement=True`` when
+            the backend can identify an incompatible persisted provisioning
+            policy without safely adopting it. Enumeration must not destroy
+            resources; the provider owns replacement fencing. None otherwise.
         """
         ...
+
+    def is_absent(self, sandbox_id: str) -> bool:
+        """Prove that no runtime exists under this logical ID, even if stopped.
+
+        Unknown/unavailable runtimes must never return True. Backends without
+        an authoritative absence check retain their quarantine fences.
+        """
+        return False
+
+    def complete_absent_teardown(self, sandbox_id: str) -> None:
+        """Finish cleanup bookkeeping after authoritative runtime absence.
+
+        The provider must confirm ``is_absent(sandbox_id) is True`` and hold
+        both its local teardown reservation and cross-worker teardown lease
+        throughout this call. Implementations may release pending resources
+        scoped to this absent logical ID. Failure must raise so quarantine is
+        retained and cleanup can be retried before creating a replacement.
+        Backends without pending cleanup require no completion work.
+        """
+
+    def inspect_runtime(self, sandbox_id: str) -> SandboxInfo | None:
+        """Inspect the runtime generation independently of endpoint readiness.
+
+        Return None only after confirming no resource has this logical ID,
+        including stopped or terminating resources. Unavailable or unsupported
+        inspections must raise rather than imply absence.
+        """
+        raise RuntimeError(f"Runtime inspection is unavailable for sandbox {sandbox_id}")
 
     def list_running(self) -> list[SandboxInfo]:
         """Enumerate all running sandboxes managed by this backend.
@@ -145,6 +290,9 @@ class SandboxBackend(ABC):
         The default implementation returns an empty list, which is correct
         for backends that don't manage local containers (e.g., RemoteSandboxBackend
         delegates lifecycle to the provisioner which handles its own cleanup).
+        Enumeration must be read-only. Backends report resources that need
+        replacement through ``SandboxInfo.requires_replacement`` so the
+        provider can apply ownership and local teardown fencing first.
 
         Returns:
             A list of SandboxInfo for all currently running sandboxes.

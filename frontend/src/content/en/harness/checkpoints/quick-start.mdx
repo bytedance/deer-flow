@@ -1,0 +1,73 @@
+---
+title: Quick Start
+description: How to switch DeerFlow checkpoint storage to delta mode — the two config keys and their defaults, why a restart is required, what a fresh install gets, how to confirm the switch took effect, and the supported migration direction.
+---
+
+import { Callout } from "nextra/components";
+
+# Quick Start
+
+Two keys under `database:` select the checkpoint representation and how often delta mode stores a full message snapshot. Both are restart-required.
+
+```yaml
+database:
+  checkpoint_channel_mode: full     # full | delta
+  checkpoint_delta:
+    snapshot_frequency: 10          # >= 1
+```
+
+| Key | Type | Default | Range | Restart required |
+| --- | --- | --- | --- | --- |
+| `database.checkpoint_channel_mode` | `"full"` \| `"delta"` | `"full"` | `full`, `delta` | Yes |
+| `database.checkpoint_delta.snapshot_frequency` | int | `10` | `>= 1`, no documented upper bound | Yes |
+
+No environment variable selects the mode or the cadence; both come only from `config.yaml`. An unknown mode value fails pydantic validation at config load, and so does a `snapshot_frequency` below 1. `snapshot_frequency` applies only in `delta` mode; `config.example.yaml` ships both keys at their defaults.
+
+## Why a restart is required
+
+Both values are frozen on first use: the process stores them in two module globals, and a later value that differs raises `CheckpointModeReconfigurationError`:
+
+- `checkpoint_channel_mode is restart-required and cannot change in a running process`
+- `checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process`
+
+The cadence is frozen alongside the mode because it is not stored in the checkpoint: it is baked into each compiled graph's channel table when the graph is built. A process started with a different cadence would apply that cadence to the same threads, and since the cadence is deliberately not stamped into checkpoint metadata there is nothing at read time to detect the mismatch against. The same reasoning makes the mode a cross-process invariant: every process sharing one checkpoint database must use the same value.
+
+The freeze happens before graph compilation, on every path that builds a graph: the Gateway lifespan, the lead agent assembly, and `DeerFlowClient.__init__`. There is no hot reload for either value.
+
+## What a fresh install gets
+
+| Setting | Value on a fresh install |
+| --- | --- |
+| `database.backend` | `sqlite`, with `sqlite_dir: .deer-flow/data`, when the `database:` section or the key is absent |
+| `database.checkpoint_channel_mode` | `full` |
+| `database.checkpoint_delta.snapshot_frequency` | `10` |
+| `database.checkpoint_graph_cache.accessor_graph_max` | `64` |
+| `database.checkpoint_cache` | Process-local memory LRU: `max_entries: 128`, `redis_url: null`, `ttl_seconds: 86400`, `key_prefix: ""`. The example file leaves the whole block commented out |
+
+A missing `database:` section resolves to `sqlite` plus `full`, not to the in-memory backend: `memory` is only the default of a directly constructed `DatabaseConfig()`. If your `config.yaml` predates the key, `make config-upgrade` merges it in with the safe default `full`.
+
+## Confirming the switch took effect
+
+1. **In-process.** `frozen_checkpoint_channel_mode()` returns the frozen mode, or `None` before the process has frozen one; `frozen_checkpoint_snapshot_frequency()` is its cadence twin. Both live in `deerflow.runtime.checkpoint_mode`.
+2. **On the thread.** A checkpoint written by a delta-mode process carries the metadata marker `deerflow_checkpoint_channel_mode: "delta"`. Full mode removes that key, so absence means full — existing checkpoints need no migration.
+3. **On a mismatch.** If the process is still in `full` mode, opening a delta thread returns HTTP 409 with `Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode.` That is the fail-closed gate working, not an error to silence; see [Channel Modes](/docs/harness/checkpoints/modes).
+
+There is no health, readiness, or capabilities endpoint that reports the mode, so the three checks above are the ones available.
+
+## Migration direction
+
+Delta-mode processes read legacy full checkpoints transparently, so **full → delta is the supported direction**: existing threads keep working with no data rewrite. The reverse direction is not symmetric. From the runtime module docstring:
+
+> a full-mode process opening a delta thread raises CheckpointModeMismatchError instead of silently materializing empty state. Delta-mode processes read legacy full checkpoints transparently, so full -> delta is the supported migration path.
+
+Switching a store back to `full` therefore requires materializing and converting those threads' checkpoints first, which is what the error text tells the operator to do. Until that is done, keep `delta` in every process that touches the store.
+
+<Callout type="warning">
+  Editing `checkpoint_channel_mode` in `config.yaml` without restarting does not take effect: the run
+  worker injects the frozen mode, so the edit is ignored until a restart. Editing
+  `checkpoint_delta.snapshot_frequency` without restarting is louder — the next run fails with
+  `CheckpointModeReconfigurationError` in its run record and SSE `error` frame. Neither edit makes a
+  request return `503`; see
+  [Troubleshooting](/docs/harness/checkpoints/troubleshooting#a-run-fails-after-a-config-edit). Roll
+  either change out by restarting every process that shares the checkpoint database.
+</Callout>

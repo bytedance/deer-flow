@@ -28,11 +28,13 @@ from typing import Any, Protocol, runtime_checkable
 
 @dataclass
 class Principal:
-    """The actor. Built once per run from ``request.state.user`` + context.
+    """The actor resolved from trusted runtime identity context.
 
     Identity fields mirror what ``inject_authenticated_user_context``
     (``app/gateway/services.py``) already stamps into the run context, so the
-    provider sees a single resolved actor rather than re-deriving it per call.
+    provider sees one consistent identity shape. Layer 1 and the execution-time
+    guardrail adapter both use ``build_principal_from_context``; the adapter
+    rebuilds the value per request so it never caches stale runtime identity.
     """
 
     user_id: str | None = None
@@ -117,5 +119,13 @@ class AuthorizationProvider(Protocol):
         role→resource map should delegate to :meth:`authorize` per item and
         return only the allowed subset. Providers with a static map can
         override this for O(1) filtering and fail-closed visibility.
+
+        The answer can only narrow *candidates*: every caller intersects it with
+        the list it asked about, so naming a target that was never a candidate
+        grants nothing.
+
+        Implementations must be thread-safe: an async caller offloads this
+        synchronous method to a worker thread, so it may run while the event
+        loop keeps serving other work.
         """
         ...

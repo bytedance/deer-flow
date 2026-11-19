@@ -3,11 +3,10 @@ import { cookies } from "next/headers";
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { AUTH_DISABLED_USER, isAuthDisabledMode } from "./auth-disabled-user";
+import { AUTH_REQUEST_TIMEOUT_MS } from "./constants";
 import { getGatewayConfig } from "./gateway-config";
 import { STATIC_WEBSITE_USER } from "./static-user";
-import { type AuthResult, userSchema } from "./types";
-
-const SSR_AUTH_TIMEOUT_MS = 5_000;
+import { type AuthResult, parseAuthError, userSchema } from "./types";
 
 /**
  * Fetch the authenticated user from the gateway using the request's cookies.
@@ -43,7 +42,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
     const setupController = new AbortController();
     const setupTimeout = setTimeout(
       () => setupController.abort(),
-      SSR_AUTH_TIMEOUT_MS,
+      AUTH_REQUEST_TIMEOUT_MS,
     );
     try {
       const setupRes = await fetch(
@@ -68,7 +67,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SSR_AUTH_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
 
   try {
     const res = await fetch(`${internalGatewayUrl}/api/v1/auth/me`, {
@@ -90,6 +89,16 @@ export async function getServerSideUser(): Promise<AuthResult> {
       return { tag: "authenticated", user: parsed.data };
     }
     if (res.status === 401 || res.status === 403) {
+      // A disabled account gets a distinct code so the login redirect can
+      // say why (#4063 gap 3); every other rejected session (expired,
+      // invalid, revoked) stays a plain unauthenticated bounce.
+      const code = await res
+        .json()
+        .then((data) => parseAuthError(data).code)
+        .catch(() => null);
+      if (code === "account_disabled") {
+        return { tag: "account_disabled" };
+      }
       return { tag: "unauthenticated" };
     }
     console.error(`[SSR auth] /api/v1/auth/me responded ${res.status}`);

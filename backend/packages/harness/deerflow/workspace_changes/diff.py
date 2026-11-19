@@ -21,23 +21,22 @@ def compare_snapshots(
     limits: WorkspaceChangeLimits | None = None,
 ) -> WorkspaceChangeResult:
     resolved_limits = limits or WorkspaceChangeLimits()
-    all_paths = sorted(set(before.files) | set(after.files))
     changes: list[WorkspaceFileChange] = []
-    created = modified = deleted = additions = deletions = 0
+    created = modified = deleted = symlink_created = additions = deletions = 0
     total_diff_bytes = 0
     truncated = before.truncated or after.truncated
 
-    for path in all_paths:
+    for path in sorted(get_changed_paths(before, after)):
         before_file = before.files.get(path)
         after_file = after.files.get(path)
-        if before_file and after_file and _same_file(before_file, after_file):
-            continue
 
         status = _status(before_file, after_file)
         if status == "created":
             created += 1
         elif status == "modified":
             modified += 1
+        elif status == "symlink_created":
+            symlink_created += 1
         else:
             deleted += 1
 
@@ -73,6 +72,9 @@ def compare_snapshots(
                     diff_unavailable_reason=reason,
                     additions=line_additions,
                     deletions=line_deletions,
+                    symlink=bool((after_file or before_file).symlink if (after_file or before_file) else False),
+                    symlink_target_before=before_file.symlink_target if before_file else None,
+                    symlink_target_after=after_file.symlink_target if after_file else None,
                 )
             )
         else:
@@ -83,6 +85,7 @@ def compare_snapshots(
             created=created,
             modified=modified,
             deleted=deleted,
+            symlink_created=symlink_created,
             additions=additions,
             deletions=deletions,
             truncated=truncated,
@@ -97,16 +100,63 @@ def get_changed_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> se
     for path in set(before.files) | set(after.files):
         before_file = before.files.get(path)
         after_file = after.files.get(path)
+        # Absence from a partial scan does not prove creation or deletion.
+        if (before_file is None and before.truncated) or (after_file is None and after.truncated):
+            continue
         if before_file and after_file and _same_file(before_file, after_file):
             continue
         changed.add(path)
     return changed
 
 
+#: Virtual prefix of the outputs workspace root. Shared with ``recorder.py`` so
+#: the delivery filter below cannot silently drift from the scanner's paths.
+OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs"
+
+
+def _is_hidden_output_path(path: str) -> bool:
+    """Whether any segment below the outputs root starts with a dot.
+
+    Scheduled tasks and agents keep working state under outputs (a cursor or
+    state JSON, a ``.work/`` scratch tree). Those files are not deliverables, so
+    they must not make an otherwise finished run fail delivery verification.
+    """
+    prefix = f"{OUTPUTS_VIRTUAL_PREFIX}/"
+    if not path.startswith(prefix):
+        return False
+    return any(segment.startswith(".") for segment in path[len(prefix) :].split("/") if segment)
+
+
+def get_changed_output_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> list[str]:
+    """Return regular output changes established by the bounded snapshots.
+
+    Paths absent from a truncated before snapshot are omitted, including
+    genuinely new files; modifications observed in both snapshots are retained.
+    Hidden paths are working state, not deliverables. The worker's delivery
+    check relies on this list and is skipped when it is empty, so an empty
+    result does not prove that the run produced no outputs.
+    """
+    paths: list[str] = []
+    for path in sorted(get_changed_paths(before, after)):
+        snapshot = after.files.get(path)
+        if snapshot is not None and snapshot.root == "outputs" and not snapshot.symlink and not _is_hidden_output_path(path):
+            paths.append(path)
+    return paths
+
+
 def _status(
     before_file: FileSnapshot | None,
     after_file: FileSnapshot | None,
 ) -> WorkspaceChangeStatus:
+    # A symlink now occupying a path that was not already a symlink is always
+    # surfaced distinctly - whether it is brand new (before_file is None) or it
+    # just replaced a regular file (before_file is None => "deleted" would
+    # otherwise be reported even though the path is still alive on disk, just
+    # as a symlink that may point anywhere on the host).
+    before_was_symlink = before_file is not None and before_file.symlink
+    after_is_symlink = after_file is not None and after_file.symlink
+    if after_is_symlink and not before_was_symlink:
+        return "symlink_created"
     if before_file is None:
         return "created"
     if after_file is None:
@@ -160,7 +210,7 @@ def _diff_unavailable_reason(
     after_file: FileSnapshot | None,
 ) -> DiffUnavailableReason | None:
     files = [file for file in (before_file, after_file) if file is not None]
-    for preferred in ("sensitive", "binary", "large"):
+    for preferred in ("symlink", "sensitive", "binary", "large"):
         if any(file.content_unavailable_reason == preferred for file in files):
             return preferred  # type: ignore[return-value]
     return None
@@ -173,7 +223,11 @@ def _snapshot_text(file: FileSnapshot | None) -> str | None:
         return file.text
     if file.text_path:
         try:
-            with open(file.text_path, encoding="utf-8") as cached:
+            # The cache is published byte-exactly (the scanner pins
+            # newline="\n"), so read it back without newline translation:
+            # universal newlines would silently rewrite a decoded CRLF
+            # snapshot into LF text and corrupt the served content.
+            with open(file.text_path, encoding="utf-8", newline="") as cached:
                 return cached.read()
         except OSError:
             return None
@@ -183,12 +237,12 @@ def _snapshot_text(file: FileSnapshot | None) -> str | None:
 def _count_diff_lines(lines: list[str]) -> tuple[int, int]:
     additions = 0
     deletions = 0
-    for line in lines:
-        # Unified-diff file headers are "+++ " / "--- " with a trailing space;
-        # a bare "+++"/"---" prefix would also swallow real content lines whose
-        # text begins with those sequences (e.g. an added line "+++foo").
-        if line.startswith("+++ ") or line.startswith("--- "):
-            continue
+    # difflib.unified_diff always emits the two file headers ("--- a/…" then
+    # "+++ b/…") first; skip them by position. A prefix test can't tell them
+    # apart from a hunk-body line whose content starts with "-- "/"++ " (e.g. a
+    # deleted SQL comment "-- get users" becomes the diff line "--- get users"),
+    # which would then be dropped from the count.
+    for line in lines[2:]:
         if line.startswith("+"):
             additions += 1
         elif line.startswith("-"):

@@ -1,6 +1,7 @@
 import re
 from abc import ABC, abstractmethod
 
+from deerflow.sandbox.command_scope import CommandScopes
 from deerflow.sandbox.search import GrepMatch
 
 # POSIX env-var name rule: letter or underscore, then letters/digits/underscores.
@@ -45,9 +46,55 @@ class Sandbox(ABC):
     """Abstract base class for sandbox environments"""
 
     _id: str
+    # Explicit POSIX directory used for confined remote artifact snapshots.
+    # Custom providers remain unsupported until they declare their real root.
+    artifact_root: str | None = None
+
+    #: Whether ``execute_command`` reuses one persistent shell session across
+    #: calls (shell state — exports, cwd, functions — survives from one call
+    #: into the next). When True, a recorded command's environment cannot be
+    #: proven clean from the command text alone, so evidence consumers (the
+    #: acceptance checklist's ``tests_passed`` matcher) must treat recorded
+    #: bash evidence as untrusted and degrade to UNVERIFIED.
+    #:
+    #: Tri-state, failing closed: ``None`` (the default) means the
+    #: implementation has NOT declared its session semantics — custom
+    #: providers are loaded by class path and may reuse a persistent
+    #: session, so silence cannot be read as fresh-shell. Consumers must
+    #: trust only an explicit ``False`` and degrade to UNVERIFIED on
+    #: ``None`` exactly as on ``True``. Every shipped implementation
+    #: declares explicitly (AIO: ``True``; the per-call exec providers:
+    #: ``False``).
+    persistent_shell_sessions: bool | None = None
+
+    #: Whether sandbox ``lark-cli`` runs through a credential-owning broker
+    #: sidecar (Pattern B, issue #4338): ``True`` once the provider has
+    #: attested broker mode for this sandbox, ``False`` for the plaintext
+    #: config/data overlay. Tri-state, failing closed: ``None`` means the
+    #: mode is unverified and ``lark-cli`` execution must refuse to run until
+    #: the mode is attested. The default is ``False`` rather than ``None``
+    #: because most providers have no broker sidecar, no credential mounts,
+    #: and no provisioner to attest a mode — the non-broker overlay is the
+    #: only mode that exists for them. Only the AIO sandbox overrides the
+    #: default with ``None``: its mode is attested per Pod by the
+    #: provisioner, and an unattested Pod must fail closed instead of
+    #: silently mounting credentials.
+    lark_cli_broker: bool | None = False
+
+    supports_command_cancellation = False
 
     def __init__(self, id: str):
         self._id = id
+        self._command_scopes = CommandScopes()
+
+    def request_command_cancel(self, scope_id: str) -> None:
+        """Signal a cancelled bash execution without blocking the event loop."""
+        if self.supports_command_cancellation:
+            self._command_scopes.request_cancel(scope_id)
+
+    def cancel_command_scope(self, scope_id: str) -> None:
+        """Stop commands owned by this execution; legacy providers keep their behavior."""
+        self.request_command_cancel(scope_id)
 
     @property
     def id(self) -> str:
@@ -90,12 +137,40 @@ class Sandbox(ABC):
         """
         pass
 
+    def execute_command_in_scope(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+        *,
+        scope_id: str | None = None,
+    ) -> str:
+        """Execute a command in an optional agent execution scope.
+
+        Providers without server-side shell sessions inherit the ordinary
+        command behavior. Session-aware providers may isolate concurrent agent
+        executions while preserving serialization inside one scope.
+        """
+        del scope_id
+        return self.execute_command(command, env=env, timeout=timeout)
+
+    def release_command_scope(self, scope_id: str) -> None:
+        """Forget completed execution ownership without stopping background services."""
+        self._command_scopes.release(scope_id)
+
     @abstractmethod
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         """Read the content of a file.
 
         Args:
             path: The absolute path of the file to read.
+            start_line: Optional starting line number (1-indexed, inclusive).
+            end_line: Optional ending line number (1-indexed, inclusive).
 
         Returns:
             The content of the file.
@@ -103,19 +178,29 @@ class Sandbox(ABC):
         pass
 
     @abstractmethod
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download the binary content of a file.
 
         Args:
             path: The absolute path of the file to download.
+            max_bytes: Optional non-negative byte ceiling, capped by the
+                provider's own limit. Enforce it during reading, not after an
+                unbounded SDK read. Streaming providers stop on the first
+                overflowing chunk and close the stream on every exit; file and
+                exec readers may probe one extra byte. Never return a truncated
+                prefix as success. None preserves the provider's default cap.
+                Custom providers must support this keyword to serve image
+                reads; callers must not retry without it on TypeError.
 
         Returns:
             Raw file bytes.
 
         Raises:
+            ValueError: If max_bytes is not a non-negative integer or None.
             PermissionError: If path traversal is detected or the path is outside
                 the allowed virtual prefix.
-            OSError: If the file cannot be read or does not exist.  Both local
+            OSError: If the file cannot be read or does not exist, or with
+                errno.EFBIG if it exceeds the effective byte limit. Both local
                 and remote implementations must raise ``OSError`` so callers
                 have a single exception type to handle.
         """
@@ -130,7 +215,15 @@ class Sandbox(ABC):
             max_depth: The maximum depth to traverse. Default is 2.
 
         Returns:
-            The contents of the directory.
+            The contents of the directory. An existing empty directory may
+            return an empty list. A missing path must not.
+
+        Raises:
+            FileNotFoundError: If ``path`` does not exist or is not a directory.
+            OSError: If the listing cannot be performed (command/client failure).
+                Both local and remote implementations must raise rather than
+                return ``[]`` for failure or a missing path: ``ls_tool``
+                renders an empty list as ``(empty)``.
         """
         pass
 
@@ -147,7 +240,18 @@ class Sandbox(ABC):
 
     @abstractmethod
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        """Find paths that match a glob pattern under a root directory."""
+        """Find paths that match a glob pattern under a root directory.
+
+        Returns the matches and ``truncated``, which is true whenever the
+        matches may be incomplete: the search stopped at an output cap before
+        filtering, or an eligible match beyond ``max_results`` was dropped.
+
+        Providers differ in how precisely they can decide the second case. One
+        that holds the whole listing can tell an exactly-full result from a
+        cut-off one and reports the former as complete; one reading a capped
+        stream cannot, and reports it as truncated. Treat the flag as "may be
+        incomplete", never as a count.
+        """
         pass
 
     @abstractmethod
@@ -161,7 +265,11 @@ class Sandbox(ABC):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        """Search for matches inside text files under a directory."""
+        """Search for matches inside a text file or files under a directory.
+
+        Returns the matches and ``truncated``, with the same meaning as in
+        :meth:`glob`.
+        """
         pass
 
     @abstractmethod

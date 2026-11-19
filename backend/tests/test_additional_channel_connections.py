@@ -60,6 +60,23 @@ def test_pending_connect_code_accepts_leading_platform_mentions():
     assert channel._pending_connect_code("@_user_1 /connect via-base") == "via-base"
 
 
+def test_bare_connect_without_slash_does_not_bind():
+    """A message that merely starts with the word "connect" is normal chat.
+
+    Every other channel control command requires a leading slash
+    (``is_known_channel_command`` only matches ``/``-prefixed tokens, and
+    ``KNOWN_CHANNEL_COMMANDS`` holds only slash forms), so a bare ``connect``
+    must not be treated as ``/connect <code>`` and swallow the next word as a
+    bind code — otherwise "connect the database to the api" binds to "the".
+    """
+    assert extract_connect_code("connect the database to the api") is None
+    assert extract_connect_code("connect abc") is None
+    assert extract_connect_code("@bot connect abc") is None
+    # The real slash command still binds, including after a mention prefix.
+    assert extract_connect_code("/connect abc") == "abc"
+    assert extract_connect_code("@bot /connect abc") == "abc"
+
+
 def test_pending_connect_code_is_none_when_connections_disabled():
     # With no connection repo, binding is not configured and connect codes are
     # ignored so the message falls through to normal handling.
@@ -114,6 +131,55 @@ def test_feishu_connect_command_binds_identity(tmp_path):
         assert connections[0]["external_account_id"] == "ou-user-1"
         assert connections[0]["workspace_id"] == "oc-chat-1"
         channel._reply_card.assert_awaited_once_with("om-message-1", "Feishu connected to DeerFlow.")
+        await repo.close()
+
+    anyio.run(go)
+
+
+def test_feishu_connect_replies_follow_the_code_owner_language(tmp_path, monkeypatch):
+    """Success speaks the binding owner's web UI language; an invalid code has no owner yet."""
+    import anyio
+
+    from app.channels.feishu import FeishuChannel
+    from app.channels.reply_locale import ReplyLocaleResolver
+
+    lookups = []
+
+    class _Preferences:  # stands in for the user_preferences table
+        def __init__(self, sessions):
+            self.sessions = sessions
+
+        async def get(self, user_id):
+            lookups.append((user_id, self.sessions))
+            return {"locale": "zh-CN"} if user_id == "deerflow-user-1" else {}
+
+    monkeypatch.setattr("app.channels.reply_locale.UserPreferencesRepository", _Preferences)
+
+    async def go():
+        repo = await _make_repo(tmp_path, "feishu-zh")
+        state = "feishu-bind-code-zh"
+        await _seed_state(repo, "feishu", state)
+        channel = FeishuChannel(
+            bus=MessageBus(),
+            config={
+                "app_id": "app",
+                "app_secret": "secret",
+                "connection_repo": repo,
+                # What ChannelService injects: the shared database, configured default en-US.
+                "reply_locale": ReplyLocaleResolver(session_factory=repo.session_factory, default_locale="en-US"),
+            },
+        )
+        channel._reply_card = AsyncMock()
+
+        await channel._bind_connection_from_connect_code(message_id="om-1", chat_id="oc-chat-1", user_id="ou-user-1", code=state)
+        await channel._bind_connection_from_connect_code(message_id="om-2", chat_id="oc-chat-1", user_id="ou-user-1", code=state)
+
+        assert [call.args for call in channel._reply_card.await_args_list] == [
+            ("om-1", "飞书已连接到 DeerFlow。"),
+            # The code is spent: no owner is known, so the configured default applies.
+            ("om-2", "Feishu connection code is invalid or expired."),
+        ]
+        assert lookups == [("deerflow-user-1", repo.session_factory)]
         await repo.close()
 
     anyio.run(go)

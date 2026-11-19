@@ -17,6 +17,7 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
     "description",
     "license",
     "allowed-tools",
+    "argument-hint",
     "required-secrets",
     "secrets-autonomous",
     "metadata",
@@ -25,7 +26,12 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
     "author",
 }
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+# `\ufeff` is the UTF-8 byte-order mark that Windows Notepad and PowerShell's
+# `Set-Content -Encoding UTF8` prepend to a saved file. It is consumed by the match, so
+# neither the front matter nor the body carries it downstream.
+# Delimiter whitespace must stay on its own line; do not consume body
+# indentation or accept a closing line that merely starts with three hyphens.
+_FRONTMATTER_RE = re.compile(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,10 @@ def split_skill_markdown(content: str) -> tuple[SkillMarkdownParts | None, str |
 
     if not isinstance(metadata, dict):
         return None, "Frontmatter must be a YAML dictionary"
+
+    # YAML permits non-string keys, but downstream validation expects field
+    # names to be strings.
+    metadata = {str(key): value for key, value in metadata.items()}
 
     return (
         SkillMarkdownParts(

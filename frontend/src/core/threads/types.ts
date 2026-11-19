@@ -1,6 +1,12 @@
-import type { Message, Thread } from "@langchain/langgraph-sdk";
+import type { Message, Run, Thread } from "@langchain/langgraph-sdk";
+
+import type { ReasoningEffortValue } from "@/core/models/reasoning";
 
 import type { Todo } from "../todos";
+
+/** Gateway status outside the SDK's closed RunStatus union. */
+export type AppRunStatus = Run["status"] | "waiting_for_input";
+export type AppRun = Omit<Run, "status"> & { status: AppRunStatus };
 
 export interface GoalState {
   objective: string;
@@ -29,12 +35,54 @@ export interface GoalState {
   };
 }
 
+/**
+ * The record of the latest met goal (the `goal_outcome` channel). Only the
+ * checkpoint write that clears a satisfied goal writes it, and every other
+ * goal write removes it; `contracts/thread_goal_contract.json` pins the keys.
+ * Named apart from the scheduled-run `GoalOutcome` in `core/scheduled-tasks`.
+ */
+export interface ThreadGoalOutcome {
+  status: "achieved";
+  objective: string;
+  /** The met goal's `created_at`; empty for a goal stored without one. */
+  goal_created_at: string;
+  achieved_at: string;
+  continuation_count: number;
+  max_continuations: number;
+  reason: string;
+  relied_on_assumption: boolean;
+  /** The reply the verdict judged: the latest visible AI message with text. */
+  reply_message_id: string | null;
+}
+
+export interface ArtifactEntry {
+  handle: string;
+  tool_name: string;
+  tool_call_id: string;
+  call_index: number;
+  artifact_type: string;
+  display_name: string;
+  real_ref: string;
+  mime_type?: string | null;
+  created_at?: string;
+  consumed_by?: string[];
+}
+
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
   messages: Message[];
   artifacts?: string[];
   todos?: Todo[];
   goal?: GoalState | null;
+  goal_outcome?: ThreadGoalOutcome | null;
+  applied_run_inputs?: { run_id: string; ids: string[] } | null;
+  tool_artifacts?: ArtifactEntry[];
+}
+
+export interface AgentClientContext {
+  name?: string;
+  capabilities?: Record<string, boolean>;
+  preferences?: Record<string, string | number | boolean>;
 }
 
 export interface AgentThreadContext extends Record<string, unknown> {
@@ -43,23 +91,37 @@ export interface AgentThreadContext extends Record<string, unknown> {
   thinking_enabled: boolean;
   is_plan_mode: boolean;
   subagent_enabled: boolean;
-  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+  reasoning_effort?: ReasoningEffortValue;
+  tool_approval_mode?: "ask" | "auto" | "full";
   agent_name?: string;
+  client?: AgentClientContext;
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
+  /**
+   * Thread search only: a server-originated run of the viewer (schedule, IM,
+   * GitHub, extension) changed since the viewer last opened the thread.
+   * `null`/absent when unknown (another endpoint, or no SQL read state).
+   */
+  unread?: boolean | null;
 }
 
 export interface RunMessage {
   run_id: string;
-  seq?: number;
+  seq: number;
   content: Message;
   metadata: {
     caller: string;
     [key: string]: unknown;
   };
   created_at: string;
+}
+
+export interface ThreadContextUsage {
+  token_count: number;
+  max_context_tokens: number | null;
+  percentage: number | null;
 }
 
 export interface ThreadTokenUsageResponse {
@@ -74,4 +136,5 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
+  context_usage?: ThreadContextUsage | null;
 }

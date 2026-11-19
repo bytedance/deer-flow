@@ -2,7 +2,14 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   describeSchedule,
+  describeTaskSchedule,
+  hasScheduleSpec,
+  clampIntervalAmount,
+  intervalToSeconds,
+  minIntervalAmount,
+  onceRunAtInstant,
   parseCron,
+  secondsToInterval,
   serializeCron,
   utcToZonedLocalInput,
   zonedLocalToUtcIso,
@@ -124,6 +131,21 @@ describe("parseCron", () => {
     expect(parseCron("0 9 * * 1-5").preset).toBe("custom");
     expect(parseCron("garbage").preset).toBe("custom");
     expect(parseCron("garbage").parts.raw).toBe("garbage");
+  });
+
+  test.each([
+    "60 * * * *",
+    "99 9 * * *",
+    "0 24 * * *",
+    "0 9 0 * *",
+    "0 9 32 * *",
+  ])("keeps the out-of-range cron %j as custom", (cron) => {
+    expect(parseCron(cron)).toEqual({ preset: "custom", parts: { raw: cron } });
+  });
+
+  test("accepts inclusive upper bounds for numeric fields", () => {
+    expect(parseCron("59 23 * * *").preset).toBe("daily");
+    expect(parseCron("0 9 31 * *").preset).toBe("monthly");
   });
 });
 
@@ -259,6 +281,175 @@ describe("describeSchedule", () => {
       ),
     ).toBe("Custom: */5 * * * * (UTC)");
   });
+
+  test("interval minutes en/zh omit timezone", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "minutes",
+          timezone: "Asia/Shanghai",
+        },
+        "en",
+      ),
+    ).toBe("Every 90 minutes");
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "minutes",
+          timezone: "Asia/Shanghai",
+        },
+        "zh",
+      ),
+    ).toBe("每 90 分钟");
+  });
+
+  test("interval singular hour en", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 1,
+          intervalUnit: "hours",
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("Every hour");
+  });
+
+  test("interval seconds en/zh omit timezone", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "seconds",
+          timezone: "Asia/Shanghai",
+        },
+        "en",
+      ),
+    ).toBe("Every 90 seconds");
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "seconds",
+          timezone: "Asia/Shanghai",
+        },
+        "zh",
+      ),
+    ).toBe("每 90 秒");
+  });
+});
+
+describe("interval wording for one unit and for more", () => {
+  const cases: [number, "seconds" | "minutes" | "hours", string, string][] = [
+    [1, "minutes", "Every minute", "每分钟"],
+    [2, "minutes", "Every 2 minutes", "每 2 分钟"],
+    [1, "hours", "Every hour", "每小时"],
+    [3, "hours", "Every 3 hours", "每 3 小时"],
+    [1, "seconds", "Every second", "每秒"],
+    [45, "seconds", "Every 45 seconds", "每 45 秒"],
+  ];
+  for (const [amount, unit, en, zh] of cases) {
+    test(`${amount} ${unit}: "${en}" / "${zh}"`, () => {
+      const state = {
+        scheduleType: "interval" as const,
+        intervalAmount: amount,
+        intervalUnit: unit,
+        timezone: "Asia/Shanghai",
+      };
+      expect(describeSchedule(state, "en")).toBe(en);
+      expect(describeSchedule(state, "zh")).toBe(zh);
+    });
+  }
+
+  const saved = (every_seconds: number) => ({
+    schedule_type: "interval" as const,
+    schedule_spec: { every_seconds },
+    timezone: "Asia/Shanghai",
+  });
+
+  test("a saved task's interval of one unit has no number in Chinese", () => {
+    expect(describeTaskSchedule(saved(60), "zh-CN").text).toBe("每分钟");
+    expect(describeTaskSchedule(saved(3600), "zh-CN").text).toBe("每小时");
+    expect(describeTaskSchedule(saved(86400), "zh-CN").text).toBe("每天");
+    expect(describeTaskSchedule(saved(60), "en-US").text).toBe("Every minute");
+    expect(describeTaskSchedule(saved(3600), "en-US").text).toBe("Every hour");
+    expect(describeTaskSchedule(saved(86400), "en-US").text).toBe("Every day");
+  });
+
+  test("a saved task's interval of several units keeps the number", () => {
+    expect(describeTaskSchedule(saved(120), "zh-CN").text).toBe("每 2 分钟");
+    expect(describeTaskSchedule(saved(7200), "zh-CN").text).toBe("每 2 小时");
+    expect(describeTaskSchedule(saved(2 * 86400), "zh-CN").text).toBe(
+      "每 2 天",
+    );
+    expect(describeTaskSchedule(saved(120), "en-US").text).toBe(
+      "Every 2 minutes",
+    );
+    expect(describeTaskSchedule(saved(2 * 86400), "en-US").text).toBe(
+      "Every 2 days",
+    );
+    // 36 hours is not a whole number of days: it stays in hours.
+    expect(describeTaskSchedule(saved(36 * 3600), "zh-CN").text).toBe(
+      "每 36 小时",
+    );
+  });
+});
+
+describe("interval conversion", () => {
+  test("minutes and hours convert to seconds", () => {
+    expect(intervalToSeconds(90, "seconds")).toBe(90);
+    expect(intervalToSeconds(90, "minutes")).toBe(5400);
+    expect(intervalToSeconds(2, "hours")).toBe(7200);
+  });
+
+  test("whole hours stay in hours; whole minutes stay in minutes", () => {
+    expect(secondsToInterval(7200)).toEqual({ amount: 2, unit: "hours" });
+    expect(secondsToInterval(5400)).toEqual({ amount: 90, unit: "minutes" });
+    expect(secondsToInterval(120)).toEqual({ amount: 2, unit: "minutes" });
+  });
+
+  test("edit/duplicate round-trip keeps intervals that are not whole minutes", () => {
+    const stored = 90;
+    const displayed = secondsToInterval(stored);
+    expect(displayed).toEqual({ amount: 90, unit: "seconds" });
+    expect(intervalToSeconds(displayed.amount, displayed.unit)).toBe(stored);
+  });
+
+  test("seconds unit clamps below the default 60s server floor", () => {
+    expect(minIntervalAmount("seconds")).toBe(60);
+    expect(minIntervalAmount("minutes")).toBe(1);
+    expect(minIntervalAmount("hours")).toBe(1);
+    expect(clampIntervalAmount(30, "seconds")).toBe(60);
+    expect(clampIntervalAmount(90, "seconds")).toBe(90);
+    expect(clampIntervalAmount(1, "minutes")).toBe(1);
+  });
+
+  test("a server with a larger floor raises every unit's minimum", () => {
+    expect(minIntervalAmount("seconds", 300)).toBe(300);
+    expect(minIntervalAmount("minutes", 300)).toBe(5);
+    expect(minIntervalAmount("hours", 300)).toBe(1);
+    expect(minIntervalAmount("minutes", 90)).toBe(2);
+    expect(clampIntervalAmount(2, "minutes", 300)).toBe(5);
+    expect(clampIntervalAmount(120, "seconds", 300)).toBe(300);
+    // An unknown or broken floor falls back to the default.
+    expect(minIntervalAmount("seconds", Number.NaN)).toBe(60);
+  });
+
+  test("hasScheduleSpec accepts interval every_seconds", () => {
+    expect(hasScheduleSpec({ every_seconds: 90 })).toBe(true);
+    expect(hasScheduleSpec({ cron: "0 9 * * *" })).toBe(true);
+    expect(hasScheduleSpec({ run_at: "2026-07-02T01:00:00+00:00" })).toBe(true);
+    expect(hasScheduleSpec({})).toBe(false);
+    expect(hasScheduleSpec({ every_seconds: 0 })).toBe(false);
+  });
 });
 
 describe("zonedLocalToUtcIso", () => {
@@ -317,6 +508,21 @@ describe("utcToZonedLocalInput", () => {
 });
 
 describe("zonedLocalToUtcIso DST transitions", () => {
+  // Expected instants match scheduler.next_run_at's ZoneInfo(fold=0) reading.
+  test.each([
+    ["America/Santiago", "2026-09-06T00:00", "2026-09-06T04:00:00+00:00"],
+    ["America/Santiago", "2026-09-06T00:30", "2026-09-06T04:30:00+00:00"],
+    ["America/New_York", "2026-03-08T02:30", "2026-03-08T07:30:00+00:00"],
+    ["Europe/Berlin", "2026-03-29T02:30", "2026-03-29T01:30:00+00:00"],
+    ["Europe/Berlin", "2026-10-25T02:30", "2026-10-25T00:30:00+00:00"],
+    ["Australia/Lord_Howe", "2026-10-04T02:15", "2026-10-03T15:45:00+00:00"],
+    ["Australia/Lord_Howe", "2026-04-05T01:45", "2026-04-04T14:45:00+00:00"],
+    ["Pacific/Apia", "2011-12-30T12:00", "2011-12-30T22:00:00+00:00"],
+  ])("matches the scheduler at %s %s", (timezone, local, expected) => {
+    expect(zonedLocalToUtcIso(local, timezone)).toBe(expected);
+    expect(onceRunAtInstant(local, timezone)).toBe(expected);
+  });
+
   // US spring-forward 2026: clocks jump 02:00 -> 03:00 EST->EDT on 2026-03-08.
   test("New_York wall time after spring-forward uses the post-transition offset", () => {
     // 03:30 EDT (-4) is 07:30Z; the stale pre-transition offset (-5) would say 08:30Z.
@@ -349,5 +555,193 @@ describe("zonedLocalToUtcIso DST transitions", () => {
     expect(zonedLocalToUtcIso("2026-03-08T03:30", "Asia/Shanghai")).toBe(
       "2026-03-07T19:30:00+00:00",
     );
+  });
+});
+
+describe("onceRunAtInstant", () => {
+  test("a run_at without an offset is wall-clock time in the task's zone", () => {
+    expect(onceRunAtInstant("2026-10-07T09:00:00", "Asia/Shanghai")).toBe(
+      "2026-10-07T01:00:00+00:00",
+    );
+    expect(onceRunAtInstant("2026-10-07T09:00", "America/New_York")).toBe(
+      "2026-10-07T13:00:00+00:00",
+    );
+  });
+
+  test("a date-only run_at is midnight in the task's zone, as the server runs it", () => {
+    // `-07` at the end of a bare date is a day, not a UTC offset.
+    expect(onceRunAtInstant("2026-12-07", "Asia/Shanghai")).toBe(
+      "2026-12-06T16:00:00+00:00",
+    );
+    // West of UTC the old reading (UTC midnight) also fell on the previous day.
+    expect(onceRunAtInstant("2026-12-07", "America/New_York")).toBe(
+      "2026-12-07T05:00:00+00:00",
+    );
+  });
+
+  test("a run_at with an offset is already an instant", () => {
+    for (const value of [
+      "2026-10-07T01:00:00Z",
+      "2026-10-07T09:00:00+08:00",
+      "2026-10-07T09:00:00-0500",
+    ]) {
+      expect(onceRunAtInstant(value, "Europe/Berlin")).toBe(value);
+    }
+  });
+});
+
+describe("describeTaskSchedule", () => {
+  const cronTask = (cron: string, timezone = "Asia/Shanghai") => ({
+    schedule_type: "cron" as const,
+    schedule_spec: { cron },
+    timezone,
+  });
+
+  test("Mon–Fri reads as weekdays, with the cron only in raw", () => {
+    expect(describeTaskSchedule(cronTask("0 9 * * 1-5"), "en-US")).toEqual({
+      text: "Weekdays at 09:00 (Asia/Shanghai)",
+      raw: "0 9 * * 1-5",
+    });
+    expect(describeTaskSchedule(cronTask("0 18 * * 1,3-5"), "en-US").text).toBe(
+      "Every Mon, Wed, Thu, Fri at 18:00 (Asia/Shanghai)",
+    );
+    expect(
+      describeTaskSchedule(cronTask("0 9 * * 1,2,3,4,5"), "en-US"),
+    ).toEqual({
+      text: "Weekdays at 09:00 (Asia/Shanghai)",
+      raw: "0 9 * * 1,2,3,4,5",
+    });
+    expect(
+      describeTaskSchedule(cronTask("30 8 * * 1,2,3,4,5"), "zh-CN").text,
+    ).toBe("工作日 08:30 (Asia/Shanghai)");
+  });
+
+  test("max valid weekdays still read as weekdays", () => {
+    expect(describeTaskSchedule(cronTask("59 23 * * 1-5"), "en-US")).toEqual({
+      text: "Weekdays at 23:59 (Asia/Shanghai)",
+      raw: "59 23 * * 1-5",
+    });
+  });
+
+  test("daily reuses the preset wording", () => {
+    expect(describeTaskSchedule(cronTask("0 9 * * *"), "en-US").text).toBe(
+      "Every day at 09:00 (Asia/Shanghai)",
+    );
+    expect(describeTaskSchedule(cronTask("0 9 * * *"), "zh-CN").text).toBe(
+      "每天 09:00 (Asia/Shanghai)",
+    );
+  });
+
+  test.each(["60 9 * * 1-5", "0 24 * * 1-5"])(
+    "does not describe the out-of-range cron %j as a preset",
+    (cron) => {
+      expect(describeTaskSchedule(cronTask(cron), "en-US")).toEqual({
+        text: "Custom schedule (Asia/Shanghai)",
+        raw: cron,
+      });
+    },
+  );
+
+  test("a custom cron never shows the expression in text", () => {
+    const { text, raw } = describeTaskSchedule(
+      cronTask("*/15 9-17 * * 1-5"),
+      "zh-CN",
+    );
+    expect(text).toBe("自定义时间 (Asia/Shanghai)");
+    expect(text).not.toContain("*/15");
+    expect(raw).toBe("*/15 9-17 * * 1-5");
+    expect(
+      describeTaskSchedule(cronTask("*/15 9-17 * * 1-5"), "en-US").text,
+    ).toBe("Custom schedule (Asia/Shanghai)");
+  });
+
+  test("interval tasks read in minutes and never print the stored zone", () => {
+    const interval = {
+      schedule_type: "interval" as const,
+      schedule_spec: { every_seconds: 1800 },
+      timezone: "UTC",
+    };
+    expect(describeTaskSchedule(interval, "en-US")).toEqual({
+      text: "Every 30 minutes",
+      raw: null,
+    });
+    expect(describeTaskSchedule(interval, "zh-CN").text).toBe("每 30 分钟");
+    expect(describeTaskSchedule(interval, "en-US").text).not.toContain("UTC");
+  });
+
+  test("one-time tasks read their local time, relative when labels are given", () => {
+    const once = {
+      schedule_type: "once" as const,
+      schedule_spec: { run_at: "2026-10-07T01:00:00+00:00" },
+      timezone: "Asia/Shanghai",
+    };
+    expect(
+      describeTaskSchedule(once, "en-US", {
+        time: {
+          today: "Today {time}",
+          tomorrow: "Tomorrow {time}",
+          yesterday: "Yesterday {time}",
+          yourTime: "{time} your time",
+        },
+        now: new Date("2026-10-06T04:00:00Z"),
+      }).text,
+    ).toBe("Once, Tomorrow 09:00 (Asia/Shanghai)");
+    // Without labels: a plain local date, never an ISO-like value.
+    const plain = describeTaskSchedule(once, "zh-CN", {
+      now: new Date("2026-10-06T04:00:00Z"),
+    }).text;
+    expect(plain).toBe("单次，10月7日 09:00 (Asia/Shanghai)");
+    expect(plain).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(
+      describeTaskSchedule(once, "en-US", {
+        now: new Date("2026-10-06T04:00:00Z"),
+      }).text,
+    ).toBe("Once, Oct 7 09:00 (Asia/Shanghai)");
+  });
+});
+
+describe("describeTaskSchedule for a chat-created one-time task", () => {
+  test("a stored skipped midnight displays when the scheduler will run it", () => {
+    const task = {
+      schedule_type: "once" as const,
+      schedule_spec: { run_at: "2026-09-06" },
+      timezone: "America/Santiago",
+    };
+    expect(
+      describeTaskSchedule(task, "en-US", {
+        now: new Date("2026-08-01T00:00:00Z"),
+      }).text,
+    ).toBe("Once, Sep 6 01:00 (America/Santiago)");
+  });
+
+  test("reads the agent's local run_at in the task's zone, whatever the viewer's zone", () => {
+    const task = {
+      schedule_type: "once" as const,
+      schedule_spec: { run_at: "2026-10-07T09:00:00" },
+      timezone: "America/New_York",
+    };
+    expect(
+      describeTaskSchedule(task, "en-US", {
+        now: new Date("2026-10-01T00:00:00Z"),
+      }).text,
+    ).toBe("Once, Oct 7 09:00 (America/New_York)");
+  });
+
+  test("reads a date-only run_at as midnight on that day in the task's zone", () => {
+    for (const [timezone, expected] of [
+      ["Asia/Shanghai", "Once, Dec 7 00:00 (Asia/Shanghai)"],
+      ["America/New_York", "Once, Dec 7 00:00 (America/New_York)"],
+    ] as const) {
+      const task = {
+        schedule_type: "once" as const,
+        schedule_spec: { run_at: "2026-12-07" },
+        timezone,
+      };
+      expect(
+        describeTaskSchedule(task, "en-US", {
+          now: new Date("2026-10-01T00:00:00Z"),
+        }).text,
+      ).toBe(expected);
+    }
   });
 });

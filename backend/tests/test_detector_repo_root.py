@@ -44,7 +44,7 @@ def test_cli_shims_delegate_to_their_detectors(capsys: pytest.CaptureFixture[str
 
     for shim, description_fragment in (
         (detect_blocking_io_static, "Statically inventory blocking IO calls"),
-        (detect_thread_boundaries, "Detect async/thread boundary points"),
+        (detect_thread_boundaries, "Inventory backend thread/executor/event-loop boundaries"),
         (scan_changed_blocking_io, "blocking-IO candidates this change introduces"),
     ):
         with pytest.raises(SystemExit) as excinfo:

@@ -38,6 +38,14 @@ async def get_or_provision_oidc_user(
     # 1. Existing OAuth link
     existing = await local_provider.get_user_by_oauth(provider_id, identity.subject)
     if existing:
+        if getattr(existing, "disabled", False):
+            # Operator-disabled account (#3462 gap 3): the IdP authenticated
+            # the identity, but the account is suspended — the row stays
+            # linked so re-enabling restores access unchanged.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account has been disabled. Please contact your administrator.",
+            )
         return {"user": existing, "created": False}
 
     # 2. Verified email requirement

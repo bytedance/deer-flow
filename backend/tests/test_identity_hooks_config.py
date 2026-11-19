@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from deerflow.config.extensions_config import ExtensionsConfig, IdentityHookCall, IdentityHooksConfig
 
 

@@ -885,9 +885,11 @@ test.describe("Side chat", () => {
       thinking_enabled: false,
       is_plan_mode: false,
       subagent_enabled: false,
-      reasoning_effort: "minimal",
       thread_id: MOCK_SIDECAR_THREAD_ID,
     });
+    // fast-model advertises no effort control, so the mode preset is dropped
+    // instead of being sent for the Gateway to discard (issue #5073).
+    expect(streamBody?.context).not.toHaveProperty("reasoning_effort");
 
     const messages = streamBody?.input?.messages ?? [];
     expect(messages[0]?.additional_kwargs).toMatchObject({

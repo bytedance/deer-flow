@@ -16,9 +16,9 @@
 | 7 | TodoMiddleware | | ✓ | ✓ | | ✓ | | ✓ | ✗ | `plan_mode` 参数 |
 | 8 | TitleMiddleware | | | ✓ | | | | ✓ | ✗ | `auto_title` |
 | 9 | MemoryMiddleware | | | | ✓ | | | ✓ | ✗ | `memory` |
-| 10 | ViewImageMiddleware | | ✓ | | | | | ✓ | ✗ | `vision` |
-| 11 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
-| 12 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
+| 10 | ViewImageMiddleware | | | | | ✓ | | ✓ | ✗ | `vision` |
+| 11 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
+| 12 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
 | 13 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
 
 主 agent **14 个** middleware（`make_lead_agent`），subagent **4 个**（ThreadData、Sandbox、Guardrail、ToolErrorHandling）。`create_deerflow_agent` Phase 1 实现 **13 个**（Guardrail 仅支持自定义实例，无内置默认）。
@@ -38,18 +38,12 @@ graph TB
         TD["[0] ThreadData<br/>创建线程目录"] --> UL["[1] Uploads<br/>扫描上传文件"] --> SB["[2] Sandbox<br/>获取沙箱"] --> LD_BA["[12] LoopDetection<br/>清理 stale warning"]
     end
 
-    subgraph BM ["<b>before_model</b> 正序 0→N"]
+    subgraph WM ["<b>wrap_model_call</b> 外→内 0→N"]
         direction TB
-        VI["[10] ViewImage<br/>注入图片 base64"]
+        DTC_WM["[3] DanglingToolCall<br/>补悬空 ToolMessage"] --> VI["[10] ViewImage<br/>注入图片 base64（仅请求内）"] --> LD_WM["[12] LoopDetection<br/>注入当前 run warning"]
     end
 
-    subgraph WM ["<b>wrap_model_call</b>"]
-        direction TB
-        DTC_WM["[3] DanglingToolCall<br/>补悬空 ToolMessage"] --> LD_WM["[12] LoopDetection<br/>注入当前 run warning"]
-    end
-
-    LD_BA --> VI
-    VI --> DTC_WM
+    LD_BA --> DTC_WM
     LD_WM --> M["<b>MODEL</b>"]
 
     subgraph AM ["<b>after_model</b> 反序 N→0"]
@@ -74,8 +68,8 @@ graph TB
     classDef afterAgentNode fill:#a0b5a8,stroke:#637a6b,color:#2d3239
     classDef terminalNode fill:#a8b5a0,stroke:#6b7a63,color:#2d3239
 
-    class TD,UL,SB,LD_BA,VI beforeNode
-    class DTC_WM,LD_WM wrapModelNode
+    class TD,UL,SB,LD_BA beforeNode
+    class DTC_WM,VI,LD_WM wrapModelNode
     class M modelNode
     class LD,SL,TI afterModelNode
     class LD_CLEAN,SBR,MEM afterAgentNode
@@ -91,8 +85,8 @@ sequenceDiagram
     participant UL as UploadsMiddleware
     participant SB as SandboxMiddleware
     participant LD as LoopDetectionMiddleware
-    participant VI as ViewImageMiddleware
     participant DTC as DanglingToolCallMiddleware
+    participant VI as ViewImageMiddleware
     participant M as MODEL
     participant SL as SubagentLimitMiddleware
     participant TI as TitleMiddleware
@@ -113,38 +107,38 @@ sequenceDiagram
     SB ->> LD: before_agent
     activate LD
     Note right of LD: before_agent 清理同 thread 旧 run 的 pending warning
-    LD ->> VI: before_model
-    activate VI
-    Note right of VI: before_model 注入图片 base64
-
-    VI ->> DTC: wrap_model_call
+    LD ->> DTC: wrap_model_call
     activate DTC
     Note right of DTC: wrap_model_call 补悬空 ToolMessage
-    DTC ->> LD: wrap_model_call
+
+    DTC ->> VI: wrap_model_call
+    activate VI
+    Note right of VI: wrap_model_call 把图片 base64 追加到请求（不写入 state）
+    VI ->> LD: wrap_model_call
     Note right of LD: wrap_model_call drain 当前 run warning 并追加到末尾
     LD ->> M: messages + tools
     activate M
-    M -->> LD: AI response
+    M -->> SL: AI response
     deactivate M
-
-    Note right of LD: after_model 检测循环；warning 入队，hard-stop 清 tool_calls
-    LD -->> SL: after_model
-    deactivate LD
 
     activate SL
     Note right of SL: after_model 截断多余 task
-    SL -->> TI: after_model
+    SL -->> LD: after_model
     deactivate SL
+
+    Note right of LD: after_model 检测已准入批次；warning 入队，hard-stop 清 tool_calls
+    LD -->> TI: after_model
+    deactivate LD
 
     activate TI
     Note right of TI: after_model 生成标题
-    TI -->> DTC: done
+    TI -->> VI: done
     deactivate TI
 
-    deactivate DTC
-
-    VI -->> SB: done
     deactivate VI
+
+    DTC -->> SB: done
+    deactivate DTC
 
     Note right of LD: after_agent 清理当前 run 未消费 warning
 
@@ -166,7 +160,8 @@ sequenceDiagram
 列表位置决定在洋葱中的层级 — 位置 0 最外层，位置 N 最内层：
 
 ```
-进入 before_*：   [0] → [1] → [2] → ... → [10] → MODEL
+进入 before_*：   [0] → [1] → [2] → ... → [7] → MODEL
+进入 wrap_model_call： [3] → [10] → [12] → MODEL（外→内，同样正序）
 退出 after_*：    MODEL → [13] → [11] → ... → [6] → [3] → [2] → [0]
                           ↑ 最内层最先执行
 ```
@@ -233,8 +228,8 @@ sequenceDiagram
     participant UL as Uploads
     participant SB as Sandbox
     participant LD as LoopDetection
-    participant VI as ViewImage
     participant DTC as DanglingToolCall
+    participant VI as ViewImage
     participant M as MODEL
     participant SL as SubagentLimit
     participant TI as Title
@@ -250,11 +245,11 @@ sequenceDiagram
     Note right of LD: before_agent 清理 stale pending warning
 
     loop 每轮对话（tool call 循环）
-        SB ->> VI: .
-        Note right of VI: before_model 注入图片
-        VI ->> DTC: .
+        SB ->> DTC: .
         Note right of DTC: wrap_model_call 补悬空工具结果
-        DTC ->> LD: .
+        DTC ->> VI: .
+        Note right of VI: wrap_model_call 把图片追加到请求
+        VI ->> LD: .
         Note right of LD: wrap_model_call 注入当前 run warning
         LD ->> M: messages + tools
         M -->> LD: AI response
@@ -302,4 +297,8 @@ sequenceDiagram
 
 ### LoopDetectionMiddleware 为什么同时用多个钩子？
 
-`after_model` 只做检测：重复工具调用达到 warning 阈值时，把 warning 放入 `(thread_id, run_id)` 作用域的 pending 队列。真正注入发生在下一次 `wrap_model_call`：此时上一轮 `AIMessage(tool_calls)` 对应的 `ToolMessage` 已经在请求里，warning 追加在末尾，不会破坏 OpenAI/Moonshot 的 tool-call pairing。`before_agent` 清理同一 thread 下旧 run 的残留 warning，`after_agent` 清理当前 run 没被消费的 warning。
+`after_model` 只做检测：重复工具调用达到 warning 阈值时，把 warning 放入 `(thread_id, run_id)` 作用域的 pending 队列。真正注入发生在下一次 `wrap_model_call`：此时上一轮 `AIMessage(tool_calls)` 对应的 `ToolMessage` 已经在请求里，warning 追加在末尾，不会破坏 OpenAI/Moonshot 的 tool-call pairing。`after_agent` 清理当前 run 没被消费的 warning；检测历史保留在同一 run 内，供目标续跑共享预算，新 run 使用独立预算。
+
+重复判定以整批调用的参数和结果指纹为依据，忽略批内执行顺序、调用 ID、回执等临时元数据。每轮先按 AIMessage 的调用实例配对上一批结果，再用同参调用最近的结果估计当前尚未执行的批次；结果返回后修正这次记录。成功结果不同会分别计数，所以正常的读取、修改、重新读取不会仅因参数相同而被拦截。范围读取还使用读写门禁附带的完整文件哈希，能识别未显示部分的版本变化。无效版本标记会被忽略。
+
+相同成功结果仍会累计；结构化错误忽略变化的诊断文本，缺失、无法配对或无法序列化的结果退回调用模式保护。结果循环变化也会在最近窗口内累计各自的重复次数，而不是每次变化都清空历史。结果指纹只保留在有界的进程内历史中，不写入检查点或日志。默认仍在第 3 次重复请求警告、第 5 次强停；当前请求执行前只能依据已有结果判断。结果变化并不保证任务取得实质进展，因此每种工具的独立频率预算仅作为 INFO 指标观测（`action=observe_only`），不会触发 warning 或强停；只有基于参数/结果哈希的重复检测会产生警告并在阈值下硬停。

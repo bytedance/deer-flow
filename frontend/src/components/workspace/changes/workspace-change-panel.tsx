@@ -225,6 +225,9 @@ function unavailableLabel(
   if (reason === "truncated") {
     return t.workspaceChanges.truncatedUnavailable;
   }
+  if (reason === "symlink") {
+    return t.workspaceChanges.symlinkUnavailable;
+  }
   return t.workspaceChanges.diffUnavailable;
 }
 

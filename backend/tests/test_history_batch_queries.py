@@ -6,6 +6,7 @@ import pytest
 
 from deerflow.runtime import RunManager, RunStatus
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.runs.manager import EditReplayVisibility
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
@@ -73,7 +74,7 @@ async def test_memory_event_store_defensively_rechecks_message_category():
         content={"type": "ai", "content": "visible"},
         metadata={"caller": "lead_agent"},
     )
-    mutated = await store.put(
+    await store.put(
         thread_id="t1",
         run_id="r1",
         event_type="llm.ai.response",
@@ -81,10 +82,9 @@ async def test_memory_event_store_defensively_rechecks_message_category():
         content={"type": "ai", "content": "no longer a message"},
         metadata={"caller": "lead_agent"},
     )
-    # Memory projections intentionally share their row dictionaries. Recheck
-    # category at read time so an accidental mutation cannot violate the same
-    # contract that the DB and JSONL stores enforce explicitly.
-    mutated["category"] = "trace"
+    # Receipts are detached snapshots now. Corrupt the private shared row
+    # deliberately so this test still exercises the defensive category recheck.
+    store._messages_by_run["t1"]["r1"][1]["category"] = "trace"
 
     assert await store.get_last_visible_ai_seq_by_run("t1", {"r1"}) == {"r1": expected["seq"]}
 
@@ -250,6 +250,38 @@ async def test_run_manager_batch_history_methods_default_to_current_user():
 
 
 @pytest.mark.anyio
+async def test_run_manager_owner_scoped_history_includes_runs_admitted_without_explicit_user():
+    """A run admitted with the ambient user must count as that user's run."""
+    from types import SimpleNamespace
+
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    manager = RunManager(store=MemoryRunStore())
+    token = set_current_user(SimpleNamespace(id="alice"))
+    try:
+        record = await manager.create_or_reject("t1", metadata={"regenerate_from_run_id": "source"})
+        await manager.set_status(record.run_id, RunStatus.success)
+        sources = await manager.list_successful_regenerate_sources("t1")
+        records = await manager.get_many_by_thread("t1", {record.run_id})
+    finally:
+        reset_current_user(token)
+
+    assert sources == {"source"}
+    assert set(records) == {record.run_id}
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_run_manager_keeps_omitted_owner_unset_without_user_context():
+    """No ambient user means no owner, never a fallback bucket such as ``default``."""
+    manager = RunManager(store=MemoryRunStore())
+
+    record = await manager.create_or_reject("t1")
+
+    assert record.user_id is None
+
+
+@pytest.mark.anyio
 async def test_run_manager_batch_history_methods_fail_closed_without_user_context():
     from deerflow.runtime import user_context
 
@@ -288,3 +320,121 @@ async def test_run_manager_batch_history_methods_allow_explicit_unscoped_access(
 
     assert sources == {"source-alice", "source-bob"}
     assert set(records) == {"regen-alice", "regen-bob"}
+
+
+@pytest.mark.anyio
+async def test_memory_run_store_lists_edit_replay_runs_unbounded_and_owner_scoped():
+    store = MemoryRunStore()
+    for index in range(105):
+        await store.put(f"normal-{index}", thread_id="t1", user_id="alice", status="success")
+    await store.put(
+        "edit-success",
+        thread_id="t1",
+        user_id="alice",
+        status="success",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-success"},
+    )
+    await store.put(
+        "edit-error",
+        thread_id="t1",
+        user_id="alice",
+        status="error",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-error"},
+    )
+    await store.put(
+        "edit-bob",
+        thread_id="t1",
+        user_id="bob",
+        status="success",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-bob"},
+    )
+
+    rows = await store.list_edit_regenerate_runs("t1", user_id="alice")
+
+    assert [row["run_id"] for row in rows] == ["edit-success", "edit-error"]
+
+
+@pytest.mark.anyio
+async def test_run_repository_lists_edit_replay_runs_unbounded_and_owner_scoped(tmp_path):
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}", sqlite_dir=str(tmp_path))
+    try:
+        repo = RunRepository(get_session_factory())
+        for index in range(105):
+            await repo.put(f"normal-{index}", thread_id="t1", user_id="alice", status="success")
+        await repo.put(
+            "edit-success",
+            thread_id="t1",
+            user_id="alice",
+            status="success",
+            metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-success"},
+        )
+        await repo.put(
+            "edit-error",
+            thread_id="t1",
+            user_id="alice",
+            status="error",
+            metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-error"},
+        )
+        await repo.put(
+            "edit-bob",
+            thread_id="t1",
+            user_id="bob",
+            status="success",
+            metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-bob"},
+        )
+
+        rows = await repo.list_edit_regenerate_runs("t1", user_id="alice")
+
+        assert [row["run_id"] for row in rows] == ["edit-success", "edit-error"]
+    finally:
+        await close_engine()
+
+
+@pytest.mark.anyio
+async def test_run_manager_computes_edit_replay_visibility_by_latest_attempt():
+    manager = RunManager()
+    running = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-running"},
+    )
+    running.status = RunStatus.running
+    success = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-success"},
+    )
+    success.status = RunStatus.success
+    failed = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-failed"},
+    )
+    failed.status = RunStatus.error
+    older_success = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-retried"},
+    )
+    older_success.status = RunStatus.success
+    newer_failed = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-retried"},
+    )
+    newer_failed.status = RunStatus.interrupted
+    older_failed_then_success = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-retry-success"},
+    )
+    older_failed_then_success.status = RunStatus.error
+    newer_success_after_failure = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-retry-success"},
+    )
+    newer_success_after_failure.status = RunStatus.success
+
+    visibility = await manager.list_edit_replay_visibility("t1", user_id=None)
+
+    assert visibility == EditReplayVisibility(
+        hidden_source_run_ids={"source-running", "source-success", "source-retry-success"},
+        hidden_attempt_run_ids={failed.run_id, newer_failed.run_id, older_failed_then_success.run_id},
+    )

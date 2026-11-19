@@ -15,8 +15,18 @@ from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from deerflow.agents.thread_state import _SKILL_DESCRIPTION_MAX_CHARS, SkillEntry
 
 _SKILL_FILE_NAME = "SKILL.md"
-_FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# `\ufeff` is the UTF-8 byte-order mark a Windows-saved SKILL.md can carry. The loader and
+# validator already tolerate it (see `deerflow.skills.frontmatter._FRONTMATTER_RE`); without it
+# here the match fails on the leading marker and the captured description comes back empty.
+_FRONT_MATTER_RE = re.compile(r"^\ufeff?---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 SKILL_CONTEXT_ENTRY_KEY = "skill_context_entry"
+# Stamped instead of SKILL_CONTEXT_ENTRY_KEY when the read SKILL.md belongs to
+# a skill whose action-scoped ``skill:activate`` decision is denied: the file
+# content was served (Layer 1 visibility allows it) but the skill must not
+# activate — no durable skill_context entry or secret binding.
+# extract_skills uses it to skip the entry without the "missing skill read
+# metadata" warning that an unstamped read would otherwise produce.
+SKILL_CONTEXT_DENIED_KEY = "skill_context_denied"
 logger = logging.getLogger(__name__)
 
 
@@ -130,25 +140,36 @@ def extract_skills(
     skills_root: str,
     read_tool_names: Collection[str],
 ) -> list[SkillEntry]:
-    """Enumerate skill-file reads (AI read_file call + paired ToolMessage result)."""
+    """Enumerate skill-file reads (AI read_file call + paired ToolMessage result).
+
+    A result pairs only with a read call from the nearest preceding AIMessage,
+    because tool-call ids are unique per response, not per conversation; a
+    result that ended up non-adjacent to its call is dropped.
+    """
     normalized_root = posixpath.normpath(skills_root.rstrip("/") or "/")
     read_names = frozenset(read_tool_names)
 
-    skill_paths_by_id: dict[str, str] = {}
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in message.tool_calls or []:
-            if _tool_call_name(tool_call) not in read_names:
-                continue
-            tool_call_id = _tool_call_id(tool_call)
-            raw_path = _tool_call_path(tool_call)
-            path = _normalize_under_root(raw_path, normalized_root) if raw_path else None
-            if tool_call_id and path and _is_skill_file(path):
-                skill_paths_by_id[tool_call_id] = path
-
     entries: list[SkillEntry] = []
+    # Tool-call ids are unique per assistant response, not per conversation, so
+    # this map is rebuilt from each AIMessage's own calls and a ToolMessage is
+    # resolved against the nearest preceding response — the pairing rule
+    # ``tool_call_args.pair_tool_call_results`` applies. A single map for the
+    # whole conversation let a later read overwrite an earlier read that reused
+    # the same id, which dropped the earlier skill from the ledger and logged a
+    # mismatch for a read that was correct.
+    skill_paths_by_id: dict[str, str] = {}
     for index, message in enumerate(messages):
+        if isinstance(message, AIMessage):
+            skill_paths_by_id = {}
+            for tool_call in message.tool_calls or []:
+                if _tool_call_name(tool_call) not in read_names:
+                    continue
+                tool_call_id = _tool_call_id(tool_call)
+                raw_path = _tool_call_path(tool_call)
+                path = _normalize_under_root(raw_path, normalized_root) if raw_path else None
+                if tool_call_id and path and _is_skill_file(path):
+                    skill_paths_by_id[tool_call_id] = path
+            continue
         if not isinstance(message, ToolMessage):
             continue
         if getattr(message, "status", "success") == "error":
@@ -156,6 +177,11 @@ def extract_skills(
         tool_call_id = str(message.tool_call_id) if message.tool_call_id else ""
         expected_path = skill_paths_by_id.get(tool_call_id)
         if expected_path is None:
+            continue
+        if (message.additional_kwargs or {}).get(SKILL_CONTEXT_DENIED_KEY):
+            # The skill:activate decision denied this read's skill — the
+            # middleware stamped the denial instead of entry metadata on
+            # purpose, so this is not the "missing metadata" bug shape.
             continue
         metadata = read_skill_entry_metadata(message.additional_kwargs)
         if metadata is None:

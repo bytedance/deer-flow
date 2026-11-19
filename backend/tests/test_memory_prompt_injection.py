@@ -4,7 +4,53 @@ import math
 
 import pytest
 
-from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _coerce_confidence, format_memory_for_injection
+from deerflow.agents.memory.backends.deermem.deermem.core import prompt
+from deerflow.agents.memory.backends.deermem.deermem.core.prompt import (
+    FACT_EXTRACTION_PROMPT,
+    _coerce_confidence,
+    format_memory_for_injection,
+    load_prompt_messages,
+)
+
+
+@pytest.mark.parametrize("use_tiktoken", [False, True])
+@pytest.mark.parametrize("with_guaranteed_fact", [False, True])
+@pytest.mark.parametrize("max_tokens", [100, 2000])
+def test_summary_truncation_counts_the_selected_prefix(monkeypatch, use_tiktoken, with_guaranteed_fact, max_tokens):
+    if use_tiktoken:
+        tiktoken = pytest.importorskip("tiktoken")
+        # Exercise real UTF-8/BPE counting without downloading a vocabulary.
+        encoding = tiktoken.Encoding(name="bytes", pat_str=r"[\s\S]", mergeable_ranks={bytes([i]): i for i in range(256)}, special_tokens={})
+        monkeypatch.setattr(prompt, "_get_tiktoken_encoding", lambda _name: encoding)
+
+    fact = {"content": "Always keep a rollback backup", "category": "correction", "confidence": 1.0}
+    memory = {
+        "user": {"workContext": {"summary": "数据库迁移采用事务并保留回滚记录。" * 500}},
+        "history": {"recentMonths": {"summary": "Release notes retain migration records. " * 1000}},
+        "facts": [fact] if with_guaranteed_fact else [],
+    }
+    result = format_memory_for_injection(memory, max_tokens=max_tokens, use_tiktoken=use_tiktoken, guaranteed_categories=["correction"], guaranteed_token_budget=100)
+    allowance = prompt._count_tokens(prompt._format_fact_line(fact), use_tiktoken=use_tiktoken) if with_guaranteed_fact else 0
+
+    assert prompt._count_tokens(result, use_tiktoken=use_tiktoken) <= max_tokens + allowance
+    assert result.startswith("User Context:")
+    assert "\ufffd" not in result
+    if with_guaranteed_fact:
+        assert fact["content"] in result
+
+
+def test_summary_truncation_handles_nonmonotone_bpe_counts(monkeypatch):
+    tiktoken = pytest.importorskip("tiktoken")
+    ranks = {bytes([i]): i for i in range(256)} | {b"bc": 256, b"abc": 257}
+    encoding = tiktoken.Encoding(name="merging", pat_str=r"[\s\S]+", mergeable_ranks=ranks, special_tokens={})
+    assert len(encoding.encode("ab")) == 2
+    assert len(encoding.encode("abc")) == 1
+    monkeypatch.setattr(prompt, "_get_tiktoken_encoding", lambda _name: encoding)
+
+    result = format_memory_for_injection({"user": {"workContext": {"summary": "abc" * 1000}}}, max_tokens=100)
+
+    assert result.startswith("User Context:")
+    assert len(encoding.encode(result)) <= 100
 
 
 def test_format_memory_includes_facts_section() -> None:
@@ -820,3 +866,56 @@ def test_format_memory_tolerates_non_string_summary() -> None:
     result = format_memory_for_injection(memory_data, max_tokens=2000)
 
     assert "Current Focus: 12345" in result
+
+
+def test_format_memory_includes_cognitive_style() -> None:
+    memory_data = {
+        "user": {
+            "cognitiveStyle": {
+                "summary": "Prefers conclusions first, then details.",
+                "updatedAt": "2026-01-01T00:00:00Z",
+            }
+        },
+        "history": {},
+        "facts": [],
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "Thinking Style:" in result
+    assert "Prefers conclusions first, then details." in result
+
+
+def test_cognitive_fact_category_is_documented_and_rendered() -> None:
+    messages = load_prompt_messages(
+        "memory_update",
+        {
+            "current_memory": "{}",
+            "conversation": "",
+            "correction_hint": "",
+            "staleness_review_section": "",
+            "consolidation_section": "",
+        },
+    )
+    memory_update_prompt = messages[0].content
+    assert isinstance(memory_update_prompt, str)
+    assert "cognitive|goal|correction" in memory_update_prompt
+    assert "cognitive|goal|correction" in FACT_EXTRACTION_PROMPT
+    assert "- cognitive:" in FACT_EXTRACTION_PROMPT
+
+    result = format_memory_for_injection(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                {
+                    "content": "User prefers conclusions first.",
+                    "category": "cognitive",
+                    "confidence": 0.9,
+                }
+            ],
+        },
+        max_tokens=2000,
+    )
+
+    assert "[cognitive | 0.90] User prefers conclusions first." in result

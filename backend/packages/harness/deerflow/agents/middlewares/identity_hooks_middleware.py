@@ -15,6 +15,7 @@ import logging
 from datetime import timedelta
 from typing import Any, override
 
+from deerflow_extension_api.provenance import ContentKind, provenance_kwargs
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
@@ -23,8 +24,14 @@ from langgraph.runtime import Runtime
 
 from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config
 from deerflow.mcp.client import build_server_params
-from deerflow.mcp.session_pool import get_session_pool
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.mcp.session_pool import (
+    MCPSessionPool,
+    call_pooled_session_tool,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
+from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
+from deerflow.runtime.user_context import resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,34 @@ def _resolve_thread_id(runtime: Runtime) -> str | None:
         return str(thread_id) if thread_id is not None else None
     except RuntimeError:
         return None
+
+
+def _optional_thread_incarnation(runtime: Runtime) -> str | None:
+    """Read the server-owned incarnation, or None when this run has none.
+
+    A missing or stale incarnation must not fail the turn. The hook then uses
+    its own pool scope instead of the agent's tool session.
+    """
+    try:
+        return runtime_thread_incarnation(runtime)
+    except RuntimeError:
+        return None
+
+
+def _hook_scope_key(*, user_id: str, thread_id: str, thread_incarnation: str | None) -> str:
+    """Scope the prefetch session away from the agent's tool session.
+
+    Tool calls pin stdio cwd and temp dirs on the shared pool entry. Opening
+    that entry first from this hook would reuse a process without those pins.
+    Thread teardown still closes this scope: it matches every incarnation of
+    the user/thread pair.
+    """
+    suffix = thread_incarnation if isinstance(thread_incarnation, str) and thread_incarnation else "none"
+    return mcp_session_scope_key(
+        user_id=user_id,
+        thread_id=thread_id,
+        thread_incarnation=f"identity-hooks:{suffix}",
+    )
 
 
 def _session_start_already_fired(state: AgentState | None) -> bool:
@@ -98,6 +133,7 @@ async def run_session_start_hooks(
     config: ExtensionsConfig,
     thread_id: str,
     user_id: str,
+    thread_incarnation: str | None = None,
 ) -> str | None:
     """Invoke configured sessionStart MCP tools and return sanitized context text."""
     hooks = config.identity_hooks
@@ -125,10 +161,46 @@ async def run_session_start_hooks(
         )
         return None
 
-    scope_key = f"{user_id}:{thread_id}"
+    scope_key = _hook_scope_key(
+        user_id=user_id,
+        thread_id=thread_id,
+        thread_incarnation=thread_incarnation,
+    )
     pool = get_session_pool()
+    transport = connection.get("transport", "stdio")
+    # Stdio discovery registers a binding lifecycle. A later get_session
+    # without that binding raises StaleMCPBindingError, so prefetch has to
+    # present the same fingerprint the tool path uses.
+    binding = None
+    if isinstance(pool, MCPSessionPool) and transport == "stdio":
+        try:
+            binding = pool.ensure_binding(
+                hooks.mcp_server_ref,
+                normalized_connection_fingerprint(connection),
+            )
+        except Exception:
+            logger.exception(
+                "identity_hooks_binding_failed server=%s",
+                hooks.mcp_server_ref,
+            )
+            return None
     try:
-        session = await pool.get_session(hooks.mcp_server_ref, scope_key, connection)
+        if binding is not None:
+            session_request = pool.get_session(
+                hooks.mcp_server_ref,
+                scope_key,
+                connection,
+                binding=binding,
+            )
+        else:
+            session_request = pool.get_session(hooks.mcp_server_ref, scope_key, connection)
+        if server_config.session_init_timeout is not None:
+            session = await asyncio.wait_for(
+                session_request,
+                timeout=server_config.session_init_timeout,
+            )
+        else:
+            session = await session_request
     except Exception:
         logger.exception(
             "identity_hooks_session_failed server=%s",
@@ -137,14 +209,29 @@ async def run_session_start_hooks(
         return None
 
     call_kwargs: dict[str, Any] = {}
-    if server_config.tool_call_timeout:
+    # HTTP/SSE tool calls use transport timeouts. read_timeout_seconds is the
+    # stdio (and durable-task) call budget only.
+    if transport == "stdio" and server_config.tool_call_timeout:
         call_kwargs["read_timeout_seconds"] = timedelta(seconds=server_config.tool_call_timeout)
 
     sections: list[str] = []
     total_chars = 0
     for call in hooks.session_start:
         try:
-            call_tool_result = await session.call_tool(call.tool, call.args, **call_kwargs)
+            if isinstance(pool, MCPSessionPool):
+                call_tool_result = await call_pooled_session_tool(
+                    session,
+                    pool,
+                    server_name=hooks.mcp_server_ref,
+                    scope_key=scope_key,
+                    tool_name=call.tool,
+                    arguments=call.args,
+                    call_kwargs=call_kwargs,
+                )
+            else:
+                # Unit tests inject a lightweight pool. Production stdio uses
+                # the pooled helper so an in-flight prefetch is not evicted.
+                call_tool_result = await session.call_tool(call.tool, call.args, **call_kwargs)
         except Exception:
             logger.exception("identity_hooks_call_failed tool=%s", call.tool)
             continue
@@ -193,11 +280,12 @@ class IdentityHooksMiddleware(AgentMiddleware[AgentState]):
             logger.debug("identity_hooks_skip reason=missing_thread_id")
             return None
 
-        user_id = get_effective_user_id() or "default"
+        user_id = resolve_runtime_user_id(runtime)
         context_block = await run_session_start_hooks(
             config=config,
             thread_id=thread_id,
             user_id=user_id,
+            thread_incarnation=_optional_thread_incarnation(runtime),
         )
 
         update: dict[str, Any] = {"identity_hooks": {"session_start_fired": True}}
@@ -208,6 +296,7 @@ class IdentityHooksMiddleware(AgentMiddleware[AgentState]):
                     additional_kwargs={
                         IDENTITY_HOOKS_CONTEXT_KEY: True,
                         "hide_from_ui": True,
+                        **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "identity_hooks"),
                     },
                 )
             ]

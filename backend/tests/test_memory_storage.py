@@ -1,24 +1,31 @@
 """Tests for memory storage providers (DI: FileMemoryStorage(config) / create_storage)."""
 
+import errno
+import json
 import threading
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+from deerflow.agents.memory.backends.deermem.deermem.core import markdown_format as mf
+from deerflow.agents.memory.backends.deermem.deermem.core.markdown_storage import MarkdownMemoryStorage
 from deerflow.agents.memory.backends.deermem.deermem.core.paths import validate_agent_name
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     FileMemoryStorage,
     MemoryStorage,
+    MemoryStorageCorruption,
     create_empty_memory,
     create_storage,
+    normalize_memory_data,
 )
 
 
 def _storage_at(memory_file) -> FileMemoryStorage:
-    """A FileMemoryStorage whose absolute storage_path is a single shared file."""
-    resolved = str(memory_file.resolve())
-    return FileMemoryStorage(DeerMemConfig(storage_path=resolved))
+    """A FileMemoryStorage rooted at the directory containing ``memory_file``."""
+    root = str(memory_file.parent.resolve())
+    return FileMemoryStorage(DeerMemConfig(storage_path=root))
 
 
 class TestCreateEmptyMemory:
@@ -32,6 +39,45 @@ class TestCreateEmptyMemory:
         assert isinstance(memory["user"], dict)
         assert isinstance(memory["history"], dict)
         assert isinstance(memory["facts"], list)
+
+
+class TestNormalizeMemoryData:
+    """Test backward-compatible memory schema normalization."""
+
+    def test_normalizes_legacy_facts_without_mutating_input(self):
+        legacy = {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+
+        normalized = normalize_memory_data(legacy)
+
+        assert legacy == {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+        assert len(normalized["facts"]) == 1
+        fact = normalized["facts"][0]
+        assert fact["id"].startswith("fact_")
+        assert fact["content"] == "User prefers conclusions first"
+        assert fact["category"] == "cognitive"
+        assert fact["confidence"] == 0.5
+        assert fact["createdAt"] == ""
+        assert fact["source"] == "unknown"
 
 
 class TestMemoryStorageInterface:
@@ -55,11 +101,11 @@ class TestFileMemoryStorage:
         assert storage._get_memory_file_path(None) == tmp_path / "memory.json"
 
     def test_get_memory_file_path_agent(self, tmp_path, monkeypatch):
-        """Legacy per-agent path lives under the DeerMem root ($DEERMEM_DATA_DIR)."""
+        """Agent facts share the user's global summary JSON path."""
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         storage = FileMemoryStorage(DeerMemConfig())
         path = storage._get_memory_file_path("test-agent")
-        assert path == tmp_path / "agents" / "test-agent" / "memory.json"
+        assert path == tmp_path / "memory.json"
 
     @pytest.mark.parametrize("invalid_name", ["", "../etc/passwd", "agent/name", "agent\\name", "agent name", "agent@123", "agent_name"])
     def test_validate_agent_name_invalid(self, invalid_name):
@@ -74,13 +120,39 @@ class TestFileMemoryStorage:
         assert isinstance(memory, dict)
         assert memory["version"] == "1.0"
 
+    def test_summary_saved_with_utf8_bom_loads(self, tmp_path, monkeypatch):
+        """A summary hand-edited into "UTF-8 with BOM" (Windows Notepad /
+        PowerShell ``Set-Content -Encoding UTF8``) is valid JSON, not corruption:
+        the BOM is consumed instead of raising MemoryStorageCorruption."""
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["revision"] = 7
+        manifest["user"]["workContext"] = {"summary": "edited in Notepad"}
+        memory_file.write_bytes(b"\xef\xbb\xbf" + json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
+        assert memory_file.read_bytes().startswith(b"\xef\xbb\xbf"), "fixture must carry a real BOM"
+        storage = FileMemoryStorage(DeerMemConfig())
+        loaded = storage.load()
+        assert loaded["user"]["workContext"]["summary"] == "edited in Notepad"
+
+    def test_summary_without_bom_is_unaffected(self, tmp_path, monkeypatch):
+        """The BOM-tolerant decoder must not alter plain UTF-8 summaries."""
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["user"]["workContext"] = {"summary": "plain"}
+        memory_file.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        loaded = FileMemoryStorage(DeerMemConfig()).load()
+        assert loaded["user"]["workContext"]["summary"] == "plain"
+
     def test_save_writes_to_file(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
         storage = FileMemoryStorage(DeerMemConfig())
-        result = storage.save({"version": "1.0", "facts": [{"content": "test fact"}]})
+        result = storage.save({"version": "1.0", "facts": []})
         assert result is True
         assert memory_file.exists()
+        assert "facts" not in memory_file.read_text(encoding="utf-8")
 
     def test_save_does_not_mutate_caller_dict(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
@@ -98,16 +170,18 @@ class TestFileMemoryStorage:
         memory_file.parent.mkdir(parents=True, exist_ok=True)
         import json as _json
 
-        memory_file.write_text(_json.dumps({"version": "1.0", "facts": [{"content": "original"}]}))
+        memory_file.write_text(_json.dumps({"version": "2.0", "user": {"workContext": {"summary": "original"}}, "history": {}}))
         storage = FileMemoryStorage(DeerMemConfig())
         cached = storage.load()
-        assert cached["facts"][0]["content"] == "original"
+        assert cached["user"]["workContext"]["summary"] == "original"
 
         with patch("builtins.open", side_effect=OSError("disk full")):
-            result = storage.save({"version": "1.0", "facts": [{"content": "mutated"}]})
+            changed = create_empty_memory()
+            changed["user"]["workContext"]["summary"] = "mutated"
+            result = storage.save(changed)
         assert result is False
         after = storage.load()
-        assert after["facts"][0]["content"] == "original"
+        assert after["user"]["workContext"]["summary"] == "original"
 
     def test_cache_thread_safety(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
@@ -137,13 +211,52 @@ class TestFileMemoryStorage:
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
         memory_file.parent.mkdir(parents=True, exist_ok=True)
-        memory_file.write_text('{"version": "1.0", "facts": [{"content": "initial fact"}]}')
+        memory_file.write_text('{"version": "2.0", "user": {"workContext": {"summary": "initial"}}, "history": {}}')
         storage = FileMemoryStorage(DeerMemConfig())
         memory1 = storage.load()
-        assert memory1["facts"][0]["content"] == "initial fact"
-        memory_file.write_text('{"version": "1.0", "facts": [{"content": "updated fact"}]}')
+        assert memory1["user"]["workContext"]["summary"] == "initial"
+        memory_file.write_text('{"version": "2.0", "user": {"workContext": {"summary": "updated"}}, "history": {}}')
         memory2 = storage.reload()
-        assert memory2["facts"][0]["content"] == "updated fact"
+        assert memory2["user"]["workContext"]["summary"] == "updated"
+
+    @pytest.mark.parametrize("storage_class", [FileMemoryStorage, MarkdownMemoryStorage])
+    @pytest.mark.parametrize("agent_name", [None, "test-agent"])
+    def test_reload_does_not_pin_a_document_older_than_its_signature(self, tmp_path, storage_class, agent_name):
+        """A write committed while reload() reads must not be hidden from later loads."""
+        storage = storage_class(DeerMemConfig(storage_path=str(tmp_path)))
+
+        def memory_with(text: str) -> dict:
+            memory = create_empty_memory()
+            if agent_name is None:
+                memory["user"]["workContext"]["summary"] = text
+            else:
+                memory["facts"] = [{"id": "fact_1", "content": text, "category": "context", "confidence": 0.9}]
+            return memory
+
+        def text_of(memory: dict) -> str:
+            if agent_name is None:
+                return memory["user"]["workContext"]["summary"]
+            return memory["facts"][0]["content"]
+
+        assert storage.save(memory_with("old"), agent_name, user_id="alice")
+        read_document = storage._read_document
+        raced = False
+
+        def read_then_concurrent_write(*args, **kwargs):
+            nonlocal raced
+            document = read_document(*args, **kwargs)
+            if not raced:
+                raced = True
+                # A background updater commits after reload() has read the
+                # document but before it caches the result.
+                assert storage.save(memory_with("new"), agent_name, user_id="alice")
+            return document
+
+        with patch.object(storage, "_read_document", side_effect=read_then_concurrent_write):
+            storage.reload(agent_name, user_id="alice")
+
+        assert raced
+        assert text_of(storage.load(agent_name, user_id="alice")) == "new"
 
 
 class TestCreateStorage:
@@ -175,3 +288,252 @@ class TestCreateStorage:
     def test_dotted_storage_class_resolves(self):
         storage = create_storage(DeerMemConfig(storage_class="deerflow.agents.memory.backends.deermem.deermem.core.storage.FileMemoryStorage"))
         assert isinstance(storage, FileMemoryStorage)
+
+
+def test_load_normalizes_legacy_json_without_cognitive_style(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text(
+        '{"version":"1.0","lastUpdated":"","user":{"workContext":{"summary":"work","updatedAt":""}},"history":{},"facts":[]}',
+        encoding="utf-8",
+    )
+    storage = _storage_at(memory_file)
+
+    loaded = storage.load()
+
+    assert loaded["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert loaded["user"]["workContext"]["summary"] == "work"
+
+
+def test_cache_hit_returns_an_equivalent_normalized_copy(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text(
+        '{"version":"1.0","lastUpdated":"","user":{},"history":{},"facts":[{"content":"Legacy cached fact"}]}',
+        encoding="utf-8",
+    )
+
+    storage = _storage_at(memory_file)
+    first = storage.load()
+    second = storage.load()
+
+    assert second == first
+    assert second is not first
+    assert second["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+
+
+class TestMarkdownMemoryStorage:
+    """Opt-in ``storage_class="markdown"``: tolerant load path (issue #3124)."""
+
+    def _markdown_storage_at(self, memory_file) -> MarkdownMemoryStorage:
+        return MarkdownMemoryStorage(DeerMemConfig(storage_path=str(memory_file.parent.resolve())))
+
+    def test_markdown_alias_resolves(self):
+        storage = create_storage(DeerMemConfig(storage_class="markdown"))
+        assert isinstance(storage, MarkdownMemoryStorage)
+        assert isinstance(storage, FileMemoryStorage)
+
+    @pytest.mark.parametrize(("version", "expected_revision"), [("1.0", 8), ("2.0", 7)])
+    def test_corrupt_json_with_fenced_block_recovers(self, tmp_path, version, expected_revision):
+        """A partially written JSON summary that still carries a fenced
+        ```memory-json block is recovered losslessly instead of crashing."""
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["version"] = version
+        if version == "2.0":
+            manifest.pop("facts")  # v2 manifests keep facts in separate files.
+        manifest["revision"] = 7
+        manifest["user"]["workContext"] = {"summary": "recovered"}
+        fenced = '{"version": 1, "revision": 7, "user": {"lang": "zh"}\n```memory-json\n' + json.dumps(manifest, ensure_ascii=False) + "\n```"
+        memory_file.write_text(fenced, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        # Legacy manifests migrate to v2 on load and advance the revision.
+        assert loaded["version"] == "2.0"
+        assert loaded["revision"] == expected_revision
+        assert loaded["user"]["workContext"]["summary"] == "recovered"
+
+    def test_bom_prefixed_valid_json_is_not_quarantined(self, tmp_path):
+        """A BOM does not make the summary unreadable, so the tolerant loader
+        must parse it instead of quarantining recoverable state."""
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 7
+        manifest["user"]["workContext"] = {"summary": "kept"}
+        memory_file.write_bytes(b"\xef\xbb\xbf" + json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert loaded["revision"] == 7
+        assert loaded["user"]["workContext"]["summary"] == "kept"
+        assert not list(tmp_path.glob("memory.json.corrupt-*")), "a readable summary must not be quarantined"
+
+    def test_hand_edited_markdown_without_fence_is_quarantined(self, tmp_path):
+        """Markdown without a fenced block cannot be mapped onto the manifest
+        schema losslessly: load() must not crash AND must not return an
+        invalid shape -- the file is quarantined so nothing is silently lost."""
+        memory_file = tmp_path / "memory.json"
+        body = "# DeerFlow Memory\n\n- version: 2\n- revision: 5\n\n## User\n- summary: likes tea\n"
+        memory_file.write_text(body, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()  # must not raise
+        assert isinstance(loaded, dict)
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1, "unreadable file must be preserved via quarantine"
+        assert quarantined[0].read_text(encoding="utf-8") == body
+
+    def test_truncated_json_is_quarantined_before_rebuild(self, tmp_path):
+        """A truncated manifest must not be silently erased by the next save:
+        the unreadable file is quarantined (revision reset is then safe)."""
+        memory_file = tmp_path / "memory.json"
+        truncated = '{"version": "2.0", "revision": 41, "user": {"work'
+        memory_file.write_text(truncated, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert isinstance(loaded, dict)
+        assert storage.save(create_empty_memory()) is True
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == truncated
+
+    @pytest.mark.parametrize("encoding", ["utf-16", "invalid-utf8"])
+    def test_non_utf8_summary_is_quarantined_before_rebuild(self, tmp_path, encoding):
+        """Invalid UTF-8 bytes stay recoverable across repeated reads and a save."""
+        memory_file = tmp_path / "memory.json"
+        payload = json.dumps(create_empty_memory(), ensure_ascii=False)
+        original = payload.encode("utf-16") if encoding == "utf-16" else payload.encode("utf-8") + b"\xff"
+        memory_file.write_bytes(original)
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert isinstance(loaded, dict)
+        assert isinstance(storage.reload(), dict)
+        assert storage.save(create_empty_memory()) is True
+        assert isinstance(storage.load(), dict)
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1, "a non-UTF-8 summary must be quarantined, not silently rebuilt over"
+        assert quarantined[0].read_bytes() == original
+
+    def test_fenced_block_containing_backticks_parses_losslessly(self):
+        """Remembered code snippets must not terminate the JSON block."""
+        manifest = create_empty_memory()
+        manifest["user"]["workContext"] = {"summary": "prefers ```python\nprint('hi')\n``` snippets"}
+        rendered = "# DeerFlow Memory\n\n```memory-json\n" + json.dumps(manifest, ensure_ascii=False) + "\n```\n"
+        parsed = mf._parse_markdown_memory(rendered)
+        assert parsed == manifest
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    def test_fenced_summary_with_trailing_code_block_loads_without_quarantine(self, tmp_path, newline):
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 7
+        manifest["user"]["workContext"]["summary"] = "prefers ```python snippets```"
+        body = newline.join(["# Memory", "```memory-json", json.dumps(manifest, indent=2), "", "```", "Notes:", "```python", "print('example')", "```", ""])
+        memory_file = tmp_path / "memory.json"
+        memory_file.write_text(body, encoding="utf-8")
+        assert mf._parse_markdown_memory(body) == manifest
+        loaded = self._markdown_storage_at(memory_file).load()
+        assert loaded["revision"] == 7
+        assert loaded["user"]["workContext"] == manifest["user"]["workContext"]
+        assert not list(tmp_path.glob("memory.json.corrupt-*"))
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "# Memory without a fence",
+            '```memory-json\n{"user": ',
+            '```memory-json\n{"user": {}}',
+            '```memory-json\n{"user": {}} trailing garbage\n```',
+            '```memory-json\n{"user": {}}\n```python\nnotes\n```',
+            "```memory-json\n[]\n```",
+            "```memory-json\nnull\n```",
+        ],
+    )
+    def test_invalid_or_non_object_fenced_summary_rejected(self, body):
+        assert mf._parse_markdown_memory(body) is None
+
+
+class TestMarkdownMemoryReadFailures:
+    @pytest.mark.parametrize("error_number", [errno.EACCES, errno.EIO, getattr(errno, "ESTALE", errno.EIO), errno.EBUSY])
+    @pytest.mark.parametrize("operation", ["load", "reload", "save", "apply_changes"])
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_read_error_preserves_summary_and_retries_after_recovery(self, tmp_path, monkeypatch, error_number, operation, cached):
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 41
+        manifest["user"]["workContext"]["summary"] = "private saved summary"
+        original = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+        memory_file.write_bytes(original)
+        storage = MarkdownMemoryStorage(DeerMemConfig(storage_path=str(tmp_path), retrieval_adapter=""))
+        try:
+            if cached:
+                assert storage.load()["revision"] == 41
+            replacement = create_empty_memory()
+            replacement["user"]["workContext"]["summary"] = "replacement summary"
+            read_text = Path.read_text
+
+            def fail_summary_read(path, *args, **kwargs):
+                if path == memory_file:
+                    raise OSError(error_number, "synthetic summary read failure")
+                return read_text(path, *args, **kwargs)
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(Path, "read_text", fail_summary_read)
+                if operation == "save":
+                    assert storage.save(replacement) is False
+                else:
+                    with pytest.raises(MemoryStorageCorruption, match="Failed to read memory summary") as raised:
+                        if operation == "apply_changes":
+                            storage.apply_changes({"summaries": {"user": replacement["user"]}})
+                        else:
+                            getattr(storage, operation)()
+                    assert isinstance(raised.value.__cause__, OSError)
+                    assert raised.value.__cause__.errno == error_number
+
+            assert memory_file.read_bytes() == original
+            assert list(tmp_path.glob("memory.json.corrupt-*")) == []
+            assert not (tmp_path / ".memory.journal.json").exists()
+            recovered = storage.load()
+            assert recovered["revision"] == 41
+            assert recovered["user"]["workContext"]["summary"] == "private saved summary"
+            assert storage.save(replacement, expected_revision=41) is True
+            saved = storage.reload()
+            assert saved["revision"] == 42
+            assert saved["user"]["workContext"]["summary"] == "replacement summary"
+        finally:
+            storage.close()
+
+
+class TestFactMarkdownBom:
+    """Hand-edited canonical facts must survive the complete storage read path."""
+
+    def test_fact_saved_with_utf8_bom_round_trips_through_storage(self, tmp_path):
+        storage = _storage_at(tmp_path / "memory.json")
+        memory = create_empty_memory()
+        memory["facts"] = [
+            {
+                "id": "fact_bom",
+                "title": "Shared decision",
+                "content": "Use Postgres. Preserve an interior \ufeff character.",
+                "category": "context",
+                "confidence": 0.9,
+                "createdAt": "2026-10-19T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+        assert storage.save(memory, "agent-a", user_id="alice")
+        before = storage.load("agent-a", user_id="alice")
+        (fact_path,) = tmp_path.rglob("fact_bom.md")
+        original = fact_path.read_bytes()
+        assert not original.startswith(b"\xef\xbb\xbf")
+        fact_path.write_bytes(b"\xef\xbb\xbf" + original)
+
+        reloaded = storage.reload("agent-a", user_id="alice")
+
+        assert reloaded["facts"] == before["facts"]
+        (fact,) = reloaded["facts"]
+        assert fact["id"] == "fact_bom"
+        assert fact["title"] == "Shared decision"
+        assert fact["content"] == memory["facts"][0]["content"]
+        assert fact["scope"] == {"userId": "alice", "agentName": "agent-a"}

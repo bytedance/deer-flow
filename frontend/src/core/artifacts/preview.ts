@@ -1,3 +1,11 @@
+import { indexToolResults } from "../messages/tool-result";
+
+export function getTabularDelimiter(
+  language: string | null,
+): "," | "\t" | null {
+  return language === "csv" ? "," : language === "tsv" ? "\t" : null;
+}
+
 export type ArtifactViewMode = "code" | "preview";
 
 type ArtifactPreviewMessage = {
@@ -62,7 +70,7 @@ function findToolResult(
   return undefined;
 }
 
-function parseWriteFileArtifact(filepath: string) {
+export function parseWriteFileArtifact(filepath: string) {
   if (!isWriteFileArtifact(filepath)) {
     return undefined;
   }
@@ -92,8 +100,9 @@ export function buildWriteFileDraftContent({
 
   let draft = "";
   let hasDraft = false;
+  const toolResults = indexToolResults(messages);
 
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type !== "ai") {
       continue;
     }
@@ -110,7 +119,7 @@ export function buildWriteFileDraftContent({
 
       const toolCallId = toolCall.id;
       const toolResult = toolCallId
-        ? findToolResult(toolCallId, messages)
+        ? findToolResult(toolCallId, toolResults.get(messageIndex) ?? [])
         : undefined;
       const isSelected =
         toolCallId === target.toolCallId &&
@@ -169,14 +178,30 @@ export function appendHtmlPreviewBaseHref(
   url?: string,
   currentHref = globalThis.location?.href ?? "http://localhost/",
 ) {
-  if (!url || /<base\s/i.exec(content)) {
+  if (!url) {
     return content;
+  }
+
+  // A real base tag requires this text; avoid constructing a DOM for other reports.
+  if (/base/i.test(content)) {
+    // Template contents are inert: parse tags without running scripts or loading assets.
+    const template = document.createElement("template");
+    template.innerHTML = content;
+    if (template.content.querySelector("base")) {
+      return content;
+    }
   }
 
   const baseHref = htmlBaseHref(url, currentHref);
   const baseElement = `<base href="${escapeHtmlAttribute(baseHref)}">`;
-  if (/<head[^>]*>/i.exec(content)) {
-    return content.replace(/<head([^>]*)>/i, `<head$1>${baseElement}`);
+  // "(?:\s[^>]*)?" keeps the tag-name boundary so `<header>` (a common
+  // leading tag in agent-generated fragments) is not mistaken for `<head>`;
+  // mirrors appendHtmlPreviewScrollRestoration below.
+  if (/<head(?:\s[^>]*)?>/i.test(content)) {
+    return content.replace(
+      /<head(?:\s[^>]*)?>/i,
+      (headTag) => `${headTag}${baseElement}`,
+    );
   }
   return `${baseElement}${content}`;
 }

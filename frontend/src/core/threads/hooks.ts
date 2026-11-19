@@ -4,72 +4,240 @@ import { useStream } from "@langchain/langgraph-sdk/react";
 import {
   type QueryClient,
   type InfiniteData,
+  type QueryFilters,
   useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
+import { GatewayApiError } from "../api/errors";
 import { fetch } from "../api/fetcher";
+import { AuthQueryScopeContext } from "../auth/query-scope";
 import { getBackendBaseURL } from "../config";
+import { useRunInputsEnabled } from "../features";
 import { useI18n } from "../i18n/hooks";
-import { isHiddenFromUIMessage } from "../messages/utils";
+import type { Locale } from "../i18n/locale";
+import type { Translations } from "../i18n/locales";
+import {
+  extractHitlApprovalRequests,
+  type HitlApprovalRequest,
+  type HitlApprovalResponse,
+} from "../messages/human-input";
+import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
+import { isErrorToolMessage } from "../messages/tool-error";
+import { indexToolResults } from "../messages/tool-result";
+import {
+  extractContentFromMessage,
+  hasToolCalls,
+  isHiddenFromUIMessage,
+} from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
+import { PROJECTS_QUERY_KEY } from "../projects/api";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
-import { useUpdateSubtask } from "../tasks/context";
+import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
-import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import {
+  AttachmentUploadError,
+  type AttachmentUploadSession,
+} from "../uploads/attachment-upload-session";
+import { uuid } from "../utils/uuid";
 
-import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
+import {
+  branchThreadFromTurn,
+  fetchThreadTokenUsage,
+  moveThreadToProject,
+  patchThreadMetadata,
+  searchThreadsByArchive,
+  type ThreadMetadataPatch,
+} from "./api";
+import {
+  dedupeMessagesByIdentity,
+  insertByTrustedSeq,
+  isValidMessageSeq,
+  MESSAGE_SEQ_KEY,
+  mergeMessages,
+  messageIdentity,
+  trustedMessageSeq,
+} from "./message-order";
+import {
+  fetchRunInputState,
+  fetchRunInputs,
+  runInputsKey,
+  submitRunInput,
+  type RunInputMode,
+} from "./run-inputs";
+import {
+  hasRenderedThreadStateUpdate,
+  reduceThreadStateUpdates,
+} from "./stream-state";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
   filterThreadSearchResults,
   type ThreadSearchParams,
 } from "./thread-search-query";
-import { threadTokenUsageQueryKey } from "./token-usage";
+import {
+  retainThreadTokenUsagePlaceholder,
+  threadTokenUsageQueryKey,
+} from "./token-usage";
+import {
+  approvalsKey,
+  combineNativeApprovals,
+  fetchToolApprovals,
+  submitLiveApproval,
+  useToolApprovalFeature,
+} from "./tool-approvals";
 import type {
   AgentThread,
   AgentThreadState,
+  AppRun,
   RunMessage,
   ThreadTokenUsageResponse,
 } from "./types";
-
-export type ToolEndEvent = {
-  name: string;
-  data: unknown;
-};
+import {
+  THREAD_PINNED_METADATA_KEY,
+  THREAD_PROJECT_METADATA_KEY,
+} from "./utils";
 
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
+  /**
+   * Assistant identity sent to the Gateway for run admission and execution.
+   * Default-chat and sidecar callers use the lead agent; custom-agent pages
+   * pass their stable agent name so server-side capability checks see the same
+   * assistant that the runtime loads from the request context.
+   */
+  assistantId?: string;
   context: LocalSettings["context"];
   isMock?: boolean;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
-  onToolEnd?: (event: ToolEndEvent) => void;
+  /** REST detail fallback for reloads and other tabs; live uses thread.interrupt. */
+  restInterrupts?: unknown;
+  restInterruptsLoading?: boolean;
+  restInterruptsError?: boolean;
 };
 
 type SendMessageOptions = {
+  attachmentUploads?: AttachmentUploadSession;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /**
-   * Invoked exactly once when the send passes the in-flight guard and is
-   * genuinely dispatched. It never fires on the early-return path, so callers
-   * can safely perform one-time cleanup (e.g. clearing quoted references)
-   * without losing state when a concurrent send is dropped.
+   * Thread IDs of conversations the user attached for this run. They ride in
+   * `context.conversation_references`, which the Gateway consumes at admission;
+   * the LangGraph SDK drops unknown top-level body fields, so the top-level
+   * request field is not reachable from here. Display metadata for the
+   * transcript travels separately in `additionalKwargs`.
+   */
+  conversationReferences?: string[];
+  /**
+   * Invoked exactly once when the send is genuinely dispatched: after the
+   * in-flight guard and after any attachments upload, right before the run is
+   * submitted. It never fires for a dropped send or one whose attachments fail
+   * to prepare or upload, so callers can safely perform one-time cleanup (e.g.
+   * clearing quoted references) without losing state a retry still needs.
+   * The guarantee ends at dispatch: a run that fails afterwards does not
+   * reject `thread.submit` (the SDK reports it through the stream's
+   * `onError`), so the send resolves and the composer is cleared as a whole.
    */
   onSent?: () => void;
 };
+
+export const THREAD_RUN_RECURSION_LIMIT = 1000;
+export const HITL_APPROVAL_ACCEPTANCE_TIMEOUT_MS = 10_000;
+
+type PausedRunContext = {
+  extraContext?: Record<string, unknown>;
+  conversationReferences?: string[];
+};
+
+type PendingApprovalSubmission = {
+  threadId: string;
+  requestId: string;
+  requestIds: string[];
+  resolve: (accepted: boolean) => void;
+  timeout: number | undefined;
+};
+
+export function deriveHitlApprovalState({
+  liveInterrupt,
+  restInterrupts,
+  historyLoading,
+  restInterruptsError = false,
+  pendingApprovalRun = false,
+  next,
+  answeredRequestIds,
+}: {
+  liveInterrupt: unknown;
+  restInterrupts?: unknown;
+  historyLoading: boolean;
+  restInterruptsError?: boolean;
+  pendingApprovalRun?: boolean;
+  next: readonly string[];
+  answeredRequestIds: ReadonlySet<string>;
+}) {
+  const requests = extractHitlApprovalRequests([
+    ...extractHitlApprovalRequests(liveInterrupt),
+    ...extractHitlApprovalRequests(restInterrupts),
+  ]);
+  const pendingRequests = requests.filter(
+    (request) => !answeredRequestIds.has(request.request_id),
+  );
+  return {
+    requests: combineNativeApprovals(pendingRequests),
+    hasPendingApproval:
+      pendingRequests.length > 0 ||
+      ((historyLoading || restInterruptsError) &&
+        (pendingApprovalRun ||
+          next.includes("HitlApprovalMiddleware.after_model"))),
+  };
+}
+
+export function buildHitlApprovalSubmitOptions({
+  threadId,
+  settings,
+  responses,
+  extraContext,
+  conversationReferences,
+}: {
+  threadId: string;
+  settings: LocalSettings["context"];
+  responses: HitlApprovalResponse[];
+} & PausedRunContext) {
+  return {
+    threadId,
+    // The SDK otherwise injects the pre-interrupt history head in this window.
+    checkpoint: null,
+    command: { resume: { responses } },
+    streamMode: ["values" as const],
+    streamResumable: true,
+    config: { recursion_limit: THREAD_RUN_RECURSION_LIMIT },
+    context: buildRunContext({
+      settings,
+      threadId,
+      extraContext,
+      conversationReferences,
+    }),
+  };
+}
 
 type ThreadDeleteClient = {
   threads: {
@@ -95,33 +263,289 @@ type RegeneratePrepareResponse = {
   target_run_id: string;
 };
 
+type EditRegeneratePrepareResponse = RegeneratePrepareResponse & {
+  replacement_human_message_id: string;
+  source_message_ids: string[];
+};
+
+export type PendingPreparedReplayMask = {
+  kind: "regenerate" | "edit";
+  targetRunId: string;
+  supersededMessageIds: string[];
+  replacementHumanMessageId?: string;
+};
+
+export type ToolResultStatus = "pending" | "success" | "error";
+
+export function getToolResultStatus(
+  messages: Message[],
+  toolName: string,
+): ToolResultStatus {
+  let latestToolCallId: string | undefined;
+  let latestToolCallIndex = -1;
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.type !== "ai") {
+      continue;
+    }
+    for (const toolCall of message.tool_calls ?? []) {
+      if (toolCall.name === toolName && toolCall.id) {
+        latestToolCallId = toolCall.id;
+        latestToolCallIndex = messageIndex;
+      }
+    }
+  }
+
+  const results = latestToolCallId
+    ? (indexToolResults(messages).get(latestToolCallIndex) ?? [])
+    : messages;
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const message = results[index];
+    if (message?.type !== "tool") {
+      continue;
+    }
+    const matches = latestToolCallId
+      ? message.tool_call_id === latestToolCallId
+      : message.name === toolName;
+    if (matches) {
+      return isErrorToolMessage(message) ? "error" : "success";
+    }
+  }
+
+  return "pending";
+}
+
+export function hasToolResult(messages: Message[], toolName: string): boolean {
+  return getToolResultStatus(messages, toolName) !== "pending";
+}
+
+/**
+ * `additional_kwargs` of this turn's visible human message. The optimistic
+ * display copy (before and after the upload) and the submitted message all
+ * build it here, so caller metadata such as quotes and conversation
+ * references stays on the bubble through the upload. Files staged out-of-band
+ * (e.g. a project document attached to this thread and carried in
+ * ``additionalKwargs.files``) ride alongside ``files`` instead of being
+ * overwritten by them.
+ */
+export function buildHumanMessageAdditionalKwargs(
+  additionalKwargs: Record<string, unknown> | undefined,
+  files: FileInMessage[],
+): Record<string, unknown> {
+  const stagedFiles = Array.isArray(additionalKwargs?.files)
+    ? (additionalKwargs.files as FileInMessage[])
+    : [];
+  const allFiles = [...stagedFiles, ...files];
+  return {
+    ...additionalKwargs,
+    ...(allFiles.length > 0 ? { files: allFiles } : {}),
+  };
+}
+
 export function buildThreadSubmitMessages({
   text,
   additionalKwargs,
   additionalInputMessages = [],
   filesForSubmit = [],
+  humanMessageId,
 }: {
   text: string;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   filesForSubmit?: FileInMessage[];
+  /**
+   * Client-generated id for the visible human message. The optimistic display
+   * copy and the actual submit share it, so the server echo (`<id>__user`)
+   * confirms the exact message the user already sees.
+   */
+  humanMessageId?: string;
 }): Message[] {
   return [
     ...additionalInputMessages,
     {
       type: "human",
+      ...(humanMessageId ? { id: humanMessageId } : {}),
       content: [
         {
           type: "text",
           text,
         },
       ],
-      additional_kwargs: {
-        ...additionalKwargs,
-        ...(filesForSubmit.length > 0 ? { files: filesForSubmit } : {}),
-      },
+      additional_kwargs: buildHumanMessageAdditionalKwargs(
+        additionalKwargs,
+        filesForSubmit,
+      ),
     } as Message,
   ];
+}
+
+/**
+ * Run context sent with `thread.submit`. Both submit paths (send, and the
+ * regenerate/edit replay) build it here so the client half of the Gateway
+ * contract stays in one place: conversation references travel only as a plain
+ * `string[]` under `context.conversation_references`, only when the caller
+ * attached them, and never from local settings. A stray key in settings is
+ * dropped rather than forwarded, so a stale value can never grant access.
+ * `client_timezone` carries the browser's zone (scheduled-task default only).
+ * `locale` carries the live UI language and overrides any saved value.
+ */
+export function buildRunContext({
+  settings,
+  threadId,
+  locale,
+  extraContext,
+  conversationReferences,
+}: {
+  settings: LocalSettings["context"];
+  threadId: string;
+  locale?: Locale;
+  extraContext?: Record<string, unknown>;
+  conversationReferences?: string[];
+}): Record<string, unknown> {
+  const ownedSettings = Object.fromEntries(
+    Object.entries(settings).filter(
+      ([key]) => key !== "conversation_references",
+    ),
+  );
+  return {
+    ...extraContext,
+    ...ownedSettings,
+    ...(typeof extraContext?.model_name === "string"
+      ? { model_name: extraContext.model_name }
+      : {}),
+    ...(conversationReferences?.length
+      ? { conversation_references: [...conversationReferences] }
+      : {}),
+    thinking_enabled: settings.mode !== "flash",
+    is_plan_mode: settings.mode === "pro" || settings.mode === "ultra",
+    subagent_enabled: settings.mode === "ultra",
+    reasoning_effort:
+      settings.reasoning_effort ??
+      (settings.mode === "ultra"
+        ? "high"
+        : settings.mode === "pro"
+          ? "medium"
+          : settings.mode === "thinking"
+            ? "low"
+            : undefined),
+    thread_id: threadId,
+    ...(locale ? { locale } : {}),
+    ...clientTimezoneContext(),
+  };
+}
+
+/**
+ * The browser's IANA zone as `context.client_timezone`. The Gateway reads it
+ * only to offer a default zone when a chat creates a scheduled task; it never
+ * reaches the model's context. Omitted when the browser cannot tell.
+ */
+function clientTimezoneContext(): { client_timezone?: string } {
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof timeZone === "string" && timeZone.length > 0
+      ? { client_timezone: timeZone }
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+// Stable identity for "no optimistic messages" so the merged-messages memo
+// below is not invalidated by a fresh empty array on every render.
+const EMPTY_MESSAGES: Message[] = [];
+const EMPTY_RUN_MESSAGES: RunMessage[] = [];
+const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
+const EMPTY_MESSAGE_IDENTITIES_SET: ReadonlySet<string> = new Set<string>();
+const ACTIVE_RUN_STATUSES = new Set(["pending", "running"]);
+const ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS = [1_000, 2_000] as const;
+const MAX_ACTIVE_RUN_REJOIN_ATTEMPTS =
+  ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS.length + 1;
+
+type ActiveRunRejoinState = {
+  attempts: number;
+  inFlight: boolean;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  runId: string | null;
+  settled: boolean;
+  threadId: string | null;
+};
+
+function createActiveRunRejoinState(
+  threadId: string | null = null,
+  runId: string | null = null,
+): ActiveRunRejoinState {
+  return {
+    attempts: 0,
+    inFlight: false,
+    retryTimer: null,
+    runId,
+    settled: false,
+    threadId,
+  };
+}
+
+function readReconnectRun(threadId: string): string | null {
+  try {
+    return window.sessionStorage.getItem(`lg:stream:${threadId}`);
+  } catch {
+    return null;
+  }
+}
+
+function rememberReconnectRun(threadId: string, runId: string): void {
+  try {
+    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
+  } catch {
+    // The stream can still be joined, but SDK stop cannot cancel it without
+    // the tab-local run pointer.
+  }
+}
+
+function clearReconnectRun(threadId: string, runId: string): void {
+  try {
+    const key = `lg:stream:${threadId}`;
+    if (window.sessionStorage.getItem(key) === runId) {
+      window.sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Storage access is best-effort and must never block stream cleanup.
+  }
+}
+
+/**
+ * Prefix of the client-generated id minted once per turn for the visible
+ * human message (`${LOCAL_HUMAN_MESSAGE_ID_PREFIX}${uuid()}`); the optimistic
+ * display copy and the submitted message share it, and the server echo
+ * (`<id>__user`) keeps it. Consumers that must recognize an optimistic human
+ * (e.g. the send-scroll pin) match on this prefix instead of restating it.
+ */
+export const LOCAL_HUMAN_MESSAGE_ID_PREFIX = "local-human-";
+/**
+ * The turn this client submitted, recorded at dispatch time. The visible human
+ * input gets one client-generated identity shared by the optimistic display
+ * copy and the submitted message, so the turn anchor is a *known* identity
+ * instead of a guess derived from the pre-submit baseline. `humanIdentity` is
+ * the normalized identity (`message:<id>`) of that human, or null when the
+ * turn has no visible human (hidden human-input reply, regenerate replay) —
+ * such turns must never borrow an older visible human as their anchor.
+ */
+export type LocalTurnAnchor = {
+  threadId: string;
+  humanIdentity: string | null;
+  baselineIdentities: ReadonlySet<string>;
+  /** Canonical REST-history identities already loaded when this turn began. */
+  preSubmitHistoryIdentities: ReadonlySet<string>;
+  /** Transient-bridge identities already established before this turn began. */
+  preSubmitBridgeIdentities: ReadonlySet<string>;
+  /**
+   * Highest authoritative feed position known before submit. Older pages that
+   * arrive later may still be confirmed as pre-submit history through this
+   * boundary; messages from later external turns may not.
+   */
+  preSubmitMaxSeq?: number;
+};
+
+function isNonEmptyString(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
@@ -131,84 +555,61 @@ const EMPTY_THREAD_VALUES: AgentThreadState = {
   todos: [],
 };
 
-function isNonEmptyString(value: string | undefined): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
 const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "SummarizationMiddleware.before_model",
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
 
-function messageIdentity(message: Message): string | undefined {
-  if (
-    "tool_call_id" in message &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
+function maxMessageSeq(messages: Message[]): number | undefined {
+  let maxSeq: number | undefined;
+  for (const message of messages) {
+    const seq = trustedMessageSeq(message);
+    if (seq !== undefined && (maxSeq === undefined || seq > maxSeq)) {
+      maxSeq = seq;
+    }
   }
-  if (typeof message.id === "string" && message.id.length > 0) {
-    return `message:${message.id}`;
-  }
-  return undefined;
+  return maxSeq;
 }
 
-function dedupeMessagesByIdentity(messages: Message[]): Message[] {
-  const lastIndexByIdentity = new Map<string, number>();
-  const lastVisibleIndexByIdentity = new Map<string, number>();
-
-  // This is a UI-display dedupe rule, not a general LangChain message-stream
-  // contract. Hidden messages that share an identity with a visible message are
-  // treated as control messages for this merged view; hidden messages carrying
-  // independent tracing/task semantics should use a distinct id or a custom
-  // stream/state channel instead of relying on message dedupe preservation.
-  const preservedTurnDurations = new Map<string, number>();
-  messages.forEach((message, index) => {
+function getConfirmedPreSubmitHistoryIdentities(
+  visibleHistory: Message[],
+  localTurnAnchor: LocalTurnAnchor | null,
+): Set<string> {
+  if (localTurnAnchor === null) {
+    return new Set();
+  }
+  const confirmed = new Set([
+    ...localTurnAnchor.preSubmitHistoryIdentities,
+    ...localTurnAnchor.preSubmitBridgeIdentities,
+  ]);
+  const maxSeq = localTurnAnchor.preSubmitMaxSeq;
+  if (maxSeq === undefined) {
+    return confirmed;
+  }
+  for (const message of visibleHistory) {
     const identity = messageIdentity(message);
-    if (identity) {
-      lastIndexByIdentity.set(identity, index);
-      if (!isHiddenFromUIMessage(message)) {
-        lastVisibleIndexByIdentity.set(identity, index);
-      }
-      if (message.additional_kwargs?.turn_duration !== undefined) {
-        preservedTurnDurations.set(
-          identity,
-          message.additional_kwargs.turn_duration as number,
-        );
-      }
+    const seq = trustedMessageSeq(message);
+    if (identity !== undefined && seq !== undefined && seq <= maxSeq) {
+      confirmed.add(identity);
     }
-  });
+  }
+  return confirmed;
+}
 
-  return messages
-    .filter((message, index) => {
-      const identity = messageIdentity(message);
-      if (!identity) {
-        return true;
-      }
-      const visibleIndex = lastVisibleIndexByIdentity.get(identity);
-      if (visibleIndex !== undefined) {
-        return visibleIndex === index;
-      }
-      return lastIndexByIdentity.get(identity) === index;
-    })
-    .map((message) => {
-      const identity = messageIdentity(message);
-      if (
-        identity &&
-        preservedTurnDurations.has(identity) &&
-        message.additional_kwargs?.turn_duration === undefined
-      ) {
-        return {
-          ...message,
-          additional_kwargs: {
-            ...message.additional_kwargs,
-            turn_duration: preservedTurnDurations.get(identity),
-          },
-        } as Message;
-      }
-      return message;
-    });
+function findMessageRunIdByIdentity(
+  messages: Message[],
+  identity: string,
+): string | undefined {
+  for (const message of messages) {
+    if (messageIdentity(message) !== identity) {
+      continue;
+    }
+    const runId = getMessageRunId(message);
+    if (runId) {
+      return runId;
+    }
+  }
+  return undefined;
 }
 
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
@@ -247,15 +648,69 @@ export function buildVisibleHistoryMessages(
   const visibleRows = messageRows.filter(
     (message) => !supersededRunIds.has(message.run_id),
   );
-  return dedupeMessagesByIdentity([
+  // Content and position converge separately for a repeated identity: the
+  // newest visible row supplies the content, but the position stays the
+  // earliest trusted feed row — mirroring the backend `get_message_seqs`
+  // earliest-seq-wins rule, so a re-persisted update cannot push the message
+  // towards the tail. Hidden control copies never contribute a visible
+  // position (they only serve as a fallback when no visible row carries the
+  // identity).
+  const earliestSeqByIdentity = new Map<string, number>();
+  const earliestVisibleSeqByIdentity = new Map<string, number>();
+  for (const row of visibleRows) {
+    const identity = messageIdentity(row.content);
+    if (!identity || !isValidMessageSeq(row.seq)) {
+      continue;
+    }
+    const known = earliestSeqByIdentity.get(identity);
+    if (known === undefined || row.seq < known) {
+      earliestSeqByIdentity.set(identity, row.seq);
+    }
+    if (!isHiddenFromUIMessage(row.content)) {
+      const knownVisible = earliestVisibleSeqByIdentity.get(identity);
+      if (knownVisible === undefined || row.seq < knownVisible) {
+        earliestVisibleSeqByIdentity.set(identity, row.seq);
+      }
+    }
+  }
+  const deduped = dedupeMessagesByIdentity([
     // Carry the owning run_id onto the content message so historical subtask
     // cards can fetch their persisted step history on expand (#3779). run_id
     // lives on the RunMessage wrapper and would otherwise be dropped here.
+    // seq rides along for the same reason: it is the thread-global position
+    // this feed is ordered by, and merging needs it on the message itself to
+    // place a checkpoint copy that falls outside the loaded window (#4666).
     ...visibleRows.map((message) => ({
       ...message.content,
       run_id: message.run_id,
+      additional_kwargs: {
+        ...message.content.additional_kwargs,
+        [MESSAGE_SEQ_KEY]: message.seq,
+      },
     })),
   ]);
+  return deduped.map((message) => {
+    const identity = messageIdentity(message);
+    if (!identity) {
+      return message;
+    }
+    const earliestSeq =
+      earliestVisibleSeqByIdentity.get(identity) ??
+      earliestSeqByIdentity.get(identity);
+    if (
+      earliestSeq === undefined ||
+      message.additional_kwargs?.[MESSAGE_SEQ_KEY] === earliestSeq
+    ) {
+      return message;
+    }
+    return {
+      ...message,
+      additional_kwargs: {
+        ...message.additional_kwargs,
+        [MESSAGE_SEQ_KEY]: earliestSeq,
+      },
+    } as Message;
+  });
 }
 
 export type ThreadMessagesPageResponse = {
@@ -263,6 +718,52 @@ export type ThreadMessagesPageResponse = {
   has_more: boolean;
   next_before_seq: number | null;
 };
+
+/**
+ * Validate the sequence fields that history reconciliation and pagination use
+ * as runtime identities. The static RunMessage type cannot protect this JSON
+ * boundary from version skew or malformed responses.
+ */
+export function parseThreadMessagesPageResponse(
+  value: unknown,
+): ThreadMessagesPageResponse {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Thread history returned an invalid response.");
+  }
+
+  const data = Reflect.get(value, "data");
+  const hasMore = Reflect.get(value, "has_more");
+  const nextBeforeSeq = Reflect.get(value, "next_before_seq");
+  if (!Array.isArray(data) || typeof hasMore !== "boolean") {
+    throw new Error("Thread history returned an invalid response.");
+  }
+
+  const seenSeqs = new Set<number>();
+  for (const row of data) {
+    const seq =
+      typeof row === "object" && row !== null
+        ? Reflect.get(row, "seq")
+        : undefined;
+    if (!isValidMessageSeq(seq)) {
+      throw new Error("Thread history returned a row with an invalid seq.");
+    }
+    if (seenSeqs.has(seq)) {
+      throw new Error("Thread history returned duplicate seq values.");
+    }
+    seenSeqs.add(seq);
+  }
+
+  if (
+    (hasMore && !isValidMessageSeq(nextBeforeSeq)) ||
+    (!hasMore && nextBeforeSeq !== null)
+  ) {
+    throw new Error(
+      "Thread history returned an invalid next_before_seq cursor.",
+    );
+  }
+
+  return value as ThreadMessagesPageResponse;
+}
 
 export function getThreadHistoryNextPageParam(
   lastPage: ThreadMessagesPageResponse,
@@ -286,6 +787,7 @@ export function buildThreadMessagesPageUrl(
   baseUrl: string,
   threadId: string,
   beforeSeq?: number,
+  limit?: number,
 ) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
   const path = `/api/threads/${encodeURIComponent(threadId)}/messages/page`;
@@ -296,6 +798,7 @@ export function buildThreadMessagesPageUrl(
   if (beforeSeq !== undefined) {
     url.searchParams.set("before_seq", String(beforeSeq));
   }
+  if (limit !== undefined) url.searchParams.set("limit", String(limit));
   return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
@@ -310,123 +813,488 @@ export function flattenThreadHistoryPages(
   );
 }
 
-export function mergeMessages(
-  historyMessages: Message[],
-  threadMessages: Message[],
-  optimisticMessages: Message[],
-): Message[] {
-  const savedTurnDurations = new Map<string, number>();
-  for (const msg of historyMessages) {
-    const identity = messageIdentity(msg);
-    if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
-      savedTurnDurations.set(
-        identity,
-        msg.additional_kwargs.turn_duration as number,
-      );
+/** Read persisted history independently of the loaded UI and compacted state. */
+export async function fetchThreadExportMessages(threadId: string) {
+  const pages: ThreadMessagesPageResponse[] = [];
+  let beforeSeq: number | undefined;
+  do {
+    const response = await fetch(
+      buildThreadMessagesPageUrl(getBackendBaseURL(), threadId, beforeSeq, 200),
+    );
+    if (!response.ok) {
+      throw new Error("Failed to load conversation for export.");
     }
+    const page = parseThreadMessagesPageResponse(await response.json());
+    const next = getThreadHistoryNextPageParam(page);
+    if (
+      next !== undefined &&
+      (page.data.length === 0 ||
+        next !== page.data[0]?.seq ||
+        (beforeSeq !== undefined && next >= beforeSeq))
+    ) {
+      throw new Error("Thread export history cursor did not advance.");
+    }
+    pages.push(page);
+    beforeSeq = next;
+  } while (beforeSeq !== undefined);
+  return mergeMessages(
+    buildVisibleHistoryMessages(
+      flattenThreadHistoryPages(pages),
+      new Set<string>(),
+    ),
+    [],
+    [],
+  );
+}
+
+/**
+ * Preserve rows that this client has already loaded while newest-first cursor
+ * pages move forward during a long run.
+ *
+ * A background refetch recalculates every loaded page from the refreshed first
+ * page. When older pages have not all been loaded yet, that can displace rows
+ * which were visible a moment ago even though they still exist on the server.
+ * Thread-global seq is the authoritative order; refreshed copies win without
+ * moving their established position.
+ */
+export function reconcileThreadHistoryRows(
+  previousRows: RunMessage[],
+  currentRows: RunMessage[],
+  isAuthoritativeComplete: boolean,
+): RunMessage[] {
+  const sourceRows = isAuthoritativeComplete
+    ? currentRows
+    : [...previousRows, ...currentRows];
+  if (sourceRows.some((row) => !isValidMessageSeq(row.seq))) {
+    console.error(
+      "Thread history reconciliation received an invalid sequence value.",
+    );
+    // Never skip an invalid row or feed it into Map/Array.sort: either choice
+    // can silently lose or misorder messages. A failed refresh keeps the last
+    // known-good snapshot; an invalid first snapshot degrades to server order.
+    return previousRows.length > 0 ? previousRows : currentRows;
   }
 
-  const canonical = dedupeMessagesByIdentity(historyMessages);
-  const live = dedupeMessagesByIdentity(threadMessages);
-  const canonicalByIdentity = new Map(
-    canonical.flatMap((message) => {
-      const identity = messageIdentity(message);
-      return identity ? [[identity, message] as const] : [];
-    }),
-  );
-  const replacementByIdentity = new Map<string, Message>();
-  // This uses the same identity-anchor weaving shape as
-  // resolveTransientHistoryBridge, but intentionally remains separate: live
-  // messages may replace canonical copies and identity-less entries survive.
-  const beforeAnchor = new Map<string, Message[]>();
-  let pending: Message[] = [];
-  let lastAnchorIdentity: string | undefined;
-  let hasSharedAnchor = false;
+  const rowsBySeq = new Map<number, RunMessage>();
+  for (const row of sourceRows) {
+    rowsBySeq.set(row.seq, row);
+  }
 
-  // A summarized checkpoint is not necessarily a contiguous history suffix:
-  // middleware may retain protected prompt/input messages at the front and a
-  // recent tail at the back. Treat every shared identity as an ordering anchor,
-  // replacing the canonical copy in place. New live messages are woven before
-  // the next shared anchor (or after the last one), so a protected early input
-  // can never be moved to the tail by global last-copy deduplication.
-  for (const message of live) {
-    const identity = messageIdentity(message);
-    const canonicalMessage = identity
-      ? canonicalByIdentity.get(identity)
-      : undefined;
-    if (!identity || !canonicalMessage) {
-      pending.push(message);
+  const sortedRows = [...rowsBySeq.values()].sort(
+    (left, right) => left.seq - right.seq,
+  );
+  const reconciled = dedupeRunMessagesByIdentity(sortedRows);
+  // Deduping collapses a re-persisted identity to its newest copy, but per
+  // the backend `get_message_seqs` earliest-seq-wins rule the message keeps
+  // the position it first occupied (see buildVisibleHistoryMessages).
+  // Re-anchor the surviving row to the earliest seq the identity held in
+  // this window, otherwise a re-persisted update pushes the message towards
+  // the tail. Prefer visible rows so a hidden control copy cannot move its
+  // visible twin; hidden rows provide a fallback only when no visible copy exists.
+  const earliestSeqByRunIdentity = new Map<string, number>();
+  const earliestVisibleSeqByRunIdentity = new Map<string, number>();
+  for (const row of sortedRows) {
+    const identity = messageIdentity(row.content);
+    if (!identity || !isValidMessageSeq(row.seq)) {
       continue;
     }
-
-    if (pending.length > 0 && hasSharedAnchor) {
-      beforeAnchor.set(identity, [
-        ...(beforeAnchor.get(identity) ?? []),
-        ...pending,
-      ]);
+    const key = `${row.run_id}:${identity}`;
+    const known = earliestSeqByRunIdentity.get(key);
+    if (known === undefined || row.seq < known) {
+      earliestSeqByRunIdentity.set(key, row.seq);
     }
-    // A summarized checkpoint may start with a protected message whose true
-    // canonical position is separated from this anchor by unloaded pages.
-    // Suppress that ambiguous prefix instead of visually collapsing the gap.
-    pending = [];
-    hasSharedAnchor = true;
-    lastAnchorIdentity = identity;
-
-    // A hidden checkpoint control message must not replace a visible canonical
-    // user turn that happens to reuse its identity. In every other case the
-    // live checkpoint copy is fresher and replaces history without moving it.
-    if (
-      !isHiddenFromUIMessage(message) ||
-      isHiddenFromUIMessage(canonicalMessage)
-    ) {
-      replacementByIdentity.set(identity, message);
-    }
-  }
-
-  let canonicalAndLive: Message[];
-  if (!lastAnchorIdentity) {
-    canonicalAndLive = [...canonical, ...live];
-  } else {
-    canonicalAndLive = [];
-    for (const message of canonical) {
-      const identity = messageIdentity(message);
-      if (identity) {
-        canonicalAndLive.push(...(beforeAnchor.get(identity) ?? []));
+    if (!isHiddenFromUIMessage(row.content)) {
+      const knownVisible = earliestVisibleSeqByRunIdentity.get(key);
+      if (knownVisible === undefined || row.seq < knownVisible) {
+        earliestVisibleSeqByRunIdentity.set(key, row.seq);
       }
-      const replacement = identity
-        ? replacementByIdentity.get(identity)
-        : undefined;
-      canonicalAndLive.push(replacement ?? message);
     }
-    // A trailing live-only segment is known to come after the last shared
-    // anchor, but that anchor may not be the end of canonical history (for
-    // example, another client may have persisted newer rows). Preserve the
-    // canonical source order before appending the live tail.
-    canonicalAndLive.push(...pending);
+  }
+  const anchored = reconciled.map((row) => {
+    const identity = messageIdentity(row.content);
+    if (!identity) {
+      return row;
+    }
+    const key = `${row.run_id}:${identity}`;
+    const earliestSeq =
+      earliestVisibleSeqByRunIdentity.get(key) ??
+      earliestSeqByRunIdentity.get(key);
+    if (earliestSeq === undefined || row.seq === earliestSeq) {
+      return row;
+    }
+    return { ...row, seq: earliestSeq };
+  });
+  // Re-anchoring can change row order. Sort before comparing with the retained
+  // snapshot so unchanged reconciliations can still reuse the previous array.
+  anchored.sort((left, right) => left.seq - right.seq);
+  if (
+    anchored.length === previousRows.length &&
+    anchored.every((row, index) => {
+      const previous = previousRows[index];
+      if (!previous) {
+        return false;
+      }
+      // Re-anchoring rebuilds the row object on every pass; treat a row whose
+      // run_id, seq and content reference all match as unchanged so the
+      // retained-history state can stay referentially stable.
+      return (
+        row === previous ||
+        (row.run_id === previous.run_id &&
+          row.seq === previous.seq &&
+          row.content === previous.content)
+      );
+    })
+  ) {
+    return previousRows;
+  }
+  return anchored;
+}
+
+// mergeMessages now lives in ./message-order (pure, unit-testable ordering
+// module); it is imported above and re-exported here so existing consumers of
+// this module keep working unchanged.
+export { mergeMessages };
+
+/**
+ * Collect live run ids that were not part of the pre-submit checkpoint.
+ * An empty result is safe because restoreLocalTurnMessageOrder independently
+ * anchors the current turn from the pending human's run_id when interrupt/stop
+ * has already flushed the live steps into canonical history.
+ */
+export function getCurrentTurnRunIds(
+  messages: Message[],
+  baselineMessageIdentities: ReadonlySet<string> | null,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+): Set<string> {
+  const runIds = new Set<string>();
+  if (baselineMessageIdentities === null) {
+    return runIds;
   }
 
-  const merged = dedupeMessagesByIdentity([
-    ...canonicalAndLive,
-    ...optimisticMessages,
-  ]);
-
-  return merged.map((message) => {
-    const identity = messageIdentity(message);
+  for (const message of messages) {
     if (
-      identity &&
-      savedTurnDurations.has(identity) &&
-      message.additional_kwargs?.turn_duration === undefined
+      (message.type !== "ai" && message.type !== "tool") ||
+      isHiddenFromUIMessage(message)
     ) {
-      return {
-        ...message,
-        additional_kwargs: {
-          ...message.additional_kwargs,
-          turn_duration: savedTurnDurations.get(identity),
-        },
-      } as Message;
+      continue;
     }
-    return message;
-  });
+    const identity = messageIdentity(message);
+    const runId = getMessageRunId(message);
+    if (
+      runId &&
+      (!identity ||
+        (!baselineMessageIdentities.has(identity) &&
+          !confirmedHistoryIdentities.has(identity)))
+    ) {
+      runIds.add(runId);
+    }
+  }
+  return runIds;
+}
+
+/**
+ * Keep messages from a locally submitted turn behind that turn's user input.
+ * LangGraph `messages-tuple` events can publish the first AI/tool steps before
+ * canonical history contains the user message. Those steps are not part of the
+ * pre-submit baseline, so move only that visible pending segment behind the
+ * latest new human message. Conversely, a baseline or history-confirmed message
+ * from an established turn can be woven after that human before a live
+ * checkpoint tail; move those established messages back before the input. The
+ * caller keeps the baseline after stream completion because the SDK may retain
+ * its transient event order until the next submit.
+ */
+export function restoreLocalTurnMessageOrder(
+  messages: Message[],
+  baselineMessageIdentities: ReadonlySet<string>,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+  currentTurnRunIds: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+  anchorHumanIdentity?: string | null,
+  canonicalHistoryIdentities: ReadonlySet<string> = confirmedHistoryIdentities,
+): Message[] {
+  // When the caller recorded the exact human identity this turn submitted
+  // (LocalTurnAnchor), only that message may anchor the repair. `null` means
+  // the turn has no visible human at all (hidden human-input reply,
+  // regenerate replay): no human may be borrowed from history. An identity
+  // that has not reached the render snapshot yet means the display is a frame
+  // behind — keep the established order instead of re-anchoring on an older
+  // history-only human (absence from the checkpoint baseline is not proof
+  // that a message belongs to this turn).
+  if (anchorHumanIdentity === null) {
+    return messages;
+  }
+  let pendingHumanIndex = -1;
+  if (anchorHumanIdentity !== undefined) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      if (
+        message.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        messageIdentity(message) === anchorHumanIdentity
+      ) {
+        pendingHumanIndex = index;
+        break;
+      }
+    }
+  } else {
+    // Compat path for callers without a local-turn anchor. Context compaction
+    // can omit an older human from the checkpoint while the REST history page
+    // still supplies it, so anchor on the LATEST visible human that is not in
+    // the baseline; an old history-only turn then cannot claim the current
+    // stream. A freshly submitted human may not have a server id yet, and
+    // identity-less messages are necessarily absent from the baseline.
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      const identity = messageIdentity(message);
+      if (
+        message.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        (identity === undefined || !baselineMessageIdentities.has(identity))
+      ) {
+        pendingHumanIndex = index;
+        break;
+      }
+    }
+  }
+  if (pendingHumanIndex < 0) {
+    return messages;
+  }
+
+  // The fixed confirmed set decides which suffix messages may move back across
+  // this turn's human. The wider canonical set has a different job in the
+  // prefix: a REST-history message is not speculative current-turn output just
+  // because the latest-page window advanced after submit.
+  const isConfirmedHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && confirmedHistoryIdentities.has(identity);
+  const isCanonicalHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && canonicalHistoryIdentities.has(identity);
+  // Steps of the CURRENT run must never be treated as displaced history: after
+  // an interrupt/stop the current turn's already-executed steps are persisted
+  // into canonical history, but they still belong AFTER the new human input.
+  // The pending human message itself carries the current run_id, so it is the
+  // most reliable anchor even when the live checkpoint no longer holds the
+  // current turn's steps (stop/interrupt can flush them to history).
+  const effectiveCurrentTurnRunIds = new Set(currentTurnRunIds);
+  const pendingHumanRunId = getMessageRunId(messages[pendingHumanIndex]!);
+  if (pendingHumanRunId) {
+    effectiveCurrentTurnRunIds.add(pendingHumanRunId);
+  }
+  const isCurrentTurnStep = (message: Message) => {
+    const runId = getMessageRunId(message);
+    return runId !== undefined && effectiveCurrentTurnRunIds.has(runId);
+  };
+
+  const stablePrefix: Message[] = [];
+  const earlyPendingSteps: Message[] = [];
+  for (const message of messages.slice(0, pendingHumanIndex)) {
+    const identity = messageIdentity(message);
+    const isVisiblePendingStep =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message) &&
+      identity !== undefined &&
+      !baselineMessageIdentities.has(identity) &&
+      ((!isCanonicalHistoryMessage(identity) &&
+        !isConfirmedHistoryMessage(identity)) ||
+        isCurrentTurnStep(message));
+    if (isVisiblePendingStep) {
+      earlyPendingSteps.push(message);
+    } else {
+      stablePrefix.push(message);
+    }
+  }
+  const displacedMessages: Message[] = [];
+  const stableSuffix: Message[] = [];
+  for (const message of messages.slice(pendingHumanIndex + 1)) {
+    const identity = messageIdentity(message);
+    const wasPresentBeforeSubmit =
+      identity !== undefined && baselineMessageIdentities.has(identity);
+    const wasConfirmedInPreviousHistory =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message) &&
+      isConfirmedHistoryMessage(identity) &&
+      !isCurrentTurnStep(message);
+    if (wasPresentBeforeSubmit || wasConfirmedInPreviousHistory) {
+      displacedMessages.push(message);
+    } else {
+      stableSuffix.push(message);
+    }
+  }
+  if (earlyPendingSteps.length === 0 && displacedMessages.length === 0) {
+    return messages;
+  }
+
+  return [
+    ...stablePrefix,
+    ...displacedMessages,
+    messages[pendingHumanIndex]!,
+    ...earlyPendingSteps,
+    ...stableSuffix,
+  ];
+}
+
+/**
+ * Reconnect/reload counterpart of {@link restoreLocalTurnMessageOrder}.
+ *
+ * After a mid-run page reload the local-turn baseline is empty, so the local
+ * restore never runs — yet the same ordering race still applies: replayed
+ * `messages-tuple` steps can reach the merged list before the turn's human
+ * message (the retained replay buffer may even have dropped it), and the
+ * live-only human is then woven in before the next shared history anchor,
+ * leaving steps of the SAME run above the user message they belong to.
+ *
+ * Canonical history is seq-sorted, so a visible AI/tool step sitting above
+ * the last visible human while another message of the same run sits below it
+ * (a "same-run sandwich") is provably misplaced. Run_id-less steps are
+ * live-only (history rows always carry run_id) and are attributable to the
+ * reconnected run only when a run_id-less step also follows the human.
+ *
+ * Only steps after the last terminal assistant answer (visible content, no
+ * tool calls) in the segment are candidates: such an answer completes the
+ * turn that owns it, so everything up to it belongs to a finished turn and
+ * must keep its position even when run_ids are absent or uniform across
+ * turns (branch-seeded history, mocked feeds). A still-streaming text step
+ * can look like a terminal answer before its tool call arrives (#4304); it
+ * then stays above the human until canonical history heals the order — an
+ * accepted transient, far safer than pulling a completed turn's answer
+ * below the next user message. A resent turn after an interrupted run and
+ * pagination orphans from older turns (#4399) fail the checks as well and
+ * are left untouched. When an interrupted turn and the next turn share one
+ * synthetic run_id, the previous human anchor plus the missing terminal
+ * answer makes step ownership ambiguous, so that layout is also preserved.
+ */
+export function restoreReconnectedTurnMessageOrder(
+  messages: Message[],
+): Message[] {
+  let humanIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+      humanIndex = index;
+      break;
+    }
+  }
+  if (humanIndex <= 0) {
+    return messages;
+  }
+
+  // Only the segment since the previous visible human can belong to the
+  // active turn; older turns are anchored by their own human message.
+  let segmentStart = 0;
+  for (let index = humanIndex - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+      segmentStart = index + 1;
+      break;
+    }
+  }
+  if (segmentStart >= humanIndex) {
+    return messages;
+  }
+
+  // A terminal assistant answer completes the turn that owns it. Only steps
+  // after the last such boundary can belong to the active turn.
+  let candidateStart = segmentStart;
+  for (let index = segmentStart; index < humanIndex; index++) {
+    const message = messages[index]!;
+    if (
+      message.type === "ai" &&
+      !isHiddenFromUIMessage(message) &&
+      // Thinking-only blocks (Anthropic) are not completed answers: require
+      // extractable text/image content to close the turn.
+      extractContentFromMessage(message).length > 0 &&
+      !hasToolCalls(message)
+    ) {
+      candidateStart = index + 1;
+    }
+  }
+
+  const previousHumanRunId =
+    segmentStart > 0 ? getMessageRunId(messages[segmentStart - 1]!) : undefined;
+  const hasUniformRunIdSincePreviousHuman =
+    previousHumanRunId !== undefined &&
+    messages
+      .slice(segmentStart - 1)
+      .every(
+        (message) =>
+          isHiddenFromUIMessage(message) ||
+          getMessageRunId(message) === previousHumanRunId,
+      );
+  if (candidateStart === segmentStart && hasUniformRunIdSincePreviousHuman) {
+    return messages;
+  }
+
+  const runIdsAfter = new Set<string>();
+  let hasLiveOnlyStepAfter = false;
+  for (const message of messages.slice(humanIndex + 1)) {
+    const runId = getMessageRunId(message);
+    if (runId) {
+      runIdsAfter.add(runId);
+    } else if (
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message)
+    ) {
+      hasLiveOnlyStepAfter = true;
+    }
+  }
+
+  const misplacedSteps: Message[] = [];
+  const stablePrefix = messages.slice(0, candidateStart);
+  for (const message of messages.slice(candidateStart, humanIndex)) {
+    const isVisibleStep =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message);
+    const runId = getMessageRunId(message);
+    if (
+      isVisibleStep &&
+      ((runId !== undefined && runIdsAfter.has(runId)) ||
+        (runId === undefined && hasLiveOnlyStepAfter))
+    ) {
+      misplacedSteps.push(message);
+    } else {
+      stablePrefix.push(message);
+    }
+  }
+  if (misplacedSteps.length === 0) {
+    return messages;
+  }
+
+  return [
+    ...stablePrefix,
+    messages[humanIndex]!,
+    ...misplacedSteps,
+    ...messages.slice(humanIndex + 1),
+  ];
+}
+
+/**
+ * Keep a run-scoped ledger of every visible message that reached a committed
+ * UI frame. Live checkpoint windows can roll forward between two
+ * summarization events; replacing this ledger with only the newest window
+ * would make the intervening steps impossible to rescue at the next
+ * RemoveMessage(ALL).
+ *
+ * The newest visible copy wins by identity without moving its established
+ * position. Explicitly superseded messages are removed so regeneration cannot
+ * revive an answer that the UI intentionally hid.
+ */
+export function mergeRenderedMessageLedger(
+  previouslyRenderedMessages: Message[],
+  visibleMessages: Message[],
+  supersededMessageIds: ReadonlySet<string> = new Set<string>(),
+): Message[] {
+  const isEligible = (message: Message) =>
+    messageIdentity(message) !== undefined &&
+    (!message.id || !supersededMessageIds.has(message.id));
+  const retainedPrevious =
+    supersededMessageIds.size === 0
+      ? previouslyRenderedMessages.filter(
+          (message) => messageIdentity(message) !== undefined,
+        )
+      : previouslyRenderedMessages.filter(isEligible);
+  const eligibleVisibleMessages = visibleMessages.filter(isEligible);
+  if (retainedPrevious.length === 0) {
+    return eligibleVisibleMessages;
+  }
+  return mergeMessages(retainedPrevious, eligibleVisibleMessages, []);
 }
 
 /**
@@ -434,28 +1302,41 @@ export function mergeMessages(
  * therefore need a short-lived visual bridge until run-event history catches up.
  *
  * Summarization emits `RemoveMessage(ALL)` + a hidden summary + the retained
- * tail. Everything in the current live thread before the first retained visible
- * message is being removed; we keep those (minus the summary control messages
- * already tracked) so the UI can still show the full conversation (#3825).
+ * tail. Everything in the current live thread that is absent from the retained
+ * visible window is being removed; we keep those (minus the summary control
+ * messages already tracked) so the UI can still show the full conversation
+ * (#3825). Comparing identities instead of slicing at the first retained
+ * message also handles a protected early input followed by a recent tail.
  */
 export function computeSummarizationTransientMessages(
   currentMessages: Message[],
   summarizationMessages: Message[],
   summarizedMessageIds: ReadonlySet<string>,
+  previouslyRenderedMessages: Message[] = EMPTY_MESSAGES,
 ): Message[] {
-  const firstRetainedVisibleIdentity = summarizationMessages
-    .filter((message) => message.type !== "remove")
-    .filter((message) => !isHiddenFromUIMessage(message))
-    .map(messageIdentity)
-    .find(isNonEmptyString);
+  const retainedVisibleIdentities = new Set(
+    summarizationMessages
+      .filter((message) => message.type !== "remove")
+      .filter((message) => !isHiddenFromUIMessage(message))
+      .map(messageIdentity)
+      .filter(isNonEmptyString),
+  );
 
+  // Updates can outrun React while the SDK applies RemoveMessage(ALL). In that
+  // case currentMessages may already be the retained post-compaction window
+  // even though the previous committed UI frame still showed the removed
+  // processing steps. Use that frame as the chronological base, then overlay
+  // fresher live copies. This rescues only messages the user actually saw and
+  // preserves the unloaded-history-gap protection in the bridge resolver.
+  const captureMessages =
+    previouslyRenderedMessages.length > 0
+      ? mergeMessages(previouslyRenderedMessages, currentMessages, [])
+      : currentMessages;
   const moved: Message[] = [];
-  for (const message of currentMessages) {
-    if (
-      firstRetainedVisibleIdentity &&
-      messageIdentity(message) === firstRetainedVisibleIdentity
-    ) {
-      break;
+  for (const message of captureMessages) {
+    const identity = messageIdentity(message);
+    if (identity && retainedVisibleIdentities.has(identity)) {
+      continue;
     }
     if (!summarizedMessageIds.has(message.id ?? "")) {
       moved.push(message);
@@ -486,6 +1367,7 @@ export function resolveTransientHistoryBridge(
   bridgeOrder: readonly string[] = transientMessages
     .map(messageIdentity)
     .filter(isNonEmptyString),
+  previouslyRenderedOrder: readonly string[] = EMPTY_MESSAGE_IDENTITIES,
 ): Message[] {
   if (transientMessages.length === 0) {
     return visibleHistory;
@@ -505,8 +1387,28 @@ export function resolveTransientHistoryBridge(
     return visibleHistory;
   }
 
+  // Trusted seq outranks identity anchors — the same position priority
+  // mergeMessages applies. A rescued message whose seq is known lands exactly
+  // where the feed places it, even when no bridge identity overlaps the
+  // loaded window; anchor weaving below remains the fallback for entries
+  // without a trustworthy position.
+  const seqPositioned: Message[] = [];
+  const unpositioned: Message[] = [];
+  for (const message of missing) {
+    if (trustedMessageSeq(message) !== undefined) {
+      seqPositioned.push(message);
+    } else {
+      unpositioned.push(message);
+    }
+  }
+  // Place rescued seq rows first so weaving can anchor unsequenced
+  // neighbors to them without a later insertion reversing their order.
+  const positionedHistory = insertByTrustedSeq(visibleHistory, seqPositioned);
+  const anchorIdentities = new Set(
+    positionedHistory.map(messageIdentity).filter(isNonEmptyString),
+  );
   const missingByIdentity = new Map(
-    missing.flatMap((message) => {
+    unpositioned.flatMap((message) => {
       const identity = messageIdentity(message);
       return identity ? [[identity, message] as const] : [];
     }),
@@ -516,22 +1418,55 @@ export function resolveTransientHistoryBridge(
   // intentionally excluded to avoid permanent duplicates.
   const beforeAnchor = new Map<string, Message[]>();
   const emittedMissingIdentities = new Set<string>();
+  const previouslyRenderedIndex = new Map(
+    previouslyRenderedOrder.map((identity, index) => [identity, index]),
+  );
   let pending: Message[] = [];
   let lastAnchorIdentity: string | undefined;
-  let hasCanonicalAnchor = false;
 
   for (const identity of bridgeOrder) {
-    if (presentIdentities.has(identity)) {
-      if (pending.length > 0 && hasCanonicalAnchor) {
-        beforeAnchor.set(identity, [
-          ...(beforeAnchor.get(identity) ?? []),
-          ...pending,
-        ]);
+    if (anchorIdentities.has(identity)) {
+      if (pending.length > 0) {
+        // A rescued seq anchor preserves its captured prefix even if React
+        // has not rendered it yet. Only a leading prefix anchored to loaded
+        // history needs proof that it does not span an unloaded cursor gap.
+        if (
+          lastAnchorIdentity !== undefined ||
+          !presentIdentities.has(identity)
+        ) {
+          beforeAnchor.set(identity, [
+            ...(beforeAnchor.get(identity) ?? []),
+            ...pending,
+          ]);
+        } else {
+          const anchorRenderIndex = previouslyRenderedIndex.get(identity);
+          if (anchorRenderIndex !== undefined) {
+            const safeRenderedPrefix = pending
+              .filter((message) => {
+                const pendingIdentity = messageIdentity(message);
+                const renderIndex = pendingIdentity
+                  ? previouslyRenderedIndex.get(pendingIdentity)
+                  : undefined;
+                return (
+                  renderIndex !== undefined && renderIndex < anchorRenderIndex
+                );
+              })
+              .sort((left, right) => {
+                const leftIndex =
+                  previouslyRenderedIndex.get(messageIdentity(left) ?? "") ??
+                  Number.MAX_SAFE_INTEGER;
+                const rightIndex =
+                  previouslyRenderedIndex.get(messageIdentity(right) ?? "") ??
+                  Number.MAX_SAFE_INTEGER;
+                return leftIndex - rightIndex;
+              });
+            if (safeRenderedPrefix.length > 0) {
+              beforeAnchor.set(identity, safeRenderedPrefix);
+            }
+          }
+        }
       }
-      // The prefix before the first loaded anchor has no trustworthy position:
-      // cursor pages containing its intervening history may not be loaded yet.
       pending = [];
-      hasCanonicalAnchor = true;
       lastAnchorIdentity = identity;
       continue;
     }
@@ -542,17 +1477,17 @@ export function resolveTransientHistoryBridge(
     }
   }
 
-  // No bridge identity overlaps canonical history. This is the original
+  // No bridge identity overlaps a positioned row. This is the original
   // persistence-gap case: loaded history is older and the rescued live turns
   // belong after it.
   if (!lastAnchorIdentity) {
-    return [...visibleHistory, ...missing];
+    return [...positionedHistory, ...unpositioned];
   }
 
   // A candidate added before its ordering snapshot (or carrying an identity
   // absent from that snapshot) cannot be anchored. Keep it in capture order at
   // the trailing edge of the anchored bridge rather than dropping it.
-  for (const message of missing) {
+  for (const message of unpositioned) {
     const identity = messageIdentity(message);
     if (identity && !emittedMissingIdentities.has(identity)) {
       pending.push(message);
@@ -561,7 +1496,7 @@ export function resolveTransientHistoryBridge(
   }
 
   const resolved: Message[] = [];
-  for (const message of visibleHistory) {
+  for (const message of positionedHistory) {
     const identity = messageIdentity(message);
     if (identity) {
       resolved.push(...(beforeAnchor.get(identity) ?? []));
@@ -604,9 +1539,27 @@ export function mergeTransientHistoryBridge(
       (!isHiddenFromUIMessage(captured) || isHiddenFromUIMessage(existing))
     ) {
       // Refresh the buffered snapshot without moving its first-known
-      // chronological position. Repeated compression can recapture protected
-      // prefix messages before a newer tail.
-      merged[existingIndex] = captured;
+      // chronological position — and without dropping a trusted position the
+      // earlier copy already carried. Repeated compression can recapture
+      // protected prefix messages before a newer tail; a refresh without seq
+      // must not reset the position the bridge resolver relies on.
+      const existingSeq = trustedMessageSeq(existing);
+      const capturedSeq = trustedMessageSeq(captured);
+      const keptSeq =
+        existingSeq !== undefined &&
+        (capturedSeq === undefined || existingSeq < capturedSeq)
+          ? existingSeq
+          : capturedSeq;
+      merged[existingIndex] =
+        keptSeq !== undefined && capturedSeq !== keptSeq
+          ? ({
+              ...captured,
+              additional_kwargs: {
+                ...captured.additional_kwargs,
+                [MESSAGE_SEQ_KEY]: keptSeq,
+              },
+            } as Message)
+          : captured;
     }
   }
   return merged;
@@ -620,19 +1573,22 @@ export function mergeTransientHistoryBridge(
 export function mergeTransientHistoryBridgeOrder(
   currentOrder: readonly string[],
   capturedMessages: Message[],
-): string[] {
+): readonly string[] {
   const capturedOrder = dedupeMessagesByIdentity(capturedMessages)
     .map(messageIdentity)
     .filter(isNonEmptyString);
-  const merged = [...currentOrder];
+  // Clone lazily and return the input when nothing is appended: this runs per
+  // render while the bridge is active, and a fresh array would invalidate the
+  // coalesced render memo on every chunk (#4409 Phase 1).
+  let merged: string[] | null = null;
   const seen = new Set(currentOrder);
   for (const identity of capturedOrder) {
     if (!seen.has(identity)) {
       seen.add(identity);
-      merged.push(identity);
+      (merged ??= [...currentOrder]).push(identity);
     }
   }
-  return merged;
+  return merged ?? currentOrder;
 }
 
 export function resolveThreadTransientHistoryBridge(
@@ -641,6 +1597,7 @@ export function resolveThreadTransientHistoryBridge(
   bridgeThreadId: string | null,
   currentThreadId: string | null | undefined,
   bridgeOrder?: readonly string[],
+  previouslyRenderedOrder?: readonly string[],
 ): Message[] {
   if (!bridgeThreadId || bridgeThreadId !== currentThreadId) {
     return visibleHistory;
@@ -649,6 +1606,7 @@ export function resolveThreadTransientHistoryBridge(
     visibleHistory,
     transientMessages,
     bridgeOrder,
+    previouslyRenderedOrder,
   );
 }
 
@@ -685,6 +1643,27 @@ function getMessagesAfterBaseline(
   });
 }
 
+/**
+ * Human-message baseline for a prepared replay (regenerate / edit).
+ *
+ * A replay masks the turn it supersedes, so those messages leave the live
+ * message list the moment the mask is applied. Baselining on the pre-mask count
+ * means the replacement only ever restores the count instead of exceeding it,
+ * and the optimistic copy is never recognised as confirmed. That matters for
+ * the first turn of a thread, where the runtime re-keys the replacement message
+ * so identity comparison cannot stand in for the count either.
+ */
+export function countHumanMessagesExcludingSuperseded(
+  messages: Message[],
+  supersededMessageIds: readonly string[],
+): number {
+  const superseded = new Set(supersededMessageIds);
+  return messages.filter(
+    (message) =>
+      message.type === "human" && (!message.id || !superseded.has(message.id)),
+  ).length;
+}
+
 export function getVisibleOptimisticMessages(
   optimisticMessages: Message[],
   previousHumanMessageCount: number,
@@ -697,6 +1676,24 @@ export function getVisibleOptimisticMessages(
     return [];
   }
   return optimisticMessages;
+}
+
+export function areOptimisticMessagesConfirmed(
+  optimisticMessages: Message[],
+  persistedMessages: Message[],
+): boolean {
+  const optimisticIdentities = optimisticMessages
+    .map(messageIdentity)
+    .filter(isNonEmptyString);
+  if (optimisticIdentities.length === 0) {
+    return false;
+  }
+  const persistedIdentities = new Set(
+    persistedMessages.map(messageIdentity).filter(isNonEmptyString),
+  );
+  return optimisticIdentities.every((identity) =>
+    persistedIdentities.has(identity),
+  );
 }
 
 export function getSummarizationMiddlewareMessages(
@@ -721,6 +1718,136 @@ export function getSummarizationMiddlewareMessages(
   }
 
   return undefined;
+}
+
+export const STREAM_RENDER_COALESCE_MS = 80;
+
+export type CoalesceDecision =
+  | { action: "flush-now" }
+  | { action: "schedule"; delayMs: number }
+  | { action: "wait" };
+
+/**
+ * Decide how an incoming stream update reaches the rendered snapshot: flush
+ * immediately once a full interval has elapsed (leading edge), otherwise
+ * schedule exactly one trailing flush for the interval remainder. Unlike a
+ * debounce, the delay never extends past the interval, so a dense stream can
+ * never starve rendering.
+ */
+export function decideCoalesce(
+  nowMs: number,
+  lastFlushMs: number,
+  intervalMs: number,
+  hasPendingTimer: boolean,
+): CoalesceDecision {
+  if (nowMs - lastFlushMs >= intervalMs) {
+    return { action: "flush-now" };
+  }
+  if (hasPendingTimer) {
+    return { action: "wait" };
+  }
+  return { action: "schedule", delayMs: intervalMs - (nowMs - lastFlushMs) };
+}
+
+/**
+ * While a run is streaming, expose the messages array as a snapshot that
+ * updates at most once per interval instead of once per SSE chunk, so the
+ * merge/group/render pipeline runs per frame budget rather than per token
+ * (#4409 Phase 1). When the stream is idle the latest array passes straight
+ * through, keeping non-stream updates immediate.
+ */
+function sameMessageArray(a: Message[], b: Message[]): boolean {
+  return (
+    a === b ||
+    (a.length === b.length && a.every((message, index) => message === b[index]))
+  );
+}
+
+export function useCoalescedStreamMessages(
+  messages: Message[],
+  isStreaming: boolean,
+  intervalMs: number = STREAM_RENDER_COALESCE_MS,
+): Message[] {
+  // `null` means "no snapshot belongs to the current stream": the live array is
+  // returned until the leading-edge flush lands, so a snapshot left over from an
+  // earlier stream can never be painted. This hook outlives thread switches (the
+  // chat page deliberately avoids re-mounting, see its `onStart` comment), so a
+  // retained snapshot would otherwise be another thread's messages.
+  const [snapshot, setSnapshot] = useState<Message[] | null>(null);
+  const latestRef = useRef(messages);
+  latestRef.current = messages;
+  // Monotonic clock: a wall-clock step (NTP, sleep/wake) between two reads
+  // would otherwise be added to the remaining interval and stall the flush for
+  // the length of the jump. -Infinity means "never flushed", so the first
+  // update of a stream always takes the leading edge.
+  const lastFlushRef = useRef(Number.NEGATIVE_INFINITY);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Every publication goes through the shallow-equality guard: inputs whose
+  // identity churns without content change (the SDK getter mints fresh arrays)
+  // must not re-trigger renders, or this effect would setState-loop.
+  const publish = useCallback(() => {
+    setSnapshot((previous) =>
+      previous !== null && sameMessageArray(previous, latestRef.current)
+        ? previous
+        : latestRef.current,
+    );
+  }, []);
+
+  const clearPendingFlush = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isStreaming) {
+      clearPendingFlush();
+      // Drop the flush baseline so the leading edge is per stream rather than
+      // per hook instance: a run starting within one interval of the previous
+      // one must not have its first frame deferred. Dropping the snapshot with
+      // it costs one render per stream end, versus one per idle message change
+      // if the snapshot were instead kept in sync while nothing reads it.
+      lastFlushRef.current = Number.NEGATIVE_INFINITY;
+      setSnapshot((previous) => (previous === null ? previous : null));
+      return;
+    }
+    const now = performance.now();
+    const decision = decideCoalesce(
+      now,
+      lastFlushRef.current,
+      intervalMs,
+      timerRef.current !== null,
+    );
+    if (decision.action === "flush-now") {
+      // A trailing timer can still be armed here: timers fire late under
+      // main-thread load, which is exactly when a chunk overtakes one. Leaving
+      // it would publish a second time and slip the next interval forward.
+      clearPendingFlush();
+      lastFlushRef.current = now;
+      publish();
+    } else if (decision.action === "schedule") {
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        // Read the clock again: timers fire late under load, and the next
+        // interval must start from the real flush.
+        lastFlushRef.current = performance.now();
+        publish();
+      }, decision.delayMs);
+    }
+  }, [messages, isStreaming, intervalMs, publish, clearPendingFlush]);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+      }
+    },
+    [],
+  );
+
+  return isStreaming && snapshot !== null ? snapshot : messages;
 }
 
 export function upsertThreadInSearchCache(
@@ -769,18 +1896,29 @@ export function upsertThreadInInfiniteCache(
   queryClient: QueryClient,
   thread: AgentThread,
 ) {
+  // Run-created snapshots do not carry archive metadata. Let the server
+  // decide membership instead of injecting a running chat into both views.
+  const hasArchiveFilter = ({ queryKey }: { queryKey: readonly unknown[] }) =>
+    typeof (queryKey[2] as InfiniteThreadsParams | undefined)?.archived ===
+    "boolean";
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+    predicate: hasArchiveFilter,
+  });
   queryClient.setQueriesData(
     {
       queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       exact: false,
+      predicate: (query) => !hasArchiveFilter(query),
     },
-    (oldData: InfiniteData<AgentThread[]> | undefined) => {
+    (oldData: InfiniteThreadsData | undefined) => {
       if (!oldData) {
         return oldData;
       }
 
-      const merged = oldData.pages.map((page) =>
-        page.map((t) =>
+      const merged = oldData.pages.map((page) => ({
+        ...page,
+        threads: page.threads.map((t) =>
           t.thread_id === thread.thread_id
             ? {
                 ...thread,
@@ -796,20 +1934,27 @@ export function upsertThreadInInfiniteCache(
               }
             : t,
         ),
-      );
+      }));
 
       const exists = merged.some((page) =>
-        page.some((t) => t.thread_id === thread.thread_id),
+        page.threads.some((t) => t.thread_id === thread.thread_id),
       );
       if (exists) {
         return { ...oldData, pages: merged };
       }
 
-      const firstPage = merged[0] ?? [];
+      const firstPage = merged[0] ?? {
+        threads: [],
+        hiddenCount: 0,
+        hasMore: false,
+      };
       const restPages = merged.slice(1);
       return {
         ...oldData,
-        pages: [[thread, ...firstPage], ...restPages],
+        pages: [
+          { ...firstPage, threads: [thread, ...firstPage.threads] },
+          ...restPages,
+        ],
       };
     },
   );
@@ -824,12 +1969,22 @@ export function invalidateStoppedThreadCaches(
   void queryClient.invalidateQueries({
     queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
   });
+  // A finished run updates the title/recency the project page thread list
+  // shows ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+  void queryClient.invalidateQueries({
+    queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+  });
 
   if (!threadId || isMock) {
     return;
   }
 
   void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+  void queryClient.invalidateQueries({
+    queryKey: ["tool-approvals"],
+    predicate: (query) => query.queryKey[2] === threadId,
+  });
+  void queryClient.invalidateQueries({ queryKey: runInputsKey(threadId) });
   void queryClient.invalidateQueries({
     queryKey: threadHistoryQueryKey(threadId),
   });
@@ -929,6 +2084,30 @@ function getHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+function getStreamErrorToastMessage(
+  error: unknown,
+  t: Translations,
+  showApprovalErrors = false,
+): string {
+  const status = getHttpStatus(error);
+  if (status !== undefined && status >= 500 && status < 600) {
+    console.warn("Chat stream request failed:", getStreamErrorMessage(error));
+    return t.conversation.streamServerError(status);
+  }
+
+  const message = getStreamErrorMessage(error);
+  if (showApprovalErrors) {
+    const errorText = `${JSON.stringify(error) ?? ""} ${message}`;
+    if (errorText.includes("hitl_approval_disabled")) {
+      return t.humanInput.approval.featureDisabled;
+    }
+    if (errorText.includes("no_pending_approval")) {
+      return t.humanInput.approval.noPending;
+    }
+  }
+  return message;
+}
+
 function isThreadMissingError(error: unknown): boolean {
   const status = getHttpStatus(error);
   // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
@@ -939,14 +2118,17 @@ function isThreadMissingError(error: unknown): boolean {
 export function useThreadStream({
   threadId,
   displayThreadId,
+  assistantId = "lead_agent",
   context,
   isMock,
   onSend,
   onStart,
   onFinish,
-  onToolEnd,
+  restInterrupts,
+  restInterruptsLoading = false,
+  restInterruptsError = false,
 }: ThreadStreamOptions) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -971,12 +2153,37 @@ export function useThreadStream({
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
+  const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
+    null,
+  );
   const listeners = useRef({
     onSend,
     onStart,
     onFinish,
-    onToolEnd,
   });
+  const [answeredApprovalState, setAnsweredApprovalState] = useState<{
+    threadId: string | null;
+    requestIds: Set<string>;
+  }>({ threadId: null, requestIds: new Set() });
+  const pendingApprovalSubmissionRef = useRef<PendingApprovalSubmission | null>(
+    null,
+  );
+  const timedOutApprovalSubmissionRef = useRef<{
+    threadId: string;
+    requestId: string;
+  } | null>(null);
+  const liveInterruptRef = useRef<unknown>(undefined);
+  const restInterruptsRef = useRef<unknown>(restInterrupts);
+  restInterruptsRef.current = restInterrupts;
+
+  const settlePendingApproval = useCallback((accepted: boolean) => {
+    const pending = pendingApprovalSubmissionRef.current;
+    if (!pending) return;
+    pendingApprovalSubmissionRef.current = null;
+    clearTimeout(pending.timeout);
+    pending.resolve(accepted);
+  }, []);
+  const pausedRunContextsRef = useRef(new Map<string, PausedRunContext>());
 
   const {
     messages: history,
@@ -987,14 +2194,44 @@ export function useThreadStream({
     enabled: !isMock,
     pendingSupersededRunIds,
   });
+  const runsQuery = useThreadRuns(onStreamThreadId ?? undefined, {
+    enabled: !isMock,
+  });
+  const activeRunId = useMemo(
+    () =>
+      runsQuery.data?.find((run) => ACTIVE_RUN_STATUSES.has(String(run.status)))
+        ?.run_id,
+    [runsQuery.data],
+  );
+  const waitingForInputRunIds = useMemo(
+    () =>
+      new Set(
+        (runsQuery.data ?? [])
+          .filter((run) => run.status === "waiting_for_input")
+          .map((run) => run.run_id),
+      ),
+    [runsQuery.data],
+  );
+  const activeRunRejoinRef = useRef<ActiveRunRejoinState>(
+    createActiveRunRejoinState(),
+  );
+  const [activeRunRejoinRetry, setActiveRunRejoinRetry] = useState(0);
+  // Runs reads can lag behind SDK completion, including the initial read.
+  // Keep completed IDs across recovery-state resets so stale "running" data
+  // cannot restart a submitted or natively reconnected stream.
+  const completedRunIdsRef = useRef(new Set<string>());
+  // onCreated fires only for runs this hook submitted. A failed submit stays
+  // with the submit flow; only SDK reconnects are handed to recovery.
+  const submittedRunIdRef = useRef<string | null>(null);
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    listeners.current = { onSend, onStart, onFinish, onToolEnd };
-  }, [onSend, onStart, onFinish, onToolEnd]);
+    listeners.current = { onSend, onStart, onFinish };
+  }, [onSend, onStart, onFinish]);
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
+    timedOutApprovalSubmissionRef.current = null;
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
@@ -1004,6 +2241,25 @@ export function useThreadStream({
     }
     threadIdRef.current = normalizedThreadId;
   }, [threadId]);
+  useEffect(() => {
+    return () => {
+      timedOutApprovalSubmissionRef.current = null;
+      settlePendingApproval(false);
+    };
+  }, [settlePendingApproval]);
+
+  useEffect(() => {
+    const timedOutApproval = timedOutApprovalSubmissionRef.current;
+    if (!timedOutApproval || restInterruptsLoading || restInterruptsError) {
+      return;
+    }
+    const stillPending = extractHitlApprovalRequests(restInterrupts).some(
+      (request) => request.request_id === timedOutApproval.requestId,
+    );
+    if (!stillPending) {
+      timedOutApprovalSubmissionRef.current = null;
+    }
+  }, [restInterrupts, restInterruptsError, restInterruptsLoading]);
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
@@ -1037,15 +2293,121 @@ export function useThreadStream({
   }, []);
 
   const queryClient = useQueryClient();
+  const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+
+  const scheduleActiveRunRejoinRetry = useCallback(
+    (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
+      const rejoin = activeRunRejoinRef.current;
+      // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
+      // errors omit it. Re-verify this callback contract when upgrading the SDK.
+      if (
+        run &&
+        !rejoin.inFlight &&
+        run.run_id !== submittedRunIdRef.current &&
+        readReconnectRun(run.thread_id) === run.run_id
+      ) {
+        // The SDK's same-tab reconnect tries once and keeps its pointer on
+        // error, so the recovery effect would keep deferring to a stream that
+        // no longer exists. Release the pointer and let recovery take over.
+        clearReconnectRun(run.thread_id, run.run_id);
+        setActiveRunRejoinRetry((current) => current + 1);
+        return;
+      }
+      if (
+        !rejoin.inFlight ||
+        !rejoin.threadId ||
+        !rejoin.runId ||
+        run?.thread_id !== rejoin.threadId ||
+        run?.run_id !== rejoin.runId
+      ) {
+        return;
+      }
+
+      rejoin.inFlight = false;
+      clearReconnectRun(rejoin.threadId, rejoin.runId);
+      const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
+      if (retryDelay === undefined) {
+        return;
+      }
+
+      rejoin.retryTimer = setTimeout(() => {
+        rejoin.retryTimer = null;
+        setActiveRunRejoinRetry((current) => current + 1);
+      }, retryDelay);
+    },
+    [],
+  );
+
+  const settleActiveRunRejoin = useCallback(() => {
+    const rejoin = activeRunRejoinRef.current;
+    if (!rejoin.inFlight) {
+      return;
+    }
+    rejoin.inFlight = false;
+    rejoin.settled = true;
+    if (rejoin.retryTimer !== null) {
+      clearTimeout(rejoin.retryTimer);
+      rejoin.retryTimer = null;
+    }
+  }, []);
+
+  const clearPreparedReplayMasks = useCallback(
+    (replay: PendingPreparedReplayMask | null) => {
+      if (!replay) {
+        return;
+      }
+      setPendingSupersededRunIds((current) =>
+        removeSetItems(current, [replay.targetRunId]),
+      );
+      setPendingSupersededMessageIds((current) =>
+        removeSetItems(current, replay.supersededMessageIds),
+      );
+      if (pendingPreparedReplayRef.current === replay) {
+        pendingPreparedReplayRef.current = null;
+      }
+    },
+    [],
+  );
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
-    assistantId: "lead_agent",
+    assistantId,
     threadId: onStreamThreadId,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
+    // Batch stream updates received in the same macrotask without adding a
+    // fixed debounce interval that could delay a continuously active stream.
+    // Coalesce same-tick stream events into one React notification. Only the
+    // boolean tier is safe: the SDK's numeric tier is a trailing debounce that
+    // starves UI updates while chunks keep arriving faster than the window.
+    // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
+    throttle: true,
     onCreated(meta) {
+      const pendingApproval = pendingApprovalSubmissionRef.current;
+      const timedOutApproval = timedOutApprovalSubmissionRef.current;
+      const acceptedRequestId =
+        pendingApproval?.threadId === meta.thread_id
+          ? pendingApproval.requestId
+          : timedOutApproval?.threadId === meta.thread_id
+            ? timedOutApproval.requestId
+            : null;
+      if (pendingApproval?.threadId === meta.thread_id) {
+        settlePendingApproval(true);
+      }
+      if (acceptedRequestId) {
+        timedOutApprovalSubmissionRef.current = null;
+        setAnsweredApprovalState((current) => {
+          const requestIds = new Set(
+            current.threadId === meta.thread_id ? current.requestIds : [],
+          );
+          requestIds.add(acceptedRequestId);
+          for (const id of pendingApproval?.requestIds ?? [])
+            requestIds.add(id);
+          return { threadId: meta.thread_id, requestIds };
+        });
+      }
+      submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
@@ -1082,15 +2444,11 @@ export function useThreadStream({
           .catch(() => ({}));
       }
     },
-    onLangChainEvent(event) {
-      if (event.event === "on_tool_end") {
-        listeners.current.onToolEnd?.({
-          name: event.name,
-          data: event.data,
-        });
+    onUpdateEvent(data, { mutate }) {
+      if (hasRenderedThreadStateUpdate(data)) {
+        mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
       }
-    },
-    onUpdateEvent(data) {
+
       const _messages = getSummarizationMiddlewareMessages(data);
       if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
@@ -1105,6 +2463,9 @@ export function useThreadStream({
           messagesRef.current,
           _messages,
           summarizedRef.current ?? new Set<string>(),
+          renderedMessageSnapshotRef.current.threadId === threadIdRef.current
+            ? renderedMessageSnapshotRef.current.messages
+            : EMPTY_MESSAGES,
         );
         transientHistoryOrderRef.current = mergeTransientHistoryBridgeOrder(
           transientHistoryOrderRef.current,
@@ -1123,47 +2484,10 @@ export function useThreadStream({
       );
       for (const update of updates) {
         if (update && "title" in update && update.title) {
-          void queryClient.setQueriesData(
-            {
-              queryKey: ["threads", "search"],
-              exact: false,
-            },
-            (oldData: Array<AgentThread> | undefined) => {
-              return oldData?.map((t) => {
-                if (t.thread_id === threadIdRef.current) {
-                  return {
-                    ...t,
-                    values: {
-                      ...t.values,
-                      title: update.title,
-                    },
-                  };
-                }
-                return t;
-              });
-            },
-          );
-          const nextTitle: string = update.title;
-          void queryClient.setQueriesData(
-            {
-              queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-              exact: false,
-            },
-            (oldData: InfiniteData<AgentThread[]> | undefined) =>
-              mapInfiniteThreadsCache(
-                oldData,
-                (t): AgentThread =>
-                  t.thread_id === threadIdRef.current
-                    ? {
-                        ...t,
-                        values: {
-                          ...t.values,
-                          title: nextTitle,
-                        },
-                      }
-                    : t,
-              ),
-          );
+          const currentThreadId = threadIdRef.current;
+          if (currentThreadId) {
+            setThreadTitleInCaches(queryClient, currentThreadId, update.title);
+          }
         }
       }
     },
@@ -1175,6 +2499,26 @@ export function useThreadStream({
         typeof event === "object" && event !== null && "type" in event
           ? (event as { type: unknown }).type
           : undefined;
+
+      if (eventType === "stream_replay_gap") {
+        setOptimisticMessages([]);
+        setOptimisticThreadId(null);
+        setLiveMessagesThreadId(null);
+        setPendingSupersededRunIds(new Set());
+        setPendingSupersededMessageIds(new Set());
+        messagesRef.current = [];
+        transientHistoryBridgeRef.current = [];
+        transientHistoryOrderRef.current = [];
+        transientHistoryThreadIdRef.current = null;
+        summarizedRef.current = new Set<string>();
+        pendingUsageBaselineMessageIdsRef.current = new Set();
+        localTurnAnchorRef.current = null;
+        tasksRef.current = {};
+        setTasks({});
+        invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
+        toast.warning(t.conversation.streamReplayGap);
+        return;
+      }
 
       const taskUpdate = taskEventToSubtaskUpdate(event);
       if (taskUpdate) {
@@ -1206,19 +2550,50 @@ export function useThreadStream({
         }
       }
     },
-    onError(error) {
+    onError(error, run) {
+      timedOutApprovalSubmissionRef.current = null;
+      if (pendingApprovalSubmissionRef.current) {
+        settlePendingApproval(false);
+      }
+      const erroredThreadId = run?.thread_id ?? threadIdRef.current;
+      // Acceptance does not prove the replay completed. Reopen only requests
+      // still advertised as pending; completed historical answers stay hidden.
+      const stillPendingRequestIds = new Set(
+        extractHitlApprovalRequests([
+          ...extractHitlApprovalRequests(liveInterruptRef.current),
+          ...extractHitlApprovalRequests(restInterruptsRef.current),
+        ]).map((request) => request.request_id),
+      );
+      setAnsweredApprovalState((current) => {
+        if (current.threadId !== erroredThreadId) {
+          return current;
+        }
+        const requestIds = new Set(
+          [...current.requestIds].filter(
+            (requestId) => !stillPendingRequestIds.has(requestId),
+          ),
+        );
+        return requestIds.size === current.requestIds.size
+          ? current
+          : { threadId: current.threadId, requestIds };
+      });
+      scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
+      pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      toast.error(getStreamErrorMessage(error));
+      toast.error(getStreamErrorToastMessage(error, t, true));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
       if (threadIdRef.current && !isMock) {
+        void queryClient.invalidateQueries({
+          queryKey: runInputsKey(threadIdRef.current),
+        });
         void queryClient.invalidateQueries({
           queryKey: threadHistoryQueryKey(threadIdRef.current),
         });
@@ -1227,8 +2602,14 @@ export function useThreadStream({
         });
       }
     },
-    onFinish(state) {
+    onFinish(state, run) {
+      settlePendingApproval(false);
+      if (run) {
+        completedRunIdsRef.current.add(run.run_id);
+      }
+      settleActiveRunRejoin();
       listeners.current.onFinish?.(state.values);
+      pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -1237,40 +2618,306 @@ export function useThreadStream({
       invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
     },
   });
+  liveInterruptRef.current = thread.interrupt;
+
+  const { isLoading: isThreadLoading, joinStream } = thread;
+  const runInputAccount = useContext(AuthQueryScopeContext);
+  const approvalFeature = useToolApprovalFeature(!!runInputAccount && !isMock);
+  const liveApprovals = useQuery({
+    queryKey: approvalsKey(onStreamThreadId ?? "", runInputAccount),
+    queryFn: ({ signal }) => fetchToolApprovals(onStreamThreadId!, signal),
+    enabled:
+      !!approvalFeature.data?.enabled &&
+      !!onStreamThreadId &&
+      !!runInputAccount &&
+      !isMock,
+    refetchInterval: (query) =>
+      isThreadLoading || activeRunId || query.state.data?.requests.length
+        ? 1000
+        : false,
+    retry: false,
+  });
+  const inputCapability = useRunInputsEnabled(!!runInputAccount && !isMock);
+  const inputQuery = useQuery({
+    queryKey: [...runInputsKey(onStreamThreadId ?? ""), runInputAccount],
+    queryFn: ({ signal }) => fetchRunInputState(onStreamThreadId!, signal),
+    enabled:
+      inputCapability && !isMock && !!onStreamThreadId && !!runInputAccount,
+    refetchInterval: (q) =>
+      isThreadLoading || activeRunId
+        ? 1000
+        : q.state.data?.items.some((x) =>
+              ["pending", "applying", "dispatching"].includes(x.status),
+            )
+          ? 5000
+          : false,
+    retry: false,
+  });
+  const runInputAttemptRef = useRef<{
+    threadId: string;
+    runId: string;
+    text: string;
+    mode: RunInputMode;
+    id: string;
+    context?: Record<string, unknown>;
+  } | null>(null);
+  const runInputAbortRef = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      runInputAbortRef.current?.abort();
+      runInputAttemptRef.current = null;
+    },
+    [onStreamThreadId, runInputAccount],
+  );
+  const sendInput = useCallback(
+    async (text: string, mode: RunInputMode) => {
+      const targetThread = onStreamThreadId;
+      const runId = inputQuery.data?.active_run_id;
+      if (!targetThread || !runId)
+        throw new Error(t.inputBox.runInputUnavailable);
+      const previous = runInputAttemptRef.current;
+      const attempt =
+        previous?.threadId === targetThread &&
+        previous.text === text &&
+        previous.mode === mode
+          ? previous
+          : {
+              threadId: targetThread,
+              runId,
+              text,
+              mode,
+              id: uuid(),
+              context:
+                mode === "queue"
+                  ? buildRunContext({
+                      settings: context,
+                      threadId: targetThread,
+                      locale,
+                    })
+                  : undefined,
+            };
+      runInputAttemptRef.current = attempt;
+      const controller = new AbortController();
+      runInputAbortRef.current?.abort();
+      runInputAbortRef.current = controller;
+      try {
+        const item = await submitRunInput({
+          threadId: targetThread,
+          runId: attempt.runId,
+          requestId: attempt.id,
+          text,
+          mode,
+          context: attempt.context,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted)
+          throw new Error("thread-submission-stale");
+        runInputAttemptRef.current = null;
+        void queryClient.invalidateQueries({
+          queryKey: runInputsKey(targetThread),
+        });
+        return item;
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          const accepted = await fetchRunInputs(targetThread, controller.signal)
+            .then((items) =>
+              items.find(
+                (x) => x.id === attempt.id && x.target_run_id === attempt.runId,
+              ),
+            )
+            .catch(() => undefined);
+          if (accepted && !controller.signal.aborted) {
+            runInputAttemptRef.current = null;
+            void queryClient.invalidateQueries({
+              queryKey: runInputsKey(targetThread),
+            });
+            return accepted;
+          }
+          // A conflict rejects this submission. Let the next user attempt
+          // target the current run, but retain the original identity for
+          // uncertain failures: the recent-input list may omit its receipt.
+          if (
+            !controller.signal.aborted &&
+            runInputAttemptRef.current === attempt &&
+            error instanceof GatewayApiError &&
+            error.status === 409
+          ) {
+            runInputAttemptRef.current = null;
+          }
+          toast.error(t.inputBox.runInputUnavailable);
+        }
+        throw error;
+      }
+    },
+    [
+      context,
+      inputQuery.data?.active_run_id,
+      locale,
+      onStreamThreadId,
+      queryClient,
+      t.inputBox.runInputUnavailable,
+    ],
+  );
+
+  const inputActiveRunId = inputQuery.data?.active_run_id;
+  const knownActiveRunId =
+    inputActiveRunId && !completedRunIdsRef.current.has(inputActiveRunId)
+      ? inputActiveRunId
+      : activeRunId;
+  // A run observed mid-flight (remount, chat switch, rejoin) started before
+  // this view did. Its record carries the same start that turn_duration uses.
+  const knownActiveRun = knownActiveRunId
+    ? runsQuery.data?.find((run) => run.run_id === knownActiveRunId)
+    : undefined;
+  const knownActiveRunStartedAt =
+    knownActiveRun &&
+    ACTIVE_RUN_STATUSES.has(String(knownActiveRun.status)) &&
+    !completedRunIdsRef.current.has(knownActiveRun.run_id)
+      ? parseRunStartTime(knownActiveRun.created_at)
+      : null;
+
+  // reconnectOnMount only knows the run id stored in this tab's
+  // sessionStorage. A reopened browser or a new tab has no pointer, so recover
+  // the newest active run from the server and join its resumable SSE stream.
+  useEffect(() => {
+    const resolvedThreadId = onStreamThreadId ?? null;
+    const resolvedRunId = knownActiveRunId ?? null;
+    let rejoin = activeRunRejoinRef.current;
+
+    if (
+      rejoin.threadId !== resolvedThreadId ||
+      rejoin.runId !== resolvedRunId
+    ) {
+      if (rejoin.retryTimer !== null) {
+        clearTimeout(rejoin.retryTimer);
+      }
+      if (rejoin.attempts > 0 && rejoin.threadId && rejoin.runId) {
+        clearReconnectRun(rejoin.threadId, rejoin.runId);
+      }
+      rejoin = createActiveRunRejoinState(resolvedThreadId, resolvedRunId);
+      activeRunRejoinRef.current = rejoin;
+    }
+
+    if (
+      !resolvedThreadId ||
+      !resolvedRunId ||
+      completedRunIdsRef.current.has(resolvedRunId) ||
+      rejoin.inFlight ||
+      rejoin.retryTimer !== null ||
+      rejoin.settled ||
+      rejoin.attempts >= MAX_ACTIVE_RUN_REJOIN_ATTEMPTS ||
+      isThreadLoading
+    ) {
+      return;
+    }
+
+    // A matching pointer means the SDK's native same-tab reconnect owns this
+    // run. Do not create a second SSE consumer; if that reconnect fails,
+    // scheduleActiveRunRejoinRetry releases the pointer.
+    if (readReconnectRun(resolvedThreadId) === resolvedRunId) {
+      return;
+    }
+
+    rejoin.attempts += 1;
+    rejoin.inFlight = true;
+    rememberReconnectRun(resolvedThreadId, resolvedRunId);
+    void joinStream(resolvedRunId);
+  }, [
+    activeRunId,
+    knownActiveRunId,
+    activeRunRejoinRetry,
+    isThreadLoading,
+    joinStream,
+    onStreamThreadId,
+  ]);
+
+  useEffect(
+    () => () => {
+      const rejoin = activeRunRejoinRef.current;
+      if (rejoin.threadId !== (onStreamThreadId ?? null)) {
+        return;
+      }
+      if (rejoin.retryTimer !== null) {
+        clearTimeout(rejoin.retryTimer);
+      }
+      if (rejoin.attempts > 0 && rejoin.threadId && rejoin.runId) {
+        clearReconnectRun(rejoin.threadId, rejoin.runId);
+      }
+      activeRunRejoinRef.current = createActiveRunRejoinState();
+    },
+    [onStreamThreadId],
+  );
 
   const stopThread = useCallback(async () => {
+    settlePendingApproval(false);
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
+    const pendingReplay = pendingPreparedReplayRef.current;
     await stopThreadAndInvalidateCaches(
       queryClient,
-      () => thread.stop(),
+      () =>
+        !thread.isLoading && knownActiveRunId && stoppedThreadId
+          ? getAPIClient(isMock).runs.cancel(stoppedThreadId, knownActiveRunId)
+          : thread.stop(),
       stoppedThreadId,
       isMock,
     );
-  }, [displayThreadId, isMock, queryClient, thread, threadId]);
+    if (pendingReplay) {
+      setOptimisticMessages([]);
+      setOptimisticThreadId(null);
+      clearPreparedReplayMasks(pendingReplay);
+    }
+  }, [
+    clearPreparedReplayMasks,
+    displayThreadId,
+    knownActiveRunId,
+    isMock,
+    queryClient,
+    settlePendingApproval,
+    thread,
+    threadId,
+  ]);
 
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
-  const persistedMessages = useMemo(
-    () =>
-      hasVisibleStreamState
-        ? thread.messages.filter(
-            (message) =>
-              !message.id || !pendingSupersededMessageIds.has(message.id),
-          )
-        : [],
-    [hasVisibleStreamState, pendingSupersededMessageIds, thread.messages],
-  );
+  const persistedMessages = useMemo(() => {
+    if (!hasVisibleStreamState) {
+      return EMPTY_MESSAGES;
+    }
+    const filtered = thread.messages.filter(
+      (message) => !message.id || !pendingSupersededMessageIds.has(message.id),
+    );
+    // The SDK getter mints a fresh [] on every read while the stream has no
+    // values; normalize to a stable identity so downstream effects keyed on
+    // this array cannot re-fire (and setState-loop) on idle renders.
+    return filtered.length === 0 ? EMPTY_MESSAGES : filtered;
+  }, [hasVisibleStreamState, pendingSupersededMessageIds, thread.messages]);
   const visibleHistory = useMemo(
     () => (threadId ? history : []),
     [history, threadId],
   );
-  const humanMessageCount = persistedMessages.filter(
+  // Render-facing coalesced snapshot. Optimistic-input confirmation and the
+  // turn anchor observe THIS snapshot — the same frames the user sees — so a
+  // human echo landing in the per-chunk SDK array one coalesce interval early
+  // can no longer withdraw the local input before the snapshot shows it.
+  // Refs, summarization capture, and token-usage tracking keep consuming the
+  // per-chunk `persistedMessages` array above, unchanged.
+  const renderMessages = useCoalescedStreamMessages(
+    persistedMessages,
+    thread.isLoading,
+  );
+  const humanMessageCount = renderMessages.filter(
     (m) => m.type === "human",
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
+  // Non-null only after a turn submitted by this mounted client. Keep it after
+  // finish/stop/error because the SDK can retain its transient event order in
+  // the settled frame. The next local submit replaces it and a thread switch or
+  // replay gap clears it. An empty set is meaningful for a new thread and must
+  // not be confused with a reconnect that has no local turn anchor.
+  const localTurnAnchorRef = useRef<LocalTurnAnchor | null>(null);
   // Current-stream lifecycle bridge for messages removed from the checkpoint
   // tail before the canonical run-event page refetch observes the journal
   // flush. It is never appended into useThreadHistory's persisted pages.
@@ -1278,8 +2925,21 @@ export function useThreadStream({
   // Full identity order of each captured checkpoint. Confirmed bridge entries
   // are pruned from the message buffer, but remain here as non-rendering
   // anchors so an older rescue can be placed before a newest-first page.
-  const transientHistoryOrderRef = useRef<string[]>([]);
+  const transientHistoryOrderRef = useRef<readonly string[]>([]);
   const transientHistoryThreadIdRef = useRef<string | null>(null);
+  // The run-scoped committed display ledger supplies message objects when a
+  // compaction replacement outruns React or several rolling checkpoint windows
+  // pass between compactions. The merged order separately anchors those
+  // objects against canonical history.
+  const renderedMessageSnapshotRef = useRef<{
+    threadId: string | null;
+    messages: Message[];
+    order: readonly string[];
+  }>({
+    threadId: null,
+    messages: EMPTY_MESSAGES,
+    order: EMPTY_MESSAGE_IDENTITIES,
+  });
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
   // messages before the server's human message arrives (e.g. when AI messages
@@ -1295,17 +2955,31 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    settlePendingApproval(false);
     messagesRef.current = [];
     transientHistoryBridgeRef.current = [];
     transientHistoryOrderRef.current = [];
     transientHistoryThreadIdRef.current = null;
+    renderedMessageSnapshotRef.current = {
+      threadId: null,
+      messages: EMPTY_MESSAGES,
+      order: EMPTY_MESSAGE_IDENTITIES,
+    };
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
+    pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
-  }, [threadId]);
+    return () => settlePendingApproval(false);
+  }, [settlePendingApproval, threadId]);
+
+  // Confirming a new thread only assigns its SDK id; the displayed
+  // conversation and its submitted human anchor have not changed.
+  useEffect(() => {
+    localTurnAnchorRef.current = null;
+  }, [currentViewThreadId]);
 
   // Release entries individually once canonical history confirms their stable
   // identities. Keep unconfirmed entries across failure/refetch within this
@@ -1349,9 +3023,11 @@ export function useThreadStream({
 
   // Clear optimistic when server messages arrive.
   // For messages with a human optimistic message, wait until the server's
-  // human message has arrived to avoid clearing before the input message
-  // appears in the stream (the input message may arrive via "values" events
-  // after individual "messages-tuple" events for AI messages).
+  // human message has arrived in the RENDER SNAPSHOT — identity match first,
+  // human-count growth of the rendered frames as fallback for runtime-re-keyed
+  // first turns — never in the unthrottled per-chunk array, which would
+  // withdraw the local input one coalesce interval before the user can see
+  // its confirmed copy.
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
   useEffect(() => {
@@ -1365,6 +3041,16 @@ export function useThreadStream({
     }
   }, [hasHumanOptimistic, humanMessageCount, optimisticMessageCount]);
 
+  useEffect(() => {
+    if (
+      optimisticMessageCount > 0 &&
+      areOptimisticMessagesConfirmed(optimisticMessages, renderMessages)
+    ) {
+      setOptimisticMessages([]);
+      setOptimisticThreadId(null);
+    }
+  }, [optimisticMessageCount, optimisticMessages, renderMessages]);
+
   const sendMessage = useCallback(
     async (
       threadId: string,
@@ -1377,10 +3063,6 @@ export function useThreadStream({
       }
       sendInFlightRef.current = true;
 
-      // The send has genuinely proceeded past the in-flight guard, so callers
-      // can now run one-time cleanup that must not fire on the dropped path.
-      options?.onSent?.();
-
       const text = message.text.trim();
 
       // Capture the current human message count before showing optimistic
@@ -1391,6 +3073,33 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
+      // One client-generated id for this turn's human input: the optimistic
+      // display copy and the submitted message share it, so the render
+      // snapshot confirms the exact identity it already shows instead of the
+      // ordering repair guessing from the baseline (a compaction-trimmed
+      // checkpoint must never promote an older history-only human into this
+      // turn's anchor).
+      const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
+      const humanMessageId = `${LOCAL_HUMAN_MESSAGE_ID_PREFIX}${uuid()}`;
+      localTurnAnchorRef.current = {
+        threadId,
+        humanIdentity: hideFromUI ? null : `message:${humanMessageId}`,
+        baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
+        preSubmitHistoryIdentities: new Set(
+          visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitBridgeIdentities: new Set(
+          transientHistoryThreadIdRef.current === threadId
+            ? transientHistoryBridgeRef.current
+                .map(messageIdentity)
+                .filter(isNonEmptyString)
+            : EMPTY_MESSAGE_IDENTITIES,
+        ),
+        preSubmitMaxSeq: maxMessageSeq([
+          ...visibleHistory,
+          ...persistedMessages,
+        ]),
+      };
 
       // Build optimistic files list with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
@@ -1401,19 +3110,16 @@ export function useThreadStream({
         }),
       );
 
-      const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
-      const optimisticAdditionalKwargs = {
-        ...options?.additionalKwargs,
-        ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
-      };
-
       const newOptimistic: Message[] = [];
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
-          id: `opt-human-${Date.now()}`,
+          id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
-          additional_kwargs: optimisticAdditionalKwargs,
+          additional_kwargs: buildHumanMessageAdditionalKwargs(
+            options?.additionalKwargs,
+            optimisticFiles,
+          ),
         });
       }
 
@@ -1432,53 +3138,59 @@ export function useThreadStream({
 
       listeners.current.onSend?.(threadId);
 
-      let uploadedFileInfo: UploadedFileInfo[] = [];
+      // Shared by the optimistic bubble and the submit, so the files the
+      // user sees are exactly the files that are sent.
+      let uploadedFiles: FileInMessage[] = [];
 
       try {
         // Upload files first if any
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
           try {
-            const filePromises = message.files.map((fileUIPart) =>
-              promptInputFilePartToFile(fileUIPart),
-            );
-
-            const conversionResults = await Promise.all(filePromises);
-            const files = conversionResults.filter(
-              (file): file is File => file !== null,
-            );
-            const failedConversions = conversionResults.length - files.length;
-
-            if (failedConversions > 0) {
-              throw new Error(
-                `Failed to prepare ${failedConversions} attachment(s) for upload. Please retry.`,
-              );
-            }
-
             if (!threadId) {
               throw new Error("Thread is not ready for file upload.");
             }
 
-            if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
-              uploadedFileInfo = uploadResponse.files;
+            {
+              let uploadResponse;
+              if (options?.attachmentUploads) {
+                uploadResponse = {
+                  files: await options.attachmentUploads.uploadAll(
+                    threadId,
+                    message.files,
+                  ),
+                };
+              } else {
+                const converted = await Promise.all(
+                  message.files.map((part) => promptInputFilePartToFile(part)),
+                );
+                const files = converted.filter(
+                  (file): file is File => file !== null,
+                );
+                if (files.length !== converted.length)
+                  throw new Error(
+                    "Failed to prepare attachments for upload. Please retry.",
+                  );
+                uploadResponse = await uploadFiles(threadId, files);
+              }
+              uploadedFiles = uploadResponse.files.map((info) => ({
+                filename: info.filename,
+                size: info.size,
+                path: info.virtual_path,
+                status: "uploaded" as const,
+              }));
 
               // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
-                  filename: info.filename,
-                  size: info.size,
-                  path: info.virtual_path,
-                  status: "uploaded" as const,
-                }),
-              );
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
                   const humanMessage: Message = messages[0];
                   return [
                     {
                       ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
+                      additional_kwargs: buildHumanMessageAdditionalKwargs(
+                        options?.additionalKwargs,
+                        uploadedFiles,
+                      ),
                     },
                     ...messages.slice(1),
                   ];
@@ -1491,7 +3203,11 @@ export function useThreadStream({
               error instanceof Error
                 ? error.message
                 : "Failed to upload files.";
-            toast.error(errorMessage);
+            toast.error(
+              error instanceof AttachmentUploadError && error.code !== "failed"
+                ? t.uploads.notReady
+                : errorMessage,
+            );
             setOptimisticMessages([]);
             setOptimisticThreadId(null);
             setLiveMessagesThreadId(null);
@@ -1501,49 +3217,42 @@ export function useThreadStream({
           }
         }
 
-        // Build files metadata for submission (included in additional_kwargs)
-        const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          (info) => ({
-            filename: info.filename,
-            size: info.size,
-            path: info.virtual_path,
-            status: "uploaded" as const,
-          }),
-        );
-
+        // Attachments are uploaded, so the send is genuinely dispatched and
+        // callers can drop one-time state. A failed upload rejected above
+        // without reaching here, leaving that state for a retry.
+        pausedRunContextsRef.current.set(threadId, {
+          extraContext,
+          conversationReferences: options?.conversationReferences
+            ? [...options.conversationReferences]
+            : undefined,
+        });
+        options?.onSent?.();
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
               text,
               additionalKwargs: options?.additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
-              filesForSubmit,
+              filesForSubmit: uploadedFiles,
+              humanMessageId,
             }),
           },
           {
             threadId: threadId,
-            streamSubgraphs: true,
+            // No streamSubgraphs: subtask progress arrives via root-namespace
+            // custom events, while subgraph frames would leak a delegated
+            // subagent's values/messages into the thread view (#4399).
             streamResumable: true,
             config: {
-              recursion_limit: 1000,
+              recursion_limit: THREAD_RUN_RECURSION_LIMIT,
             },
-            context: {
-              ...extraContext,
-              ...context,
-              thinking_enabled: context.mode !== "flash",
-              is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode === "ultra",
-              reasoning_effort:
-                context.reasoning_effort ??
-                (context.mode === "ultra"
-                  ? "high"
-                  : context.mode === "pro"
-                    ? "medium"
-                    : context.mode === "thinking"
-                      ? "low"
-                      : undefined),
-              thread_id: threadId,
-            },
+            context: buildRunContext({
+              settings: context,
+              threadId,
+              locale,
+              extraContext,
+              conversationReferences: options?.conversationReferences,
+            }),
           },
         );
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -1555,6 +3264,7 @@ export function useThreadStream({
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
         setIsUploading(false);
+        localTurnAnchorRef.current = null;
         throw error;
       } finally {
         sendInFlightRef.current = false;
@@ -1563,10 +3273,327 @@ export function useThreadStream({
     [
       thread,
       t.uploads.uploadingFiles,
+      t.uploads.notReady,
+      locale,
       context,
       queryClient,
       humanMessageCount,
       persistedMessages,
+      visibleHistory,
+    ],
+  );
+
+  const submitHitlApproval = useCallback(
+    async (
+      threadId: string,
+      request: HitlApprovalRequest,
+      responses: HitlApprovalResponse[],
+    ) => {
+      if (request.transport === "live") {
+        if (
+          threadId !== onStreamThreadId ||
+          !liveApprovals.data?.requests?.some(
+            (pending) =>
+              pending.request_id === request.request_id &&
+              pending.run_id === request.run_id,
+          )
+        )
+          return false;
+        try {
+          await submitLiveApproval(threadId, request, responses);
+          await queryClient.invalidateQueries({
+            queryKey: approvalsKey(threadId, runInputAccount),
+          });
+          return true;
+        } catch (error) {
+          await queryClient.invalidateQueries({
+            queryKey: approvalsKey(threadId, runInputAccount),
+          });
+          toast.error(getStreamErrorMessage(error));
+          return false;
+        }
+      }
+      if (thread.isLoading || sendInFlightRef.current) return false;
+      const expected = new Set(
+        request.actions.map((action) => action.tool_call_id),
+      );
+      const responseIds = new Set<string>();
+      const valid =
+        responses.length === request.actions.length &&
+        responses.every((response) => {
+          const action = request.actions.find(
+            (candidate) => candidate.tool_call_id === response.tool_call_id,
+          );
+          if (
+            !action ||
+            responseIds.has(response.tool_call_id) ||
+            response.request_id !== action.request_id ||
+            response.source !== "hitl_approval" ||
+            response.response_kind !== "option" ||
+            !request.allowed_decisions.includes(response.option_id) ||
+            response.value.length > 2000 ||
+            (response.option_id === "approve" && response.value !== "")
+          ) {
+            return false;
+          }
+          responseIds.add(response.tool_call_id);
+          return true;
+        });
+      if (!valid || responseIds.size !== expected.size) return false;
+
+      const timedOutApproval = timedOutApprovalSubmissionRef.current;
+      if (
+        timedOutApproval?.threadId === threadId &&
+        timedOutApproval.requestId !== request.request_id
+      ) {
+        // Without a request ID echo, a different resume cannot safely share
+        // the thread until the timed-out request resolves or disappears.
+        void queryClient.invalidateQueries({
+          queryKey: ["thread", "metadata", threadId],
+        });
+        return false;
+      }
+
+      sendInFlightRef.current = true;
+      // ES2022 target: Promise.withResolvers is not in the configured libs.
+      let resolveAccepted!: (accepted: boolean) => void;
+      const accepted = new Promise<boolean>((resolve) => {
+        resolveAccepted = resolve;
+      });
+      const submission: PendingApprovalSubmission = {
+        threadId,
+        requestId: request.request_id,
+        requestIds: request.actions.map((action) => action.request_id),
+        resolve: resolveAccepted,
+        timeout: undefined,
+      };
+      pendingApprovalSubmissionRef.current = submission;
+      try {
+        submission.timeout = window.setTimeout(() => {
+          if (pendingApprovalSubmissionRef.current === submission) {
+            timedOutApprovalSubmissionRef.current = {
+              threadId,
+              requestId: request.request_id,
+            };
+            toast.error(t.humanInput.approval.submitTimeout);
+            void stopThread().catch((error: unknown) => {
+              toast.error(getStreamErrorToastMessage(error, t));
+            });
+          }
+        }, HITL_APPROVAL_ACCEPTANCE_TIMEOUT_MS);
+        const pausedContext = pausedRunContextsRef.current.get(threadId);
+        // assistantId is fixed on this useStream instance and is therefore the
+        // same lead/custom agent used by the paused run.
+        const queued = thread.submit(
+          null,
+          buildHitlApprovalSubmitOptions({
+            threadId,
+            settings: context,
+            responses,
+            extraContext: pausedContext?.extraContext,
+            conversationReferences: pausedContext?.conversationReferences,
+          }),
+        );
+        // submit() resolves when the SDK has queued consumption, not when the
+        // Gateway has accepted the resume. Acceptance can arrive first, while
+        // onError, onFinish, abort, and the deadline can unblock a submit that
+        // never settles. Only onCreated proves acceptance.
+        const outcome = await Promise.race([
+          queued.then(() => "queued" as const),
+          accepted,
+        ]);
+        const wasAccepted = outcome === "queued" ? await accepted : outcome;
+        if (wasAccepted) {
+          void queryClient.invalidateQueries({
+            queryKey: ["thread", "metadata", threadId],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["thread", threadId],
+          });
+        }
+        return wasAccepted;
+      } catch (error) {
+        if (
+          timedOutApprovalSubmissionRef.current?.threadId === threadId &&
+          timedOutApprovalSubmissionRef.current.requestId === request.request_id
+        ) {
+          timedOutApprovalSubmissionRef.current = null;
+        }
+        if (pendingApprovalSubmissionRef.current === submission) {
+          settlePendingApproval(false);
+        }
+        toast.error(getStreamErrorToastMessage(error, t, true));
+        return false;
+      } finally {
+        sendInFlightRef.current = false;
+      }
+    },
+    [
+      context,
+      queryClient,
+      settlePendingApproval,
+      stopThread,
+      t,
+      thread,
+      onStreamThreadId,
+      liveApprovals.data,
+      runInputAccount,
+    ],
+  );
+
+  const submitPreparedReplay = useCallback(
+    async <TPrepared extends RegeneratePrepareResponse>({
+      threadId,
+      prepare,
+      getSupersededMessageIds,
+      getOptimisticMessages,
+    }: {
+      threadId: string;
+      prepare: () => Promise<TPrepared>;
+      getSupersededMessageIds: (prepared: TPrepared) => string[];
+      getOptimisticMessages?: (prepared: TPrepared) => Message[];
+    }) => {
+      if (sendInFlightRef.current || !threadId) {
+        return false;
+      }
+      sendInFlightRef.current = true;
+      prevHumanMsgCountRef.current = humanMessageCount;
+      pendingUsageBaselineMessageIdsRef.current = new Set(
+        persistedMessages
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
+      );
+      localTurnAnchorRef.current = {
+        threadId,
+        // Replay turns submit no new visible human; an edit replay adopts the
+        // prepare response's replacement identity once it lands below.
+        humanIdentity: null,
+        baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
+        preSubmitHistoryIdentities: new Set(
+          visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitBridgeIdentities: new Set(
+          transientHistoryThreadIdRef.current === threadId
+            ? transientHistoryBridgeRef.current
+                .map(messageIdentity)
+                .filter(isNonEmptyString)
+            : EMPTY_MESSAGE_IDENTITIES,
+        ),
+        preSubmitMaxSeq: maxMessageSeq([
+          ...visibleHistory,
+          ...persistedMessages,
+        ]),
+      };
+      setLiveMessagesThreadId(threadId);
+      listeners.current.onSend?.(threadId);
+      let preparedSupersededRunId: string | null = null;
+      let preparedSupersededMessageIds: string[] = [];
+
+      try {
+        const prepared = await prepare();
+        preparedSupersededRunId = prepared.target_run_id;
+        preparedSupersededMessageIds = getSupersededMessageIds(prepared);
+        prevHumanMsgCountRef.current = countHumanMessagesExcludingSuperseded(
+          persistedMessages,
+          preparedSupersededMessageIds,
+        );
+        const replacementHumanMessageId =
+          "replacement_human_message_id" in prepared &&
+          typeof prepared.replacement_human_message_id === "string"
+            ? prepared.replacement_human_message_id
+            : undefined;
+        const replayAnchor = localTurnAnchorRef.current;
+        if (replayAnchor?.threadId === threadId && replacementHumanMessageId) {
+          // The edit replay reuses the server-prepared replacement identity;
+          // supersede semantics stay with the prepare response.
+          localTurnAnchorRef.current = {
+            ...replayAnchor,
+            humanIdentity: `message:${replacementHumanMessageId}`,
+          };
+        }
+        const pendingReplay: PendingPreparedReplayMask = {
+          kind: replacementHumanMessageId ? "edit" : "regenerate",
+          targetRunId: prepared.target_run_id,
+          supersededMessageIds: preparedSupersededMessageIds,
+          replacementHumanMessageId,
+        };
+        pendingPreparedReplayRef.current = pendingReplay;
+        setPendingSupersededRunIds((current) => {
+          const next = new Set(current);
+          next.add(prepared.target_run_id);
+          return next;
+        });
+        setPendingSupersededMessageIds((current) => {
+          const next = new Set(current);
+          for (const id of preparedSupersededMessageIds) {
+            next.add(id);
+          }
+          return next;
+        });
+
+        const nextOptimisticMessages = getOptimisticMessages?.(prepared) ?? [];
+        if (nextOptimisticMessages.length > 0) {
+          setOptimisticThreadId(threadId);
+          setOptimisticMessages(nextOptimisticMessages);
+        }
+
+        pausedRunContextsRef.current.set(threadId, {});
+        await thread.submit(prepared.input, {
+          threadId,
+          checkpoint: prepared.checkpoint,
+          metadata: prepared.metadata,
+          // No streamSubgraphs — same contract as the main submit path (#4399).
+          streamResumable: true,
+          config: {
+            recursion_limit: THREAD_RUN_RECURSION_LIMIT,
+          },
+          // Replaying a turn never carries conversation references: the grant
+          // is per send, so a regenerate or edit runs without them unless the
+          // user attaches them again.
+          context: buildRunContext({ settings: context, threadId, locale }),
+        });
+        void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        void queryClient.invalidateQueries({
+          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+        });
+        void queryClient.invalidateQueries({
+          queryKey: threadHistoryQueryKey(threadId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: threadTokenUsageQueryKey(threadId),
+        });
+        return true;
+      } catch (error) {
+        setOptimisticMessages([]);
+        setOptimisticThreadId(null);
+        setLiveMessagesThreadId(null);
+        localTurnAnchorRef.current = null;
+        if (preparedSupersededRunId) {
+          const supersededRunId = preparedSupersededRunId;
+          pendingPreparedReplayRef.current = null;
+          setPendingSupersededRunIds((current) =>
+            removeSetItems(current, [supersededRunId]),
+          );
+          setPendingSupersededMessageIds((current) =>
+            removeSetItems(current, preparedSupersededMessageIds),
+          );
+        }
+        toast.error(getStreamErrorToastMessage(error, t));
+        return false;
+      } finally {
+        sendInFlightRef.current = false;
+      }
+    },
+    [
+      context,
+      locale,
+      humanMessageCount,
+      persistedMessages,
+      queryClient,
+      t,
+      thread,
+      visibleHistory,
     ],
   );
 
@@ -1576,105 +3603,93 @@ export function useThreadStream({
       messageId: string,
       supersededMessageIds: string[] = [messageId],
     ) => {
-      if (sendInFlightRef.current || !threadId || !messageId) {
-        return;
+      if (!messageId) {
+        return false;
       }
-      sendInFlightRef.current = true;
-      prevHumanMsgCountRef.current = humanMessageCount;
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        persistedMessages
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
-      );
-      setLiveMessagesThreadId(threadId);
-      listeners.current.onSend?.(threadId);
-      let preparedSupersededRunId: string | null = null;
-      let preparedSupersededMessageIds: string[] = [];
-
-      try {
-        const response = await fetch(
-          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
-            threadId,
-          )}/runs/regenerate/prepare`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
+      return submitPreparedReplay({
+        threadId,
+        prepare: async () => {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/runs/regenerate/prepare`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              credentials: "include",
+              body: JSON.stringify({ message_id: messageId }),
             },
-            credentials: "include",
-            body: JSON.stringify({ message_id: messageId }),
-          },
-        );
-        if (!response.ok) {
-          throw new Error(await readResponseErrorMessage(response));
-        }
-        const prepared = (await response.json()) as RegeneratePrepareResponse;
-        preparedSupersededRunId = prepared.target_run_id;
-        preparedSupersededMessageIds = supersededMessageIds;
-        setPendingSupersededRunIds((current) => {
-          const next = new Set(current);
-          next.add(prepared.target_run_id);
-          return next;
-        });
-        setPendingSupersededMessageIds((current) => {
-          const next = new Set(current);
-          for (const id of supersededMessageIds) {
-            next.add(id);
+          );
+          if (!response.ok) {
+            throw new Error(await readResponseErrorMessage(response));
           }
-          return next;
-        });
-
-        await thread.submit(prepared.input, {
-          threadId,
-          checkpoint: prepared.checkpoint,
-          metadata: prepared.metadata,
-          streamSubgraphs: true,
-          streamResumable: true,
-          config: {
-            recursion_limit: 1000,
-          },
-          context: {
-            ...context,
-            thinking_enabled: context.mode !== "flash",
-            is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-            subagent_enabled: context.mode === "ultra",
-            reasoning_effort:
-              context.reasoning_effort ??
-              (context.mode === "ultra"
-                ? "high"
-                : context.mode === "pro"
-                  ? "medium"
-                  : context.mode === "thinking"
-                    ? "low"
-                    : undefined),
-            thread_id: threadId,
-          },
-        });
-        void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
-        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-        void queryClient.invalidateQueries({
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-        });
-        void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadId),
-        });
-      } catch (error) {
-        setLiveMessagesThreadId(null);
-        if (preparedSupersededRunId) {
-          const supersededRunId = preparedSupersededRunId;
-          setPendingSupersededRunIds((current) =>
-            removeSetItems(current, [supersededRunId]),
-          );
-          setPendingSupersededMessageIds((current) =>
-            removeSetItems(current, preparedSupersededMessageIds),
-          );
-        }
-        toast.error(getStreamErrorMessage(error));
-      } finally {
-        sendInFlightRef.current = false;
-      }
+          return (await response.json()) as RegeneratePrepareResponse;
+        },
+        getSupersededMessageIds: () => supersededMessageIds,
+      });
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [submitPreparedReplay],
+  );
+
+  const editAndRegenerateMessage = useCallback(
+    async (
+      threadId: string,
+      humanMessageId: string,
+      replacementText: string,
+      additionalKwargs?: Record<string, unknown>,
+    ) => {
+      if (!humanMessageId) {
+        return false;
+      }
+      return submitPreparedReplay<EditRegeneratePrepareResponse>({
+        threadId,
+        prepare: async () => {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/runs/edit-regenerate/prepare`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              credentials: "include",
+              body: JSON.stringify({
+                human_message_id: humanMessageId,
+                replacement_text: replacementText,
+              }),
+            },
+          );
+          if (!response.ok) {
+            throw new Error(await readResponseErrorMessage(response));
+          }
+          const prepared =
+            (await response.json()) as EditRegeneratePrepareResponse;
+          if (!additionalKwargs || !Array.isArray(prepared.input.messages)) {
+            return prepared;
+          }
+          const messages = [...prepared.input.messages];
+          for (let index = messages.length - 1; index >= 0; index -= 1) {
+            const message = messages[index];
+            if (message?.type !== "human") continue;
+            messages[index] = {
+              ...message,
+              additional_kwargs: {
+                ...message.additional_kwargs,
+                ...additionalKwargs,
+              },
+            };
+            break;
+          }
+          return { ...prepared, input: { ...prepared.input, messages } };
+        },
+        getSupersededMessageIds: (prepared) => prepared.source_message_ids,
+        getOptimisticMessages: (prepared) => prepared.input.messages ?? [],
+      });
+    },
+    [submitPreparedReplay],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
@@ -1683,11 +3698,15 @@ export function useThreadStream({
     messagesRef.current = persistedMessages;
   }
 
-  const visibleOptimisticMessages = getVisibleOptimisticMessages(
+  const rawVisibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
     prevHumanMsgCountRef.current,
     humanMessageCount,
   );
+  const visibleOptimisticMessages =
+    rawVisibleOptimisticMessages.length === 0
+      ? EMPTY_MESSAGES
+      : rawVisibleOptimisticMessages;
 
   const transientHistoryOrder =
     transientHistoryBridgeRef.current.length > 0 &&
@@ -1697,6 +3716,10 @@ export function useThreadStream({
           persistedMessages,
         )
       : transientHistoryOrderRef.current;
+  const previouslyRenderedOrder =
+    renderedMessageSnapshotRef.current.threadId === threadId
+      ? renderedMessageSnapshotRef.current.order
+      : EMPTY_MESSAGE_IDENTITIES;
 
   // Commit the extended non-rendering order skeleton after React commits this
   // render. The local value above keeps this render correctly anchored without
@@ -1713,29 +3736,186 @@ export function useThreadStream({
     }
   }, [persistedMessages, threadId]);
 
-  const effectiveHistory = resolveThreadTransientHistoryBridge(
-    visibleHistory,
-    transientHistoryBridgeRef.current,
-    transientHistoryThreadIdRef.current,
+  // The transient-bridge refs mutate in lockstep with stream/history updates
+  // already captured by these deps, and resolveTransientHistoryBridge is
+  // idempotent for entries canonical history has absorbed, so memoizing on the
+  // coalesced snapshot cannot pin a stale bridge.
+  const mergedMessages = useMemo(() => {
+    const effectiveHistory = resolveThreadTransientHistoryBridge(
+      visibleHistory,
+      transientHistoryBridgeRef.current,
+      transientHistoryThreadIdRef.current,
+      threadId,
+      transientHistoryOrder,
+      previouslyRenderedOrder,
+    );
+    const merged = mergeMessages(
+      effectiveHistory,
+      renderMessages,
+      visibleOptimisticMessages,
+    );
+    const localTurnAnchor =
+      localTurnAnchorRef.current?.threadId === currentViewThreadId
+        ? localTurnAnchorRef.current
+        : null;
+    const canonicalHistoryIdentities = new Set(
+      visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+    );
+    // Only established history known to predate this local submit may be moved
+    // across its human anchor. The fixed identity snapshots cover messages
+    // already loaded from REST and pre-existing transient-bridge rescue; the
+    // authoritative seq boundary also admits older pages that finish loading
+    // after submit. Post-submit rescue and later external turns stay outside.
+    const confirmedHistoryIdentities = getConfirmedPreSubmitHistoryIdentities(
+      visibleHistory,
+      localTurnAnchor,
+    );
+    // The current turn's run(s): visible ai/tool steps that appear in the live
+    // checkpoint but are neither part of the pre-submit baseline nor already
+    // canonical REST history. These are output from the in-flight submit and
+    // must never be moved before their human.
+    const currentTurnRunIds = getCurrentTurnRunIds(
+      renderMessages,
+      localTurnAnchor ? localTurnAnchor.baselineIdentities : null,
+      canonicalHistoryIdentities,
+    );
+    if (localTurnAnchor?.humanIdentity) {
+      // The surviving merged copy of the submitted human can be the run_id-less
+      // optimistic one; recover the run from any rendered or canonical copy so
+      // an interrupt-flushed current-run step is still recognised as ours.
+      const anchorRunId =
+        findMessageRunIdByIdentity(
+          renderMessages,
+          localTurnAnchor.humanIdentity,
+        ) ??
+        findMessageRunIdByIdentity(
+          effectiveHistory,
+          localTurnAnchor.humanIdentity,
+        );
+      if (anchorRunId) {
+        currentTurnRunIds.add(anchorRunId);
+      }
+    }
+    return localTurnAnchor === null
+      ? restoreReconnectedTurnMessageOrder(merged)
+      : restoreLocalTurnMessageOrder(
+          merged,
+          localTurnAnchor.baselineIdentities,
+          confirmedHistoryIdentities,
+          currentTurnRunIds,
+          localTurnAnchor.humanIdentity,
+          canonicalHistoryIdentities,
+        );
+  }, [
+    currentViewThreadId,
+    previouslyRenderedOrder,
+    renderMessages,
     threadId,
     transientHistoryOrder,
-  );
-  const mergedMessages = mergeMessages(
-    effectiveHistory,
-    persistedMessages,
+    visibleHistory,
     visibleOptimisticMessages,
-  );
+  ]);
+  useEffect(() => {
+    // The committed render ledger excludes hidden control copies and the
+    // still-unconfirmed optimistic ones (keyed by identity, since the local
+    // input now shares its id with the submit instead of an `opt-` prefix):
+    // a failed send must never pin a message the server never saw.
+    const pendingOptimisticIdentities = new Set(
+      (optimisticThreadId === currentViewThreadId
+        ? optimisticMessages
+        : EMPTY_MESSAGES
+      )
+        .map(messageIdentity)
+        .filter(isNonEmptyString),
+    );
+    const visibleMergedMessages = mergedMessages.filter((message) => {
+      if (isHiddenFromUIMessage(message)) {
+        return false;
+      }
+      const identity = messageIdentity(message);
+      return (
+        identity === undefined || !pendingOptimisticIdentities.has(identity)
+      );
+    });
+    const previousLedger =
+      thread.isLoading &&
+      renderedMessageSnapshotRef.current.threadId === threadId
+        ? renderedMessageSnapshotRef.current.messages
+        : EMPTY_MESSAGES;
+    const renderedMessageLedger = mergeRenderedMessageLedger(
+      previousLedger,
+      visibleMergedMessages,
+      pendingSupersededMessageIds,
+    );
+    renderedMessageSnapshotRef.current = {
+      threadId: threadId ?? null,
+      messages: renderedMessageLedger,
+      order: renderedMessageLedger
+        .map(messageIdentity)
+        .filter(isNonEmptyString),
+    };
+  }, [
+    mergedMessages,
+    optimisticMessages,
+    optimisticThreadId,
+    currentViewThreadId,
+    pendingSupersededMessageIds,
+    thread.isLoading,
+    threadId,
+  ]);
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
         persistedMessages,
         pendingUsageBaselineMessageIdsRef.current,
       )
     : [];
+  const answeredApprovalRequestIds = useMemo(
+    () =>
+      answeredApprovalState.threadId === currentViewThreadId
+        ? answeredApprovalState.requestIds
+        : new Set<string>(),
+    [answeredApprovalState, currentViewThreadId],
+  );
+  const approvalState = useMemo(
+    () =>
+      deriveHitlApprovalState({
+        liveInterrupt: thread.interrupt,
+        restInterrupts,
+        restInterruptsError,
+        pendingApprovalRun: (runsQuery.data ?? []).some(
+          (run) =>
+            run.status === "waiting_for_input" &&
+            extractHitlApprovalRequests(run.metadata?.hitl_approval).some(
+              (request) => !answeredApprovalRequestIds.has(request.request_id),
+            ),
+        ),
+        historyLoading:
+          isHistoryLoading || restInterruptsLoading || thread.isThreadLoading,
+        next: thread.history?.[0]?.next ?? [],
+        answeredRequestIds: answeredApprovalRequestIds,
+      }),
+    [
+      answeredApprovalRequestIds,
+      isHistoryLoading,
+      restInterrupts,
+      restInterruptsError,
+      restInterruptsLoading,
+      runsQuery.data,
+      thread.history,
+      thread.interrupt,
+      thread.isThreadLoading,
+    ],
+  );
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
+    isLoading:
+      thread.isLoading ||
+      (inputCapability &&
+        !!knownActiveRunId &&
+        !completedRunIdsRef.current.has(knownActiveRunId)),
     stop: stopThread,
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
@@ -1746,10 +3926,38 @@ export function useThreadStream({
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,
+    approvalRequests: [
+      ...approvalState.requests,
+      ...(liveApprovals.data?.requests ?? []),
+    ],
+    hasPendingApproval:
+      approvalState.hasPendingApproval ||
+      !!liveApprovals.data?.requests?.length,
+    submitHitlApproval,
+    waitingForInputRunIds,
+    editAndRegenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    sendInput,
+    runInputs: (inputQuery.data?.items ?? []).map((item) =>
+      item.mode === "steer" &&
+      (item.status === "pending" || item.status === "applying") &&
+      ((thread.values.applied_run_inputs?.run_id === item.target_run_id &&
+        thread.values.applied_run_inputs.ids.includes(item.id)) ||
+        thread.messages.some(
+          (message) =>
+            message.type === "human" &&
+            getMessageRunId(message) === item.target_run_id &&
+            message.additional_kwargs?.run_input_id === item.id,
+        ))
+        ? { ...item, status: "applied" as const }
+        : item,
+    ),
+    canSendInput: inputCapability && !!inputQuery.data?.active_run_id,
+    activeRunId: knownActiveRunId,
+    activeRunStartedAt: knownActiveRunStartedAt,
   } as const;
 }
 
@@ -1757,6 +3965,11 @@ type ThreadHistoryOptions = {
   enabled?: boolean;
   pendingSupersededRunIds?: ReadonlySet<string>;
 };
+
+export const THREAD_HISTORY_QUERY_POLICY = {
+  refetchOnWindowFocus: false,
+  staleTime: 5 * 60 * 1_000,
+} as const;
 
 export function useThreadHistory(
   threadId: string,
@@ -1769,6 +3982,7 @@ export function useThreadHistory(
     ReturnType<typeof threadHistoryQueryKey>,
     number | null
   >({
+    ...THREAD_HISTORY_QUERY_POLICY,
     queryKey: threadHistoryQueryKey(threadId),
     enabled: enabled && Boolean(threadId),
     initialPageParam: null,
@@ -1794,15 +4008,47 @@ export function useThreadHistory(
           ),
         );
       }
-      return (await response.json()) as ThreadMessagesPageResponse;
+      return parseThreadMessagesPageResponse(await response.json());
     },
     getNextPageParam: getThreadHistoryNextPageParam,
   });
 
-  const messageRows = useMemo(
+  const currentMessageRows = useMemo(
     () => flattenThreadHistoryPages(historyQuery.data?.pages ?? []),
     [historyQuery.data?.pages],
   );
+  const [retainedHistory, setRetainedHistory] = useState<{
+    threadId: string;
+    rows: RunMessage[];
+  }>({ threadId, rows: EMPTY_RUN_MESSAGES });
+  const previousRows =
+    retainedHistory.threadId === threadId
+      ? retainedHistory.rows
+      : EMPTY_RUN_MESSAGES;
+  const pages = historyQuery.data?.pages ?? [];
+  const isAuthoritativeComplete =
+    historyQuery.isSuccess &&
+    !historyQuery.isFetching &&
+    pages.length > 0 &&
+    pages.at(-1)?.has_more === false;
+  const messageRows = useMemo(
+    () =>
+      reconcileThreadHistoryRows(
+        previousRows,
+        currentMessageRows,
+        isAuthoritativeComplete,
+      ),
+    [currentMessageRows, isAuthoritativeComplete, previousRows],
+  );
+
+  useEffect(() => {
+    setRetainedHistory((current) => {
+      if (current.threadId === threadId && current.rows === messageRows) {
+        return current;
+      }
+      return { threadId, rows: messageRows };
+    });
+  }, [messageRows, threadId]);
 
   const messages = useMemo(() => {
     return buildVisibleHistoryMessages(
@@ -1842,14 +4088,10 @@ export const INFINITE_THREADS_QUERY_KEY_PREFIX = [
   "searchInfinite",
 ] as const;
 
-const INFINITE_THREADS_NEXT_PAGE_PARAM = Symbol(
-  "deerflow.infiniteThreads.nextPageParam",
-);
-
 type InfiniteThreadsParams = Omit<
-  Parameters<ThreadsClient["search"]>[0],
+  NonNullable<Parameters<ThreadsClient["search"]>[0]>,
   "limit" | "offset"
->;
+> & { archived?: boolean };
 
 type InfiniteThreadsSearchClient = {
   threads: {
@@ -1857,95 +4099,211 @@ type InfiniteThreadsSearchClient = {
   };
 };
 
-type InfiniteThreadsPageWithNextParam = AgentThread[] & {
-  [INFINITE_THREADS_NEXT_PAGE_PARAM]?: number;
+/**
+ * One loaded page of an infinite thread list. `threads` holds the rows the
+ * list shows; `hiddenCount` counts the server rows the page consumed but the
+ * client filtered out (sidecar threads). Both live in the page data itself so
+ * cache writes and structural sharing, which rebuild pages, keep them.
+ */
+export type InfiniteThreadsPage = {
+  threads: AgentThread[];
+  hiddenCount: number;
+  /** False once the server returned fewer rows than requested. */
+  hasMore: boolean;
 };
 
-function annotateInfiniteThreadsPage(
-  page: AgentThread[],
-  nextPageParam: number | undefined,
-): AgentThread[] {
-  if (nextPageParam !== undefined) {
-    Reflect.set(page, INFINITE_THREADS_NEXT_PAGE_PARAM, nextPageParam);
-  }
-  return page;
-}
+export type InfiniteThreadsData = InfiniteData<InfiniteThreadsPage, number>;
 
 export async function fetchInfiniteThreadsPage(
   apiClient: InfiniteThreadsSearchClient,
   params: InfiniteThreadsParams,
   pageParam: number,
   pageSize: number = INFINITE_THREADS_PAGE_SIZE,
-): Promise<AgentThread[]> {
+): Promise<InfiniteThreadsPage> {
   const threads: AgentThread[] = [];
   let offset = pageParam;
-  let nextPageParam: number | undefined;
+  let hasMore = true;
 
   while (threads.length < pageSize) {
     const currentLimit = pageSize - threads.length;
-    const response = (await apiClient.threads.search<AgentThreadState>({
-      ...params,
-      limit: currentLimit,
-      offset,
-    })) as AgentThread[];
+    const response =
+      params.archived === undefined
+        ? ((await apiClient.threads.search<AgentThreadState>({
+            ...params,
+            limit: currentLimit,
+            offset,
+          })) as AgentThread[])
+        : await searchThreadsByArchive({
+            ...params,
+            archived: params.archived,
+            metadata: params.metadata ?? undefined,
+            limit: currentLimit,
+            offset,
+          });
 
     threads.push(...filterThreadSearchResults(response, params));
     offset += response.length;
 
     if (response.length < currentLimit) {
-      nextPageParam = undefined;
+      hasMore = false;
       break;
     }
-
-    nextPageParam = offset;
   }
 
-  return annotateInfiniteThreadsPage(threads, nextPageParam);
+  return {
+    threads,
+    hiddenCount: offset - pageParam - threads.length,
+    hasMore,
+  };
 }
 
 export function getInfiniteThreadsNextPageParam(
-  lastPage: AgentThread[],
-  allPages: AgentThread[][],
-  pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+  lastPage: InfiniteThreadsPage,
+  allPages: InfiniteThreadsPage[],
 ): number | undefined {
-  const annotatedNextPageParam = Reflect.get(
-    lastPage as InfiniteThreadsPageWithNextParam,
-    INFINITE_THREADS_NEXT_PAGE_PARAM,
-  );
-  if (typeof annotatedNextPageParam === "number") {
-    return annotatedNextPageParam;
-  }
-
-  if (lastPage.length < pageSize) {
+  if (!lastPage.hasMore) {
     return undefined;
   }
-  return allPages.reduce((sum, page) => sum + page.length, 0);
+  // Count visible rows from the cache instead of freezing the fetch-time
+  // offset: a local delete or insert changes the server list the same way.
+  return allPages.reduce(
+    (offset, page) => offset + page.threads.length + page.hiddenCount,
+    0,
+  );
+}
+
+/** List components read plain thread pages; pagination state stays cached. */
+function selectInfiniteThreads(
+  data: InfiniteThreadsData,
+): InfiniteData<AgentThread[], number> {
+  return {
+    pages: data.pages.map((page) => page.threads),
+    pageParams: data.pageParams,
+  };
+}
+
+function updateInfiniteThreadsPages(
+  oldData: InfiniteThreadsData | undefined,
+  update: (threads: AgentThread[]) => AgentThread[],
+): InfiniteThreadsData | undefined {
+  if (!oldData) {
+    return oldData;
+  }
+  return {
+    ...oldData,
+    pages: oldData.pages.map((page) => ({
+      ...page,
+      threads: update(page.threads),
+    })),
+  };
 }
 
 export function mapInfiniteThreadsCache(
-  oldData: InfiniteData<AgentThread[]> | undefined,
+  oldData: InfiniteThreadsData | undefined,
   mapper: (thread: AgentThread) => AgentThread,
-): InfiniteData<AgentThread[]> | undefined {
-  if (!oldData) {
-    return oldData;
-  }
-  return {
-    ...oldData,
-    pages: oldData.pages.map((page) => page.map(mapper)),
-  };
+): InfiniteThreadsData | undefined {
+  return updateInfiniteThreadsPages(oldData, (threads) => threads.map(mapper));
 }
 
 export function filterInfiniteThreadsCache(
-  oldData: InfiniteData<AgentThread[]> | undefined,
+  oldData: InfiniteThreadsData | undefined,
   predicate: (thread: AgentThread) => boolean,
-): InfiniteData<AgentThread[]> | undefined {
-  if (!oldData) {
-    return oldData;
-  }
+): InfiniteThreadsData | undefined {
+  return updateInfiniteThreadsPages(oldData, (threads) =>
+    threads.filter(predicate),
+  );
+}
+
+function mergeThreadMetadata(
+  thread: AgentThread,
+  metadata: ThreadMetadataPatch,
+): AgentThread {
   return {
-    ...oldData,
-    pages: oldData.pages.map((page) => page.filter(predicate)),
+    ...thread,
+    metadata: {
+      ...(thread.metadata ?? {}),
+      ...metadata,
+    },
   };
+}
+
+function mergeThreadTitle(thread: AgentThread, title: string): AgentThread {
+  return {
+    ...thread,
+    values: {
+      ...thread.values,
+      title,
+    },
+  };
+}
+
+function getThreadSnapshotCacheFilters(threadId: string) {
+  return {
+    search: {
+      queryKey: ["threads", "search"],
+      exact: false,
+    },
+    infiniteSearch: {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    metadata: {
+      queryKey: ["thread", "metadata", threadId],
+      exact: false,
+    },
+  } as const;
+}
+
+function setThreadInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  mapper: (thread: AgentThread) => AgentThread,
+): void {
+  const filters = getThreadSnapshotCacheFilters(threadId);
+
+  queryClient.setQueriesData(
+    filters.search,
+    (oldData: Array<AgentThread> | undefined) => {
+      if (!oldData) {
+        return oldData;
+      }
+      return oldData.map((thread) =>
+        thread.thread_id === threadId ? mapper(thread) : thread,
+      );
+    },
+  );
+  queryClient.setQueriesData(
+    filters.infiniteSearch,
+    (oldData: InfiniteThreadsData | undefined) =>
+      mapInfiniteThreadsCache(oldData, (thread) =>
+        thread.thread_id === threadId ? mapper(thread) : thread,
+      ),
+  );
+  queryClient.setQueriesData(
+    filters.metadata,
+    (oldData: AgentThread | null | undefined) =>
+      oldData ? mapper(oldData) : oldData,
+  );
+}
+
+export function setThreadMetadataInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  metadata: ThreadMetadataPatch,
+) {
+  setThreadInCaches(queryClient, threadId, (thread) =>
+    mergeThreadMetadata(thread, metadata),
+  );
+}
+
+export function setThreadTitleInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  title: string,
+): void {
+  setThreadInCaches(queryClient, threadId, (thread) =>
+    mergeThreadTitle(thread, title),
+  );
 }
 
 export function useInfiniteThreads(
@@ -1954,12 +4312,13 @@ export function useInfiniteThreads(
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
+  { enabled = true }: { enabled?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
   return useInfiniteQuery<
-    AgentThread[],
+    InfiniteThreadsPage,
     Error,
-    InfiniteData<AgentThread[]>,
+    InfiniteData<AgentThread[], number>,
     readonly unknown[],
     number
   >({
@@ -1974,7 +4333,9 @@ export function useInfiniteThreads(
       ),
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
+    select: selectInfiniteThreads,
     refetchOnWindowFocus: false,
+    enabled,
   });
 }
 
@@ -1983,17 +4344,18 @@ export function useThreadRuns(
   { enabled = true }: { enabled?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
-  return useQuery<Run[]>({
+  return useQuery<AppRun[]>({
     queryKey: ["thread", threadId],
     queryFn: async () => {
       if (!threadId) {
         return [];
       }
       const response = await apiClient.runs.list(threadId);
-      return response;
+      return response as AppRun[];
     },
     enabled: enabled && Boolean(threadId),
     refetchOnWindowFocus: false,
+    retry: false,
   });
 }
 
@@ -2042,6 +4404,10 @@ export function useThreadTokenUsage(
     enabled: enabled && Boolean(threadId),
     retry: false,
     refetchOnWindowFocus: false,
+    // Keep same-thread data visible during refetches without carrying usage
+    // from the previous route into a newly selected thread.
+    placeholderData: (previous) =>
+      retainThreadTokenUsagePlaceholder(previous, threadId),
   });
 }
 
@@ -2074,13 +4440,92 @@ export function useBranchThread() {
   });
 }
 
+export function usePinThread() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      threadId,
+      pinned,
+    }: {
+      threadId: string;
+      pinned: boolean;
+    }) =>
+      patchThreadMetadata(threadId, {
+        [THREAD_PINNED_METADATA_KEY]: pinned,
+      }),
+    onSuccess(_response, { threadId, pinned }) {
+      setThreadMetadataInCaches(queryClient, threadId, {
+        [THREAD_PINNED_METADATA_KEY]: pinned,
+      });
+    },
+    onSettled() {
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+      // Pin changes the ordering the project page thread list shows
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]); without this, cached
+      // pages keep the old order and pagination can duplicate or skip
+      // entries across the refetch boundary.
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
+    },
+  });
+}
+
+export function useMoveThreadToProject(options?: {
+  onError?: (
+    error: Error,
+    variables: { threadId: string; projectId: string | null },
+  ) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      threadId,
+      projectId,
+    }: {
+      threadId: string;
+      projectId: string | null;
+    }) => moveThreadToProject(threadId, projectId),
+    // Hook-level error handler: survives the caller's dropdown unmounting,
+    // unlike a per-mutate `onError` passed from inside a closing menu.
+    onError: options?.onError,
+    async onSuccess(_response, { threadId, projectId }) {
+      // An older GET must not overwrite the confirmed affiliation. Match all
+      // metadata variants, including an initial read with no cached snapshot.
+      await queryClient.cancelQueries({
+        queryKey: ["thread", "metadata", threadId],
+      });
+      setThreadMetadataInCaches(queryClient, threadId, {
+        [THREAD_PROJECT_METADATA_KEY]: projectId,
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["thread", "metadata", threadId],
+      });
+    },
+    onSettled() {
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+      // Moving a thread changes membership of project thread lists
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
+    },
+  });
+}
+
 export function useRunDetail(threadId: string, runId: string) {
   const apiClient = getAPIClient();
-  return useQuery<Run>({
+  return useQuery<AppRun>({
     queryKey: ["thread", threadId, "run", runId],
     queryFn: async () => {
       const response = await apiClient.runs.get(threadId, runId);
-      return response;
+      return response as AppRun;
     },
     refetchOnWindowFocus: false,
   });
@@ -2111,7 +4556,13 @@ async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
 ) {
-  await apiClient.threads.delete(threadId);
+  try {
+    await apiClient.threads.delete(threadId);
+  } catch (error) {
+    // A previous attempt may have deleted the remote thread before local
+    // cleanup failed. Only 404 is success here; authorization failures are not.
+    if (getHttpStatus(error) !== 404) throw error;
+  }
   await deleteLocalThreadData(threadId);
 }
 
@@ -2206,18 +4657,17 @@ export function useDeleteThread() {
   return useMutation({
     mutationFn: async ({
       threadId,
-      onRemoteDeleted,
+      onDeleted,
     }: {
       threadId: string;
-      onRemoteDeleted?: () => void;
+      onDeleted?: () => void;
     }) => {
       const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
         apiClient,
         threadId,
       );
-      await apiClient.threads.delete(threadId);
-      onRemoteDeleted?.();
-      await deleteLocalThreadData(threadId);
+      await deleteThreadEverywhere(apiClient, threadId);
+      onDeleted?.();
       return deletedSidecarThreadIds;
     },
     onSuccess(deletedSidecarThreadIds, { threadId }) {
@@ -2239,7 +4689,7 @@ export function useDeleteThread() {
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
           exact: false,
         },
-        (oldData: InfiniteData<AgentThread[]> | undefined) =>
+        (oldData: InfiniteThreadsData | undefined) =>
           filterInfiniteThreadsCache(
             oldData,
             (t) => !deletedThreadIds.has(t.thread_id),
@@ -2251,6 +4701,11 @@ export function useDeleteThread() {
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+      // Deleting a thread changes membership of project thread lists
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
       });
     },
   });
@@ -2271,45 +4726,24 @@ export function useRenameThread() {
         values: { title },
       });
     },
-    onSuccess(_, { threadId, title }) {
-      queryClient.setQueriesData(
-        {
-          queryKey: ["threads", "search"],
-          exact: false,
-        },
-        (oldData: Array<AgentThread>) => {
-          return oldData.map((t) => {
-            if (t.thread_id === threadId) {
-              return {
-                ...t,
-                values: {
-                  ...t.values,
-                  title,
-                },
-              };
-            }
-            return t;
-          });
-        },
+    async onSuccess(_, { threadId, title }) {
+      const filters: QueryFilters[] = Object.values(
+        getThreadSnapshotCacheFilters(threadId),
       );
-      queryClient.setQueriesData(
-        {
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-          exact: false,
-        },
-        (oldData: InfiniteData<AgentThread[]> | undefined) =>
-          mapInfiniteThreadsCache(oldData, (t) =>
-            t.thread_id === threadId
-              ? {
-                  ...t,
-                  values: {
-                    ...t.values,
-                    title,
-                  },
-                }
-              : t,
-          ),
+
+      // Prevent pre-rename snapshot requests from restoring the stale title.
+      await Promise.all(
+        filters.map((filter) => queryClient.cancelQueries(filter)),
       );
+      setThreadTitleInCaches(queryClient, threadId, title);
+      for (const filter of filters) {
+        void queryClient.invalidateQueries(filter);
+      }
+      // The project page thread list is REST-shaped, not covered by
+      // setThreadTitleInCaches; invalidate it so renamed titles refresh.
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
     },
   });
 }

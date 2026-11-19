@@ -2,7 +2,7 @@
 
 Different LLM providers signal "I stopped this response for safety reasons"
 through different fields with different values. This module defines a small
-strategy interface and three built-in detectors that cover the major
+strategy interface and built-in detectors that cover the major
 providers DeerFlow supports today. New providers (Wenxin, Hunyuan, Bedrock
 adapters, in-house gateways, ...) can be added by implementing
 ``SafetyTerminationDetector`` and wiring it through
@@ -119,6 +119,25 @@ class OpenAICompatibleContentFilterDetector:
         )
 
 
+class OpenAIResponsesContentFilterDetector:
+    """Native Responses safety termination, distinct from token exhaustion."""
+
+    name = "openai_responses_content_filter"
+
+    def detect(self, message: AIMessage) -> SafetyTermination | None:
+        for metadata in (message.response_metadata, message.additional_kwargs):
+            if not isinstance(metadata, dict) or metadata.get("status") != "incomplete":
+                continue
+            details = metadata.get("incomplete_details")
+            if isinstance(details, dict) and details.get("reason") == "content_filter":
+                return SafetyTermination(
+                    detector=self.name,
+                    reason_field="incomplete_details.reason",
+                    reason_value="content_filter",
+                )
+        return None
+
+
 class AnthropicRefusalDetector:
     """Anthropic ``stop_reason == "refusal"`` signal.
 
@@ -222,6 +241,7 @@ def default_detectors() -> list[SafetyTerminationDetector]:
     """Built-in detector set used when no custom detectors are configured."""
     return [
         OpenAICompatibleContentFilterDetector(),
+        OpenAIResponsesContentFilterDetector(),
         AnthropicRefusalDetector(),
         GeminiSafetyDetector(),
     ]
@@ -231,6 +251,7 @@ __all__ = [
     "AnthropicRefusalDetector",
     "GeminiSafetyDetector",
     "OpenAICompatibleContentFilterDetector",
+    "OpenAIResponsesContentFilterDetector",
     "SafetyTermination",
     "SafetyTerminationDetector",
     "default_detectors",

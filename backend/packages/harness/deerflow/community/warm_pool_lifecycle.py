@@ -72,7 +72,9 @@ class WarmPoolLifecycleMixin[WarmEntryT]:
         if timeout <= 0:
             return
 
-        now = time.time()
+        # Idle age is a duration. Wall-clock steps (NTP, VM resume, manual
+        # correction) must neither expire fresh entries nor preserve old ones.
+        now = time.monotonic()
         expired: list[tuple[str, WarmEntryT]] = []
         with self._lock:
             for sandbox_id, (entry, timestamp) in self._warm_pool.items():
@@ -99,11 +101,13 @@ class WarmPoolLifecycleMixin[WarmEntryT]:
         logger.info("Started warm-pool idle checker thread (timeout: %ss)", self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
 
     def _stop_idle_checker(self) -> None:
-        """Stop the idle checker thread and wait for it to exit when running."""
+        """Stop the idle checker thread and fail if bounded teardown cannot own it."""
         self._idle_checker_stop.set()
         thread = self._idle_checker_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5)
+            if thread.is_alive():
+                raise RuntimeError("warm-pool idle checker is still running after stop timeout")
 
     def _idle_checker_loop(self) -> None:
         """Run periodic idle cleanup until the stop event is set."""

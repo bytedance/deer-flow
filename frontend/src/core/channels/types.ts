@@ -20,6 +20,12 @@ export interface ChannelProvider {
   connection_status: string;
   credential_fields: ChannelCredentialField[];
   credential_values?: ChannelRuntimeConfigValues;
+  /**
+   * The app can receive scheduled-task updates through proactive push. This
+   * is a capability, not a notification preference. Older backends may omit it.
+   */
+  proactive_notifications?: boolean;
+  proactive_group_notifications?: boolean;
 }
 
 export interface ChannelProvidersResponse {
@@ -51,3 +57,24 @@ export interface ChannelConnectResponse {
   instruction: string;
   expires_in: number;
 }
+
+export type WechatQRLoginSession = {
+  id: string;
+  status:
+    | "pending"
+    | "scanned"
+    | "verification_required"
+    | "confirmed"
+    | "expired"
+    | "failed";
+  error?:
+    | "network"
+    | "invalid_response"
+    | "verification_rejected"
+    | "verification_blocked"
+    | "already_bound"
+    | null;
+  qrcode_content: string;
+  expires_in: number;
+  provider: ChannelProvider | null;
+};

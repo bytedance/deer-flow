@@ -6,9 +6,40 @@ Run from repo root:
 
 from __future__ import annotations
 
+import builtins
+import importlib.util
+import ipaddress
+import json
 import sys
+from pathlib import Path
 
 import doctor
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_script(path: Path, name: str):
+    assert path.exists(), f"{path} must exist"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_run_preserves_tool_diagnostics_with_invalid_utf8(monkeypatch, host_encoding, stream):
+    monkeypatch.setattr(doctor.subprocess, "_text_encoding", lambda: host_encoding)
+    output = "v22.0.0 ✓ 检查通过 ".encode() + b"\xff\n"
+    code = f"import sys; sys.{stream}.buffer.write({output!r})"
+
+    result = doctor._run([sys.executable, "-c", code])
+
+    assert result == "v22.0.0 ✓ 检查通过 \ufffd"
+
 
 # ---------------------------------------------------------------------------
 # check_python
@@ -20,6 +51,86 @@ class TestCheckPython:
         result = doctor.check_python()
         assert sys.version_info >= (3, 12)
         assert result.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# check_pnpm
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPnpm:
+    @pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+    @pytest.mark.parametrize("returncode", [0, 7])
+    def test_preserves_runner_diagnostics_with_invalid_utf8(self, tmp_path, monkeypatch, host_encoding, returncode):
+        monkeypatch.setattr(doctor.subprocess, "_text_encoding", lambda: host_encoding)
+        stdout = b"10.26.2\n" if returncode == 0 else "运行失败 ".encode() + b"\xff\n"
+        stderr = "诊断详情 ".encode() + b"\xff\n"
+        runner = tmp_path / "pnpm runner.py"
+        runner.write_text(
+            f"import os, sys\nassert os.getcwd() == {str(tmp_path)!r}\nassert sys.argv[1:] == ['-v']\nsys.stdout.buffer.write({stdout!r})\nsys.stderr.buffer.write({stderr!r})\nsys.exit({returncode})\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(doctor, "PNPM_SCRIPT_PATH", runner)
+        monkeypatch.setattr(doctor, "FRONTEND_DIR", tmp_path)
+
+        result = doctor.check_pnpm()
+
+        if returncode == 0:
+            assert result.status == "ok"
+            assert result.detail == "10.26.2"
+        else:
+            assert result.status == "fail"
+            assert result.detail == "诊断详情 \ufffd\n运行失败 \ufffd"
+            assert result.fix is not None
+
+    def test_resolves_shared_runner_from_relative_script_path(self, monkeypatch):
+        # Load the script as `scripts/doctor.py`, as a user would from the
+        # repository root. The derived paths must not depend on that relative
+        # invocation path.
+        monkeypatch.chdir(REPO_ROOT)
+        relative_doctor = _load_script(Path("scripts/doctor.py"), "deerflow_doctor_relative")
+
+        assert relative_doctor.PNPM_SCRIPT_PATH == REPO_ROOT / "scripts" / "pnpm.py"
+        assert relative_doctor.PNPM_SCRIPT_PATH.is_absolute()
+        assert relative_doctor.FRONTEND_DIR == REPO_ROOT / "frontend"
+        assert relative_doctor.FRONTEND_DIR.is_absolute()
+
+    def test_uses_shared_runner_from_frontend(self, monkeypatch):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return doctor.subprocess.CompletedProcess(cmd, 0, stdout="10.26.2\n", stderr="")
+
+        monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+        result = doctor.check_pnpm()
+
+        expected_runner = doctor.Path(doctor.__file__).with_name("pnpm.py")
+        assert result.status == "ok"
+        assert result.detail == "10.26.2"
+        assert captured["cmd"] == [sys.executable, str(expected_runner), "-v"]
+        assert captured["kwargs"]["cwd"] == expected_runner.parent.parent / "frontend"
+        assert captured["kwargs"]["shell"] is False
+        assert captured["kwargs"]["check"] is False
+
+    def test_runner_failure_is_reported_as_failure(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            return doctor.subprocess.CompletedProcess(
+                cmd,
+                42,
+                stdout="",
+                stderr="Error: pnpm command failed with exit status 42.\n",
+            )
+
+        monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+        result = doctor.check_pnpm()
+
+        assert result.status == "fail"
+        assert "exit status 42" in result.detail
+        assert result.fix is not None
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +149,103 @@ class TestCheckConfigExists:
         cfg.write_text("config_version: 5\n")
         result = doctor.check_config_exists(cfg)
         assert result.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# resolve_config_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def runtime_path_env(monkeypatch):
+    """Clear the runtime path variables and restore them after the test.
+
+    ``main()`` defaults ``DEER_FLOW_PROJECT_ROOT`` in ``os.environ`` the way
+    ``make dev`` does. ``monkeypatch.delenv`` records nothing for an unset
+    variable, so set each one first to make teardown remove what main() adds.
+    """
+    for name in ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    return monkeypatch
+
+
+class TestResolveConfigPath:
+    def test_uses_config_path_env(self, tmp_path, runtime_path_env):
+        cfg = tmp_path / "elsewhere.yaml"
+        cfg.write_text("config_version: 5\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(cfg))
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path / "root"))
+
+        assert doctor.resolve_config_path() == (cfg, None)
+
+    def test_missing_config_path_env_fails(self, tmp_path, runtime_path_env):
+        (tmp_path / "config.yaml").write_text("config_version: 5\n")
+        missing = tmp_path / "missing.yaml"
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(missing))
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+
+        path, failure = doctor.resolve_config_path()
+
+        assert path == missing
+        assert failure is not None
+        assert failure.status == "fail"
+        assert "DEER_FLOW_CONFIG_PATH" in failure.detail
+        assert "DEER_FLOW_CONFIG_PATH" in failure.fix
+
+    def test_uses_config_under_project_root_env(self, tmp_path, runtime_path_env):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\n")
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+
+        assert doctor.resolve_config_path() == (cfg, None)
+
+    def test_missing_project_root_env_fails(self, tmp_path, runtime_path_env):
+        missing_root = tmp_path / "missing-root"
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(missing_root))
+
+        path, failure = doctor.resolve_config_path()
+
+        assert not path.exists()
+        assert failure is not None
+        assert failure.status == "fail"
+        assert "DEER_FLOW_PROJECT_ROOT" in failure.detail
+        assert "DEER_FLOW_PROJECT_ROOT" in failure.fix
+
+    def test_no_config_anywhere_is_a_plain_missing_config(self, tmp_path, runtime_path_env):
+        from deerflow.config import app_config
+
+        runtime_path_env.setattr(app_config, "_legacy_config_candidates", lambda: ())
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+
+        path, failure = doctor.resolve_config_path()
+
+        assert path == tmp_path / "config.yaml"
+        assert failure is None
+        assert doctor.check_config_exists(path).fix == "Run 'make setup' to create it"
+
+    @pytest.mark.parametrize("error", [ImportError("no module"), TypeError("ABI mismatch"), SyntaxError("bad syntax")], ids=lambda e: type(e).__name__)
+    def test_unimportable_harness_is_reported_not_raised(self, tmp_path, runtime_path_env, error):
+        # A broken backend environment is exactly what doctor must diagnose,
+        # whatever the harness raises while its module body executes.
+        real_import = builtins.__import__
+
+        def broken_import(name, *args, **kwargs):
+            if name == "deerflow.config.app_config":
+                raise error
+            return real_import(name, *args, **kwargs)
+
+        runtime_path_env.setattr(builtins, "__import__", broken_import)
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+
+        path, failure = doctor.resolve_config_path()
+
+        assert path == tmp_path / "config.yaml"
+        assert failure is not None
+        assert failure.status == "fail"
+        assert "harness" in failure.detail
+        assert type(error).__name__ in failure.detail
+        assert failure.fix == "Run 'make install'"
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +324,14 @@ class TestCheckModelsConfigured:
         result = doctor.check_models_configured(tmp_path / "config.yaml")
         assert result.status == "skip"
 
+    def test_commented_out_models_block(self, tmp_path):
+        # config.example.yaml ships a `models:` key whose entries are all
+        # commented out, so it parses as None rather than an empty list.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        result = doctor.check_models_configured(cfg)
+        assert result.status == "fail"
+
 
 # ---------------------------------------------------------------------------
 # check_llm_api_key
@@ -141,8 +357,34 @@ class TestCheckLLMApiKey:
         assert all(r.fix is not None for r in failed)
         assert any("OPENAI_API_KEY" in (r.fix or "") for r in failed)
 
+    @pytest.mark.parametrize(
+        "placeholder",
+        ["your-openai-api-key", "replace-with-your-totokens-api-key", "   "],
+    )
+    def test_placeholder_key_is_not_reported_as_ready(self, tmp_path, monkeypatch, placeholder):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  - name: relay\n    use: langchain_openai:ChatOpenAI\n    model: gpt-6-luna\n    api_key: $RELAY_API_KEY\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("RELAY_API_KEY", placeholder)
+
+        results = doctor.check_llm_api_key(cfg)
+
+        assert len(results) == 1
+        assert results[0].status == "fail"
+        assert "RELAY_API_KEY" in (results[0].fix or "")
+
     def test_missing_config_returns_empty(self, tmp_path):
         results = doctor.check_llm_api_key(tmp_path / "config.yaml")
+        assert results == []
+
+    def test_commented_out_models_block_returns_empty(self, tmp_path):
+        # Regression: iterating a null `models:` raised TypeError, which the
+        # broad handler rendered as "('NoneType' object is not iterable)".
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        results = doctor.check_llm_api_key(cfg)
         assert results == []
 
 
@@ -159,12 +401,163 @@ class TestCheckLLMAuth:
         results = doctor.check_llm_auth(cfg)
         assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
 
+    def test_codex_auth_file_without_token_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text("{}")
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_codex_auth_file_with_supported_token_shapes_passes(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        for payload in (
+            '{"access_token": "codex-token"}',
+            '{"token": "codex-token"}',
+            '{"tokens": {"access_token": "codex-token"}}',
+        ):
+            auth_path.write_text(payload)
+            results = doctor.check_llm_auth(cfg)
+
+            assert any(result.status == "ok" and "Codex CLI auth available" in result.label for result in results)
+
     def test_claude_oauth_env_passes(self, tmp_path, monkeypatch):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token")
         results = doctor.check_llm_auth(cfg)
         assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
+
+    def test_claude_credentials_file_without_token_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
+        credentials_path = tmp_path / "credentials.json"
+        credentials_path.write_text("{}")
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(credentials_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"):
+            monkeypatch.delenv(name, raising=False)
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Claude auth available" in result.label for result in results)
+
+    def test_claude_expired_credentials_file_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
+        credentials_path = tmp_path / "credentials.json"
+        credentials_path.write_text('{"claudeAiOauth": {"accessToken": "expired-token", "expiresAt": 1}}')
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(credentials_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"):
+            monkeypatch.delenv(name, raising=False)
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Claude auth available" in result.label for result in results)
+
+    def test_claude_credentials_file_with_token_passes(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
+        credentials_path = tmp_path / "credentials.json"
+        credentials_path.write_text('{"claudeAiOauth": {"accessToken": "claude-token"}}')
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(credentials_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"):
+            monkeypatch.delenv(name, raising=False)
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
+
+    def test_codex_auth_file_with_malformed_json_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text("not json")
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_codex_auth_file_with_non_object_json_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text('["access_token"]')
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_codex_auth_path_pointing_at_directory_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.mkdir()
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_codex_auth_file_with_blank_token_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text('{"access_token": "   "}')
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_claude_credentials_file_with_invalid_expires_at_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
+        credentials_path = tmp_path / "credentials.json"
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(credentials_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"):
+            monkeypatch.delenv(name, raising=False)
+
+        for expires_at in ("soon", True, [1]):
+            credentials_path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "claude-token", "expiresAt": expires_at}}))
+            results = doctor.check_llm_auth(cfg)
+
+            assert any(result.status == "fail" and "Claude auth available" in result.label for result in results), expires_at
+
+    def test_undecodable_auth_file_keeps_other_model_results(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "config_version: 5\nmodels:\n"
+            "  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n"
+            "  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n"
+        )
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_bytes(b'{"access_token": "\xff\xfe"}')
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-token")
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+        assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
+
+    def test_commented_out_models_block_returns_empty(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        assert doctor.check_llm_auth(cfg) == []
+        assert doctor.check_llm_package(cfg) == []
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +575,24 @@ class TestCheckWebSearch:
         assert result.status == "ok"
         assert "DuckDuckGo" in result.detail
 
+    def test_commented_out_tools_block_warns_without_traceback(self, tmp_path):
+        # config.example.yaml ships a `tools:` key whose entries can all be
+        # commented out, so it parses as None rather than an empty list.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  # - name: web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
+
+    def test_scalar_tools_entry_warns_without_traceback(self, tmp_path):
+        # A bare string entry is not a mapping; `t.get("name")` used to raise
+        # AttributeError, which the broad handler rendered as the check result.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
+
     def test_tavily_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
         cfg = tmp_path / "config.yaml"
@@ -197,6 +608,88 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert result.fix is not None
         assert "make setup" in result.fix
+
+    def test_infoquest_ignores_a_configured_api_key_like_its_client(self, tmp_path, monkeypatch):
+        """InfoQuest reads only INFOQUEST_API_KEY, so an api_key field must not make doctor report it configured."""
+        from deerflow.community.infoquest.infoquest_client import InfoQuestClient
+
+        monkeypatch.setenv("MY_INFOQUEST_KEY", "iq-real-key")
+        monkeypatch.setenv("INFOQUEST_API_KEY", "your-infoquest-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.infoquest.tools:web_search_tool\n    api_key: $MY_INFOQUEST_KEY\n")
+
+        result = doctor.check_web_search(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == "infoquest configured but INFOQUEST_API_KEY still holds the .env.example placeholder"
+        assert InfoQuestClient().api_key_set is False
+
+    @pytest.mark.parametrize("tool_name", ["web_search", "web_fetch"])
+    def test_groundroute_key_is_checked(self, tmp_path, monkeypatch, tool_name):
+        """Every GroundRoute call needs a key; doctor used to report ok without one."""
+        monkeypatch.delenv("GROUNDROUTE_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: {tool_name}\n    use: deerflow.community.groundroute.tools:{tool_name}_tool\n")
+        check = doctor.check_web_search if tool_name == "web_search" else doctor.check_web_fetch
+
+        result = check(cfg)
+        assert result.status == "warn"
+        assert result.detail == "groundroute configured but GROUNDROUTE_API_KEY not set"
+
+        monkeypatch.setenv("GROUNDROUTE_API_KEY", "gr-real-key")
+        assert check(cfg).status == "ok"
+
+    def test_youcom_names_an_ignored_placeholder_in_config(self, tmp_path, monkeypatch):
+        """You.com drops it and uses the keyless endpoint, so the status stays ok but the field is named."""
+        from types import SimpleNamespace
+
+        from deerflow.community.youcom import tools as youcom
+
+        monkeypatch.delenv("YDC_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.youcom.tools:web_search_tool\n    api_key: your-tavily-api-key\n")
+
+        result = doctor.check_web_search(cfg)
+
+        assert result.status == "ok"
+        assert result.detail.endswith("; api_key in config holds the .env.example placeholder and is ignored")
+        monkeypatch.setattr(youcom, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: SimpleNamespace(model_extra={"api_key": "your-tavily-api-key"})))
+        assert youcom._resolve_tool_settings("web_search")[0] is None
+
+    def test_tavily_with_env_template_placeholder_warns(self, tmp_path, monkeypatch):
+        """The runtime drops an ``.env.example`` value, so doctor must not call it configured."""
+        monkeypatch.setenv("TAVILY_API_KEY", "your-tavily-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tavily.tools:web_search_tool\n    api_key: $TAVILY_API_KEY\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "tavily configured but TAVILY_API_KEY still holds the .env.example placeholder"
+        assert "TAVILY_API_KEY" in (result.fix or "")
+
+    def test_literal_placeholder_in_config_falls_back_to_the_env_key(self, tmp_path, monkeypatch):
+        """``resolve_api_key`` drops the literal placeholder and the provider reads the environment instead."""
+        monkeypatch.setenv("SERPER_API_KEY", "real-serper-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n    api_key: your-serper-api-key\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert result.detail == "serper (SERPER_API_KEY set)"
+
+    def test_literal_placeholder_in_config_is_named_when_no_env_key_backs_it(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tavily.tools:web_search_tool\n    api_key: your-tavily-api-key\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "tavily configured but api_key in config still holds the .env.example placeholder"
+
+    def test_key_that_only_mentions_your_is_configured(self, tmp_path, monkeypatch):
+        """Doctor and the runtime share one rule: ``sk-your-...`` is a key both of them use."""
+        monkeypatch.setenv("TAVILY_API_KEY", "sk-your-tavily-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tavily.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
 
     def test_brave_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
@@ -230,6 +723,38 @@ class TestCheckWebSearch:
         result = doctor.check_web_search(cfg)
         assert result.status == "ok"
         assert "BRAVE_SEARCH_API_KEY set from config" in result.detail
+
+    def test_sofya_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SOFYA_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.sofya.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "sofya" in result.detail
+
+    def test_sofya_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SOFYA_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.sofya.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SOFYA_API_KEY" in (result.fix or "")
+
+    def test_specstream_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SPECSTREAM_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.specstream.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "specstream" in result.detail
+
+    def test_specstream_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SPECSTREAM_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.specstream.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SPECSTREAM_API_KEY" in (result.fix or "")
 
     def test_serper_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SERPER_API_KEY", "test-key")
@@ -285,6 +810,33 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert "SERPER_API_KEY" in (result.fix or "")
 
+    def test_tencent_wsa_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TENCENTCLOUD_WSA_APIKEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tencent_wsa.tools:web_search_tool\n")
+
+        result = doctor.check_web_search(cfg)
+
+        assert result.status == "warn"
+        assert "tencent_wsa configured but TENCENTCLOUD_WSA_APIKEY not set" in result.detail
+        assert "TENCENTCLOUD_WSA_APIKEY" in (result.fix or "")
+
+    def test_serply_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SERPLY_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serply.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "serply" in result.detail
+
+    def test_serply_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SERPLY_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serply.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SERPLY_API_KEY" in (result.fix or "")
+
     def test_no_search_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools: []\n")
@@ -317,6 +869,30 @@ class TestCheckWebFetch:
         assert result.status == "ok"
         assert "Jina AI" in result.detail
 
+    @pytest.mark.usefixtures("delegated_backend_dns")
+    def test_browserless_fetch_explicit_token_wins_over_the_environment(self, tmp_path, monkeypatch):
+        """``web_fetch`` builds the same client as ``web_capture``, so the configured token is authoritative there too."""
+        from deerflow.community.browserless.tools import _get_browserless_client
+
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-real-token")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.browserless.tools:web_fetch_tool\n    base_url: https://production-sfo.browserless.io\n    token: your-github-token\n")
+
+        result = doctor.check_web_fetch(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == "browserless configured but token in config still holds the .env.example placeholder"
+        assert _get_browserless_client("web_fetch", cfg={"base_url": "https://production-sfo.browserless.io", "token": "your-github-token"}).token == ""
+
+    def test_jina_names_the_ignored_template_placeholder(self, tmp_path, monkeypatch):
+        """The runtime drops it and fetches anonymously; doctor says so instead of staying silent."""
+        monkeypatch.setenv("JINA_API_KEY", "your-jina-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.jina_ai.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "ok"
+        assert result.detail == "Jina AI Reader (no key needed); JINA_API_KEY holds the .env.example placeholder and is ignored"
+
     def test_firecrawl_without_key_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         cfg = tmp_path / "config.yaml"
@@ -324,6 +900,38 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "warn"
         assert "FIRECRAWL_API_KEY" in (result.fix or "")
+
+    def test_sofya_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SOFYA_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.sofya.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert "SOFYA_API_KEY" in (result.fix or "")
+
+    def test_specstream_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SPECSTREAM_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.specstream.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert "SPECSTREAM_API_KEY" in (result.fix or "")
+
+    def test_unbrowse_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNBROWSE_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.unbrowse.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "ok"
+        assert "unbrowse" in result.detail
+
+    def test_unbrowse_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("UNBROWSE_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.unbrowse.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert "UNBROWSE_API_KEY" in (result.fix or "")
 
     def test_no_fetch_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
@@ -344,16 +952,172 @@ class TestCheckWebFetch:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def delegated_backend_dns(monkeypatch):
+    """Keep backend screening real while replacing external DNS."""
+    from deerflow.community import url_safety
+
+    def resolve(host):
+        if host == "missing.invalid":
+            return []
+        if host == "mixed.invalid":
+            return [ipaddress.ip_address("93.184.216.34"), ipaddress.ip_address("10.0.0.5")]
+        return [ipaddress.ip_address("93.184.216.34")]
+
+    monkeypatch.setattr(url_safety, "resolve_host_addresses", resolve)
+
+
+@pytest.mark.usefixtures("delegated_backend_dns")
+class TestCheckDelegatedBackends:
+    @pytest.fixture(autouse=True)
+    def provider_keys(self, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "test-key")
+        monkeypatch.setenv("CRW_API_KEY", "test-key")
+        monkeypatch.delenv("CRW_API_URL", raising=False)
+
+    def _config(self, tmp_path, provider, *, tool_name="web_fetch", **extra):
+        cfg = tmp_path / "config.yaml"
+        tool = {"name": tool_name, "use": f"deerflow.community.{provider}.tools:{tool_name}_tool", **extra}
+        cfg.write_text(json.dumps({"config_version": 5, "tools": [tool]}), encoding="utf-8")
+        return cfg
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    @pytest.mark.parametrize("base_url", ["http://10.0.0.5:3000", "http://missing.invalid:3000", "http://mixed.invalid:3000"])
+    def test_private_or_unverifiable_backend_warns(self, tmp_path, provider, base_url):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url=base_url))
+
+        assert result.status == "warn"
+        assert "backend" in result.detail
+        assert "network_isolation_confirmed" in result.detail
+        assert "CONFIGURATION.md#delegated-fetch-backend-isolation" in result.fix
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai"])
+    def test_localhost_default_warns(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider))
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    def test_isolated_private_backend_ok(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url="http://10.0.0.5:3000", network_isolation_confirmed=True))
+
+        assert result.status == "ok"
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    def test_public_backend_needs_no_acknowledgement(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url="https://public.invalid"))
+
+        assert result.status == "ok"
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    def test_private_target_opt_in_does_not_authorize_backend(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url="http://10.0.0.5:3000", allow_private_addresses=True))
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    @pytest.mark.parametrize("provider", ["browserless", "crawl4ai", "firecrawl", "fastcrw"])
+    def test_invalid_scheme_warns_even_when_isolation_confirmed(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider, base_url="ftp://public.invalid", network_isolation_confirmed=True))
+
+        assert result.status == "warn"
+        assert "Only http:// and https://" in result.detail
+
+    def test_fastcrw_env_backend_is_screened(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRW_API_URL", "http://127.0.0.1:3000")
+
+        result = doctor.check_web_fetch(self._config(tmp_path, "fastcrw"))
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    def test_fastcrw_config_endpoint_takes_precedence_over_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRW_API_URL", "http://127.0.0.1:3000")
+
+        result = doctor.check_web_fetch(self._config(tmp_path, "fastcrw", base_url="https://public.invalid"))
+
+        assert result.status == "ok"
+
+    @pytest.mark.parametrize("provider", ["firecrawl", "fastcrw"])
+    def test_cloud_defaults_need_no_acknowledgement(self, tmp_path, provider):
+        result = doctor.check_web_fetch(self._config(tmp_path, provider))
+
+        assert result.status == "ok"
+
+    def test_env_endpoint_and_acknowledgement_are_resolved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FETCH_BACKEND", "http://10.0.0.5:3000")
+        monkeypatch.setenv("FETCH_ISOLATED", "false")
+        cfg = self._config(tmp_path, "crawl4ai", base_url="$FETCH_BACKEND", network_isolation_confirmed="$FETCH_ISOLATED")
+
+        assert doctor.check_web_fetch(cfg).status == "warn"
+        monkeypatch.setenv("FETCH_ISOLATED", "true")
+        assert doctor.check_web_fetch(cfg).status == "ok"
+
+    def test_dotenv_backend_is_screened(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FETCH_BACKEND", "")  # Restore the environment after load_dotenv.
+        monkeypatch.delenv("FETCH_BACKEND")
+        (tmp_path / ".env").write_text("FETCH_BACKEND=http://10.0.0.5:3000\n", encoding="utf-8")
+
+        result = doctor.check_web_fetch(self._config(tmp_path, "crawl4ai", base_url="$FETCH_BACKEND"))
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    def test_other_provider_does_not_mask_unsafe_backend(self, tmp_path):
+        cfg = self._config(tmp_path, "crawl4ai")
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        data["tools"].insert(0, {"name": "web_fetch", "use": "deerflow.community.jina_ai.tools:web_fetch_tool"})
+        cfg.write_text(json.dumps(data), encoding="utf-8")
+
+        result = doctor.check_web_fetch(cfg)
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+
+    def test_search_policy_is_unchanged(self, tmp_path):
+        result = doctor.check_web_search(self._config(tmp_path, "fastcrw", tool_name="web_search", base_url="http://10.0.0.5:3000"))
+
+        assert result.status == "ok"
+
+
+@pytest.mark.usefixtures("delegated_backend_dns")
 class TestCheckWebCapture:
-    def test_browserless_self_host_without_token_ok(self, tmp_path, monkeypatch):
+    def test_browserless_self_host_without_confirmation_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n")
 
         result = doctor.check_web_capture(cfg)
 
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
+        assert "CONFIGURATION.md#delegated-fetch-backend-isolation" in result.fix
+
+    def test_browserless_isolated_self_host_without_token_ok(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n    network_isolation_confirmed: true\n",
+            encoding="utf-8",
+        )
+
+        result = doctor.check_web_capture(cfg)
+
         assert result.status == "ok"
         assert "self-hosted" in result.detail
+
+    def test_private_target_opt_in_does_not_authorize_capture_backend(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    allow_private_addresses: true\n",
+            encoding="utf-8",
+        )
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert "network_isolation_confirmed" in result.detail
 
     def test_browserless_token_env_ref_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-test")
@@ -374,6 +1138,64 @@ class TestCheckWebCapture:
 
         assert result.status == "warn"
         assert "BROWSERLESS_TOKEN" in (result.fix or "")
+
+    @pytest.mark.parametrize(
+        ("token", "detail"),
+        [
+            ("your-github-token", "browserless configured but token in config still holds the .env.example placeholder"),
+            ('""', "browserless configured but token in config is empty, and BROWSERLESS_TOKEN is read only when token is omitted"),
+        ],
+        ids=["placeholder", "blank"],
+    )
+    def test_browserless_explicit_token_wins_over_the_environment(self, tmp_path, monkeypatch, token, detail):
+        """Browserless reads BROWSERLESS_TOKEN only when ``token`` is omitted, so a valid variable cannot rescue the field."""
+        from deerflow.community.browserless.tools import _get_browserless_client
+
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-real-token")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: {token}\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == detail
+        assert "remove token to use BROWSERLESS_TOKEN" in (result.fix or "")
+        runtime_token = _get_browserless_client("web_capture", cfg={"base_url": "https://production-sfo.browserless.io", "token": "" if token == '""' else token}).token
+        assert runtime_token == "", "doctor must warn exactly when the client sends no token"
+
+    def test_browserless_token_reference_to_an_unset_variable_names_it_once(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: $BROWSERLESS_TOKEN\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == "browserless configured but BROWSERLESS_TOKEN not set"
+
+    def test_browserless_self_hosted_still_warns_about_a_placeholder_token(self, tmp_path, monkeypatch):
+        """A self-hosted token is optional, but a placeholder shows the operator meant to set one."""
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "your-github-token")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n    network_isolation_confirmed: true\n    token: $BROWSERLESS_TOKEN\n"
+        )
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == "browserless configured but BROWSERLESS_TOKEN still holds the .env.example placeholder"
+
+    def test_browserless_operator_chosen_token_is_a_token(self, tmp_path, monkeypatch):
+        """Only shipped template values are placeholders; ``your-review-team-token`` is a token someone chose."""
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "your-review-team-token")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: $BROWSERLESS_TOKEN\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "ok"
+        assert "BROWSERLESS_TOKEN set from config" in result.detail
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +1337,17 @@ class TestCheckSandbox:
         results = doctor.check_sandbox(cfg)
         assert results[0].status == "fail"
 
+    def test_commented_out_tools_block_reports_no_traceback(self, tmp_path):
+        # Regression: iterating a null `tools:` raised TypeError, which the
+        # broad handler rendered as "('NoneType' object is not iterable)".
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\ntools:\n  # - name: bash\n")
+        results = doctor.check_sandbox(cfg)
+        # Empty `tools:` means no bash tool, so the path is deterministic.
+        assert len(results) == 1
+        assert results[0].status == "ok"
+        assert results[0].detail == "Local sandbox"
+
     def test_local_sandbox_with_disabled_host_bash_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\n  allow_host_bash: false\ntools:\n  - name: bash\n    use: deerflow.sandbox.tools:bash_tool\n")
@@ -534,17 +1367,35 @@ class TestCheckSandbox:
 # ---------------------------------------------------------------------------
 
 
-class TestMainExitCode:
-    def test_returns_int(self, tmp_path, monkeypatch, capsys):
-        """main() should return 0 or 1 without raising."""
-        repo_root = tmp_path / "repo"
-        scripts_dir = repo_root / "scripts"
-        scripts_dir.mkdir(parents=True)
-        fake_doctor = scripts_dir / "doctor.py"
-        fake_doctor.write_text("# test-only shim for __file__ resolution\n")
+def _fake_checkout(tmp_path: Path, monkeypatch) -> Path:
+    """Point doctor at an empty checkout under ``tmp_path``.
 
-        monkeypatch.chdir(repo_root)
-        monkeypatch.setattr(doctor, "__file__", str(fake_doctor))
+    The harness's legacy config fallback is pinned to the same checkout, so
+    whether the real repository has a ``config.yaml`` cannot leak in.
+    """
+    from deerflow.config import app_config
+
+    repo_root = tmp_path / "repo"
+    scripts_dir = repo_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    fake_doctor = scripts_dir / "doctor.py"
+    fake_doctor.write_text("# test-only shim for __file__ resolution\n")
+
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setattr(doctor, "__file__", str(fake_doctor))
+    monkeypatch.setattr(
+        app_config,
+        "_legacy_config_candidates",
+        lambda: (repo_root / "backend" / "config.yaml", repo_root / "config.yaml"),
+    )
+    return repo_root
+
+
+class TestMainExitCode:
+    def test_returns_int(self, tmp_path, runtime_path_env, capsys):
+        """main() should return 0 or 1 without raising."""
+        monkeypatch = runtime_path_env
+        _fake_checkout(tmp_path, monkeypatch)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
@@ -557,3 +1408,138 @@ class TestMainExitCode:
         assert output
         assert "config.yaml" in output
         assert ".env" in output
+
+
+class TestMainConfigResolution:
+    def test_missing_config_path_env_fails_even_with_a_checkout_config(self, tmp_path, runtime_path_env, capsys):
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels: []\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing.yaml"))
+
+        exit_code = doctor.main()
+
+        output = capsys.readouterr().out
+        assert exit_code == 1
+        assert "✗ config.yaml found" in output
+        assert "DEER_FLOW_CONFIG_PATH" in output
+        # The checkout's config.yaml is not the one the Gateway would read, so
+        # nothing is reported about it.
+        assert "— config.yaml loadable" in output
+        assert "— models configured" in output
+
+    def test_checks_the_config_named_by_config_path_env(self, tmp_path, runtime_path_env, capsys):
+        _fake_checkout(tmp_path, runtime_path_env)
+        cfg = tmp_path / "custom.yaml"
+        cfg.write_text("config_version: 5\nmodels: []\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(cfg))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✗ models configured  (no models found)" in output
+
+    @pytest.mark.parametrize("project_root_env", [None, ""], ids=["unset", "empty"])
+    def test_defaults_project_root_to_the_checkout_like_make_dev(self, tmp_path, runtime_path_env, capsys, project_root_env):
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        # `make dev` runs from backend/, but serve.sh pins an unset or empty
+        # runtime root to the checkout, so the Gateway prefers
+        # <checkout>/config.yaml over the legacy backend/config.yaml.
+        # Resolving from the cwd would pick the backend copy instead.
+        if project_root_env is not None:
+            runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", project_root_env)
+        backend_dir = repo_root / "backend"
+        backend_dir.mkdir()
+        runtime_path_env.chdir(backend_dir)
+        (backend_dir / "config.yaml").write_text("config_version: 5\nmodels: []\n")
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output
+
+    def test_missing_project_root_env_fails(self, tmp_path, runtime_path_env, capsys):
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels: []\n")
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path / "missing-root"))
+
+        exit_code = doctor.main()
+
+        output = capsys.readouterr().out
+        assert exit_code == 1
+        assert "✗ config.yaml found" in output
+        assert "DEER_FLOW_PROJECT_ROOT" in output
+
+    def test_dotenv_config_path_overrides_the_shell_like_make_dev(self, tmp_path, runtime_path_env, capsys):
+        # serve.sh sources .env over the shell, so the Gateway loads the .env
+        # config even when the shell exports a different (missing) one.
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        cfg = tmp_path / "from-dotenv.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: dotenv-model\n")
+        (repo_root / ".env").write_text(f"DEER_FLOW_CONFIG_PATH={cfg}\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing.yaml"))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output
+
+    def test_dotenv_project_root_overrides_the_shell_like_make_dev(self, tmp_path, runtime_path_env, capsys):
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")
+        (repo_root / ".env").write_text(f"DEER_FLOW_PROJECT_ROOT={repo_root}\n")
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path / "missing-root"))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output
+
+    def test_empty_dotenv_config_path_clears_the_shell_value_like_make_dev(self, tmp_path, runtime_path_env, capsys):
+        # Sourcing `DEER_FLOW_CONFIG_PATH=` exports an empty value, which the
+        # resolver skips, so the Gateway falls back to <checkout>/config.yaml.
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")
+        (repo_root / ".env").write_text("DEER_FLOW_CONFIG_PATH=\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing.yaml"))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output
+
+    @pytest.mark.parametrize(
+        ("name", "value", "found"),
+        [
+            ("DEER_FLOW_CONFIG_PATH", "~/cfg.yaml", True),
+            ("DEER_FLOW_PROJECT_ROOT", "~/repo", True),
+            # bash leaves a quoted tilde literal, so the Gateway fails too.
+            ("DEER_FLOW_CONFIG_PATH", '"~/cfg.yaml"', False),
+        ],
+        ids=["config-path", "project-root", "quoted-config-path"],
+    )
+    def test_dotenv_location_tilde_expands_like_source(self, tmp_path, runtime_path_env, capsys, name, value, found):
+        # serve.sh's `source .env` expands an unquoted leading `~` (bash tilde
+        # expansion in an assignment) and keeps a quoted one literal.
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        for home_var in ("HOME", "USERPROFILE"):
+            runtime_path_env.setenv(home_var, str(tmp_path))
+        (tmp_path / "cfg.yaml").write_text("config_version: 5\nmodels:\n  - name: home-model\n")
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")
+        (repo_root / ".env").write_text(f"{name}={value}\n")
+
+        exit_code = doctor.main()
+
+        output = capsys.readouterr().out
+        if found:
+            assert "✓ config.yaml found" in output
+            assert "✓ models configured  (1 model(s))" in output
+        else:
+            assert exit_code == 1
+            assert "✗ config.yaml found" in output
+            assert str(Path("~/cfg.yaml")) in output

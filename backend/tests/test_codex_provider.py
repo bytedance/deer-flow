@@ -11,8 +11,10 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.models.credential_loader import CodexCliCredential
@@ -202,13 +204,172 @@ def test_convert_messages_ai_with_tool_calls():
     assert any(item.get("type") == "function_call" and item["name"] == "search" for item in items)
 
 
-def test_convert_messages_tool_message():
+@pytest.mark.parametrize("call_id", ["tc1", "0", " tc1 "])
+def test_convert_messages_tool_message(call_id, caplog):
     model = _make_model()
-    tool_msg = ToolMessage(content="result data", tool_call_id="tc1")
-    _, items = model._convert_messages([tool_msg])
+    tool_msg = ToolMessage(content="result data", tool_call_id=call_id)
+    with caplog.at_level(logging.WARNING, logger="deerflow.models.openai_codex_provider"):
+        _, items = model._convert_messages([tool_msg])
     assert items[0]["type"] == "function_call_output"
-    assert items[0]["call_id"] == "tc1"
+    assert items[0]["call_id"] == call_id
     assert items[0]["output"] == "result data"
+    assert caplog.record_tuples == []
+
+
+@pytest.mark.parametrize("call_id", ["tc1", "0", " tc1 "])
+def test_convert_messages_preserves_paired_call_ids(call_id):
+    model = _make_model()
+    ai_msg = AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "foo"}, "id": call_id}])
+    tool_msg = ToolMessage(content="result data", tool_call_id=call_id)
+
+    _, items = model._convert_messages([ai_msg, tool_msg])
+
+    assert items == [
+        {"type": "function_call", "name": "search", "arguments": '{"q": "foo"}', "call_id": call_id},
+        {"type": "function_call_output", "call_id": call_id, "output": "result data"},
+    ]
+    assert ai_msg.tool_calls[0]["id"] == call_id
+    assert tool_msg.tool_call_id == call_id
+
+
+@pytest.mark.parametrize("blank_id", ["", "   ", "\t\r\n"])
+@pytest.mark.parametrize("call_field", ["tool_calls", "invalid_tool_calls"])
+def test_convert_messages_omits_paired_calls_and_results_with_blank_ids(blank_id, call_field):
+    model = _make_model()
+    args = {"q": "foo"} if call_field == "tool_calls" else '{"q":'
+    ai_msg = AIMessage(content="Searching.", **{call_field: [{"name": "search", "args": args, "id": blank_id}]})
+    tool_msg = ToolMessage(content="result data", tool_call_id=blank_id)
+
+    _, items = model._convert_messages([ai_msg, tool_msg])
+
+    assert items == [{"role": "assistant", "content": "Searching."}]
+    assert getattr(ai_msg, call_field)[0]["id"] == blank_id
+    assert tool_msg.tool_call_id == blank_id
+
+
+@pytest.mark.parametrize("blank_id", ["", "   ", "\t\r\n"])
+@pytest.mark.parametrize(
+    ("content", "content_length"),
+    [
+        ("private result", 14),
+        ([{"type": "text", "text": "private"}, {"type": "text", "text": "result"}], 14),
+        ("", 0),
+    ],
+)
+def test_convert_messages_omits_tool_results_with_blank_call_ids(blank_id, content, content_length, caplog):
+    model = _make_model()
+    orphaned_result = ToolMessage(content=content, tool_call_id=blank_id)
+    original_result = orphaned_result.model_dump()
+    messages = [
+        SystemMessage(content="Follow the instructions."),
+        HumanMessage(content="Search for foo."),
+        AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "foo"}, "id": "tc1"}]),
+        orphaned_result,
+        ToolMessage(content=[{"type": "text", "text": "result data"}], tool_call_id="tc1"),
+        AIMessage(content="Done."),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.models.openai_codex_provider"):
+        instructions, items = model._convert_messages(messages)
+
+    assert instructions == "Follow the instructions."
+    assert items == [
+        {"role": "user", "content": "Search for foo."},
+        {"type": "function_call", "name": "search", "arguments": '{"q": "foo"}', "call_id": "tc1"},
+        {"type": "function_call_output", "call_id": "tc1", "output": "result data"},
+        {"role": "assistant", "content": "Done."},
+    ]
+    assert orphaned_result.model_dump() == original_result
+    assert caplog.record_tuples == [
+        ("deerflow.models.openai_codex_provider", logging.WARNING, f"Dropping tool result with blank call_id (content {content_length} chars)"),
+    ]
+
+
+def test_convert_messages_keeps_placeholder_result_paired_with_invalid_tool_call():
+    """A malformed call stays on invalid_tool_calls but is answered by a placeholder
+    ToolMessage, so it must still serialize as a function_call item.
+
+    Responses rejects a function_call_output whose call_id has no matching
+    function_call item, so dropping the invalid call turns the placeholder the
+    middleware injected for recovery into the provider error it exists to prevent.
+    """
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    model = _make_model()
+    response = {
+        "output": [
+            {
+                "type": "function_call",
+                "name": "write_file",
+                "arguments": '{"path": "report.md", "content": "unterminated',
+                "call_id": "call_bad",
+            }
+        ],
+        "usage": {},
+    }
+    ai_msg = model._parse_response(response).generations[0].message
+    assert [tc["id"] for tc in ai_msg.invalid_tool_calls] == ["call_bad"]
+
+    patched = DanglingToolCallMiddleware()._build_patched_messages([HumanMessage(content="write it"), ai_msg])
+    assert isinstance(patched[-1], ToolMessage)
+    assert patched[-1].tool_call_id == "call_bad"
+
+    _, items = model._convert_messages(patched)
+    call_ids = {item["call_id"] for item in items if item.get("type") == "function_call"}
+    output_ids = {item["call_id"] for item in items if item.get("type") == "function_call_output"}
+    assert output_ids == {"call_bad"}
+    assert output_ids <= call_ids
+
+
+def test_convert_messages_drops_invalid_calls_missing_a_name_or_call_id():
+    """A call the middleware has not repaired must not serialize as null fields.
+
+    InvalidToolCall fields are nullable, and a ``function_call`` item carrying a
+    null ``name`` or ``call_id`` is schema-invalid, so serializing one turns a
+    case the old serializer dropped into a rejected request. The middleware
+    repairs exactly these calls (see the test below), so dropping them here
+    cannot leave a placeholder ToolMessage without its call.
+    """
+    model = _make_model()
+
+    for output_item in (
+        {"type": "function_call", "name": "write_file", "arguments": '{"a":'},
+        {"type": "function_call", "call_id": "call_x", "arguments": '{"a":'},
+        {"type": "function_call", "arguments": '{"a":'},
+    ):
+        ai_msg = model._parse_response({"output": [output_item], "usage": {}}).generations[0].message
+        assert ai_msg.invalid_tool_calls, output_item
+
+        _, items = model._convert_messages([HumanMessage(content="hi"), ai_msg])
+        assert [i for i in items if i.get("type") == "function_call"] == []
+
+
+def test_convert_messages_serializes_invalid_calls_the_middleware_repaired():
+    """A repaired invalid call is still sent, and still paired with its result."""
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+        DanglingToolCallMiddleware,
+    )
+
+    model = _make_model()
+
+    for output_item in (
+        {"type": "function_call", "name": "write_file", "arguments": '{"a":'},
+        {"type": "function_call", "call_id": "call_x", "arguments": '{"a":'},
+        {"type": "function_call", "arguments": '{"a":'},
+    ):
+        ai_msg = model._parse_response({"output": [output_item], "usage": {}}).generations[0].message
+        patched = DanglingToolCallMiddleware()._build_patched_messages([HumanMessage(content="hi"), ai_msg])
+
+        _, items = model._convert_messages(patched)
+        call_ids = {i["call_id"] for i in items if i.get("type") == "function_call"}
+        output_ids = {i["call_id"] for i in items if i.get("type") == "function_call_output"}
+        assert output_ids == call_ids
+        assert call_ids
+        assert all(cid for cid in call_ids)
+        for item in items:
+            if item.get("type") == "function_call":
+                assert item["name"]
+                assert item["arguments"]
 
 
 # ---------------------------------------------------------------------------
@@ -274,3 +435,20 @@ def test_parse_tool_call_arguments_non_dict_json():
     parsed, err = model._parse_tool_call_arguments({"arguments": '["list", "not", "dict"]', "name": "t", "call_id": "c"})
     assert parsed is None
     assert err is not None
+
+
+# ---------------------------------------------------------------------------
+# Credential loading
+# ---------------------------------------------------------------------------
+
+
+def test_model_post_init_accepts_null_account_id(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"tokens": {"access_token": "tok-test", "account_id": None}}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    from deerflow.models.openai_codex_provider import CodexChatModel
+
+    model = CodexChatModel(model="gpt-5.4", reasoning_effort="medium")
+
+    assert model._account_id == ""

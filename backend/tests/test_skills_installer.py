@@ -35,6 +35,14 @@ class TestIsUnsafeZipMember:
         info = zipfile.ZipInfo("C:\\Windows\\system32\\drivers\\etc\\hosts")
         assert is_unsafe_zip_member(info) is True
 
+    def test_colon_in_member_name_ntfs_ads(self):
+        """A colon after the first path component addresses a Windows NTFS
+        Alternate Data Stream (e.g. ``run.sh:hidden.txt`` hides content inside
+        ``run.sh`` instead of creating a new file), invisible to rglob/os.walk
+        based scanning. Must be rejected outright."""
+        info = zipfile.ZipInfo("my-skill/scripts/run.sh:hidden.txt")
+        assert is_unsafe_zip_member(info) is True
+
     def test_dotdot_traversal(self):
         info = zipfile.ZipInfo("foo/../../../etc/passwd")
         assert is_unsafe_zip_member(info) is True
@@ -79,6 +87,50 @@ class TestShouldIgnoreArchiveEntry:
 
     def test_normal_dir_not_ignored(self):
         assert should_ignore_archive_entry(Path("my-skill")) is False
+
+
+# ---------------------------------------------------------------------------
+# code-file classification shared with SkillScan
+# ---------------------------------------------------------------------------
+
+
+class TestCodeFileClassification:
+    @pytest.mark.parametrize(
+        ("rel_path", "content", "expected"),
+        [
+            ("scripts/data.dat", b"plain", True),
+            ("lib/RUN.PY", b"print()", True),
+            ("bin/tool", b"#!/bin/sh\n", True),
+            ("bin/tool", b"echo", False),
+            ("bin/notes.txt", b"#!/bin/sh\n", False),
+            ("bin/scripts", b"echo", False),
+            ("assets/logo.png", b"\x89PNG", False),
+            ("hooks/install.bat", b"@echo off\r\n", True),
+            ("hooks/install.CMD", b"@echo off\r\n", True),
+            ("hooks/install.vbs", b'CreateObject("WScript.Shell")\r\n', True),
+            ("hooks/install.wsf", b"<job></job>\r\n", True),
+            ("hooks/module.psm1", b"Export-ModuleMember -Function *", True),
+            ("hooks/install.jse", b"plain", True),
+            ("hooks/install.JSE", b"plain", True),
+            ("hooks/install.vbe", b"plain", True),
+            ("hooks/install.VBE", b"plain", True),
+            ("assets/setup.hta", b"<html></html>", True),
+            ("assets/setup.HTA", b"<html></html>", True),
+            ("policy/install.sct", b"<scriptlet></scriptlet>", True),
+            ("policy/install.SCT", b"<scriptlet></scriptlet>", True),
+            ("references/notes.txt", b"plain", False),
+        ],
+    )
+    def test_installer_applies_the_shared_code_file_rule(self, tmp_path, rel_path, content, expected):
+        import deerflow.skills.installer as installer_module
+        from deerflow.skills.package_files import is_code_file
+
+        path = tmp_path / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+        assert asyncio.run(installer_module._is_code_file(path, Path(rel_path))) is expected
+        assert is_code_file(rel_path, content) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +191,21 @@ class TestSafeExtract:
             with pytest.raises(ValueError, match="unsafe"):
                 safe_extract_skill_archive(zf, dest)
 
+    def test_rejects_ntfs_ads_colon_member(self, tmp_path):
+        """A zip member named like ``scripts/run.sh:hidden.txt`` is an NTFS
+        Alternate-Data-Stream address, not a nested path. Extraction must
+        reject the whole archive instead of silently attaching hidden
+        content to ``run.sh``."""
+        zip_path = tmp_path / "ads.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("my-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
+            zf.writestr("my-skill/scripts/run.sh:hidden.txt", "HIDDEN_PAYLOAD_MARKER")
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="unsafe"):
+                safe_extract_skill_archive(zf, dest)
+
     def test_skips_symlinks(self, tmp_path):
         zip_path = tmp_path / "sym.zip"
         with zipfile.ZipFile(zip_path, "w") as zf:
@@ -152,6 +219,25 @@ class TestSafeExtract:
             safe_extract_skill_archive(zf, dest)
         assert (dest / "normal.txt").exists()
         assert not (dest / "link.txt").exists()
+
+    def test_rejects_too_many_entries(self, tmp_path):
+        """Entry-count cap is independent of total size: 4 tiny files still trips a low max_entries."""
+        zip_path = self._make_zip(tmp_path, {f"file-{i}.txt": "x" for i in range(4)})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="too many entries"):
+                safe_extract_skill_archive(zf, dest, max_entries=3)
+        assert not any(dest.iterdir())
+
+    def test_allows_entries_at_the_cap(self, tmp_path):
+        """The cap is inclusive: exactly max_entries members is not rejected."""
+        zip_path = self._make_zip(tmp_path, {f"file-{i}.txt": "x" for i in range(5)})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            safe_extract_skill_archive(zf, dest, max_entries=5)
+        assert len(list(dest.iterdir())) == 5
 
     def test_normal_archive(self, tmp_path):
         zip_path = self._make_zip(
@@ -197,6 +283,53 @@ class TestSafeExtract:
             with pytest.raises(ValueError, match="executable binary"):
                 safe_extract_skill_archive(zf, dest)
 
+    @pytest.mark.parametrize(
+        ("filler", "magic"),
+        [
+            pytest.param(b"\n", b"\x7fELF", id="newline-elf"),
+            pytest.param(b" ", b"MZ", id="space-pe"),
+            pytest.param(b"\x00\x00\x00\n", b"\x7fELF", id="nul-run-elf"),
+            pytest.param(b"\xef\xbb\xbf", b"\x7fELF", id="utf8-bom-elf"),
+            pytest.param(b"\xef\xbb\xbf", b"\xbf\xba\xfe\xca", id="utf8-bom-macho-fat64-le"),
+            pytest.param(b" " * 63, b"\x7fELF", id="max-filler-offset"),
+        ],
+    )
+    def test_rejects_whitespace_prefixed_executable_binary(self, tmp_path, filler, magic):
+        """Leading filler must not smuggle a binary past the extraction guard."""
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                "my-skill/assets/payload": filler + magic + b"\x00" * 64,
+            },
+        )
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="executable binary"):
+                safe_extract_skill_archive(zf, dest)
+
+    @pytest.mark.parametrize(
+        ("payload", "identifier"),
+        [
+            pytest.param(b" " * 64 + b"\x7fELF" + b"\x00" * 64, "filler-at-cap"),
+            pytest.param(b"\xef\xbb\xbf\xba\xfe\xca" + b"\x00" * 64, "bom-tail-is-not-macho"),
+        ],
+    )
+    def test_allows_non_executable_payloads_with_prefixes_outside_the_sniff(self, tmp_path, payload, identifier):
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                f"my-skill/assets/{identifier}": payload,
+            },
+        )
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            safe_extract_skill_archive(zf, dest)
+        assert (dest / "my-skill" / "assets" / identifier).read_bytes() == payload
+
     def test_allows_non_executable_binary_assets(self, tmp_path):
         zip_path = self._make_zip(
             tmp_path,
@@ -228,6 +361,86 @@ class TestSafeExtract:
 
 
 # ---------------------------------------------------------------------------
+# Entry-count cap must apply unconditionally, independent of skill_scan.enabled.
+#
+# scan_archive_preflight() (skillscan/orchestrator.py) already caps member
+# count at 4096, but only runs as part of the optional native scanner
+# (skill_scan.enabled, default true). When that scanner is disabled,
+# safe_extract_skill_archive was the only remaining guard on the extraction
+# path, and it only capped total bytes — not entry count. These tests pin
+# the fix: the cap now lives in extraction itself, so it holds regardless of
+# skill_scan.enabled.
+# ---------------------------------------------------------------------------
+
+
+class TestEntryCountCapAppliesRegardlessOfSkillScan:
+    @pytest.fixture(autouse=True)
+    def _allow_security_scan(self, monkeypatch):
+        async def _scan(*args, **kwargs):
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+
+    def _make_storage(self, skills_root: Path, *, skill_scan_enabled: bool):
+        from types import SimpleNamespace
+
+        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+        return LocalSkillStorage(
+            host_path=str(skills_root),
+            app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=skill_scan_enabled)),
+        )
+
+    def _make_many_entry_zip(self, tmp_path: Path, *, entry_count: int, skill_name: str = "test-skill") -> Path:
+        """A real archive with ``entry_count`` tiny members and a small total size —
+        matches the reported shape (50,000 entries, ~5MB total)."""
+        zip_path = tmp_path / f"{skill_name}.skill"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f"{skill_name}/SKILL.md", f"---\nname: {skill_name}\ndescription: A test skill\n---\n\n# {skill_name}\n")
+            for i in range(entry_count):
+                zf.writestr(f"{skill_name}/pad-{i:06d}.txt", "")
+        return zip_path
+
+    def test_rejects_high_entry_count_archive_even_with_skill_scan_disabled(self, tmp_path):
+        """The previously-vulnerable configuration: skill_scan disabled, so
+        scan_archive_preflight's member cap never runs. safe_extract_skill_archive
+        must still reject the archive unconditionally, on its own."""
+        zip_path = self._make_many_entry_zip(tmp_path, entry_count=50_000)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        storage = self._make_storage(skills_root, skill_scan_enabled=False)
+
+        with pytest.raises(ValueError, match="too many entries"):
+            storage.install_skill_from_archive(zip_path)
+
+        assert not (skills_root / "custom" / "test-skill").exists()
+
+    def test_scan_archive_preflight_independently_flags_the_same_archive(self, tmp_path):
+        """Cross-check tying the two protections together: the pre-existing optional
+        scanner also flags this exact archive by member count when it does run."""
+        from deerflow.skills.skillscan.orchestrator import scan_archive_preflight
+
+        zip_path = self._make_many_entry_zip(tmp_path, entry_count=50_000)
+
+        result = scan_archive_preflight(zip_path)
+
+        assert result["blocked"] is True
+        assert any(finding["rule_id"] == "package-too-many-members" for finding in result["findings"])
+
+    def test_normal_skill_archive_still_installs_with_skill_scan_disabled(self, tmp_path):
+        """Same disabled-scan configuration, but a small, legitimate skill: must still install."""
+        zip_path = self._make_many_entry_zip(tmp_path, entry_count=5, skill_name="small-skill")
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        storage = self._make_storage(skills_root, skill_scan_enabled=False)
+
+        result = storage.install_skill_from_archive(zip_path)
+
+        assert result["success"] is True
+        assert (skills_root / "custom" / "small-skill" / "SKILL.md").exists()
+
+
+# ---------------------------------------------------------------------------
 # install_skill_from_archive (full integration)
 # ---------------------------------------------------------------------------
 
@@ -249,6 +462,42 @@ class TestInstallSkillFromArchive:
                 f"---\nname: {skill_name}\ndescription: A test skill\n---\n\n# {skill_name}\n",
             )
         return zip_path
+
+    def test_rejects_publication_path_too_long(self, tmp_path, monkeypatch):
+        zip_path = self._make_skill_zip(tmp_path)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        monkeypatch.setattr(
+            "deerflow.skills.storage.local_skill_storage._publication_path_limit",
+            lambda root: 1,
+        )
+        with pytest.raises(ValueError, match="publication path is too long"):
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+    def test_rejects_nested_member_whose_staging_path_is_too_long(self, tmp_path, monkeypatch):
+        zip_path = tmp_path / "nested-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "nested-skill/SKILL.md",
+                "---\nname: nested-skill\ndescription: A test skill\n---\n\n# nested-skill\n",
+            )
+            zf.writestr("nested-skill/references/very/deep/guide.md", "# Guide\n")
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        # The staged skill root fits the limit; only the nested member exceeds it,
+        # as when the staging temp-dir name lengthens a path that fits at its
+        # final location.
+        monkeypatch.setattr(
+            "deerflow.skills.installer._host_path_length",
+            lambda path, **kwargs: 100 if path.name == "guide.md" else 10,
+        )
+        monkeypatch.setattr(
+            "deerflow.skills.storage.local_skill_storage._publication_path_limit",
+            lambda root: 50,
+        )
+        with pytest.raises(ValueError, match="publication path for 'references/very/deep/guide.md' is too long"):
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+        assert not (skills_root / "custom" / "nested-skill").exists()
 
     def test_success(self, tmp_path):
         zip_path = self._make_skill_zip(tmp_path)
@@ -303,7 +552,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"content": content, "executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -333,7 +582,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"content": content, "executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -378,7 +627,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -419,17 +668,20 @@ class TestInstallSkillFromArchive:
 
         assert sniffed == ["tool"]
 
-    def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("rel_path", ["lib/run.py", "hooks/install.jse", "hooks/install.vbe", "assets/setup.hta", "policy/install.sct"])
+    def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch, rel_path):
         zip_path = tmp_path / "test-skill.skill"
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
             # Benign payload on purpose: the native scanner must stay quiet so the
             # test exercises the LLM executable policy (warn != allow) on its own.
-            zf.writestr("test-skill/lib/run.py", "print('needs human review')\n")
+            zf.writestr(f"test-skill/{rel_path}", "print('needs human review')\n")
         skills_root = tmp_path / "skills"
         skills_root.mkdir()
+        calls = []
 
         async def _scan(*args, executable, **kwargs):
+            calls.append((kwargs["location"], executable))
             if executable:
                 return ScanResult(decision="warn", reason="code needs review")
             return ScanResult(decision="allow", reason="ok")
@@ -437,6 +689,28 @@ class TestInstallSkillFromArchive:
         monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
 
         with pytest.raises(SkillSecurityScanError, match="rejected executable.*code needs review"):
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+        assert (f"test-skill/{rel_path}", True) in calls
+        assert not (skills_root / "custom" / "test-skill").exists()
+
+    @pytest.mark.parametrize(
+        ("filler", "magic"),
+        [
+            pytest.param(b"\n", b"\x7fELF", id="newline-elf"),
+            pytest.param(b"\xef\xbb\xbf", b"\x7fELF", id="bom-elf"),
+            pytest.param(b" " * 63, b"\xbf\xba\xfe\xca", id="max-filler-offset-macho-fat64-le"),
+        ],
+    )
+    def test_filler_prefixed_executable_binary_prevents_install(self, tmp_path, filler, magic):
+        zip_path = tmp_path / "test-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
+            zf.writestr("test-skill/assets/payload", filler + magic + b"\x00" * 64)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+
+        with pytest.raises(ValueError, match="executable binary"):
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
         assert not (skills_root / "custom" / "test-skill").exists()
@@ -453,6 +727,42 @@ class TestInstallSkillFromArchive:
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
         assert not (skills_root / "custom" / "test-skill").exists()
+
+    def test_ntfs_ads_smuggling_prevented(self, tmp_path, monkeypatch):
+        """End-to-end regression: an archive member name like
+        ``scripts/run.sh:hidden.txt`` addresses a Windows NTFS Alternate Data
+        Stream rather than a nested file. It must be rejected by the archive
+        preflight scan before extraction — not installed with its payload
+        left invisible to directory-based scanning."""
+        marker = "HIDDEN_ADS_PAYLOAD_MARKER_TEST"
+        zip_path = tmp_path / "ads-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("ads-skill/SKILL.md", "---\nname: ads-skill\ndescription: A test skill\n---\n\n# ads-skill\n")
+            zf.writestr("ads-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
+            zf.writestr("ads-skill/scripts/run.sh:hidden.txt", marker)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        llm_calls = []
+
+        async def _scan(*args, **kwargs):
+            llm_calls.append({"args": args, "kwargs": kwargs})
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+
+        with pytest.raises(SkillSecurityScanError) as excinfo:
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+        assert "Static security scan blocked" in str(excinfo.value)
+        assert excinfo.value.findings
+        assert excinfo.value.findings[0]["rule_id"] == "package-ads-stream-name"
+        assert llm_calls == []
+        assert not (skills_root / "custom" / "ads-skill").exists()
+        # The marker must not have leaked into skills_root anywhere (e.g. a
+        # partially-extracted temp dir surviving past cleanup).
+        for path in skills_root.rglob("*"):
+            if path.is_file():
+                assert marker not in path.read_text(encoding="utf-8", errors="ignore")
 
     def test_nested_skill_markdown_prevents_install(self, tmp_path):
         zip_path = tmp_path / "test-skill.skill"
@@ -674,3 +984,180 @@ class TestInstallSkillFromArchive:
         result = get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
         assert result["success"] is True
         assert result["skill_name"] == "my-skill"
+
+
+# ---------------------------------------------------------------------------
+# Unextractable member trees
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        {"a": "file", "a/b": "nested"},
+        {"a/b": "nested", "a": "file"},
+    ],
+)
+def test_safe_extract_rejects_file_and_directory_collisions(tmp_path, members):
+    zip_path = tmp_path / "collision.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name, content in members.items():
+            zf.writestr(name, content)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="conflict"):
+            safe_extract_skill_archive(zf, dest)
+    assert not any(dest.rglob("*"))
+
+
+@pytest.mark.parametrize("name", ["", "."])
+def test_safe_extract_rejects_members_that_normalize_to_the_root(tmp_path, name):
+    zip_path = tmp_path / "root.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(name, "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="not extractable"):
+            safe_extract_skill_archive(zf, dest)
+
+
+def test_safe_extract_allows_explicit_directory_before_nested_file(tmp_path):
+    zip_path = tmp_path / "ok.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("a/", "")
+        zf.writestr("a/b.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        safe_extract_skill_archive(zf, dest)
+    assert (dest / "a" / "b.txt").read_text() == "x"
+
+
+def test_scan_archive_preflight_tolerates_empty_member_name(tmp_path):
+    from deerflow.skills.skillscan.orchestrator import scan_archive_preflight
+
+    zip_path = tmp_path / "empty.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("", "x")
+    result = scan_archive_preflight(zip_path)
+    assert result is not None
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        {"Report": "x", "report/slides/lesson.pptx": "y"},
+        {"report/slides/lesson.pptx": "y", "Report": "x"},
+        {"Café": "x", "Café/slides/a.pptx": "y"},
+        {"Café/slides/a.pptx": "y", "Café": "x"},
+    ],
+)
+def test_safe_extract_rejects_case_and_unicode_collisions(tmp_path, members):
+    zip_path = tmp_path / "fold.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name, content in members.items():
+            zf.writestr(name, content)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="conflict"):
+            safe_extract_skill_archive(zf, dest)
+    assert not any(dest.rglob("*"))
+
+
+def test_safe_extract_rejects_overlong_path_segment(tmp_path):
+    zip_path = tmp_path / "long-segment.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("x" * 300 + "/a.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="segment is too long"):
+            safe_extract_skill_archive(zf, dest)
+
+
+def test_safe_extract_rejects_deep_paths(tmp_path):
+    zip_path = tmp_path / "deep.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("/".join(["d"] * 33) + "/a.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="too deep"):
+            safe_extract_skill_archive(zf, dest)
+
+
+def test_safe_extract_accepts_the_export_depth_boundary(tmp_path):
+    """A skill exported at export.py's 32-component limit must reinstall.
+
+    The archive member adds the enclosing skill directory on top of those 32
+    components, so the installer limit is 33.
+    """
+    skill_name = "demo"
+    relative = "/".join(["d"] * 31) + "/a.txt"
+    zip_path = tmp_path / "boundary.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(f"{skill_name}/{relative}", "x")
+    assert len(relative.split("/")) == 32
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        safe_extract_skill_archive(zf, dest)
+    assert (dest / skill_name / relative).read_text() == "x"
+
+
+def test_safe_extract_rejects_overlong_paths(tmp_path):
+    zip_path = tmp_path / "long-path.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("/".join(["d" * 40] * 30) + "/a.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="too long"):
+            safe_extract_skill_archive(zf, dest)
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        {"Notes": "first", "notes": "second"},
+        {"notes": "second", "Notes": "first"},
+    ],
+)
+def test_safe_extract_rejects_duplicate_folded_file_paths(tmp_path, members):
+    zip_path = tmp_path / "dup.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name, content in members.items():
+            zf.writestr(name, content)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="conflict"):
+            safe_extract_skill_archive(zf, dest)
+    assert not any(dest.rglob("*"))
+
+
+def test_safe_extract_rejects_paths_over_the_host_limit(tmp_path, monkeypatch):
+    import os
+
+    zip_path = tmp_path / "host-limit.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("skill/a.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    monkeypatch.setattr(
+        "deerflow.skills.installer._host_path_limit",
+        lambda root: len(os.fsencode(str(root))) + 5,
+    )
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="destination filesystem"):
+            safe_extract_skill_archive(zf, dest)
+
+
+def test_host_path_length_counts_windows_utf16_units():
+    from deerflow.skills.installer import _host_path_length
+
+    assert _host_path_length(Path("𝄞"), windows=True) == 2
+    assert _host_path_length(Path("𝄞"), windows=False) == 4

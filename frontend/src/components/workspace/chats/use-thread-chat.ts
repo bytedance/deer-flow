@@ -3,6 +3,7 @@
 import { useParams, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { SHOWCASE_ROUTE_PREFIX } from "@/core/threads/static-demo";
 import { uuid } from "@/core/utils/uuid";
 
 export const THREAD_CHAT_RESET_EVENT = "deer-flow:thread-chat-reset";
@@ -23,6 +24,10 @@ export function resetThreadChatAfterDelete(detail: ThreadChatResetDetail) {
     }),
   );
 }
+
+// Sentinel distinguishing "no identity minted yet" from a minted identity
+// whose scope is a project-less new chat (project === null).
+const NEW_CHAT_SCOPE_UNSET = Symbol("deerflow.newChatScopeUnset");
 
 export function useThreadChat() {
   const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
@@ -78,6 +83,38 @@ export function useThreadChat() {
     setThreadIdState(threadIdFromPath);
   }, [pathname, threadIdFromPath]);
 
+  // A new-chat identity is minted for the entry scope (the new chat's
+  // `project` query). The sidebar "New chat" link can leave
+  // `/new?project=…` for plain `/new` without a pathname change, so the
+  // pathname sync above keeps the old identity — which may already be
+  // pre-created under the previous project, and whose in-flight submission
+  // would otherwise survive the navigation. Re-mint whenever the project
+  // scope changes while still on a new-chat path.
+  const newChatScopeRef = useRef<string | null | symbol>(NEW_CHAT_SCOPE_UNSET);
+  useEffect(() => {
+    const project = isNewPath ? searchParams.get("project") : null;
+    if (!isNewPath) {
+      newChatScopeRef.current = NEW_CHAT_SCOPE_UNSET;
+      return;
+    }
+    if (newChatScopeRef.current === project) {
+      return;
+    }
+    const previousScope = newChatScopeRef.current;
+    newChatScopeRef.current = project;
+    if (previousScope === NEW_CHAT_SCOPE_UNSET) {
+      return;
+    }
+    // Scope changed (project added, removed, or swapped): the old identity
+    // belongs to the previous scope, so allocate a fresh one. The threadId
+    // flip also runs every fence keyed on `threadId` (composer goal aborts,
+    // chat-page submission epoch).
+    const nextThreadId = uuid();
+    newThreadIdRef.current = nextThreadId;
+    setIsNewThreadState(true);
+    setThreadIdState(nextThreadId);
+  }, [isNewPath, pathname, searchParams]);
+
   useEffect(() => {
     const handleReset = (event: Event) => {
       const detail = (event as CustomEvent<ThreadChatResetDetail>).detail;
@@ -119,7 +156,9 @@ export function useThreadChat() {
     setIsNewThreadState(nextIsNewThread);
   }, []);
 
-  const isMock = searchParams.get("mock") === "true";
+  const isMock =
+    actualPathname.startsWith(`${SHOWCASE_ROUTE_PREFIX}/`) ||
+    searchParams.get("mock") === "true";
   return {
     threadId: isNewPath ? (newThreadIdRef.current ?? threadId) : threadId,
     setThreadId,

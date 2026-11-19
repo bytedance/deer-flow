@@ -25,8 +25,13 @@ import threading
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
+from deerflow.sandbox.download import download_limit
+from deerflow.sandbox.read_file_contract import split_file_lines
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -37,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 # One base64 chunk stays well under Linux MAX_ARG_STRLEN (128 KiB per argv entry),
 # and 60000 is a multiple of 4 so each chunk is a self-contained base64 unit whose
 # decoded bytes concatenate losslessly.
@@ -56,6 +60,11 @@ class BoxliteBox(Sandbox):
         default_env: Static environment merged into every command, overridden by
             per-call ``env`` (request-scoped secrets).
     """
+
+    #: Every call is a fresh ``sh -lc`` exec in the box — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
+    artifact_root = "/mnt/user-data"
 
     TERMINAL_ERROR_MARKERS = (
         "vsock",
@@ -182,6 +191,8 @@ class BoxliteBox(Sandbox):
         command timeout inside the VM, and the event-loop bridge receives the
         same value so ``run_coroutine_threadsafe(...).result(timeout)`` cannot
         block the caller forever if the SDK future itself never resolves.
+        The bridge deadline produces exit code 124. SDK wait failures returned
+        as ``ExecResult(exit_code=-1)`` retain -1 if they reach us first.
         """
         _validate_extra_env(env)  # POSIX env-var key rule; raises ValueError on a bad key
         if self.is_closed:
@@ -189,6 +200,12 @@ class BoxliteBox(Sandbox):
         merged_env = {**self._default_env, **(env or {})} or None
         try:
             result = self._exec("sh", "-lc", command, env=merged_env, timeout=timeout)
+        except TimeoutError:
+            # The loop bridge raises builtin TimeoutError on its deadline.
+            # SimpleBox.exec converts SDK wait failures to exit_code=-1;
+            # those returned results use the nonzero-exit branch below.
+            # Match Local/AIO/Tenki's marker for the bridge timeout outcome.
+            return "Error: command timed out\nExit Code: 124"
         except Exception as e:
             logger.error("Failed to execute command in BoxLite box %s: %s", self.id, e)
             return f"Error: {e}"
@@ -199,13 +216,20 @@ class BoxliteBox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
-        if result.exit_code not in (0, None) and not output:
-            output = f"Command exited with code {result.exit_code}"
+        if result.exit_code not in (0, None):
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
         return output if output else "(no output)"
 
     # ── file operations ─────────────────────────────────────────────────
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         resolved = self._resolve_path(path)
         try:
             r = self._exec("cat", "--", resolved)
@@ -214,7 +238,15 @@ class BoxliteBox(Sandbox):
             return f"Error: {e}"
         if r.exit_code not in (0, None):
             return f"Error: {(r.stderr or '').strip() or 'cannot read file'}"
-        return r.stdout or ""
+        content = r.stdout or ""
+        if start_line is None and end_line is None:
+            return content
+        lines = split_file_lines(content)
+        # Clamp like LocalSandbox.read_file: a negative start would otherwise
+        # wrap around through Python's negative-index slicing.
+        start = max(start_line or 1, 1)
+        end = max(end_line, 0) if end_line is not None else len(lines)
+        return "\n".join(lines[start - 1 : end])
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         self._write_bytes(self._resolve_path(path), content.encode("utf-8"), append=append)
@@ -245,36 +277,36 @@ class BoxliteBox(Sandbox):
                 raise OSError(f"write '{resolved}' failed: {(r.stderr or '').strip()}")
             first = False
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         normalized = self._guard_traversal(path)
         stripped = normalized.lstrip("/")
         allowed = VIRTUAL_PATH_PREFIX.lstrip("/")
         if stripped != allowed and not stripped.startswith(f"{allowed}/"):
             raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
 
-        # Enforce the size cap before buffering the whole payload.
-        size_r = self._sh(f"wc -c < {shlex.quote(normalized)}")
-        if size_r.exit_code not in (0, None):
-            raise OSError(f"cannot read '{path}' from box: {(size_r.stderr or '').strip() or 'not found'}")
-        try:
-            size = int((size_r.stdout or "0").strip() or "0")
-        except ValueError:
-            size = 0
-        if size > _MAX_DOWNLOAD_SIZE:
-            raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
-
-        r = self._sh(f"base64 {shlex.quote(normalized)}")
+        # Limit the remote read itself, including a one-byte overflow probe.
+        # sh lacks pipefail: encode head's status with the payload so base64
+        # success cannot hide a missing file or a partial read failure.
+        script = f"{{ head -c {limit + 1} {shlex.quote(normalized)}; printf '\\n__DF_READ_STATUS__:%s\\n' \"$?\"; }} | base64"
+        r = self._sh(script)
         if r.exit_code not in (0, None):
             raise OSError(f"cannot read '{path}' from box: {(r.stderr or '').strip()}")
         try:
-            return base64.b64decode("".join((r.stdout or "").split()))
+            decoded = base64.b64decode("".join((r.stdout or "").split()), validate=True)
         except Exception as e:
             raise OSError(f"failed to decode '{path}' from box: {e}") from e
+        data, marker, status = decoded.rpartition(b"\n__DF_READ_STATUS__:")
+        if not marker or status != b"0\n":
+            raise OSError(f"cannot read '{path}' from box: {(r.stderr or '').strip() or 'incomplete read'}")
+        if len(data) > limit:
+            raise OSError(errno.EFBIG, f"File exceeds maximum download size of {limit} bytes", path)
+        return data
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
-        r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [line.strip() for line in (r.stdout or "").splitlines() if line.strip()]
+        r = self._sh(remote_list_dir_command(resolved, max_depth))
+        return parse_remote_list_dir_output(r.stdout, resolved, pipeline_exit_code=r.exit_code)
 
     def glob(
         self,
@@ -288,25 +320,34 @@ class BoxliteBox(Sandbox):
         types = ("f", "d") if include_dirs else ("f",)
         type_expr = " -o ".join(f"-type {t}" for t in types)
         hard_limit = max(max_results * 4, max_results + 50)
-        r = self._sh(f"find {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null | head -{hard_limit}")
+        # -H follows a symlinked search root, as list_dir does.
+        search = f"find -H {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null"
+        r = self._sh(remote_search_command(search, resolved, limit=hard_limit))
+        # A missing root or a failed find must not read as "no files matched" (#5376).
+        output = parse_remote_search_output(r.stdout, resolved, tool="find", limit=hard_limit)
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in (r.stdout or "").splitlines():
-            entry = entry.strip()
+        # Records are LF-delimited; other splitlines() boundaries can be path characters.
+        for entry in output.text.split("\n"):
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
-            if should_ignore_path(entry):
+            if should_ignore_path_under_root(entry, root):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
                 continue
             if path_matches(pattern, rel_path):
                 matches.append(entry)
-                if len(matches) >= max_results:
-                    return matches, True
-        return matches, False
+                # Look one match past the cap before deciding: returning on the
+                # max-th match cannot tell a search that held exactly
+                # ``max_results`` from one that held more, so an exhausted tree
+                # was reported as truncated.
+                if len(matches) > max_results:
+                    return matches[:max_results], True
+        return matches, output.truncated
 
     def grep(
         self,
@@ -325,22 +366,26 @@ class BoxliteBox(Sandbox):
             re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
-        # busybox+GNU-portable flags: -r recursive (also prints the filename),
-        # -n line numbers, -I skip binary, -E/-F regex vs fixed. --include and -m
-        # are omitted for busybox portability; glob-scoping and the result cap are
-        # applied in Python below.
-        flags = ["-r", "-n", "-I"]
+        # busybox+GNU-portable flags: -r recursive, -H always print the filename
+        # (including when path is a single file), -n line numbers, -I skip
+        # binary, -E/-F regex vs fixed. --include and -m are omitted for busybox
+        # portability; glob-scoping and the result cap are applied in Python.
+        flags = ["-r", "-H", "-n", "-I"]
         if not case_sensitive:
             flags.append("-i")
         flags.append("-F" if literal else "-E")
         total_cap = max(max_results * 4, max_results + 50)
-        cmd = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null | head -{total_cap}"
-        r = self._sh(cmd)
+        search = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
+        r = self._sh(remote_search_command(search, resolved, limit=total_cap))
+        # A missing root, a missing grep or an unreadable tree must not read as "no matches" (#5376).
+        output = parse_remote_search_output(r.stdout, resolved, tool="grep", limit=total_cap)
 
-        include = glob.split("/")[-1] if glob else None
+        root = resolved.rstrip("/") or "/"
+        root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
-        truncated = False
-        for raw in (r.stdout or "").splitlines():
+        truncated = output.truncated
+        # Keep non-LF separators inside filenames and matched text intact.
+        for raw in output.text.split("\n"):
             try:
                 file_path, line_no_str, line_text = raw.split(":", 2)
             except ValueError:
@@ -349,12 +394,19 @@ class BoxliteBox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path(file_path):
+            if should_ignore_path_under_root(file_path, root):
                 continue
-            if include and not path_matches(include, posixpath.basename(file_path)):
-                continue
+            if glob is not None:
+                # Match the caller's real directory scope: a pattern like
+                # "src/*.js" must not broaden to every *.js in the tree. Same
+                # helper, same relative-to-root semantics as glob() above.
+                if file_path != root and not file_path.startswith(root_prefix):
+                    continue
+                rel_path = posixpath.basename(file_path) if file_path == root else file_path[len(root) :].lstrip("/")
+                if not path_matches(glob, rel_path):
+                    continue
             matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line_text)))
-            if len(matches) >= max_results:
-                truncated = True
-                break
+            # Same one-match-past-the-cap rule as glob() above.
+            if len(matches) > max_results:
+                return matches[:max_results], True
         return matches, truncated

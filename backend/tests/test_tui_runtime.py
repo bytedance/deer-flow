@@ -4,7 +4,13 @@ The translation layer is pure and is exercised here against real
 ``StreamEvent`` objects plus a fake client, with no Textual involved.
 """
 
-from deerflow.client import StreamEvent
+from unittest.mock import MagicMock, patch
+
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+
+from deerflow.client import DeerFlowClient, StreamEvent
+from deerflow.config.authorization_config import AuthorizationConfig
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.tui.runtime import stream_actions, translate
 from deerflow.tui.view_state import (
     AssistantDelta,
@@ -176,3 +182,35 @@ def test_stream_actions_two_turns_with_none_ids_produce_separate_rows():
     assert len(assistants) == 2
     assert assistants[0].text == "First turn answer."
     assert assistants[1].text == "Second turn answer."
+
+
+def test_real_client_stream_renders_the_streamed_answer_verbatim():
+    """Drive the real ``DeerFlowClient.stream`` into the reducer: its token
+    deltas, including ones that repeat or extend earlier text, plus the
+    closing values snapshot, must render exactly the model's answer."""
+    chunks = ["**", "Note", "**", ": ", "ha", "ha", " ", "1", "10", " apples"]
+    answer = "".join(chunks)
+
+    def stream_turn(_state, *, context, **_kwargs):
+        user = HumanMessage(content="q", id="h-1", additional_kwargs={"run_id": context["run_id"]})
+        yield ("values", {"messages": [user]})
+        for chunk in chunks:
+            yield ("messages", (AIMessageChunk(content=chunk, id="ai-1"), {}))
+        yield ("values", {"messages": [user, AIMessage(content=answer, id="ai-1")]})
+
+    config = MagicMock()
+    config.models = []
+    config.token_usage.enabled = False
+    config.database = DatabaseConfig(backend="memory")
+    config.authorization = AuthorizationConfig(enabled=False)
+    with patch("deerflow.client.get_app_config", return_value=config):
+        client = DeerFlowClient()
+    agent = MagicMock()
+    agent.stream.side_effect = stream_turn
+
+    state = initial_state()
+    with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+        for action in stream_actions(client, "q", thread_id="t-1"):
+            state = reduce(state, action)
+
+    assert [(r.kind, r.text) for r in state.rows] == [("assistant", answer)]

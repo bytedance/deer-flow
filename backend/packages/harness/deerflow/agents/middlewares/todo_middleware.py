@@ -11,21 +11,80 @@ there are still incomplete todo items. When the model produces a final response
 for the next model request and jumps back to the model node to force continued
 engagement. The completion reminder is injected via ``wrap_model_call`` instead
 of being persisted into graph state as a normal user-visible message.
+
+The completion guard defers to ``model_length_termination``: when a length-capped
+turn has already been terminalized by ``ModelLengthFinishReasonMiddleware``,
+re-engaging would only re-emit the same oversized tool call into the same cap.
+Run-level loop and token stops, and a provider safety or length stop of the
+current response, also suppress completion reminders, leaving unfinished todos
+available for a later user run. An earlier response's provider stop does not
+suppress reminders in later Goal continuation turns of the same run.
 """
 
-from __future__ import annotations
-
 import threading
-from collections.abc import Awaitable, Callable
-from typing import Any, override
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from typing import Any, Literal, override
 
 from langchain.agents.middleware import TodoListMiddleware
-from langchain.agents.middleware.todo import Todo
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain.tools import ToolRuntime
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langgraph.runtime import Runtime
+from langgraph.types import Command
+from pydantic import BaseModel
+from typing_extensions import TypedDict
 
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
+from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
 from deerflow.agents.thread_state import ThreadState
+
+TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
+# Source-inventory and graph tests pin these values to the actual guard stamps;
+# the provider-stop vocabulary is imported from the guards that write it.
+# Loop and token stops cap the whole run: their budgets stay exhausted and a
+# Goal stands down on them, so runtime.context["stop_reason"] is authoritative.
+_COMPLETION_REMINDER_RUN_STOP_REASONS = ("loop_capped", "token_capped")
+# Provider safety and length stops end one response, which carries the marker.
+# runtime.context keeps the first cap across hidden Goal turns, and a Goal
+# continues after these, so the context alone does not mean the current
+# response was capped.
+_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS = {SAFETY_CAPPED_STOP_REASON: SAFETY_TERMINATION_MARKER, MODEL_LENGTH_CAPPED_STOP_REASON: MODEL_LENGTH_TERMINATION_MARKER}
+
+_TODO_TERMINAL_STATUSES = frozenset({"completed", "blocked", "waiting"})
+_TODO_STATUSES = _TODO_TERMINAL_STATUSES | {"pending", "in_progress"}
+
+
+class ExtendedTodo(TypedDict):
+    """A todo item with statuses that describe why work is not progressing."""
+
+    content: str
+    status: Literal["pending", "in_progress", "completed", "blocked", "waiting"]
+
+
+class ExtendedWriteTodosInput(BaseModel):
+    """Input schema for the DeerFlow todo tool."""
+
+    todos: list[ExtendedTodo]
+
+
+def _write_extended_todos(runtime: ToolRuntime, todos: list[ExtendedTodo]) -> Command[Any]:
+    return Command(
+        update={
+            "todos": todos,
+            "messages": [
+                ToolMessage(
+                    f"Updated todo list ({len(todos)} items).",
+                    tool_call_id=runtime.tool_call_id,
+                    additional_kwargs={"ui_hidden": True},
+                )
+            ],
+        }
+    )
+
+
+async def _awrite_extended_todos(runtime: ToolRuntime, todos: list[ExtendedTodo]) -> Command[Any]:
+    return _write_extended_todos(runtime, todos)
 
 
 def _todos_in_messages(messages: list[Any]) -> bool:
@@ -41,25 +100,44 @@ def _todos_in_messages(messages: list[Any]) -> bool:
 def _reminder_in_messages(messages: list[Any]) -> bool:
     """Return True if a todo_reminder HumanMessage is already present in *messages*."""
     for msg in messages:
-        if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == "todo_reminder":
+        if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == TODO_REMINDER_MESSAGE_NAME:
             return True
     return False
 
 
-def _format_todos(todos: list[Todo]) -> str:
+def _usable_todos(state: ThreadState) -> list[Mapping[str, Any]]:
+    """Return the stored todo entries this middleware can render.
+
+    ``todos`` is a reducer channel that checkpoint writes and direct integrations
+    can Overwrite with any shape, so a stored value is not guaranteed to be the
+    list of mappings ``write_todos`` produces. Entries of any other shape are
+    dropped: one of them would otherwise raise on every model call of the thread,
+    because both hooks read this channel before the model runs.
+    """
+    todos = state.get("todos")
+    if not isinstance(todos, list):
+        return []
+    return [todo for todo in todos if isinstance(todo, Mapping)]
+
+
+def _stored_todo_status(todo: Mapping[str, Any]) -> str:
+    status = todo.get("status")
+    return status if isinstance(status, str) and status in _TODO_STATUSES else "pending"
+
+
+def _format_todos(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a list of Todo items into a human-readable string."""
     lines: list[str] = []
     for todo in todos:
-        status = todo.get("status", "pending")
+        status = _stored_todo_status(todo)
         content = todo.get("content", "")
         lines.append(f"- [{status}] {content}")
     return "\n".join(lines)
 
 
-def _format_completion_reminder(todos: list[Todo]) -> str:
+def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a completion reminder for incomplete todo items."""
-    incomplete = [t for t in todos if t.get("status") != "completed"]
-    incomplete_text = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in incomplete)
+    incomplete_text = _format_todos(todo for todo in todos if _stored_todo_status(todo) not in _TODO_TERMINAL_STATUSES)
     return (
         "<system_reminder>\n"
         "You have incomplete todo items that must be finished before giving your final response:\n\n"
@@ -112,6 +190,36 @@ class TodoMiddleware(TodoListMiddleware):
 
     state_schema = ThreadState
 
+    @property
+    def _todo_capability_enabled(self) -> bool:
+        """False when authorization Layer 1 narrowed away this build's ``write_todos``.
+
+        An empty narrowed ``tools`` disables the middleware's todo behavior for
+        the build: no system-prompt injection, no context-loss or completion
+        reminders, no ``jump_to: model`` — the model cannot call a tool that is
+        not bound, so demanding updates wastes model rounds against an
+        unreachable tool. Keyed off instance state so the state-preserving
+        copy chain carries the degradation automatically and the caller-owned
+        instance is never touched.
+        """
+        return bool(getattr(self, "tools", None))
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        from deerflow_extension_api import canonical_hash
+
+        return {
+            "system_prompt_hash": canonical_hash(self.system_prompt),
+            "tool_description_hash": canonical_hash(self.tool_description),
+            "state_channel": "todos",
+            "skip_completion_reminder_on_length_cap": True,
+            "skip_completion_reminder_on_safety_cap": True,
+            # Every stop_reason that suppresses reminders, for the stop-reason
+            # inventory test. Only the run-level reasons are read from
+            # runtime.context; provider stops are matched by response marker.
+            "completion_reminder_hard_stop_reasons": [*_COMPLETION_REMINDER_RUN_STOP_REASONS, *_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS],
+            "completion_reminder_response_stop_markers": dict(_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS),
+        }
+
     @override
     def before_model(
         self,
@@ -119,7 +227,11 @@ class TodoMiddleware(TodoListMiddleware):
         runtime: Runtime,
     ) -> dict[str, Any] | None:
         """Inject a todo-list reminder when write_todos has left the context window."""
-        todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
+        if not self._todo_capability_enabled:
+            # write_todos was denied for this build; context-loss detection only
+            # exists to protect todo state the model cannot update anyway.
+            return None
+        todos = _usable_todos(state)
         if not todos:
             return None
 
@@ -136,7 +248,7 @@ class TodoMiddleware(TodoListMiddleware):
         # Inject a reminder as a HumanMessage so the model stays aware.
         formatted = _format_todos(todos)
         reminder = HumanMessage(
-            name="todo_reminder",
+            name=TODO_REMINDER_MESSAGE_NAME,
             additional_kwargs={"hide_from_ui": True},
             content=(
                 "<system_reminder>\n"
@@ -167,6 +279,19 @@ class TodoMiddleware(TodoListMiddleware):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        # LangChain's built-in schema only permits three statuses. Replace its
+        # generated tool with the DeerFlow contract so blocked and waiting work
+        # can be persisted without bypassing normal tool validation.
+        self.tools = [
+            StructuredTool.from_function(
+                name="write_todos",
+                description=self.tool_description,
+                func=_write_extended_todos,
+                coroutine=_awrite_extended_todos,
+                args_schema=ExtendedWriteTodosInput,
+                infer_schema=False,
+            )
+        ]
         self._lock = threading.Lock()
         self._pending_completion_reminders: dict[tuple[str, str], list[str]] = {}
         self._completion_reminder_counts: dict[tuple[str, str], int] = {}
@@ -235,6 +360,25 @@ class TodoMiddleware(TodoListMiddleware):
                 self._touch_completion_reminder_key_locked(key)
             return reminders
 
+    def _restore_completion_reminders(self, runtime: Runtime, reminders: list[str]) -> None:
+        """Requeue reminders taken for a model call that raised.
+
+        LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed call by running this wrap again, so the retry must still find
+        the reminder. The count is not bumped again: it was spent when the
+        reminder was queued. A run whose reminder state was dropped meanwhile
+        stays dropped.
+        """
+        if not reminders:
+            return
+        key = self._pending_key(runtime)
+        with self._lock:
+            if key not in self._completion_reminder_counts:
+                return
+            queued = self._pending_completion_reminders.setdefault(key, [])
+            queued[:0] = [reminder for reminder in reminders if reminder not in queued]
+            self._touch_completion_reminder_key_locked(key)
+
     def _clear_other_run_completion_reminders(self, runtime: Runtime) -> None:
         thread_id, current_run_id = self._pending_key(runtime)
         with self._lock:
@@ -275,6 +419,23 @@ class TodoMiddleware(TodoListMiddleware):
         A retry cap of ``_MAX_COMPLETION_REMINDERS`` (default 2) prevents
         infinite loops when the agent cannot make further progress.
         """
+        if not self._todo_capability_enabled:
+            # write_todos was denied for this build: no completion reminders and
+            # no jump_to — the model cannot update todos through an unbound tool.
+            return None
+
+        # Guards run before this reversed after_model hook. They strip tool
+        # calls and stamp loop/token/safety/model-length stops. Check before
+        # the parent hook so its parallel-write retry cannot override a stop.
+        context = getattr(runtime, "context", None)
+        if isinstance(context, dict) and context.get("stop_reason") in _COMPLETION_REMINDER_RUN_STOP_REASONS:
+            return None
+        messages = state.get("messages") or []
+        last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+        termination_metadata = (last_ai.additional_kwargs or {}) if last_ai else {}
+        if any(termination_metadata.get(marker) for marker in _COMPLETION_REMINDER_RESPONSE_STOP_MARKERS.values()):
+            return None
+
         # 1. Preserve base class logic (parallel write_todos detection).
         base_result = super().after_model(state, runtime)
         if base_result is not None:
@@ -283,14 +444,17 @@ class TodoMiddleware(TodoListMiddleware):
         # 2. Only intervene when the agent wants to exit cleanly. Tool-call
         # intent or tool-call parse errors should be handled by the tool path
         # instead of being masked by todo reminders.
-        messages = state.get("messages") or []
-        last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
         if not last_ai or _has_tool_call_intent_or_error(last_ai):
             return None
 
-        # 3. Allow exit when all todos are completed or there are no todos.
-        todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
-        if not todos or all(t.get("status") == "completed" for t in todos):
+        if termination_metadata.get("deerflow_error_fallback"):
+            return None
+
+        # 3. Allow exit when every todo has reached a terminal state. Blocked
+        # and waiting items explain why the work cannot continue in this run;
+        # they must not be relabeled as completed just to satisfy the guard.
+        todos = _usable_todos(state)
+        if not todos or all(_stored_todo_status(todo) in _TODO_TERMINAL_STATUSES for todo in todos):
             return None
 
         # 4. Enforce a reminder cap to prevent infinite re-engagement loops.
@@ -317,8 +481,7 @@ class TodoMiddleware(TodoListMiddleware):
     def _format_pending_completion_reminders(reminders: list[str]) -> str:
         return "\n\n".join(dict.fromkeys(reminders))
 
-    def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        reminders = self._drain_completion_reminders(request.runtime)
+    def _inject_completion_reminders(self, request: ModelRequest, reminders: list[str]) -> ModelRequest:
         if not reminders:
             return request
         new_messages = [
@@ -337,7 +500,20 @@ class TodoMiddleware(TodoListMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        return handler(self._augment_request(request))
+        if not self._todo_capability_enabled:
+            # write_todos was denied for this build: no system-prompt injection
+            # and no completion reminders for a tool the model cannot call.
+            return handler(request)
+        # The base class appends the `write_todos` system prompt to the request;
+        # without calling it the model is never told about the todo list feature.
+        # Augment with pending completion reminders on the request that already
+        # carries the injected system prompt.
+        reminders = self._drain_completion_reminders(request.runtime)
+        try:
+            return super().wrap_model_call(request, lambda req: handler(self._inject_completion_reminders(req, reminders)))
+        except Exception:
+            self._restore_completion_reminders(request.runtime, reminders)
+            raise
 
     @override
     async def awrap_model_call(
@@ -345,7 +521,21 @@ class TodoMiddleware(TodoListMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._augment_request(request))
+        if not self._todo_capability_enabled:
+            # See wrap_model_call: capability denied — pass the request through.
+            return await handler(request)
+
+        # See wrap_model_call: preserve the base class system-prompt injection.
+        reminders = self._drain_completion_reminders(request.runtime)
+
+        async def augmented_handler(req: ModelRequest) -> ModelResponse:
+            return await handler(self._inject_completion_reminders(req, reminders))
+
+        try:
+            return await super().awrap_model_call(request, augmented_handler)
+        except Exception:
+            self._restore_completion_reminders(request.runtime, reminders)
+            raise
 
     @override
     def after_agent(self, state: ThreadState, runtime: Runtime) -> dict[str, Any] | None:

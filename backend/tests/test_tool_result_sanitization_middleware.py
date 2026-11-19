@@ -188,19 +188,55 @@ class TestCommandAndContentShapes:
 
 
 class TestKnownScopeBoundary:
-    """Pin the documented name-based scope so any coverage change is deliberate."""
+    """Pin the documented coverage scope so any change is deliberate."""
 
-    def test_mcp_named_remote_tool_is_not_sanitized(self):
-        # KNOWN LIMITATION: an MCP tool registered under an arbitrary name
-        # (e.g. `fetch_url`) is remote content but is NOT matched by the
-        # name allowlist, so it is passed through unchanged today. This test
-        # documents that boundary; broadening coverage (metadata tagging) is a
-        # tracked follow-up and should update this test intentionally.
+    def test_untagged_mcp_named_tool_is_not_sanitized(self):
+        # An MCP-registered tool that never got the deerflow_mcp metadata tag
+        # (e.g. loaded through a path that does not tag) is still passed through
+        # unchanged. Coverage follows the tag, not the name. The tool object is
+        # present here with a non-empty metadata dict, so the untagged branch of
+        # (metadata or {}).get(key) is what this test pins.
+        mw = ToolResultSanitizationMiddleware()
+        msg = _msg(_MALICIOUS_PAGE, name="fetch_url")
+        request = SimpleNamespace(
+            tool_call={"name": "fetch_url", "id": "tc-1"},
+            tool=SimpleNamespace(metadata={"other_marker": True}),
+        )
+        result = mw.wrap_tool_call(request, lambda _: msg)
+        assert result is msg
+        assert "<system-reminder>" in result.content
+
+
+class TestMcpTaggedToolResults:
+    """MCP-sourced tools (third-party remote code) are untrusted by default."""
+
+    @staticmethod
+    def _mcp_request(tool_name: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            tool_call={"name": tool_name, "id": "tc-1"},
+            tool=SimpleNamespace(metadata={"deerflow_mcp": True}),
+        )
+
+    def test_mcp_tagged_tool_result_sanitized(self):
+        mw = ToolResultSanitizationMiddleware()
+        msg = _msg(_MALICIOUS_PAGE, name="fetch_url")
+        result = mw.wrap_tool_call(self._mcp_request("fetch_url"), lambda _: msg)
+        assert "&lt;system-reminder&gt;" in result.content
+        assert "<system-reminder>" not in result.content
+
+    def test_mcp_tagged_clean_result_returns_same_object(self):
+        mw = ToolResultSanitizationMiddleware()
+        msg = _msg("# Title\n\nJust clean gardening content.", name="fetch_url")
+        result = mw.wrap_tool_call(self._mcp_request("fetch_url"), lambda _: msg)
+        assert result is msg
+
+    def test_missing_tool_attr_stays_untouched(self):
+        # ToolCallRequest.tool is optional; requests without it (and untagged
+        # tools) keep the old behavior.
         mw = ToolResultSanitizationMiddleware()
         msg = _msg(_MALICIOUS_PAGE, name="fetch_url")
         result = mw.wrap_tool_call(_request("fetch_url"), lambda _: msg)
         assert result is msg
-        assert "<system-reminder>" in result.content
 
 
 class TestAsyncPath:

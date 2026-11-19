@@ -1,38 +1,107 @@
 import asyncio
 import json
 import logging
+import ntpath
 import os
 import posixpath
 import re
 import shlex
-from collections.abc import Callable
-from functools import lru_cache
+import string
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from functools import lru_cache, partial
 from pathlib import Path
 
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
 
 from deerflow.agents.thread_state import ThreadDataState
+from deerflow.authz.sandbox_authz import (
+    authorize_sandbox_execution,
+    authorize_sandbox_execution_async,
+    safe_app_config,
+    safe_app_config_async,
+)
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH, WRITE_ELISION_PLACEHOLDER_TEMPLATE
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.command_scope import command_owner
+from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
+    SandboxAuthorizationError,
     SandboxError,
+    SandboxFileNotFoundError,
     SandboxNotFoundError,
+    SandboxPermissionError,
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.lease import (
+    get_sandbox_lease_manager,
+    run_sync_lifecycle_operation,
+    sandbox_command_scope,
+    sandbox_lease_owner,
+)
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path
+from deerflow.sandbox.overwrite import unwrap_sandbox
+from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
+from deerflow.sandbox.prewarm import claim_sandbox_prewarm
+from deerflow.sandbox.read_file_contract import (
+    READ_FILE_EMPTY,
+    READ_FILE_INVALID_END_LINE,
+    READ_FILE_INVALID_RANGE,
+    READ_FILE_INVALID_START_LINE,
+    READ_FILE_NO_CONTENT_RESULTS,
+    READ_FILE_NUMBERED_MAX_LINES,
+    READ_FILE_START_LINE_EXCEEDS,
+    READ_FILE_TRUNCATION_PREFIX,
+)
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
+from deerflow.utils.file_io import await_drained
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
+# The read-before-write middleware can enter the sandbox before or after the
+# tool body. Scope this marker to the complete composed invocation so all of
+# those entries share one live provider decision. Context variables are copied
+# into ``asyncio.to_thread`` workers, keeping the handoff task-local.
+_SANDBOX_AUTHORIZATION_CHECKED: ContextVar[bool] = ContextVar(
+    "deerflow_sandbox_authorization_checked",
+    default=False,
+)
+
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+# ``$NAME/...`` expands to a host path at runtime (``$HOME/.ssh/id_rsa``), but
+# the absolute-path regex skips a ``/`` that follows a word character, so the
+# bare-name form needs its own scan. Positional ``$1/etc/passwd`` slips the
+# same way, and ``bash -c`` gets no positionals, so it expands to ``/etc/passwd``.
+# ``${NAME}/``, ``~/`` and special parameters (``$@/``, ``$?/``) already surface
+# through the absolute-path regex because ``}``, ``~``, ``@`` and ``?`` are not
+# word chars. The remainder is captured in a lookahead so a skipped prefix does
+# not hide a later one (``$1/$2/etc/passwd``).
+# The one structural exemption is a ``$`` inside the single-quoted inline
+# program of an awk-family command (``awk '{print $NF/2}'``): bash expands
+# nothing there and awk reads ``$NAME`` as a field reference. See
+# ``_awk_program_field_spans`` for what keeps that exemption narrow.
+_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9])/(?=([^\s\"'`;&|<>()]*))")
+# ``~name/`` expands to that user's home (``~root/.ssh/id_rsa``) and slips the
+# absolute-path regex for the same reason. Tilde expansion only applies at the
+# start of a word or after ``=``/``:``, so ``HEAD~1/`` stays out of scope.
+_NAMED_TILDE_PATH_PATTERN = re.compile(r"(?<![^\s=:;&|<>()\"'`])~[A-Za-z0-9._-]+/[^\s\"'`;&|<>()]*")
+# ``PWD`` written anywhere except as a ``$PWD`` expansion (``PWD=/``,
+# ``read PWD``, ``for PWD in``) may rebind it away from the workspace.
+_PWD_REBIND_PATTERN = re.compile(r"(?<!\$)\bPWD\b")
+# ``CDPATH`` makes a relative ``cd docs`` land outside the workspace without any
+# absolute path in the command.
+_CDPATH_PATTERN = re.compile(r"\bCDPATH\b")
 # A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
 # in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
 # ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
@@ -42,6 +111,7 @@ _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
 _DOTDOT_PATH_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\=])\.\.(?:$|[/\\])")
+_LOCAL_BASH_PATH_RECOVERY_GUIDANCE = "For environment questions, use command-only probes such as uname; otherwise use an allowed virtual path. Do not repeat the rejected path."
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -163,6 +233,7 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     /mnt/skills/public/bootstrap/SKILL.md → "bootstrap"
     /mnt/skills/custom/my-skill/SKILL.md → "my-skill"
     /mnt/skills/legacy/my-skill/references/... → "my-skill"
+    /mnt/skills/integrations/lark-cli/lark-doc/SKILL.md → "lark-doc"
     /mnt/skills/public/bootstrap/ → "bootstrap"
     Returns None if the path doesn't contain a recognizable skill name pattern.
     """
@@ -173,15 +244,21 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     relative = path[len(skills_prefix) :].lstrip("/")
     if not relative:
         return None
-    # Expected patterns: "public/<name>/...", "custom/<name>/...", "legacy/<name>/..."
+    # Expected patterns: "public/<name>/...", "custom/<name>/...",
+    # "legacy/<name>/...", "integrations/<provider>/<name>/..."
     # or "<name>/..." (direct skill access). Empty segments are dropped so a
     # directory entry ("public/", as `ls` emits for dirs) is still recognized as
     # a category root rather than yielding an empty skill name.
     parts = [part for part in relative.split("/") if part]
     if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
         return parts[1]
-    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy"):
+    if len(parts) >= 3 and parts[0] == "integrations":
+        return parts[2]
+    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy", "integrations"):
         # Category root like /mnt/skills/custom — not a skill path.
+        return None
+    if len(parts) == 2 and parts[0] == "integrations":
+        # Provider root like /mnt/skills/integrations/lark-cli.
         return None
     if len(parts) >= 1:
         # Direct path like /mnt/skills/my-skill/SKILL.md
@@ -215,6 +292,8 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
             category = "custom"
         elif relative.startswith("legacy/"):
             category = "legacy"
+        elif relative.startswith("integrations/"):
+            category = "integrations"
         else:
             # Try to infer from storage
             effective_uid = user_id or get_effective_user_id()
@@ -307,7 +386,7 @@ def _resolve_skills_path(path: str) -> str:
 
     relative = path[len(skills_container) :].lstrip("/")
 
-    # Per-user custom skills: resolve to user-specific directory.
+    # Per-user custom and globally managed integration skills.
     # ``skill_manage_tool`` writes custom skills to the per-user directory,
     # and ``LocalSandboxProvider._build_thread_path_mappings`` mounts
     # ``/mnt/skills/custom`` to that same per-user dir.  Without this
@@ -326,6 +405,22 @@ def _resolve_skills_path(path: str) -> str:
         if custom_relative:
             return str(user_custom_dir / custom_relative)
         return str(user_custom_dir)
+
+    if relative == "integrations" or relative.startswith("integrations/"):
+        from deerflow.config.paths import get_paths
+
+        paths = get_paths()
+        integrations_dir = paths.integration_skills_dir()
+        integrations_relative = relative[len("integrations") :].lstrip("/")
+        if not integrations_relative:
+            return str(integrations_dir)
+        # Defense-in-depth: even though _reject_path_traversal runs upstream for
+        # sandbox callers, confirm the resolved path stays within the global
+        # integration dir so a lexical ``../`` cannot escape it here.
+        resolved = (integrations_dir / integrations_relative).resolve()
+        if not resolved.is_relative_to(integrations_dir.resolve()):
+            raise PermissionError("Access denied: path traversal detected")
+        return str(integrations_dir / integrations_relative)
 
     return _join_path_preserving_style(skills_host, relative)
 
@@ -386,20 +481,17 @@ def _get_custom_mount_for_path(path: str):
 def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
     """Extract thread_id from thread_data by inspecting workspace_path.
 
-    The workspace_path has the form
-    ``{base_dir}/threads/{thread_id}/user-data/workspace``, so
-    ``Path(workspace_path).parent.parent.name`` yields the thread_id.
+    The workspace path ends with
+    ``threads/{thread_id}/user-data/workspace``.
     """
     if thread_data is None:
         return None
     workspace_path = thread_data.get("workspace_path")
     if not workspace_path:
         return None
-    try:
-        # {base_dir}/threads/{thread_id}/user-data/workspace → parent.parent = threads/{thread_id}
-        return Path(workspace_path).parent.parent.name
-    except Exception:
-        return None
+    normalized = workspace_path.replace("\\", "/").rstrip("/")
+    parts = normalized.rsplit("/", 3)
+    return parts[-3] if len(parts) == 4 and parts[-3] else None
 
 
 def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
@@ -544,20 +636,22 @@ def _resolve_max_results(name: str, requested: int, *, default: int, upper_bound
     return min(requested_max_results, configured_max_results)
 
 
-def _resolve_local_read_path(path: str, thread_data: ThreadDataState) -> str:
+def _resolve_local_read_path(path: str, thread_data: ThreadDataState | None) -> str:
     validate_local_tool_path(path, thread_data, read_only=True)
-    if _is_skills_path(path) or _is_acp_workspace_path(path):
-        # Skills and ACP workspace paths are resolved by the sandbox's
-        # PathMapping (which uses the user_id from acquire time), not
-        # by _resolve_skills_path / _resolve_acp_workspace_path (which
-        # use get_effective_user_id() from contextvar and may differ
-        # from the sandbox mapping's user_id).
+    if _is_skills_path(path) or _is_acp_workspace_path(path) or _is_custom_mount_path(path):
+        # Mounted paths are resolved by the sandbox's PathMapping (which uses
+        # acquire-time identity and provider state), not by tool-layer host
+        # path reconstruction.
         return path
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 
 def _format_glob_results(root_path: str, matches: list[str], truncated: bool) -> str:
     if not matches:
+        # A remote search can hit its output cap before any path survives the
+        # Python-side filters; that is not evidence that nothing matches.
+        if truncated:
+            return f"Search under {root_path} stopped at its result limit with no files matched in the part it covered; results are incomplete. Narrow the path or pattern."
         return f"No files matched under {root_path}"
 
     lines = [f"Found {len(matches)} paths under {root_path}"]
@@ -571,6 +665,8 @@ def _format_glob_results(root_path: str, matches: list[str], truncated: bool) ->
 
 def _format_grep_results(root_path: str, matches: list[GrepMatch], truncated: bool) -> str:
     if not matches:
+        if truncated:
+            return f"Search under {root_path} stopped at its result limit with no matches in the part it covered; results are incomplete. Narrow the path or add a glob filter."
         return f"No matches found under {root_path}"
 
     lines = [f"Found {len(matches)} matches under {root_path}"]
@@ -599,6 +695,13 @@ def _join_path_preserving_style(base: str, relative: str) -> str:
     return f"{stripped_base}{separator}{normalized_relative}"
 
 
+def _path_parent(path: str) -> str:
+    """Return a lexical parent without interning high-cardinality path parts."""
+    if "\\" in path and "/" not in path:
+        return ntpath.dirname(path)
+    return posixpath.dirname(path)
+
+
 def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
     """Sanitize an error message to avoid leaking host filesystem paths.
 
@@ -609,6 +712,12 @@ def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
     msg = f"{type(error).__name__}: {error}"
     if runtime is not None and is_local_sandbox(runtime):
         thread_data = get_thread_data(runtime)
+        # OSError renders filenames with repr(), escaping Windows backslashes.
+        if isinstance(error, OSError):
+            for filename in (error.filename, error.filename2):
+                if filename is not None:
+                    masked = mask_local_paths_in_output(os.fsdecode(filename), thread_data)
+                    msg = msg.replace(repr(filename), repr(masked))
         msg = mask_local_paths_in_output(msg, thread_data)
     return msg
 
@@ -701,10 +810,10 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
         mappings[f"{VIRTUAL_PATH_PREFIX}/outputs"] = outputs
 
     # Also map the virtual root when all known dirs share the same parent.
-    actual_dirs = [Path(p) for p in (workspace, uploads, outputs) if p]
+    actual_dirs = [p for p in (workspace, uploads, outputs) if p]
     if actual_dirs:
-        common_parent = str(Path(actual_dirs[0]).parent)
-        if all(str(path.parent) == common_parent for path in actual_dirs):
+        common_parent = _path_parent(actual_dirs[0])
+        if all(_path_parent(path) == common_parent for path in actual_dirs):
             mappings[VIRTUAL_PATH_PREFIX] = common_parent
 
     return mappings
@@ -715,37 +824,40 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
 
 
-@lru_cache(maxsize=512)
-def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
-    """Compile the host→virtual masking patterns once per source set.
+@lru_cache(maxsize=256)
+def _mask_source_roots(host_base: str) -> tuple[str, ...]:
+    """Return lexical and filesystem-resolved spellings without ``pathlib``.
 
-    ``sources`` is an ordered tuple of ``(host_base, virtual_base)`` pairs
-    (skills, then ACP workspace, then per-thread user-data mappings sorted by
-    host-path length, longest first). The patterns derive only from
-    config-stable + per-thread inputs, so they're cached and reused instead of
-    being rebuilt — ``re.escape`` + ``re.compile`` + ``Path.resolve`` (a
-    syscall) — on every call. ``mask_local_paths_in_output`` runs once per
-    glob/grep match, so without this the same patterns are recompiled per
-    match.
+    ``PurePath`` interns every path component. That is useful for long-lived
+    paths but wasteful for one-off thread IDs, because evicting DeerFlow's LRU
+    does not shrink the interpreter's intern/allocator high-water mark. The
+    bounded cache avoids repeating ``realpath`` walks for every glob/grep match
+    without retaining an unbounded set of thread roots.
     """
-    # The segment boundary and path tail are shared with
-    # ``LocalSandbox._reverse_output_patterns`` — see
-    # ``deerflow.sandbox.path_patterns``, which owns that rule so the two copies
-    # cannot drift again (#4035 fixed one and missed the other; #4053 fixed the
-    # other).
+    raw = os.path.normpath(host_base)
+    resolved = os.path.realpath(host_base)
+    return (raw,) if resolved == raw else (raw, resolved)
+
+
+@lru_cache(maxsize=16)
+def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
+    """Compile patterns for the small, process-stable source set.
+
+    Per-user and per-thread sources must never be passed here; they are handled
+    by the non-retaining scanner in ``replace_output_path_matches``.
+    """
+    # The segment boundary and path tail are owned by
+    # ``deerflow.sandbox.path_patterns`` so the static regex path and dynamic
+    # scanner cannot drift.
     #
-    # ``separator_agnostic=True`` is the one thing this site does differently:
-    # its bases come from ``_path_variants``, which yields Windows-style
-    # spellings, and they are matched against output whose separators this layer
-    # does not control.
+    # ``separator_agnostic=True`` is required here: output separators are
+    # outside this layer's control. ``LocalSandbox`` needs it for the same
+    # reason — its forward resolution spells Windows paths with forward
+    # slashes even though its bases are resolved natively.
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()
-        # Same base set as ``_path_variants(raw) | _path_variants(resolved)``;
-        # ordered deterministically so the cached tuple is stable (variants of
-        # one host map to the same virtual and don't overlap after substitution,
-        # so order within a source is irrelevant to the result).
-        for root in (str(Path(host_base)), str(Path(host_base).resolve())):
+        for root in _mask_source_roots(host_base):
             for variant in sorted(_path_variants(root)):
                 if variant in seen:
                     continue
@@ -758,18 +870,19 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     """Mask host absolute paths from local sandbox output using virtual paths.
 
     Handles user-data paths (per-thread), skills paths (global + per-user
-    custom), and ACP workspace paths (per-thread).
+    custom + managed integrations), and ACP workspace paths (per-thread).
     """
     # Build the ordered (host_base, virtual_base) source list. Order is
     # preserved from the original implementation: skills, then per-user
-    # custom skills, then ACP workspace, then user-data mappings (longest
+    # custom/integration skills, then ACP workspace, then user-data mappings (longest
     # host path first). Custom mount host paths are masked by
     # LocalSandbox._reverse_resolve_paths_in_output().
-    sources: list[tuple[str, str]] = []
+    stable_sources: list[tuple[str, str]] = []
+    dynamic_sources: list[tuple[str, str]] = []
 
     skills_host = _get_skills_host_path()
     if skills_host:
-        sources.append((skills_host, _get_skills_container_path()))
+        stable_sources.append((skills_host, _get_skills_container_path()))
 
     # Per-user custom skills: mask host paths under the user's custom
     # skills directory back to /mnt/skills/custom. The sandbox's
@@ -782,41 +895,127 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
 
         user_id = get_effective_user_id()
         user_custom_dir = get_paths().user_custom_skills_dir(user_id)
+        integrations_dir = get_paths().integration_skills_dir()
         if user_custom_dir.exists():
             skills_container = _get_skills_container_path()
-            sources.append((str(user_custom_dir), f"{skills_container}/custom"))
+            dynamic_sources.append((str(user_custom_dir), f"{skills_container}/custom"))
+        if integrations_dir.exists():
+            skills_container = _get_skills_container_path()
+            stable_sources.append((str(integrations_dir), f"{skills_container}/integrations"))
     except Exception:
         pass
 
     acp_host = _get_acp_workspace_host_path(_extract_thread_id_from_thread_data(thread_data))
     if acp_host:
-        sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
+        dynamic_sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
 
     if thread_data is not None:
         mappings = _thread_actual_to_virtual_mappings(thread_data)
         for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
-            sources.append((actual_base, virtual_base))
+            dynamic_sources.append((actual_base, virtual_base))
 
-    if not sources:
+    if not stable_sources and not dynamic_sources:
         return output
 
     result = output
-    for pattern, base, virtual in _compiled_mask_patterns(tuple(sources)):
+    static_patterns = _compiled_mask_patterns(tuple(stable_sources)) if stable_sources else ()
+    for pattern, base, virtual in static_patterns:
 
         def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual) -> str:
             matched_path = match.group(0)
             if matched_path == _base:
                 return _virtual
-            relative = matched_path[len(_base) :].lstrip("/\\")
+            relative = normalize_mask_tail(matched_path[len(_base) :])
             return f"{_virtual}/{relative}" if relative else _virtual
 
         result = pattern.sub(replace_match, result)
 
+    for host_base, virtual_base in dynamic_sources:
+        for root in _mask_source_roots(host_base):
+            result = replace_output_path_matches(
+                result,
+                root,
+                virtual_base,
+                separator_agnostic=True,
+            )
+
     return result
 
 
+def _windows_incompatible_path_reason(path: str) -> str | None:
+    """Return why *path* is not portable, or None when every segment is fine."""
+    normalised = path.replace("\\", "/")
+    for segment in normalised.split("/"):
+        reason = windows_incompatible_segment(segment)
+        if reason:
+            return reason
+    return None
+
+
+def _host_path_exists(candidate: str) -> bool:
+    """Return True when *candidate* is already on the host filesystem.
+
+    ``pathlib`` and the Win32 ANSI APIs strip a trailing space or dot, so a
+    file created with those characters is checked again with the Windows
+    extended-length path prefix. Virtual ``/mnt/...`` paths are not rewritten.
+    """
+    try:
+        if os.path.lexists(candidate):
+            return True
+    except OSError:
+        pass
+    if os.name != "nt":
+        return False
+    normalized = candidate.replace("/", "\\")
+    if len(normalized) < 3 or normalized[1] != ":" or normalized[2] != "\\":
+        return False
+    if normalized.startswith("\\\\?\\"):
+        return False
+    try:
+        return os.path.lexists("\\\\?\\" + normalized)
+    except OSError:
+        return False
+
+
+def _stored_host_path_exists(path: str, thread_data: ThreadDataState | None) -> bool:
+    """Return True when *path* already names a host file or directory.
+
+    ``/mnt/user-data`` paths are resolved through *thread_data*. The literal
+    path is also checked so a name that exists inside the sandbox mount is
+    recognized. A missing mapping does not count as stored.
+    """
+    candidates: list[str] = []
+    if path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        if thread_data is not None:
+            try:
+                resolved = replace_virtual_path(path, thread_data)
+            except Exception:
+                resolved = None
+            if resolved and resolved != path:
+                candidates.append(resolved)
+        candidates.append(path)
+    else:
+        candidates.append(path)
+    return any(_host_path_exists(candidate) for candidate in candidates)
+
+
+def _reject_unstored_windows_incompatible_path(path: str, thread_data: ThreadDataState | None) -> None:
+    """Reject a non-portable path unless that exact path is already stored."""
+    reason = _windows_incompatible_path_reason(path)
+    if reason is None:
+        return
+    if _stored_host_path_exists(path, thread_data):
+        return
+    raise PermissionError(f"Access denied: {reason}")
+
+
 def _reject_path_traversal(path: str) -> None:
-    """Reject paths that contain '..' segments to prevent directory traversal."""
+    """Reject paths that contain '..' segments to prevent directory traversal.
+
+    Windows reserved names and trailing dots or spaces are intentionally not
+    checked here. Portability is enforced when a path is created, not on every
+    read of a name the host already stored.
+    """
     # Normalise to forward slashes, then check for '..' segments.
     normalised = path.replace("\\", "/")
     for segment in normalised.split("/"):
@@ -829,11 +1028,12 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 
     This function is a security gate — it checks whether *path* may be
     accessed and raises on violation.  It does **not** resolve the virtual
-    path to a host path; callers are responsible for resolution via
-    ``resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
+    path to a host path. Sandbox-backed readers should keep mounted paths
+    virtual and let the provider's mount table resolve them.
 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
+      - ``/mnt/user-data``    — the bare root, allowed only when *read_only* is True
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
       - Custom mount paths (from config.yaml) — respects per-mount ``read_only`` flag
@@ -851,6 +1051,10 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     _reject_path_traversal(path)
+    # Creating a non-portable name is rejected. Reading, and editing a file
+    # that is already stored under that name, is not.
+    if not read_only:
+        _reject_unstored_windows_incompatible_path(path, thread_data)
 
     # Skills paths — read-only access only
     if _is_skills_path(path):
@@ -864,8 +1068,10 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
-    # User-data paths
-    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+    # User-data paths. The bare root passes for reads because the local
+    # provider maps it for parity with AIO; the resolver still rejects it,
+    # and only ls lists it, one allowed directory at a time.
+    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/") or (read_only and path == VIRTUAL_PATH_PREFIX):
         return
 
     # Custom mount paths — respect read_only config
@@ -917,6 +1123,29 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
     return str(resolved)
 
 
+def _user_data_root_dirs(path: str, thread_data: ThreadDataState) -> dict[str, str] | None:
+    """Map virtual to host workspace/uploads/outputs when *path* is the user-data root.
+
+    The local provider maps the root so ``ls`` matches AIO, but its host
+    directory can hold more than the three allowed directories. Callers list
+    each of them instead of walking the root. Any other path returns None.
+    """
+    mappings = _thread_virtual_to_actual_mappings(thread_data)
+    user_data_root = mappings.pop(VIRTUAL_PATH_PREFIX, None)
+    if user_data_root is None or Path(replace_virtual_path(path, thread_data)).resolve() != Path(user_data_root).resolve():
+        return None
+    return mappings
+
+
+def _list_user_data_root(sandbox: Sandbox, user_data_dirs: dict[str, str]) -> list[str]:
+    """List each allowed directory and one level below it, matching ls depth 2."""
+    entries: list[str] = []
+    for virtual_dir, actual_dir in user_data_dirs.items():
+        entries.append(f"{virtual_dir}/")
+        entries.extend(sandbox.list_dir(actual_dir, max_depth=1))
+    return entries
+
+
 def _is_non_file_url_token(token: str) -> bool:
     """Return True for URL tokens that should not be interpreted as paths."""
     values = [token]
@@ -961,6 +1190,435 @@ def _split_shell_tokens(command: str) -> list[str]:
         return command.split()
 
 
+_SHELL_PATH_HARD_TERMINATORS = frozenset("\"'`;&|<>()")
+
+_AWK_COMMAND_NAMES = frozenset({"awk", "gawk", "mawk", "nawk"})
+# awk options whose value is the next word. ``-f`` is handled separately: it
+# means there is no inline program, so the first operand is an input file. Any
+# other option (gawk's ``--assign``, ``-e``, ...) may also consume the next
+# word, so it forfeits the exemption.
+_AWK_OPTIONS_WITH_VALUE = frozenset({"-F", "-v"})
+# Command words that can make a later ``awk`` word run something other than
+# awk, or re-read quoted text: definitions (``alias``, ``function``, ``name()``
+# handled in the walk), ``eval``, sourcing, ``hash -p``, ``enable -f`` (loads a
+# builtin under any name) and a ``PATH`` rebind.
+# Any of them anywhere in the command forfeits the exemption for the whole
+# command; the words are compared after basename reduction.
+_AWK_EXEMPTION_BLOCKING_COMMANDS = frozenset({".", "alias", "autoload", "enable", "eval", "function", "hash", "source"})
+# ``name[...]=`` at a command start is never an environment prefix for awk, but
+# zsh's ``functions[awk]=...`` / ``aliases[awk]=...`` define a function or alias.
+_SHELL_ARRAY_ASSIGNMENT_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\[")
+# awk keywords after which ``/`` opens a regex literal (``print /re/``), and the
+# keywords whose closing ``)`` is followed by a pattern (``if (x) /re/``) rather
+# than a divisor (``($2+$3)/2``).
+_AWK_REGEX_KEYWORDS = frozenset({"case", "delete", "do", "else", "exit", "getline", "in", "print", "printf", "return"})
+_AWK_CONDITION_KEYWORDS = frozenset({"for", "if", "while"})
+_AWK_WORD_CHARS = frozenset(string.ascii_letters + string.digits + "_")
+_SHELL_WORD_OPERATOR_CHARS = frozenset(";&|()<>\n\r")
+_SHELL_ARITHMETIC_CHARS = frozenset(string.ascii_letters + string.digits + "_ \t\r\n+-*/%<>=!&|^~?:,[]")
+_SHELL_ARITHMETIC_VARIABLE_PATTERN = re.compile(r"\$(?:\{#?[A-Za-z_][A-Za-z0-9_]*\}|\{[0-9]+\}|[A-Za-z_][A-Za-z0-9_]*|[0-9]+)")
+
+
+def _awk_word_before(program: str, position: int) -> str | None:
+    """The identifier, number or ``]`` that ends just before *position*, or None.
+
+    Scans backward over spaces and tabs only, so the token must sit on the same
+    line. Returns ``"]"`` or ``")"`` for a closing bracket, the word for an
+    identifier or number, and None for anything else (operators, punctuation,
+    start of line).
+    """
+    end = position
+    while end > 0 and program[end - 1] in " \t":
+        end -= 1
+    if end == 0:
+        return None
+    if program[end - 1] in "])":
+        return program[end - 1]
+    start = end
+    while start > 0 and program[start - 1] in _AWK_WORD_CHARS:
+        start -= 1
+    return program[start:end] or None
+
+
+def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] | None:
+    """Spans of *program* (shifted by *offset*) that awk reads as code, not string text.
+
+    A ``$NAME/`` in awk code is a field reference; inside a string literal it
+    is text that ``system("...")`` or ``getline < "..."`` may hand to a shell,
+    so string literals are left out. Rather than lex awk fully, walk the
+    program once: a ``"`` toggles a string literal (``\\`` escapes inside),
+    ``#`` outside one starts a comment that runs to the end of the line, and
+    inside a literal ``/`` and ``#`` are plain text (``split($0, p, "/")``).
+    A ``/`` outside a literal must be division, which in awk follows an
+    identifier, number, ``]`` or a ``)`` that does not close an ``if``,
+    ``while`` or ``for`` condition, all on the same line. Any other ``/``
+    (``gsub(/"/, ...)``, ``if (x) /re/``, a ``/`` at the start of a line)
+    opens a regex literal whose ``"`` would desynchronise the tracker, so
+    return None and the caller grants no exemption.
+    """
+    spans: list[tuple[int, int]] = []
+    in_string = False
+    segment_start = 0
+    open_parens: list[int] = []
+    last_closed_opener: int | None = None
+    position = 0
+    while position < len(program):
+        char = program[position]
+        if in_string:
+            if char == "\\":
+                position += 1
+            elif char == '"':
+                in_string = False
+                segment_start = position + 1
+        elif char == '"':
+            spans.append((offset + segment_start, offset + position))
+            in_string = True
+        elif char == "#":
+            newline = program.find("\n", position)
+            position = len(program) if newline == -1 else newline
+            continue
+        elif char == "(":
+            open_parens.append(position)
+        elif char == ")":
+            last_closed_opener = open_parens.pop() if open_parens else None
+        elif char == "/":
+            word = _awk_word_before(program, position)
+            if word == ")":
+                if last_closed_opener is None or _awk_word_before(program, last_closed_opener) in _AWK_CONDITION_KEYWORDS:
+                    return None
+            elif word is None or word in _AWK_REGEX_KEYWORDS:
+                return None
+        position += 1
+    if not in_string:
+        spans.append((offset + segment_start, offset + len(program)))
+    return spans
+
+
+class _ShellWord:
+    """One word of a scanned shell command.
+
+    ``text`` is the word with quotes removed; ``single_quoted`` is the span of
+    the word's content in the original command when the whole word is exactly
+    one single-quoted string, else None. ``kind`` is ``"word"``, ``"op"`` (a
+    command separator, including ``(`` and ``)``) or ``"redir"``.
+    """
+
+    __slots__ = ("kind", "single_quoted", "text")
+
+    def __init__(self, kind: str, text: str, single_quoted: tuple[int, int] | None = None) -> None:
+        self.kind = kind
+        self.text = text
+        self.single_quoted = single_quoted
+
+
+def _shell_arithmetic_end(command: str, start: int) -> int | None:
+    """End of a simple ``$((...))``, without strings or command substitutions.
+
+    Only ordinary arithmetic and simple variable/length expansions qualify.
+    Unknown parameter operators, quoting and executable substitutions forfeit
+    the exemption instead of guessing where the expression ends.
+    """
+    position = start + 3
+    depth = 0
+    while position < len(command):
+        char = command[position]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return position + 2 if command.startswith("))", position) else None
+            depth -= 1
+        elif char == "$":
+            variable = _SHELL_ARITHMETIC_VARIABLE_PATTERN.match(command, position)
+            if variable is None:
+                return None
+            position = variable.end()
+            continue
+        elif char not in _SHELL_ARITHMETIC_CHARS:
+            return None
+        position += 1
+    return None
+
+
+def _scan_shell_words(command: str, arithmetic_spans: list[tuple[int, int]] | None = None) -> list[list[_ShellWord]] | None:
+    """Split *command* into word lists, one per command context, bash-style.
+
+    The first list is the top-level command; every ``$(...)`` substitution adds
+    its own list, since quoting starts afresh inside it and its first word is
+    a command. Single quotes, double quotes with ``\\`` escapes, ``\\x``
+    escapes, ``#`` comments at the start of a word, ``2>``-style redirections
+    and the ``;``, ``&&``, ``||``, ``|``, ``|&``, ``&``, ``(``, ``)`` and
+    newline separators follow bash. Returns None, so that no exemption is
+    granted, for anything it does not model: a backslash-newline (bash splices
+    the lines before parsing, which can spell ``awk`` across lines), backticks,
+    ``$'...'`` strings, a heredoc, an unmatched ``)`` and unbalanced quotes.
+    Simple arithmetic expansions are opaque words; optionally collect their
+    content spans separately from command substitutions and shell comments.
+    """
+    if "\\\n" in command or "\\\r" in command:
+        return None
+    contexts: list[list[_ShellWord]] = []
+
+    def scan(position: int, nested: bool) -> int | None:
+        items: list[_ShellWord] = []
+        contexts.append(items)
+        text: list[str] = []
+        quoted_spans: list[tuple[int, int]] = []
+        in_word = False
+        plain_so_far = True  # no quotes or substitutions seen in this word yet
+        depth = 0
+        n = len(command)
+
+        def flush() -> None:
+            nonlocal text, quoted_spans, in_word, plain_so_far
+            if in_word:
+                joined = "".join(text)
+                span = quoted_spans[0] if len(quoted_spans) == 1 and quoted_spans[0][1] - quoted_spans[0][0] == len(joined) else None
+                items.append(_ShellWord("word", joined, span))
+            text, quoted_spans, in_word, plain_so_far = [], [], False, True
+
+        while position < n:
+            char = command[position]
+            if char in " \t":
+                flush()
+                position += 1
+            elif char == "#" and not in_word:
+                newline = command.find("\n", position)
+                position = n if newline == -1 else newline
+            elif char in _SHELL_WORD_OPERATOR_CHARS:
+                if char in "<>" and in_word and plain_so_far and "".join(text).isdigit():
+                    text, in_word = [], False  # ``2>``: the digits belong to the operator
+                flush()
+                if char == ")":
+                    if depth == 0:
+                        return position + 1 if nested else None
+                    depth -= 1
+                    items.append(_ShellWord("op", ")"))
+                    position += 1
+                    continue
+                if char == "(":
+                    depth += 1
+                end = position + 1
+                group = "&|" if char in "&|" else "<>&|" if char in "<>" else ""
+                while end < n and command[end] in group:
+                    end += 1
+                operator = command[position:end]
+                if operator.startswith("<<") and not operator.startswith("<<<"):
+                    return None  # heredoc bodies are re-read by the shell
+                items.append(_ShellWord("redir" if char in "<>" else "op", operator))
+                position = end
+            elif char == "`":
+                return None
+            elif char == "'":
+                end = command.find("'", position + 1)
+                if end == -1:
+                    return None
+                quoted_spans.append((position + 1, end))
+                text.append(command[position + 1 : end])
+                in_word, plain_so_far = True, False
+                position = end + 1
+            elif char == '"':
+                position += 1
+                while position < n and command[position] != '"':
+                    if command[position] == "\\":
+                        position += 2
+                    elif command[position] == "`":
+                        return None
+                    elif command.startswith("$((", position):
+                        after = _shell_arithmetic_end(command, position)
+                        if after is None:
+                            return None
+                        if arithmetic_spans is not None:
+                            arithmetic_spans.append((position + 3, after - 2))
+                        position = after
+                    elif command.startswith("$(", position):
+                        after = scan(position + 2, True)
+                        if after is None:
+                            return None
+                        position = after
+                    else:
+                        position += 1
+                if position >= n:
+                    return None
+                text.append("\x00")  # opaque: content is never a bare awk program
+                in_word, plain_so_far = True, False
+                position += 1
+            elif command.startswith("$'", position):
+                return None
+            elif command.startswith("$((", position):
+                after = _shell_arithmetic_end(command, position)
+                if after is None:
+                    return None
+                if arithmetic_spans is not None:
+                    arithmetic_spans.append((position + 3, after - 2))
+                text.append("\x00")
+                in_word, plain_so_far = True, False
+                position = after
+            elif command.startswith("$(", position):
+                after = scan(position + 2, True)
+                if after is None:
+                    return None
+                text.append("\x00")
+                in_word, plain_so_far = True, False
+                position = after
+            elif char == "\\":
+                if position + 1 >= n:
+                    return None
+                text.append(command[position + 1])
+                in_word, plain_so_far = True, False
+                position += 2
+            else:
+                text.append(char)
+                in_word = True
+                position += 1
+        flush()
+        if nested or depth:
+            return None
+        return position
+
+    if scan(0, False) is None:
+        return None
+    return contexts
+
+
+def _awk_inline_program_span(items: list[_ShellWord], index: int) -> tuple[tuple[int, int] | None, int]:
+    """Return the span of a wholly single-quoted awk program and the next index."""
+    while index < len(items):
+        item = items[index]
+        if item.kind == "op":
+            break
+        if item.kind == "redir" or item.text in _AWK_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if item.text == "--file" or item.text.startswith(("-f", "--file=")):
+            return None, index + 1
+        if item.text == "--":
+            index += 1
+            break
+        if not item.text.startswith("-") or item.text == "-":
+            break
+        if not item.text.startswith(("-F", "-v")):
+            return None, index + 1
+        index += 1
+    if index < len(items) and items[index].kind == "word" and items[index].single_quoted is not None:
+        return items[index].single_quoted, index + 1
+    return None, index + 1
+
+
+def _shell_commands_for_exemptions(command: str, arithmetic_spans: list[tuple[int, int]] | None = None) -> list[tuple[str, list[_ShellWord]]] | None:
+    """Command names and arguments, unless shell syntax can redefine/re-read them."""
+    contexts = _scan_shell_words(command, arithmetic_spans)
+    if contexts is None:
+        return None
+
+    commands: list[tuple[str, list[_ShellWord]]] = []
+    for items in contexts:
+        at_command_start = True
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if item.text.startswith("PATH=") or (index + 1 < len(items) and items[index + 1].kind == "op" and items[index + 1].text.startswith("(")):
+                return None  # PATH rebind or ``name ()`` function definition
+            if at_command_start and item.kind == "word" and _SHELL_ARRAY_ASSIGNMENT_PATTERN.match(item.text):
+                return None  # zsh ``functions[awk]=...`` / ``aliases[awk]=...``
+            if item.kind == "op":
+                at_command_start = True
+                index += 1
+                continue
+            if item.kind == "redir":
+                index += 1 if item.text.endswith("&") and item.text not in ("&>", "&>>") else 2
+                continue
+            if not at_command_start:
+                index += 1
+                continue
+            if _is_shell_assignment(item.text):
+                index += 1
+                continue
+            name = item.text.rsplit("/", 1)[-1]
+            if name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS or name in _LOCAL_BASH_COMMAND_END_KEYWORDS or name in _LOCAL_BASH_COMMAND_WRAPPERS:
+                index += 1
+                continue
+            if name in _AWK_EXEMPTION_BLOCKING_COMMANDS:
+                return None
+            at_command_start = False
+            argument_end = index + 1
+            while argument_end < len(items) and items[argument_end].kind != "op":
+                argument_end += 1
+            commands.append((name, items[index + 1 : argument_end]))
+            index += 1
+    return commands
+
+
+def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
+    """Spans where ``$NAME/`` is an awk field reference rather than a path.
+
+    Only wholly single-quoted awk-family inline programs qualify. The shared
+    shell scanner rejects definitions, re-reading commands and uncertain shell
+    syntax. Awk string literals and ambiguous regex syntax remain checked.
+    """
+    field_spans: list[tuple[int, int]] = []
+    for name, arguments in _shell_commands_for_exemptions(command) or []:
+        if name in _AWK_COMMAND_NAMES:
+            program, _ = _awk_inline_program_span(arguments, 0)
+            if program is None:
+                continue
+            start, end = program
+            field_spans.extend(_awk_program_code_spans(command[start:end], start) or [])
+    return field_spans
+
+
+def _absolute_path_token_occurrences(command: str, tokens: list[str]) -> list[tuple[int, int, str]]:
+    """Locate contiguous occurrences of path-bearing shell tokens in *command*.
+
+    shlex strips quotes, so a quoted path with spaces is one token. Occurrences
+    stay tied to their position so a later quoted ``.../CON notes.txt`` cannot
+    excuse an earlier real ``/.../CON``. Tokens that are not a contiguous
+    substring (newline normalization, escapes) yield no occurrence.
+    """
+    occurrences: list[tuple[int, int, str]] = []
+    for token in tokens:
+        if "/" not in token:
+            continue
+        start = command.find(token)
+        while start != -1:
+            occurrences.append((start, start + len(token), token))
+            start = command.find(token, start + 1)
+    return occurrences
+
+
+def _extend_absolute_path_within_span(command: str, match_start: int, span_end: int) -> str:
+    """Continue a regex path through spaces inside one shell word.
+
+    Stop before quotes and shell metacharacters the absolute-path regex already
+    treats as boundaries, so a trailing dot is not hidden by a closing quote.
+    """
+    chars: list[str] = []
+    for char in command[match_start:span_end]:
+        if char in _SHELL_PATH_HARD_TERMINATORS:
+            break
+        chars.append(char)
+    return "".join(chars)
+
+
+def _shell_absolute_path_candidate(command: str, occurrences: list[tuple[int, int, str]], match: re.Match[str]) -> str | None:
+    """Return the path to validate for one regex match, or None if already covered.
+
+    A match that starts a shell word is validated as that whole word. A later
+    match inside that same absolute-path word is skipped. A match embedded in a
+    larger word is extended through spaces only up to a hard terminator.
+    """
+    covering = [item for item in occurrences if item[0] <= match.start() < item[1]]
+    if not covering:
+        return match.group()
+    start, end, token = max(covering, key=lambda item: item[1] - item[0])
+    if token.startswith("/") and start == match.start():
+        return token
+    if token.startswith("/") and start < match.start():
+        return None
+    extended = _extend_absolute_path_within_span(command, match.start(), end)
+    return extended or match.group()
+
+
 def _is_shell_command_separator(token: str) -> bool:
     return token in _SHELL_COMMAND_SEPARATORS
 
@@ -976,29 +1634,41 @@ def _is_shell_assignment(token: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
 
 
-def _is_allowed_local_bash_absolute_path(path: str, allowed_paths: list[str], *, allow_system_paths: bool) -> bool:
+def _reject_allowed_bash_path(path: str, thread_data: ThreadDataState | None) -> None:
+    """Traversal always; portability only when the host path is not stored yet."""
+    _reject_path_traversal(path)
+    _reject_unstored_windows_incompatible_path(path, thread_data)
+
+
+def _is_allowed_local_bash_absolute_path(
+    path: str,
+    allowed_paths: list[str],
+    *,
+    allow_system_paths: bool,
+    thread_data: ThreadDataState | None,
+) -> bool:
     # Check for MCP filesystem server allowed paths
     if any(path.startswith(allowed_path) or path == allowed_path.rstrip("/") for allowed_path in allowed_paths):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     if path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow skills container path (resolved by tools.py before passing to sandbox)
     if _is_skills_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow ACP workspace path (path-traversal check only)
     if _is_acp_workspace_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow custom mount container paths
     if _is_custom_mount_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     if allow_system_paths and any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
@@ -1029,7 +1699,7 @@ def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, in
     return None, index
 
 
-def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str]) -> None:
+def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str], thread_data: ThreadDataState | None) -> None:
     if target is None or target == "-":
         raise PermissionError(f"Unsafe working directory change in command: {command_name}. Use paths under {VIRTUAL_PATH_PREFIX}")
     if target.startswith(("$", "`")):
@@ -1038,7 +1708,7 @@ def _validate_local_bash_cwd_target(command_name: str, target: str | None, allow
         raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
     if target.startswith("/"):
         _reject_path_traversal(target)
-        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False):
+        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False, thread_data=thread_data):
             raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
@@ -1059,12 +1729,12 @@ def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], st
         index += 1
 
 
-def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) -> None:
+def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str], tokens: list[str], thread_data: ThreadDataState | None) -> None:
     """Conservatively reject relative path escapes missed by absolute-path scanning."""
     if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
         raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
-
-    tokens = _split_shell_tokens(command)
+    if _CDPATH_PATTERN.search(command):
+        raise PermissionError(f"Unsafe working directory change via CDPATH. Use paths under {VIRTUAL_PATH_PREFIX}")
 
     for token in tokens:
         if _is_shell_command_separator(token) or _is_shell_redirection_operator(token):
@@ -1104,7 +1774,7 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             wrapped_name = tokens[index + 1].rsplit("/", 1)[-1]
             if wrapped_name in _LOCAL_BASH_CWD_COMMANDS:
                 target, next_index = _next_cd_target(tokens, index + 2)
-                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths)
+                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths, thread_data)
                 index = next_index
                 continue
             _validate_local_bash_root_path_args(wrapped_name, tokens, index + 2)
@@ -1115,7 +1785,7 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             continue
 
         target, next_index = _next_cd_target(tokens, index + 1)
-        _validate_local_bash_cwd_target(command_name, target, allowed_paths)
+        _validate_local_bash_cwd_target(command_name, target, allowed_paths, thread_data)
         index = next_index
 
 
@@ -1172,6 +1842,46 @@ def _is_non_path_literal_fragment(fragment: str) -> bool:
     return False
 
 
+def _expression_division_spans(command: str) -> list[tuple[int, int]]:
+    """Verified inline-code and shell-arithmetic spans for closer division.
+
+    A shell word ending in a closer can still construct a path, including a
+    numeric filename or a variable-prefixed glob. Only simple shell arithmetic
+    and wholly single-quoted Python/Node/Perl program arguments qualify. The
+    existing conservative awk lexer also excludes double-quoted strings and
+    ambiguous regex syntax. Python triple quotes, JavaScript comments, backticks
+    and Perl alternative quoting forfeit the exemption because their lexical
+    rules differ. Single-quoted ``sh/bash -c`` arguments are
+    scanned as shell source, so their paths never become program expressions.
+    """
+    spans: list[tuple[int, int]] = []
+    commands = _shell_commands_for_exemptions(command, spans)
+    if commands is None:
+        return []
+    for name, arguments in commands:
+        if len(arguments) < 2 or arguments[0].kind != "word" or arguments[1].single_quoted is None:
+            continue
+        option = arguments[0].text
+        python = re.fullmatch(r"python(?:3(?:\.[0-9]+)?)?", name) and option == "-c"
+        node = name in {"node", "nodejs"} and option in {"-e", "--eval"}
+        perl = name == "perl" and re.fullmatch(r"-[alnpw]*e", option)
+        shell = name in {"sh", "bash"} and option == "-c"
+        start, end = arguments[1].single_quoted
+        program = command[start:end]
+        if shell:
+            spans.extend((start + left, start + right) for left, right in _expression_division_spans(program))
+        elif python or node or perl:
+            if "`" in program or (python and '"""' in program) or (node and ("/*" in program or "//" in program)) or (perl and re.search(r"\b(?:q[qrxw]?|m|s|tr|y)\b", program)):
+                continue
+            spans.extend(_awk_program_code_spans(program, start) or [])
+    return spans
+
+
+def _is_expression_division_after_closer(command: str, start: int, spans: list[tuple[int, int]]) -> bool:
+    """A single-segment slash after a closer must belong to verified code."""
+    return start > 0 and command[start - 1] in ")]}" and _is_in_spans(start - 1, spans) and _is_in_spans(start, spans)
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -1185,7 +1895,22 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     config.yaml) are allowed (path-traversal checks only; write prevention
     for bash commands is not enforced here).
     A small allowlist of common system path prefixes is kept for executable
-    and device references (e.g. /bin/sh, /dev/null).
+    and device references (e.g. /bin/sh, /dev/null). Quoted shell words are
+    validated whole, so a space inside quotes is not treated as a new segment.
+    A shell variable used as a path prefix (``$HOME/...``, ``$1/...``) or a named
+    home (``~root/...``) is rejected like ``${HOME}/...`` and ``~/...``, since its
+    runtime value is unknown here, except inside the single-quoted inline
+    program of awk/gawk/mawk/nawk (outside awk string literals), where bash
+    expands nothing and ``$NF/2`` or ``($2+$3)/2`` is field arithmetic; that
+    exemption is withheld from any command that could redefine ``awk`` or
+    re-read quoted text (see ``_awk_program_field_spans``);
+    ``$PWD/...`` is checked like the relative path it is equivalent to.
+    Outside awk programs, a single-segment match directly after ``)``, ``]``
+    or ``}`` is exempt only in verified single-quoted interpreter code or
+    simple shell arithmetic. Shell path construction stays checked regardless
+    of whether the filename is numeric or follows a glob or substitution.
+    A windows-incompatible segment still rejects a path that is not already
+    stored on the host; an existing host file may be read or renamed.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
@@ -1193,30 +1918,80 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # Block file:// URLs which bypass the absolute-path regex but allow local file exfiltration
     file_url_match = _FILE_URL_PATTERN.search(command)
     if file_url_match:
-        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
-    _validate_local_bash_shell_tokens(command, allowed_paths)
+    tokens = _split_shell_tokens(command)
+    _validate_local_bash_shell_tokens(command, allowed_paths, tokens, thread_data)
+    path_token_occurrences = _absolute_path_token_occurrences(command, tokens)
     url_spans = _non_file_url_spans(command)
 
+    # Inside the single-quoted program of an awk command a ``/`` after ``)``
+    # is division (``($2+$3)/2``); only awk string literals, which the spans
+    # leave out, can carry text to a shell. Only a single-segment match
+    # (``/2``, ``/n``, ``/NR``) is exempt, so anything shaped like ``/a/b``
+    # is still rejected should the scanner ever misjudge a span.
+    awk_field_spans: list[tuple[int, int]] | None = None
+    expression_spans: list[tuple[int, int]] | None = None
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
         if _is_in_spans(match.start(), url_spans):
             continue
+        if "/" not in match.group()[1:]:
+            if awk_field_spans is None:
+                awk_field_spans = _awk_program_field_spans(command)
+            if _is_in_spans(match.start(), awk_field_spans):
+                continue
+            if expression_spans is None:
+                expression_spans = _expression_division_spans(command)
+            if _is_expression_division_after_closer(command, match.start(), expression_spans):
+                continue
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
             continue
-        if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
+        candidate = _shell_absolute_path_candidate(command, path_token_occurrences, match)
+        if candidate is None:
+            continue
+        if _is_allowed_local_bash_absolute_path(candidate, allowed_paths, allow_system_paths=True, thread_data=thread_data):
             continue
 
-        unsafe_paths.append(absolute_path)
+        unsafe_paths.append(candidate)
+
+    # A variable's value is unknown here, so its path is never allowed. The one
+    # exception is ``$PWD``: ``$PWD/.venv/bin`` names the same file as the
+    # relative ``.venv/bin``, which this guard already accepts, unless the
+    # command rebinds ``PWD`` itself.
+    # The prose exemption used above does not apply: ``$HOME/文档`` is a real
+    # host directory.
+    pwd_is_workspace = not _PWD_REBIND_PATTERN.search(command)
+    for match in _SHELL_VARIABLE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
+            continue
+        if awk_field_spans is None:
+            awk_field_spans = _awk_program_field_spans(command)
+        if _is_in_spans(match.start(), awk_field_spans):
+            continue
+        name, remainder = match.group(1), match.group(2)
+        if name == "PWD" and pwd_is_workspace:
+            continue
+        # ``$1/1024`` and ``$1/$2`` are awk-style field arithmetic
+        # (``awk '{print $1/$2}'``), not paths: standard top-level host
+        # directories do not start with a digit.
+        if name.isdigit() and remainder.removeprefix("$")[:1].isdigit():
+            continue
+        unsafe_paths.append(match.group() + remainder)
+
+    for match in _NAMED_TILDE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
+            continue
+        unsafe_paths.append(match.group())
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
-        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
 
-def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
+def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None, *, shell: str | None = None) -> str:
     """Replace /mnt/user-data virtual paths in a command string for local sandbox.
 
     Skills paths (/mnt/skills) and ACP workspace paths (/mnt/acp-workspace)
@@ -1229,6 +2004,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     Args:
         command: The command string that may contain virtual paths.
         thread_data: The thread data containing actual paths.
+        shell: Local execution shell, auto-detected when omitted.
 
     Returns:
         The command with user-data virtual paths replaced.
@@ -1247,17 +2023,27 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # bare root still matches and the sibling is rewritten into the thread's
         # host directory — a real path outside the mount contract. Same defect as
         # #4035 (reverse patterns) and #4053 (masking patterns), mirrored into
-        # this direction.
+        # this direction. ``PATH_START_BOUNDARY`` is the left-hand counterpart:
+        # the root must start a path, so an artifact URL such as
+        # ``.../artifacts/mnt/user-data/outputs/x.html`` is not rewritten.
         #
         # The class mirrors ``LocalSandbox._content_pattern``'s rather than
         # ``_command_pattern``'s: a virtual root can legitimately be followed by
         # ``:`` (PATH-style concatenation) or ``,``, which the shell-oriented
         # class rejects — narrowing to it would stop translating paths that
         # translate today. ``$`` covers a command ending exactly at the root.
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
+        #
+        # The tail ends at ``:`` (like ``path_patterns._PATH_TAIL``): the
+        # boundary above admits PATH-style concatenation, but a tail that ran
+        # through the ``:`` swallowed every later entry of the list, leaving
+        # those virtual paths unresolved in the command.
+        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():,]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
-            return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
+            resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
+            if LocalSandbox._is_powershell(shell or LocalSandbox._get_shell()):
+                return escape_powershell_path(match, resolved)
+            return resolved
 
         result = pattern.sub(replace_user_data_match, result)
 
@@ -1300,7 +2086,9 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
         return False
     if runtime.state is None:
         return False
-    sandbox_state = runtime.state.get("sandbox")
+    # Read-only classification: the id is only matched, so a fork-restored
+    # wrapper is safe to discard here (nothing gets released on this path).
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         return False
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -1323,7 +2111,9 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime not available")
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
-    sandbox_state = runtime.state.get("sandbox")
+    # Read-only lookup: this only resolves the provider entry, and ownership
+    # (release) stays with after_agent's short-circuit on the wrapped state.
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         raise SandboxRuntimeError("Sandbox state not initialized in runtime")
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -1336,6 +2126,88 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for downstream use
     return sandbox
+
+
+def _rollback_failed_sandbox_lookup(
+    provider: SandboxProvider,
+    sandbox_id: str,
+    owner_id: str | None,
+) -> None:
+    """Undo an acquire whose active client disappeared before lookup."""
+    try:
+        if owner_id is not None:
+            get_sandbox_lease_manager(provider).release(owner_id)
+        else:
+            provider.release(sandbox_id)
+    except Exception:
+        logger.warning(
+            "Failed to roll back sandbox after post-acquire lookup failure: %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
+async def _rollback_failed_sandbox_lookup_async(
+    provider: SandboxProvider,
+    sandbox_id: str,
+    owner_id: str | None,
+) -> None:
+    """Async rollback without blocking the event loop on provider cleanup."""
+    try:
+        if owner_id is not None:
+            await get_sandbox_lease_manager(provider).release_async(owner_id)
+        else:
+            await await_drained(asyncio.to_thread(provider.release, sandbox_id))
+    except Exception:
+        logger.warning(
+            "Failed to roll back sandbox after async post-acquire lookup failure: %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
+@contextmanager
+def sandbox_authorization_scope(runtime: Runtime) -> Iterator[None]:
+    """Authorize once for one complete synchronous sandbox tool invocation."""
+    if _SANDBOX_AUTHORIZATION_CHECKED.get():
+        yield
+        return
+
+    authorize_sandbox_execution(
+        context=runtime.context or {},
+        app_config=safe_app_config(),
+    )
+    token = _SANDBOX_AUTHORIZATION_CHECKED.set(True)
+    try:
+        yield
+    finally:
+        _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
+
+
+@asynccontextmanager
+async def sandbox_authorization_scope_async(runtime: Runtime) -> AsyncIterator[None]:
+    """Authorize once for one complete asynchronous sandbox tool invocation."""
+    if _SANDBOX_AUTHORIZATION_CHECKED.get():
+        yield
+        return
+
+    await authorize_sandbox_execution_async(
+        context=runtime.context or {},
+        app_config=await safe_app_config_async(),
+    )
+    token = _SANDBOX_AUTHORIZATION_CHECKED.set(True)
+    try:
+        yield
+    finally:
+        _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
+
+
+def _resolve_runtime_thread_id(runtime: Runtime) -> str | None:
+    """Resolve the thread identity consistently for reuse and acquisition."""
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if thread_id is None:
+        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    return thread_id
 
 
 def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
@@ -1362,27 +2234,81 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
-    # Check if sandbox already exists in state
-    sandbox_state = runtime.state.get("sandbox")
+    # Authorization is a live execution policy, not a lifetime property of a
+    # sandbox id. Re-check before both reuse and acquisition so a role or policy
+    # change takes effect on the next sandbox-backed tool call.
+    if not _SANDBOX_AUTHORIZATION_CHECKED.get():
+        authorize_sandbox_execution(
+            context=runtime.context or {},
+            app_config=safe_app_config(),
+        )
+
+    # Check if sandbox already exists in state. A fork-restored execution keeps
+    # the wrapper so after_agent cannot park the parent's sandbox, but it still
+    # binds a non-releasing holder: parent cleanup cannot close the client under
+    # the child, and the child's outer fence can clean its command scope.
+    sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            sandbox = get_sandbox_provider().get(sandbox_id)
-            if sandbox is not None:
-                if runtime.context is not None:
-                    runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
-                return sandbox
-            # Sandbox was released, fall through to acquire new one
+            provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            thread_id = _resolve_runtime_thread_id(runtime)
+            user_id = resolve_runtime_user_id(runtime)
+            if thread_id is not None:
+                if owner_id is None:
+                    if not fork_restored:
+                        scoped = provider.get_scoped(
+                            sandbox_id,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                        )
+                        if scoped is None:
+                            sandbox_id = provider.acquire(thread_id, user_id=user_id)
+                elif fork_restored:
+                    # Only the server-created fork wrapper may borrow a sandbox
+                    # from a different thread identity. Ordinary checkpoint ids
+                    # are resolved again from the authenticated user/thread.
+                    sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        release_on_last=False,
+                        allow_unscoped_borrow=True,
+                    )
+                else:
+                    sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
+                if not fork_restored:
+                    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+                sandbox = provider.get(sandbox_id)
+                if sandbox is not None:
+                    if runtime.context is not None:
+                        runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+                    return sandbox
+            # Missing thread scope or released sandbox: use the lazy path below.
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    owner_id = sandbox_lease_owner(runtime.context)
+    if owner_id is None:
+        sandbox_id = provider.acquire(thread_id, user_id=user_id)
+    else:
+        sandbox_id = get_sandbox_lease_manager(provider).acquire(
+            owner_id,
+            thread_id,
+            user_id=user_id,
+        )
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1390,6 +2316,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     # Retrieve and return the sandbox
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
+        _rollback_failed_sandbox_lookup(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
     if runtime.context is not None:
@@ -1410,29 +2337,81 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
-    sandbox_state = runtime.state.get("sandbox")
+    # Keep the async path aligned with the sync path: persisted sandbox state
+    # must not bypass a newly-revoked sandbox:execute grant.
+    if not _SANDBOX_AUTHORIZATION_CHECKED.get():
+        await authorize_sandbox_execution_async(
+            context=runtime.context or {},
+            app_config=await safe_app_config_async(),
+        )
+
+    # Same borrowed-holder rule as the sync path above: keep the fork wrapper
+    # while counting the child as an active client user.
+    sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            sandbox = get_sandbox_provider().get(sandbox_id)
-            if sandbox is not None:
-                if runtime.context is not None:
-                    runtime.context["sandbox_id"] = sandbox_id
-                return sandbox
+            provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            thread_id = _resolve_runtime_thread_id(runtime)
+            user_id = resolve_runtime_user_id(runtime)
+            if thread_id is not None:
+                if owner_id is None:
+                    if not fork_restored:
+                        scoped = provider.get_scoped(
+                            sandbox_id,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                        )
+                        if scoped is None:
+                            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+                elif fork_restored:
+                    sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        release_on_last=False,
+                        allow_unscoped_borrow=True,
+                    )
+                else:
+                    sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
+                if not fork_restored:
+                    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+                sandbox = provider.get(sandbox_id)
+                if sandbox is not None:
+                    if runtime.context is not None:
+                        runtime.context["sandbox_id"] = sandbox_id
+                    return sandbox
 
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    owner_id = sandbox_lease_owner(runtime.context)
+    sandbox_id = await claim_sandbox_prewarm(runtime, provider=provider)
+    if sandbox_id is None:
+        if owner_id is None:
+            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        else:
+            sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
+                owner_id,
+                thread_id,
+                user_id=user_id,
+            )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
+        await _rollback_failed_sandbox_lookup_async(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
     if runtime.context is not None:
@@ -1441,22 +2420,56 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
 
 async def _run_sync_tool_after_async_sandbox_init(
-    func: Callable[..., str] | None,
+    func: Callable[..., str | ToolMessage] | None,
     runtime: Runtime,
     *args: object,
-) -> str:
+    _error_result: Callable[[str, BaseException | None], str | ToolMessage] | None = None,
+) -> str | ToolMessage:
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
-        await ensure_sandbox_initialized_async(runtime)
+        async with sandbox_authorization_scope_async(runtime):
+            sandbox = await ensure_sandbox_initialized_async(runtime)
+
+            if func is None:
+                text = "Error: Tool implementation not available"
+                return _error_result(text, None) if _error_result else text
+
+            owner = sandbox_lease_owner(runtime.context)
+            signal_cancel = None
+            if func is bash_tool.func and owner and getattr(sandbox, "supports_command_cancellation", False):
+                signal_cancel = partial(sandbox.request_command_cancel, owner)
+            return await run_sync_lifecycle_operation(func, runtime, *args, _on_cancel=signal_cancel)
     except SandboxError as e:
-        return f"Error: {e}"
+        text = f"Error: {e}"
+        return _error_result(text, e) if _error_result else text
     except Exception as e:
-        return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        text = f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        return _error_result(text, e) if _error_result else text
 
-    if func is None:
-        return "Error: Tool implementation not available"
 
-    return await asyncio.to_thread(func, runtime, *args)
+def _execute_bash_command(
+    sandbox: Sandbox,
+    command: str,
+    *,
+    runtime: Runtime,
+    env: dict[str, str] | None,
+    timeout: float | None = None,
+) -> str:
+    """Route subagent bash calls through their isolated shell-session scope."""
+    with command_owner(sandbox, sandbox_lease_owner(runtime.context)):
+        scope_id = sandbox_command_scope(runtime.context)
+        scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
+        if scope_id is not None and callable(scoped_execute):
+            return scoped_execute(
+                command,
+                env=env,
+                timeout=timeout,
+                scope_id=scope_id,
+            )
+        # Keep duck-typed custom providers and test doubles compatible: the scoped
+        # method is an additive Sandbox API, and ordinary/lead executions retain
+        # the original execute_command path.
+        return sandbox.execute_command(command, env=env, timeout=timeout)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
@@ -1527,39 +2540,155 @@ def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     return output
 
 
+#: Providers append the shell's authoritative exit marker at the very end of
+#: failing output (local ``Exit Code: N`` incl. timeout 124; remote
+#: ``Command exited with code N`` when output was empty). Truncation must
+#: never cut it away — evidence consumers (acceptance checklist) parse the
+#: marker to recover the actual shell status.
+_BASH_EXIT_MARKER_TAIL_RE = re.compile(r"(?:\nExit Code: -?\d+|\n?Command exited with code -?\d+)\s*$")
+
+#: Floor for the bash output limit: the longest exit marker
+#: (``Command exited with code -128``) is 30 chars, so any smaller configured
+#: limit is raised to keep a failing command's marker preservable. The config
+#: accepts any nonnegative value; below this floor truncation would destroy
+#: the failure evidence it exists to measure.
+_BASH_OUTPUT_MIN_LIMIT_CHARS = 32
+
+
 def _truncate_bash_output(output: str, max_chars: int) -> str:
     """Middle-truncate bash output, preserving head and tail (50/50 split).
 
     bash output may have errors at either end (stderr/stdout ordering is
-    non-deterministic), so both ends are preserved equally.
+    non-deterministic), so both ends are preserved equally. A trailing
+    shell exit marker is always preserved (see
+    ``_BASH_EXIT_MARKER_TAIL_RE``): its budget comes out of the tail, not
+    out of the status evidence.
 
-    The returned string (including the truncation marker) is guaranteed to be
-    no longer than max_chars characters. Pass max_chars=0 to disable truncation
-    and return the full output unchanged.
+    The returned string (including the truncation marker) is no longer than
+    the EFFECTIVE limit, ``max(max_chars, _BASH_OUTPUT_MIN_LIMIT_CHARS)`` —
+    the 32-char floor is applied before anything else (even when the output
+    carries no exit marker) so a trailing marker always stays preservable,
+    meaning a configured limit in 1..31 yields up to 32 chars. Pass
+    max_chars=0 to disable truncation and return the full output unchanged.
     """
     if max_chars == 0:
         return output
+    # Clamp the effective limit to the marker-preserving floor (see
+    # ``_BASH_OUTPUT_MIN_LIMIT_CHARS``): a configured limit smaller than the
+    # exit marker would silently discard failure status.
+    max_chars = max(max_chars, _BASH_OUTPUT_MIN_LIMIT_CHARS)
     if len(output) <= max_chars:
         return output
+    preserved = ""
+    marker_match = _BASH_EXIT_MARKER_TAIL_RE.search(output)
+    if marker_match is not None and len(marker_match.group(0)) < max_chars:
+        preserved = marker_match.group(0)
+        output = output[: marker_match.start()]
+        max_chars -= len(preserved)
+        if len(output) <= max_chars:
+            return output + preserved
     total_len = len(output)
     # Compute the exact worst-case marker length: skipped chars is at most
     # total_len, so this is a tight upper bound.
     marker_max_len = len(f"\n... [middle truncated: {total_len} chars skipped] ...\n")
     kept = max(0, max_chars - marker_max_len)
     if kept == 0:
-        return output[:max_chars]
+        return output[:max_chars] + preserved
     head_len = kept // 2
     tail_len = kept - head_len
     skipped = total_len - kept
     marker = f"\n... [middle truncated: {skipped} chars skipped] ...\n"
-    return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}"
+    return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}" + preserved
 
 
-def _truncate_read_file_output(output: str, max_chars: int) -> str:
+# A read_file cut prefers the last line boundary before the limit, so the model
+# never sees a partial line that reads as complete and the marker can name the
+# exact next ``start_line``. When the partial line at the cut is longer than
+# this, dropping it would throw away most of the budget (minified sources,
+# one-line JSON), so the cut stays at the character limit and the marker names
+# the line it fell inside instead.
+_READ_FILE_LINE_CUT_SLACK = 4096
+
+
+def _read_file_truncation_marker(*, line_offset: int, shown_lines: int, total_lines: int, kept: int, total: int, inside_line: int | None, continuation: str, ends_at_eof: bool = True) -> str:
+    """Marker appended to a truncated read_file result.
+
+    Line numbers are file line numbers: ``line_offset`` is the number of file
+    lines before the first line of ``output`` (``start_line - 1`` for a ranged
+    read), so a continuation named here can be passed straight back to
+    ``read_file``. ``inside_line`` is None when the kept text ends on a line
+    boundary; otherwise it is the 1-based line of ``output`` the cut fell in
+    and ``continuation`` says how to go on from there ("next", "whole_line" or
+    "bash"). ``ends_at_eof`` is False when ``output`` is a bounded slice that
+    may stop before the end of the file, so a line after its last line can
+    still be named. The continuation is stated in lines because that is what
+    ``start_line`` and ``end_line`` take; character counts are kept for
+    reference.
+    """
+    first = line_offset + 1
+    span = f"of {total_lines}" if line_offset == 0 else f"of {first}-{line_offset + total_lines}"
+    if inside_line is None:
+        shown = f"first {shown_lines}" if line_offset == 0 else f"lines {first}-{line_offset + shown_lines}"
+        return f"{READ_FILE_TRUNCATION_PREFIX} showing {shown} {span} lines ({kept} of {total} chars). Continue with start_line={line_offset + shown_lines + 1}, or use start_line/end_line to read a specific range] ..."
+    line = line_offset + inside_line
+    head = f"\n{READ_FILE_TRUNCATION_PREFIX} showing first {kept} of {total} chars, cut inside line {line} {span} lines"
+    if continuation == "next":
+        return f"{head}. Continue with start_line={line}, or use start_line/end_line to read a specific range] ..."
+    if continuation == "whole_line":
+        # The line is longer than a read that also has to carry a marker, but
+        # a read of that line alone comes back whole. After the last line of a
+        # read that reached the end of the file there is nothing to name; a
+        # bounded slice may stop mid-file, and a read one past the end only
+        # answers that the line does not exist.
+        after = f", then continue with start_line={line + 1}" if inside_line < total_lines or not ends_at_eof else ""
+        return f"{head}. Read that line whole with start_line={line}, end_line={line}{after}] ..."
+    return f"{head}; that line is longer than a read can return. Use bash (for example cut -c) to read the rest of that line, or start_line/end_line for other lines] ..."
+
+
+# Digits assumed when estimating the marker a follow-up read will carry. The
+# follow-up may span more of the file than the current read did, so its counts
+# are unknown here; over-reserving by a few characters only makes the "fits a
+# fresh read" decision more cautious.
+_READ_FILE_PESSIMISTIC_COUNT = 999_999_999
+
+
+def _read_file_marker_reserve(*, line_offset: int, total_lines: int, total: int) -> int:
+    """Longest marker any form can produce for these bounds (every field at its maximum)."""
+    forms = [
+        dict(shown_lines=total_lines, inside_line=None, continuation="next"),
+        dict(shown_lines=0, inside_line=total_lines, continuation="next"),
+        dict(shown_lines=0, inside_line=total_lines, continuation="whole_line"),
+        dict(shown_lines=0, inside_line=total_lines, continuation="bash"),
+    ]
+    return max(len(_read_file_truncation_marker(line_offset=line_offset, total_lines=total_lines, kept=total, total=total, **form)) for form in forms)
+
+
+# Emitted when the budget cannot even hold a marker: the model must still
+# learn the output was cut and how to read it in pieces.
+_READ_FILE_TINY_BUDGET_MARKER = READ_FILE_TRUNCATION_PREFIX + " {total} chars exceed the {max_chars}-char read limit; use start_line/end_line to read a smaller range] ..."
+
+
+def _truncate_read_file_output(output: str, max_chars: int, *, line_offset: int = 0, joined_lines: bool = False, ends_at_eof: bool = True) -> str:
     """Head-truncate read_file output, preserving the beginning of the file.
 
     Source code and documents are read top-to-bottom; the head contains the
     most context (imports, class definitions, function signatures).
+
+    The cut lands on the last line boundary the budget allows, so the kept
+    text ends with a complete line and the marker names the next
+    ``start_line`` in file line numbers (``line_offset`` is the number of file
+    lines before ``output``, i.e. ``start_line - 1`` of a ranged read;
+    ``joined_lines`` says the output is a provider slice of lines joined with
+    newlines, where a trailing newline is an empty last line rather than a
+    line terminator; ``ends_at_eof`` is False for a slice bounded by an
+    ``end_line`` that may stop before the end of the file). Only when the
+    line at the cut is longer than
+    ``_READ_FILE_LINE_CUT_SLACK`` does
+    the cut stay at the character limit; the marker then names the line it
+    fell inside and a continuation that is guaranteed to make progress: a
+    read from that line when the whole line fits such a read, a single-line
+    read when only the line alone fits, and bash when even that cannot return
+    it.
 
     The returned string (including the truncation marker) is guaranteed to be
     no longer than max_chars characters. Pass max_chars=0 to disable truncation
@@ -1570,13 +2699,33 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     if len(output) <= max_chars:
         return output
     total = len(output)
-    # Compute the exact worst-case marker length: both numeric fields are at
-    # their maximum (total chars), so this is a tight upper bound.
-    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars. Use start_line/end_line to read a specific range] ...")
-    kept = max(0, max_chars - marker_max_len)
+    total_lines = output.count("\n") + (1 if joined_lines or not output.endswith("\n") else 0)
+    # Reserve the longest marker plus one character, so a newline sitting
+    # exactly at the budget can still be kept as a complete line.
+    kept = max(0, max_chars - _read_file_marker_reserve(line_offset=line_offset, total_lines=total_lines, total=total) - 1)
     if kept == 0:
-        return output[:max_chars]
-    marker = f"\n... [truncated: showing first {kept} of {total} chars. Use start_line/end_line to read a specific range] ..."
+        # Too small a budget for any text plus a marker: say so instead of
+        # returning a bare prefix that reads as the whole file.
+        return _READ_FILE_TINY_BUDGET_MARKER.format(total=total, max_chars=max_chars)[:max_chars]
+    boundary = output.rfind("\n", 0, kept + 1)
+    if boundary != -1 and kept - (boundary + 1) <= _READ_FILE_LINE_CUT_SLACK:
+        kept = boundary + 1
+        marker = _read_file_truncation_marker(line_offset=line_offset, shown_lines=output[:kept].count("\n"), total_lines=total_lines, kept=kept, total=total, inside_line=None, continuation="next")
+        return f"{output[:kept]}{marker}"
+    line_start = boundary + 1
+    line_end = output.find("\n", kept)
+    line_len = (total if line_end == -1 else line_end) - line_start
+    inside_line = output[:kept].count("\n") + 1
+    # What a read starting at this line could keep, estimated pessimistically:
+    # its marker may carry larger counts than this read's.
+    next_kept = max_chars - _read_file_marker_reserve(line_offset=line_offset + inside_line - 1, total_lines=_READ_FILE_PESSIMISTIC_COUNT, total=_READ_FILE_PESSIMISTIC_COUNT) - 1
+    if line_len <= next_kept:
+        continuation = "next"
+    elif line_len <= max_chars:
+        continuation = "whole_line"
+    else:
+        continuation = "bash"
+    marker = _read_file_truncation_marker(line_offset=line_offset, shown_lines=0, total_lines=total_lines, kept=kept, total=total, inside_line=inside_line, continuation=continuation, ends_at_eof=ends_at_eof)
     return f"{output[:kept]}{marker}"
 
 
@@ -1610,10 +2759,22 @@ CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
-# body.context is client-writable on web requests, so bound the value: real
-# platform ids are tens of chars; anything past this is hostile or corrupt and
-# must not bloat every command string sent to the sandbox.
+# Gateway accepts this identity only from internally authenticated channel
+# requests, but embedded runtimes can still construct context directly. Bound
+# the value defensively: real platform ids are tens of chars; anything past
+# this is corrupt and must not bloat every sandbox command string.
 _CHANNEL_USER_ID_MAX_LEN = 256
+
+# Fixed env var exposing the authenticated DeerFlow user id to sandbox
+# commands, so skill scripts and the subprocesses they launch can scope their
+# work to the current user instead of guessing or hard-coding (#3919). An
+# identifier, not a secret.
+USER_ID_ENV = "DEERFLOW_USER_ID"
+
+# Same defensive bound as the channel identity: a real user id is short
+# (``make_safe_user_id`` output), so anything past this is corrupt and must not
+# bloat every sandbox command string.
+_USER_ID_MAX_LEN = 256
 
 
 def _is_windows() -> bool:
@@ -1649,6 +2810,58 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
     if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
         return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
     return f"unset {CHANNEL_USER_ID_ENV}; "
+
+
+def _resolved_user_id(runtime: Runtime) -> str | None:
+    """Return the effective user id when it is publishable, else ``None``.
+
+    ``resolve_runtime_user_id`` is the authorization-grade source (see its
+    docstring): server-owned for external callers, channel-authenticated for
+    internal ones. The guards are the same defensive bound the channel identity
+    uses — a real id is short (``make_safe_user_id`` output), so an empty /
+    non-str / over-cap value is corrupt and must not reach a command.
+    """
+    user_id = resolve_runtime_user_id(runtime)
+    if isinstance(user_id, str) and 0 < len(user_id) <= _USER_ID_MAX_LEN:
+        return user_id
+    return None
+
+
+def _user_identity_prefix(runtime: Runtime) -> str:
+    """Build the command prefix that publishes the effective user id to bash.
+
+    Unlike :func:`_channel_identity_prefix`, this always returns a prefix.
+    ``resolve_runtime_user_id`` falls back to ``DEFAULT_USER_ID``, so there is
+    no "not applicable" run: every command is attributable to a user. Stating
+    the value on every command is also what keeps a skill script correct
+    regardless of what an earlier command exported into a reused shell session
+    — the same per-call discipline the channel identity needs.
+
+    - usable id (non-empty str within the length cap) → ``export VAR=<quoted>; ``
+    - unusable id (empty / non-str / over the cap) → ``unset VAR; ``
+
+    The id deliberately rides the command string instead of the
+    ``execute_command(env=...)`` channel: a non-empty ``env`` switches
+    ``AioSandbox`` to the ``bash.exec`` API (fresh session per call, image
+    >= 1.9.3 required), which is reserved for request-scoped secrets. The value
+    is an identifier, not a secret, so keeping it in the audit-visible command
+    string is fine.
+
+    **Informational, not authenticated identity.** The exported shell variable
+    is a convenience for skill scripts — exactly like
+    ``DEERFLOW_CHANNEL_USER_ID`` — not a credential and not proof of who is
+    acting. Any bash command can overwrite its own environment, and anything the
+    command sources or launches (a dependency, a sourced rc file on the
+    host-bash path) can silently re-export a different id before a skill's
+    scoping logic reads it; only the outer prefix on the *next* ``bash_tool``
+    call re-asserts the true value. Skills that need user-scoped *authorization*
+    must resolve the identity server-side via ``resolve_runtime_user_id`` rather
+    than trusting this variable.
+    """
+    user_id = _resolved_user_id(runtime)
+    if user_id is not None:
+        return f"export {USER_ID_ENV}={shlex.quote(user_id)}; "
+    return f"unset {USER_ID_ENV}; "
 
 
 def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
@@ -1696,23 +2909,57 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
     return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
 
 
+_LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
+
+
+def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool, sandbox: Sandbox | None = None) -> dict[str, str] | None:
+    """Expose Settings-page Lark auth to sandbox ``lark-cli`` commands.
+
+    Settings authorizes ``lark-cli`` under DeerFlow's per-user integration
+    config/data directories. Agent conversations invoke ``lark-cli`` through the
+    sandbox, so lark commands must receive those same directories or they see an
+    unrelated unauthenticated profile. Keep this scoped to commands that
+    actually call ``lark-cli`` so ordinary bash calls do not switch AIO into the
+    env-bearing execution path.
+
+    In broker mode (Pattern B, issue #4338) a sidecar owns the credentials, so
+    the overlay carries only the broker URL + runtime PATH — the config/data
+    directories are never injected into the sandbox.
+    """
+    if not _LARK_CLI_COMMAND_RE.search(command):
+        return None
+    from deerflow.integrations.lark_cli import lark_cli_env_overlay
+
+    broker = getattr(sandbox, "lark_cli_broker", None) if sandbox_paths else False
+    if broker is None:
+        raise RuntimeError("Sandbox Lark broker mode is unverified; refusing to execute lark-cli")
+    return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
+
+
 @tool("bash", parse_docstring=True)
-def bash_tool(runtime: Runtime, description: str, command: str) -> str:
-    """Execute a bash command in a Linux environment.
+def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
+    """Execute a bash command in the configured execution environment.
 
 
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - When running against the local host via host bash, inspect the current environment instead of
+      guessing. For OS detection, start with `uname -s`; on Darwin follow with `sw_vers`. On Linux,
+      start with `uname -a` and read host system files such as `/etc/os-release` only when the active
+      sandbox policy permits it.
+    - If local host bash rejects a path, do not repeat the rejected command. For environment questions,
+      retry with command-only probes; otherwise use allowed virtual paths or explain the restriction.
     - To start a long-lived process such as a web server, ALWAYS run it in the background with its
       output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
       the log file or poll the port. A long-lived process run in the foreground blocks the turn until
       it is killed at the command timeout.
 
     Args:
-        description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         command: The bash command to execute. Always use absolute paths for files and directories.
+        description: Optional short explanation of this command shown in the UI.
     """
+    redaction_env = None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
@@ -1721,10 +2968,20 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         # never placed in the command string.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
+        user_prefix = _user_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
+        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
+        if lark_cli_env:
+            injected_env = {**(injected_env or {}), **lark_cli_env}
+        redaction_env = injected_env
         if is_local_sandbox(runtime):
+            # Match the credential-name policy used for inherited host env.
+            # Keep benign operator settings readable and redact effective
+            # credentials before execution, including any exception output.
+            redaction_env = {name: value for name, value in (getattr(sandbox, "environment", None) or {}).items() if is_blocked_env_name(name)}
+            redaction_env.update(injected_env or {})
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
@@ -1733,9 +2990,20 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
-            # PowerShell/cmd.exe where `export` is not valid syntax.
-            if identity_prefix and not _is_windows():
-                command = identity_prefix + command
+            # PowerShell/cmd.exe where `export` is not valid syntax, so the id
+            # is published through the subprocess environment instead —
+            # LocalSandbox layers `env` into the per-process environment, and
+            # unlike AioSandbox it has no persistent shell session that could
+            # carry a stale value forward. Deliberately kept out of
+            # `injected_env`, which doubles as the secret-redaction set: an
+            # identifier is not a secret and must stay readable in output.
+            local_env = injected_env
+            if not _is_windows():
+                command = user_prefix + (identity_prefix or "") + command
+            else:
+                windows_user_id = _resolved_user_id(runtime)
+                if windows_user_id is not None:
+                    local_env = {**(injected_env or {}), USER_ID_ENV: windows_user_id}
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -1745,45 +3013,64 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             except Exception:
                 max_chars = 20000
                 command_timeout = None
-            output = sandbox.execute_command(command, env=injected_env, timeout=command_timeout)
+            output = _execute_bash_command(
+                sandbox,
+                command,
+                runtime=runtime,
+                env=local_env,
+                timeout=command_timeout,
+            )
             return _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
         command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
-        if identity_prefix:
-            command = identity_prefix + command
+        command = user_prefix + (identity_prefix or "") + command
         try:
             from deerflow.config.app_config import get_app_config
 
             sandbox_cfg = get_app_config().sandbox
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+            command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
+            command_timeout = None
+        return _truncate_bash_output(
+            mask_secret_values(
+                _execute_bash_command(
+                    sandbox,
+                    command,
+                    runtime=runtime,
+                    env=injected_env,
+                    timeout=command_timeout,
+                ),
+                injected_env,
+            ),
+            max_chars,
+        )
     except SandboxError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except PermissionError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction_env)
 
 
-async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, description, command)
+async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
+    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description)
 
 
 bash_tool.coroutine = _bash_tool_async
 
 
 @tool("ls", parse_docstring=True)
-def ls_tool(runtime: Runtime, description: str, path: str) -> str:
+def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
     """List the contents of a directory up to 2 levels deep in tree format.
 
     Args:
-        description: Explain why you are listing this directory in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the directory to list.
+        description: Optional short explanation of this listing shown in the UI.
     """
     try:
         user_id = resolve_runtime_user_id(runtime)
@@ -1795,6 +3082,7 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         ensure_thread_directories_exist(runtime)
         requested_path = path
         thread_data = None
+        user_data_dirs = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -1806,9 +3094,11 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
                 # from the sandbox mapping's user_id).
                 pass
             elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
+                user_data_dirs = _user_data_root_dirs(path, thread_data)
+                if user_data_dirs is None:
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
             # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
-        children = sandbox.list_dir(path)
+        children = _list_user_data_root(sandbox, user_data_dirs) if user_data_dirs is not None else sandbox.list_dir(path)
         if not children:
             return "(empty)"
         output = "\n".join(children)
@@ -1832,14 +3122,15 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: Directory not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
 
-async def _ls_tool_async(runtime: Runtime, description: str, path: str) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, description, path)
+async def _ls_tool_async(runtime: Runtime, path: str, description: str = "") -> str:
+    return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, path, description)
 
 
 ls_tool.coroutine = _ls_tool_async
@@ -1848,18 +3139,18 @@ ls_tool.coroutine = _ls_tool_async
 @tool("glob", parse_docstring=True)
 def glob_tool(
     runtime: Runtime,
-    description: str,
     pattern: str,
     path: str,
+    description: str = "",
     include_dirs: bool = False,
     max_results: int = _DEFAULT_GLOB_MAX_RESULTS,
 ) -> str:
     """Find files or directories that match a glob pattern under a root directory.
 
     Args:
-        description: Explain why you are searching for these paths in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         pattern: The glob pattern to match relative to the root path, for example `**/*.py`.
         path: The **absolute** root directory to search under.
+        description: Optional short explanation of this search shown in the UI.
         include_dirs: Whether matching directories should also be returned. Default is False.
         max_results: Maximum number of paths to return. Default is 200.
     """
@@ -1897,26 +3188,27 @@ def glob_tool(
         return f"Error: Directory not found: {requested_path}"
     except NotADirectoryError:
         return f"Error: Path is not a directory: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error searching paths: {_sanitize_error(e, runtime)}"
 
 
 async def _glob_tool_async(
     runtime: Runtime,
-    description: str,
     pattern: str,
     path: str,
+    description: str = "",
     include_dirs: bool = False,
     max_results: int = _DEFAULT_GLOB_MAX_RESULTS,
 ) -> str:
     return await _run_sync_tool_after_async_sandbox_init(
         glob_tool.func,
         runtime,
-        description,
         pattern,
         path,
+        description,
         include_dirs,
         max_results,
     )
@@ -1928,20 +3220,21 @@ glob_tool.coroutine = _glob_tool_async
 @tool("grep", parse_docstring=True)
 def grep_tool(
     runtime: Runtime,
-    description: str,
     pattern: str,
     path: str,
+    description: str = "",
     glob: str | None = None,
     literal: bool = False,
     case_sensitive: bool = False,
     max_results: int = _DEFAULT_GREP_MAX_RESULTS,
 ) -> str:
-    """Search for matching lines inside text files under a root directory.
+    """Search for matching lines inside a text file or files under a root directory.
 
     Args:
-        description: Explain why you are searching file contents in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         pattern: The string or regex pattern to search for.
-        path: The **absolute** root directory to search under.
+        path: The **absolute** file or root directory to search. Naming a file
+            searches it at any size; a directory walk skips files over 1 MB.
+        description: Optional short explanation of this search shown in the UI.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.
         case_sensitive: Whether matching is case-sensitive. Default is False.
@@ -1998,17 +3291,18 @@ def grep_tool(
         return f"Error: Path is not a directory: {requested_path}"
     except re.error as e:
         return f"Error: Invalid regex pattern: {e}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error searching file contents: {_sanitize_error(e, runtime)}"
 
 
 async def _grep_tool_async(
     runtime: Runtime,
-    description: str,
     pattern: str,
     path: str,
+    description: str = "",
     glob: str | None = None,
     literal: bool = False,
     case_sensitive: bool = False,
@@ -2017,9 +3311,9 @@ async def _grep_tool_async(
     return await _run_sync_tool_after_async_sandbox_init(
         grep_tool.func,
         runtime,
-        description,
         pattern,
         path,
+        description,
         glob,
         literal,
         case_sensitive,
@@ -2030,6 +3324,23 @@ async def _grep_tool_async(
 grep_tool.coroutine = _grep_tool_async
 
 
+def _read_file_from_sandbox(
+    runtime: Runtime | None,
+    path: str,
+    *,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    """Read through the sandbox while preserving provider-owned mount paths."""
+    sandbox = ensure_sandbox_initialized(runtime)
+    ensure_thread_directories_exist(runtime)
+    if is_local_sandbox(runtime):
+        path = _resolve_local_read_path(path, get_thread_data(runtime))
+    if start_line is None and end_line is None:
+        return sandbox.read_file(path)
+    return sandbox.read_file(path, start_line=start_line, end_line=end_line)
+
+
 def read_current_file_content(runtime: Runtime | None, path: str) -> str:
     """Read the full current content of ``path`` using read_file's resolution rules.
 
@@ -2038,57 +3349,100 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
     ``FileNotFoundError`` when the file does not exist; other sandbox errors
     propagate to the caller.
     """
-    sandbox = ensure_sandbox_initialized(runtime)
-    ensure_thread_directories_exist(runtime)
-    if is_local_sandbox(runtime):
-        thread_data = get_thread_data(runtime)
-        validate_local_tool_path(path, thread_data, read_only=True)
-        if _is_skills_path(path):
-            path = _resolve_skills_path(path)
-        elif _is_acp_workspace_path(path):
-            path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-        elif not _is_custom_mount_path(path):
-            path = _resolve_and_validate_user_data_path(path, thread_data)
-        # Custom mount paths are resolved by LocalSandbox._resolve_path()
-    return sandbox.read_file(path)
+    return _read_file_from_sandbox(runtime, path)
+
+
+def _ranged_read_hits_a_line(runtime: Runtime | None, path: str, line: int) -> bool:
+    """Whether ``line`` exists, given that a ranged read of it came back empty.
+
+    Providers join selected lines with newlines, so reading the previous line
+    together with this one yields a newline only if this line exists.
+    """
+    return "\n" in _read_file_from_sandbox(runtime, path, start_line=line - 1, end_line=line)
+
+
+def _read_file_result(runtime: Runtime, content: str, *, status: str = "success", error_type: str | None = None) -> str | ToolMessage:
+    """Stamp execution state at the producer; file text is never a status signal."""
+    call_id = getattr(runtime, "tool_call_id", None)
+    if not isinstance(call_id, str) or not call_id:
+        # Keep direct Python callers that have no LangChain tool call compatible.
+        return content
+    return ToolMessage(
+        content=content,
+        name="read_file",
+        tool_call_id=call_id,
+        status="error" if status == "error" else "success",
+        additional_kwargs={
+            "deerflow_tool_meta": {
+                "status": status,
+                "error_type": error_type,
+                "recoverable_by_model": True,
+                "recommended_next_action": "try_alternative" if status == "error" else "continue",
+                "source": "tool_return",
+            }
+        },
+    )
+
+
+def _read_file_failure(runtime: Runtime, content: str, exc: BaseException | None = None) -> str | ToolMessage:
+    category = "unknown"
+    if isinstance(exc, (FileNotFoundError, SandboxFileNotFoundError)):
+        category = "not_found"
+    elif isinstance(exc, (PermissionError, SandboxPermissionError, SandboxAuthorizationError)):
+        category = "permission"
+    elif isinstance(exc, (TimeoutError, ConnectionError)):
+        category = "transient"
+    return _read_file_result(runtime, content, status="error", error_type=category)
 
 
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
-    description: str,
     path: str,
+    description: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
-) -> str:
+) -> str | ToolMessage:
     """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
 
+    Ranges returning 1-40 lines from uploads or workspace files show source line labels when the labeled output fits the budget.
+    For edits or writes, copy only the text after the first ' | ' on each labeled line.
+
     Args:
-        description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to read.
-        start_line: Optional starting line number (1-indexed, inclusive). Use with end_line to read a specific range.
-        end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
+        description: Optional short explanation of this read shown in the UI.
+        start_line: Optional starting line number (1-indexed, inclusive). Omit to start at the first line.
+        end_line: Optional ending line number (1-indexed, inclusive). Omit to read through the last line.
     """
+    requested_path = path
     try:
         # Block access to disabled skill files
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
-            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
+            return _read_file_result(runtime, f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it.", status="error", error_type="permission")
+        if start_line is not None and start_line < 1:
+            return _read_file_failure(runtime, READ_FILE_INVALID_START_LINE)
+        effective_start = start_line or 1
+        if end_line is not None and end_line < 1:
+            return _read_file_failure(runtime, READ_FILE_INVALID_END_LINE)
+        if end_line is not None and effective_start > end_line:
+            return _read_file_failure(runtime, READ_FILE_INVALID_RANGE)
+
         requested_path = path
-        content = read_current_file_content(runtime, path)
+        use_line_range = start_line is not None or end_line is not None
+        if use_line_range:
+            content = _read_file_from_sandbox(runtime, path, start_line=start_line, end_line=end_line)
+        else:
+            content = read_current_file_content(runtime, path)
         if not content:
-            return "(empty)"
-        if start_line is not None or end_line is not None:
-            lines = content.splitlines()
-            s = max(start_line, 1) if start_line is not None else 1
-            e = end_line if end_line is not None else len(lines)
-            if e < 1:
-                return "(end_line must be >= 1)"
-            if s > len(lines):
-                return "(start_line exceeds file length)"
-            if s > e:
-                return "(start_line > end_line — no lines in range)"
-            content = "\n".join(lines[s - 1 : e])
+            if start_line is not None and start_line > 1:
+                # A blank line and a line past the end both read back as "";
+                # tell them apart so a continuation named by a truncation
+                # marker is not reported as beyond the file.
+                if _ranged_read_hits_a_line(runtime, path, start_line):
+                    return _read_file_result(runtime, READ_FILE_EMPTY)
+                return _read_file_failure(runtime, READ_FILE_START_LINE_EXCEEDS)
+            return _read_file_result(runtime, READ_FILE_EMPTY)
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -2096,36 +3450,74 @@ def read_file_tool(
             max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
         except Exception:
             max_chars = 50000
-        return _truncate_read_file_output(content, max_chars)
+        # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
+        output = _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
+        call_id = getattr(runtime, "tool_call_id", None)
+        # Leave in-band provider failures and range markers recognizable to consumers.
+        if (
+            use_line_range
+            and isinstance(call_id, str)
+            and call_id
+            and requested_path.startswith((f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/workspace/"))
+            and output == content
+            and not content.startswith("Error:")
+            and content.strip() not in READ_FILE_NO_CONTENT_RESULTS
+        ):
+            # A provider's ranged result joins source lines, including a trailing empty line.
+            lines = content.split("\n")
+            if 1 <= len(lines) <= READ_FILE_NUMBERED_MAX_LINES and (end_line is None or len(lines) <= end_line - effective_start + 1):
+                rows = "\n".join(f"{number} | {line}" for number, line in enumerate(lines, start=effective_start))
+                # Write tools accept literal 'N | ' text. A verbatim write-back of
+                # this display can therefore persist the labels as file content.
+                numbered = "Source lines (for exact edits, copy the text after the first ' | '):\n" + rows
+                if max_chars == 0 or len(numbered) <= max_chars:
+                    output = numbered
+        return _read_file_result(runtime, output, status="partial_success" if max_chars != 0 and len(content) > max_chars else "success")
     except SandboxError as e:
-        return f"Error: {e}"
-    except FileNotFoundError:
-        return f"Error: File not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied reading file: {requested_path}"
-    except IsADirectoryError:
-        return f"Error: Path is a directory, not a file: {requested_path}"
-    except UnicodeDecodeError:
-        return (
+        return _read_file_failure(runtime, f"Error: {e}", e)
+    except FileNotFoundError as e:
+        return _read_file_failure(runtime, f"Error: File not found: {requested_path}", e)
+    except PermissionError as e:
+        return _read_file_failure(runtime, f"Error: Permission denied reading file: {requested_path}", e)
+    except IsADirectoryError as e:
+        return _read_file_failure(runtime, f"Error: Path is a directory, not a file: {requested_path}", e)
+    except UnicodeDecodeError as e:
+        text = (
             f"Error: cannot read '{requested_path}' as text — it appears to be a binary file "
             "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
             "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
         )
+        return _read_file_failure(runtime, text, e)
     except Exception as e:
-        return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
+        return _read_file_failure(runtime, f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}", e)
 
 
 async def _read_file_tool_async(
     runtime: Runtime,
-    description: str,
     path: str,
+    description: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
-) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, description, path, start_line, end_line)
+) -> str | ToolMessage:
+    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, path, description, start_line, end_line, _error_result=partial(_read_file_failure, runtime))
 
 
 read_file_tool.coroutine = _read_file_tool_async
+
+
+def _reject_elision_placeholder_content(content: str) -> str | None:
+    """Reject a complete framework placeholder, allowing surrounding whitespace."""
+    pattern = re.escape(WRITE_ELISION_PLACEHOLDER_TEMPLATE).replace(re.escape("{chars}"), r"[0-9]+")
+    if re.fullmatch(pattern, content.strip()) is None:
+        return None
+    return (
+        "Error: write_file content is the tool-output elision placeholder, which is "
+        "framework-generated history text rather than file content. Nothing was written. "
+        "The placeholder stands in for a write_file payload that the harness removed from "
+        "the model-bound request because a later read or write superseded it; the real "
+        "content is the file on disk. Call read_file on the target path and write the "
+        "actual content."
+    )
 
 
 def _effective_write_file_max_bytes() -> int:
@@ -2148,9 +3540,9 @@ def _effective_write_file_max_bytes() -> int:
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
     runtime: Runtime,
-    description: str,
     path: str,
     content: str,
+    description: str = "",
     append: bool = False,
 ) -> str:
     """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
@@ -2181,12 +3573,23 @@ def write_file_tool(
     Operators can override the cap via env var `DEERFLOW_WRITE_FILE_MAX_BYTES`
     (0 disables the guard entirely). Raising it risks streaming timeouts.
 
+    PLACEHOLDER GUARD (issue #7319):
+    A call whose content is the tool-output budget middleware's elision
+    placeholder is rejected. That text is framework-owned history compression,
+    never file content: the model occasionally copies it out of its own elided
+    history and submits it as a write, which silently replaces a real
+    deliverable with a ~200-byte placeholder. Re-read the source and write the
+    actual content instead.
+
     Args:
-        description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        path: The **absolute** path to the file to write to.
+        content: The content to write to the file.
+        description: Optional short explanation of this write shown in the UI.
         append: Whether to append content to the end of the file instead of overwriting it. Defaults to False.
     """
+    placeholder_error = _reject_elision_placeholder_content(content)
+    if placeholder_error is not None:
+        return placeholder_error
     if not append:
         max_bytes = _effective_write_file_max_bytes()
         if max_bytes > 0:
@@ -2233,24 +3636,48 @@ def write_file_tool(
 
 async def _write_file_tool_async(
     runtime: Runtime,
-    description: str,
     path: str,
     content: str,
+    description: str = "",
     append: bool = False,
 ) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, description, path, content, append)
+    placeholder_error = _reject_elision_placeholder_content(content)
+    if placeholder_error is not None:
+        return placeholder_error
+    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, path, content, description, append)
 
 
 write_file_tool.coroutine = _write_file_tool_async
 
 
+def _to_crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
+def _match_line_endings(content: str, old_str: str, new_str: str) -> tuple[str, str]:
+    """Spell ``old_str`` and ``new_str`` with the CRLF line endings ``content`` uses.
+
+    Full reads return line endings as stored, but the model tends to write
+    ``\\n`` (and ranged reads join lines with ``\\n``), so a multi-line
+    ``old_str`` would never match a CRLF file and inserted lines would be LF.
+    A CRLF-only file takes both strings in CRLF; a mixed file does so only
+    when the LF spelling is absent and the CRLF one is present.
+    """
+    if "\r\n" not in content:
+        return old_str, new_str
+    crlf_old = _to_crlf(old_str)
+    if content.count("\r\n") == content.count("\n") or (old_str not in content and crlf_old in content):
+        return crlf_old, _to_crlf(new_str)
+    return old_str, new_str
+
+
 @tool("str_replace", parse_docstring=True)
 def str_replace_tool(
     runtime: Runtime,
-    description: str,
     path: str,
     old_str: str,
     new_str: str,
+    description: str = "",
     replace_all: bool = False,
 ) -> str:
     """Replace a substring in a file with another substring.
@@ -2260,10 +3687,10 @@ def str_replace_tool(
     version with read_file first; any write invalidates earlier reads.
 
     Args:
-        description: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to replace the substring in. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        old_str: The substring to replace. ALWAYS PROVIDE THIS PARAMETER THIRD.
-        new_str: The new substring. ALWAYS PROVIDE THIS PARAMETER FOURTH.
+        path: The **absolute** path to the file to replace the substring in.
+        old_str: The substring to replace.
+        new_str: The new substring.
+        description: Optional short explanation of this replacement shown in the UI.
         replace_all: Whether to replace all occurrences of the substring. If False, only the first occurrence will be replaced. Default is False.
     """
     try:
@@ -2278,11 +3705,12 @@ def str_replace_tool(
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
-            if not content:
-                if not old_str:
-                    return "OK"
-                return f"Error: String to replace not found in file: {requested_path}"
-            if old_str not in content:
+            if not old_str:
+                # A no-op edit. str.replace("", new_str) would insert new_str at
+                # every character boundary, so this cannot fall through.
+                return "OK"
+            old_str, new_str = _match_line_endings(content, old_str, new_str)
+            if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:
                 content = content.replace(old_str, new_str)
@@ -2302,19 +3730,19 @@ def str_replace_tool(
 
 async def _str_replace_tool_async(
     runtime: Runtime,
-    description: str,
     path: str,
     old_str: str,
     new_str: str,
+    description: str = "",
     replace_all: bool = False,
 ) -> str:
     return await _run_sync_tool_after_async_sandbox_init(
         str_replace_tool.func,
         runtime,
-        description,
         path,
         old_str,
         new_str,
+        description,
         replace_all,
     )
 

@@ -1,0 +1,139 @@
+---
+title: 恢复与回滚
+description: 增量模式无法正确地分叉线程：分叉后的增量读取会回放被放弃分支的写入。本章说明 DeerFlow 如何改为把检查点恢复线性化到当前 head、何时该重写是空操作、如何失败关闭，以及回滚在重写之前捕获什么。
+---
+
+import { Callout } from "nextra/components";
+
+# 恢复与回滚
+
+从较旧的检查点恢复等于一次分叉。在 `full` 模式下这是定义清晰的常规操作；在 `delta` 模式下它带来的是错误的读取结果，而不是报错——没有任何环节会拒绝这次分叉：LangGraph 会把第二个子节点存下来，而 delta 模式的前置写门在任何兼容性检查之前就直接返回——所以 DeerFlow 会在运行开始前把这次分叉改写成当前 head 上的一次线性写入。本章讲这次重写、它的失败形态、围绕它捕获的回滚点、它没有覆盖的写入路径，以及手动上下文压缩在同一模式下的写入方式。
+
+## 增量模式为什么无法正确分叉
+
+增量检查点不保存完整的通道值，它的状态靠回放祖先写入重建。这条回放路径会收集目标检查点沿途每个祖先上的**全部** `pending_writes` 条目——而共享父节点同时还留着被放弃的那条兄弟分支的写入。
+
+```
+            ┌─ C1   被放弃的兄弟分支；它的写入存在 P 下
+P（共享）  ─┤
+            └─ C2   当前 head
+```
+
+从 `P` 恢复的本意是「从 P 的状态重新开始」。但 `C1` 的写入仍然存在 `P` 下，于是回放会把它们灌进新的分叉：这次运行起手拿到的消息列表里，还带着它本该替换掉的那个回答。
+
+| 模式 | 检查点内容 | 分叉行为 |
+| --- | --- | --- |
+| `full` | 完整的 `channel_values`，包含整份 `messages` 列表 | 分叉可正确物化，LangGraph 的分支语义原样保留 |
+| `delta` | 一个 `_DeltaSnapshot` 哨兵加上逐步 writes 行 | 共享父节点会把被放弃兄弟分支的写入回放进分叉 |
+
+DeerFlow 在 Postgres、SQLite 和内存 saver 上都复现过该问题。用户可见的症状是 **DeerFlow #4458**：在已分支的线程里重新生成，刷新后会看到旧助手消息和新回答并列出现。
+
+上游跟踪同一个缺陷。PR **#8548**（"don't replay an abandoned branch into a `DeltaChannel` fork"）修复上游 issue **#8443**，目前仍未合并；它合并之前，下面的本地线性化不能移除。
+
+### 分叉会被接受，而不是被拒绝
+
+这套栈里没有任何环节拒绝增量分叉，所以「不能分叉」永远只描述读取侧，而不是写入侧。针对较旧检查点调用 `aupdate_state`（或从该检查点恢复一次运行）会为它建出第二个子节点，且不会报错：没有任何 saver 会检查是否已存在兄弟分支，而进程模式为 `delta` 时 `ensure_checkpoint_mode_compatible` 会直接返回。代价在物化时才付出。
+
+由此有两点：
+
+- **恢复是 DeerFlow 覆盖的那一半。** 运行路径会做线性化，因此 Gateway 与内嵌客户端在恢复或回滚时不会产生这种分叉。
+- **状态更新没有被覆盖。** `POST /api/threads/{thread_id}/state` 会把调用方传入的 `checkpoint_id` 直接送进访问器的写入，准备 `POST .../branches` 时用的变更访问器也接受同一个选择器。没有任何环节对它做线性化，因此写入会落在那个较旧的检查点（即共享父节点）下，进入该父节点每个其他孩子都会回走的写入集合。`messages` 这类 reducer 通道以 `Overwrite` 写入，会替换已累积的值，从而对新分支遮蔽该父节点的其他写入；一般情形由上游 issue **#8551**（"`update_state` against an older checkpoint writes into the branch it forked away from"）跟踪，目前仍未修复。在它落地之前，不要为增量线程选择较旧的 `checkpoint_id`；改为更新 head。
+
+## 线性化做了什么
+
+DeerFlow 没有重新实现「写入归属哪个子节点」——那属于 saver 的 `get_delta_channel_history` 契约——而是把恢复表达成它真正的含义：
+
+1. 通过 `CheckpointStateAccessor` 物化所选检查点的状态。
+2. 以**替换语义**把该状态写到**当前 head** 上。head 没有其他子节点，因此不会有兄弟写入被回放进它。
+3. 让运行从重写后的 head 开始线性续跑。
+
+被放弃的那一轮仍留在检查点历史里，成为重写后 head 的祖先，不会被删除。
+
+### 不变量
+
+| 不变量 | 行为 |
+| --- | --- |
+| 所有已物化的通道都被还原 | 替换值由所选检查点的物化值构造 |
+| 仅存在于 head 的通道被重置而非继承 | 只存在于较新 head 上的通道重置为其 schema 默认值（例如 `[]` 或 `{}`）；没有可构造默认值的通道重置为 `None`。LangGraph 没有公开的「取消通道」更新，这是最接近的等价做法 |
+| 归并器通道是替换而不是再归并 | 整份状态写入会把每个归并器通道——增量 `messages` 通道与经典 `BinaryOperatorAggregate` 通道都一样——包进 `Overwrite`。在任何模式下，归并器通道的替换式写入都需要这层包装；否则替换值会被再归并进已经聚合过的旧值 |
+| 中间件通道被覆盖 | 写入走线程的*有效* schema，因此自定义中间件贡献的通道也会被包含。基础 `ThreadState` 兜底 schema 不认识这些通道，而对未知通道的写入会被静默丢弃 |
+| Agent 绑定保留 | 所选检查点上由服务端写入的 Agent 绑定元数据会复制到重写后的 head 上 |
+| 选择器被消费 | 重写后 `configurable` 里的 `checkpoint_id` 与 `checkpoint_map` 会被弹出，运行初始的 `RunnableConfig` 也会重建，使流式输出从重写后的 head 开始 |
+
+## 何时是空操作
+
+以下任一条件成立时，该辅助函数返回 `None`，普通运行完全不受影响：
+
+| 条件 | 原因 |
+| --- | --- |
+| `full` 模式 | 完整检查点自带全部通道值，分叉可正确物化，LangGraph 的分支语义保持原样 |
+| 没有 checkpointer | 没有需要重写的持久化内容 |
+| `configurable` 不是 dict | 没有可解析的选择器 |
+| `checkpoint_id` 缺失或不是字符串 | 没有选中任何恢复目标 |
+| `checkpoint_ns` 非空 | 子图命名空间有自己的谱系，而网关只选择根检查点 |
+| 选择器指向的就是 head | 选择 head 本身就是线性的——此时还不可能存在兄弟分支 |
+
+## 失败关闭
+
+线性化不会退化成「那就照样分叉」。失败会向上抛出，因为悄悄回退到分叉会持久化它本该阻止的损坏历史。
+
+| 失败 | 错误原文 |
+| --- | --- |
+| 恢复状态无法物化 | `Run {run_id} could not materialize resume checkpoint {checkpoint_id}` |
+| 无法为替换值检视状态 schema | `Run {run_id} could not inspect the state schema for {operation}` |
+
+两者都是在任何写入之前抛出的 `RuntimeError`，所以运行会直接失败，而不是持久化一份不完整的替换。
+
+<Callout type="warning">
+  网关对增量模式也没有降级读取路径。Agent 工厂不可用时，`full` 模式会退化为
+  原始 checkpointer 读取，但 `delta` 模式会原样抛出：物化需要图的通道表，
+  降级读取只能拿到哨兵。
+</Callout>
+
+## 回滚
+
+被取消的运行需要还原运行前状态。增量回滚和恢复有同样的写入归属问题：捕获的父节点现在带着被取消兄弟分支的写入，靠分叉该父节点来还原会把它们回放进来。因此增量回滚改为在**当前 head 上线性还原**；`full` 模式继续使用分叉，所有通道都从父节点继承。
+
+### 捕获了什么
+
+| 捕获项 | 方式 | 说明 |
+| --- | --- | --- |
+| 已物化快照 | 通过 `CheckpointStateAccessor` | 原始检查点 blob 无法重建增量消息——增量检查点不存物化值——所以物化快照是唯一的来源 |
+| 原始 `pending_writes` | 通过 `aget_tuple` | 原始元组对元组级元数据和在途写入仍然有效 |
+| `state_values` | 每个非 `messages` 通道的深拷贝 | **仅在增量模式下**捕获；full 模式下这些通道由分叉从父节点继承 |
+| 元数据 | 取自物化快照 | 与值一起还原 |
+
+捕获失败时，本次运行被标记为 `snapshot_capture_failed` 并禁用回滚——还原空或部分历史会静默截断线程。线程完全没有检查点时，回滚改走 `adelete_thread` 重置路径。
+
+### 顺序与线程锁
+
+运行前的回滚点在恢复重写**之前**捕获。正是这个顺序使「取消并回滚」能还原真正的运行前 head，而不是线性化刚写下的状态。
+
+两步都在 `_checkpoint_thread_lock(thread_id)` 内执行，该锁串行化单个线程的检查点变更，同时不阻塞 goal 命令。锁不可重入，辅助函数内部不得再次获取。上一个成功的运行可能在释放准入槽位后仍在持久化耗时元数据，因此共用这把锁能把捕获与重写合成对 head 的一次不中断读改写序列。
+
+## 手动压缩
+
+上下文压缩用一个摘要替换线程的消息列表。增量模式下 `messages` 通道是追加式的，因此只有包一层替换才会生效：
+
+```python
+updated_config = await accessor.aupdate(
+    update_config,
+    {
+        "messages": Overwrite(list(result.preserved_messages)),
+        "summary_text": result.summary_text,
+        "task_history": result.task_history,
+    },
+    as_node="manual_compaction",
+)
+```
+
+写入通过 accessor 完成——它需要一个已物化的 `checkpoint_id`——而 `Overwrite` 正是让替换能穿过增量通道追加式归并器的关键；不加包装的列表会被追加到历史之后，而不是替换它。同一条规则也适用于 full 模式下的归并器通道。
+
+压缩失败保持原有对外表现：摘要生成失败抛出 `ContextCompactionFailed("summary generation failed")`，对应 HTTP 500 `Failed to compact thread context.`；压缩开关关闭则是 409 `Context compaction is disabled.`
+
+## 相关章节
+
+- [通道模式](/docs/harness/checkpoints/modes) —— 跨模式恢复首先会撞上的失败关闭模式门。
+- [快照节奏](/docs/harness/checkpoints/cadence) —— `_DeltaSnapshot` blob 从何而来，以及回放深度为何有界。
+- [历史缓存](/docs/harness/checkpoints/history-cache) —— 使缓存的增量历史安全可用的祖先链不变性论证。
+- [故障排查](/docs/harness/checkpoints/troubleshooting) —— 「旧回答复活」症状以及其他增量模式失败特征。

@@ -34,6 +34,8 @@ a background task must *not* see the foreground user, wrap it with
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Final, Protocol, runtime_checkable
 
@@ -50,6 +52,30 @@ class CurrentUser(Protocol):
 
 
 _current_user: Final[ContextVar[CurrentUser | None]] = ContextVar("deerflow_current_user", default=None)
+_authenticated_user_id: Final[ContextVar[str | None]] = ContextVar("deerflow_authenticated_user_id", default=None)
+
+
+@contextmanager
+def bind_authenticated_user(user_id: str | None) -> Iterator[None]:
+    """Bind verified end-user identity at a trusted host authentication boundary.
+
+    Storage ownership alone is not authentication: internal and auth-disabled
+    callers also have user IDs. Bind ``None`` for them, and never derive this
+    value from run context, configuration, request parameters or model input.
+    Child tasks/threads inherit this proof; a fresh context fails closed.
+    """
+    if user_id is not None and (not isinstance(user_id, str) or not user_id.strip() or user_id != user_id.strip()):
+        raise ValueError("Authenticated user ID must be a nonblank exact host identity")
+    token = _authenticated_user_id.set(user_id)
+    try:
+        yield
+    finally:
+        _authenticated_user_id.reset(token)
+
+
+def get_authenticated_user_id() -> str | None:
+    """Return host-verified end-user identity, without a storage-ID fallback."""
+    return _authenticated_user_id.get()
 
 
 def set_current_user(user: CurrentUser) -> Token[CurrentUser | None]:
@@ -109,19 +135,90 @@ def get_effective_user_id() -> str:
     return str(user.id)
 
 
+def _storage_user_id_from_auth_identity(identity: object | None) -> str | None:
+    """Return a stable storage-safe ID for a LangGraph auth identity."""
+    if not isinstance(identity, str) or not identity:
+        return None
+
+    # LangGraph permits arbitrary strings (commonly email addresses) for
+    # BaseUser.identity, while DeerFlow's user directories require a narrower
+    # charset. Keep the normalization at the auth boundary so graph
+    # construction and runtime middleware always select the same bucket.
+    from deerflow.config.paths import make_safe_user_id
+
+    return make_safe_user_id(identity)
+
+
+def _user_id_from_auth_user(user: object | None) -> str | None:
+    if isinstance(user, Mapping):
+        identity = user.get("identity")
+    else:
+        identity = getattr(user, "identity", None)
+    return _storage_user_id_from_auth_identity(identity)
+
+
+def _user_id_from_langgraph_config(config: object | None) -> str | None:
+    if not isinstance(config, Mapping):
+        return None
+    configurable = config.get("configurable")
+    if not isinstance(configurable, Mapping):
+        return None
+
+    user_id = _storage_user_id_from_auth_identity(configurable.get("langgraph_auth_user_id"))
+    if user_id:
+        return user_id
+    return _user_id_from_auth_user(configurable.get("langgraph_auth_user"))
+
+
+def resolve_config_user_id(config: object | None) -> str:
+    """Resolve the effective user from a LangGraph/Gateway run config.
+
+    Server-owned LangGraph authentication fields take precedence over ordinary
+    ``user_id`` values because Agent Server reserves and overwrites the auth
+    fields, while a standalone client may supply regular configurable/context
+    values. Gateway runtime context remains the next source for DeerFlow's
+    embedded run path, followed by the legacy configurable channel and the
+    request ContextVar/default fallback.
+    """
+    langgraph_user_id = _user_id_from_langgraph_config(config)
+    if langgraph_user_id:
+        return langgraph_user_id
+
+    if isinstance(config, Mapping):
+        context = config.get("context")
+        if isinstance(context, Mapping):
+            context_user_id = context.get("user_id")
+            if context_user_id:
+                return str(context_user_id)
+
+        configurable = config.get("configurable")
+        if isinstance(configurable, Mapping):
+            configurable_user_id = configurable.get("user_id")
+            if configurable_user_id:
+                return str(configurable_user_id)
+
+    return get_effective_user_id()
+
+
 def resolve_runtime_user_id(runtime: object | None) -> str:
     """Single source of truth for a tool/middleware's effective user_id.
 
     Resolution order (most authoritative first):
-      1. ``runtime.context["user_id"]`` — set by ``inject_authenticated_user_context``
+      1. ``runtime.server_info.user.identity`` — populated by current LangGraph
+         runtimes from Agent Server's authenticated user. Unlike ordinary run
+         context, this is server-owned.
+      2. ``config["configurable"]["langgraph_auth_user_id"]`` — populated by
+         LangGraph Server from the deployment's ``@auth.authenticate`` result.
+         This supports older runtimes and code paths without ``server_info``.
+      3. ``runtime.context["user_id"]`` — set by ``inject_authenticated_user_context``
          in the gateway from the auth-validated ``request.state.user``. This is
          the only source that survives boundaries where the contextvar may have
          been lost (background tasks scheduled outside the request task,
          worker pools that don't copy_context, future cross-process drivers).
-      2. The ``_current_user`` ContextVar — set by the auth middleware at
+      4. The ``_current_user`` ContextVar — set by the auth middleware at
          request entry. Reliable for in-task work; copied by ``asyncio``
          child tasks and by ``ContextThreadPoolExecutor``.
-      3. ``DEFAULT_USER_ID`` — last-resort fallback so unauthenticated
+      5. ``DEFAULT_USER_ID`` — last-resort fallback so unauthenticated
          CLI / migration / test paths keep working without raising.
 
     Tools that persist user-scoped state (custom agents, memory, uploads)
@@ -129,12 +226,40 @@ def resolve_runtime_user_id(runtime: object | None) -> str:
     benefit from the runtime.context channel that ``setup_agent`` already
     relies on.
     """
+    server_info = getattr(runtime, "server_info", None)
+    server_user_id = _user_id_from_auth_user(getattr(server_info, "user", None))
+    if server_user_id:
+        return server_user_id
+
+    langgraph_user_id = _user_id_from_langgraph_auth()
+    if langgraph_user_id:
+        return langgraph_user_id
+
     context = getattr(runtime, "context", None)
-    if isinstance(context, dict):
+    if isinstance(context, Mapping):
         ctx_user_id = context.get("user_id")
         if ctx_user_id:
             return str(ctx_user_id)
     return get_effective_user_id()
+
+
+def _user_id_from_langgraph_auth() -> str | None:
+    """Return the authenticated LangGraph Server user id, if available.
+
+    LangGraph Server reserves the ``langgraph_auth_user`` and
+    ``langgraph_auth_user_id`` configurable keys and populates them from the
+    deployment's ``@auth.authenticate`` result. ``get_config()`` raises when
+    called outside a runnable context, which simply means this identity channel
+    is unavailable.
+    """
+    try:
+        from langgraph.config import get_config
+
+        config = get_config()
+    except RuntimeError:
+        return None
+
+    return _user_id_from_langgraph_config(config)
 
 
 # ---------------------------------------------------------------------------

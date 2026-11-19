@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import subprocess
 import sys
 import zipfile
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +23,35 @@ except Exception:  # pragma: no cover - exercised only in broken environments
 
 
 SECRET_KEY_RE = re.compile(
-    r"(api[_-]?key|access[_-]?key|token|secret|password|passwd|pwd|authorization|cookie|credential|private[_-]?key)",
+    r"(api[_-]?key|access[_-]?key|private[_-]?key|(?<![a-zA-Z])key(?![a-zA-Z])"
+    r"|token|secret|password|passwd|pwd|(?<![a-zA-Z])pass(?!port)"
+    r"|authorization|cookie|credential|(?<![a-zA-Z])dsn(?![a-zA-Z]))",
     re.IGNORECASE,
 )
+# Bare-word coverage above mirrors env_policy.py's *KEY*/*SECRET*/*TOKEN*/*PASS*/
+# *CREDENTIAL*/*DSN* sandbox-env denylist (backend/packages/harness/deerflow/sandbox/env_policy.py):
+# a fixed keyword allowlist misses a secret stored under an unanticipated key name
+# inside an open-ended config dict (e.g. guardrails.provider.config, which is an
+# arbitrary dict of provider-specific kwargs). The api_key/access_key/private_key/
+# password/passwd/pwd forms predate this and stay for their glued-compound coverage
+# (e.g. "apikey" with no separator); the new bare key/pass/dsn alternatives are
+# boundary-guarded so they match only their own delimited token and not an
+# unrelated word that merely starts with the same letters (keywords, keyboard).
+# `pass` only excludes a trailing "port" (passport) rather than any trailing
+# letter: excluding any trailing letter also missed genuine secret-bearing
+# names like passphrase/passcode, which env_policy.py's *PASS* substring match
+# does catch -- `compass`/`bypass` stay excluded via the leading-letter
+# lookbehind regardless of the lookahead.
+#
+# Case-insensitive exact key names that carry a bare credential with no
+# distinguishing keyword substring, mirroring env_policy.py's no-flag credential
+# sources (GH_PAT/GITHUB_PAT/REDIS_AUTH/REDISCLI_AUTH/PGSERVICEFILE). Matched as a
+# full key name, not a substring: a bare "pat"/"auth" wildcard would false-positive
+# on unrelated fields (author, authenticated, compatible, pattern, ...). Connection
+# strings (DATABASE_URL, REDIS_URL, ...) are deliberately not in this set -- their
+# embedded credentials are already stripped in place by URL_USERINFO_RE, which
+# preserves the host/port/db-name diagnostic value instead of blanking the field.
+NO_FLAG_CREDENTIAL_KEY_NAMES = frozenset({"gh_pat", "github_pat", "redis_auth", "rediscli_auth", "pgservicefile"})
 ENV_KEY_RE = re.compile(r"(?i)^env$")
 VAR_REFERENCE_RE = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
 ENV_SECRET_RE = re.compile(r"(?im)^([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(.+)$")
@@ -37,7 +65,11 @@ SECRET_FLAG_RE = re.compile(r"(?i)^--?[\w.-]*(?:api[_-]?key|token|secret|passwor
 HEADER_KEY_RE = re.compile(r"(?i)header")
 POSIX_HOME_RE = re.compile(r"(?<![\w.-])(/Users|/home)/([^/\s:]+)")
 WINDOWS_HOME_RE = re.compile(r"(?i)([A-Z]:\\Users\\)([^\\\s:]+)")
-SAFE_THREAD_ID_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+# Must stay byte-identical to deerflow.utils.thread_id.THREAD_ID_PATTERN
+# (canonical thread ID contract); pinned by a parity test in backend/tests.
+# Kept as a local copy because this script must run even in environments
+# where the backend venv is broken.
+SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DOCTOR_STATUS_RE = re.compile(r"Status:\s*(\d+)\s+error\(s\),\s*(\d+)\s+warning\(s\)", re.IGNORECASE)
 ATTENTION_SIGNAL_NAMES = {
     "doctor_failed",
@@ -104,11 +136,12 @@ def redact_data(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
-            if SECRET_KEY_RE.search(str(key)):
+            key_str = str(key)
+            if SECRET_KEY_RE.search(key_str) or key_str.lower() in NO_FLAG_CREDENTIAL_KEY_NAMES:
                 redacted[key] = "<redacted>"
-            elif ENV_KEY_RE.fullmatch(str(key)) and isinstance(item, dict):
+            elif ENV_KEY_RE.fullmatch(key_str) and isinstance(item, dict):
                 redacted[key] = {k: _redact_env_value(v) for k, v in item.items()}
-            elif HEADER_KEY_RE.search(str(key)) and isinstance(item, dict):
+            elif HEADER_KEY_RE.search(key_str) and isinstance(item, dict):
                 redacted[key] = {k: "<redacted>" for k in item}
             else:
                 redacted[key] = redact_data(item)
@@ -137,7 +170,7 @@ def _read_json(path: Path) -> Any:
     if not path.exists():
         return {"present": False}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         return {"present": True, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -149,6 +182,12 @@ def _run_command(args: list[str], cwd: Path, timeout_s: int = 10) -> dict[str, A
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            # Python helpers (doctor, pnpm) must emit the encoding we capture,
+            # even when the host or inherited stdio setting is not UTF-8.
+            # Escape surrogate characters rather than aborting diagnostics.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8:backslashreplace"},
             timeout=timeout_s,
             check=False,
         )
@@ -183,7 +222,15 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
         },
         "commands": [
             _version_command("node", ["node", "--version"], project_root),
-            _version_command("pnpm", ["pnpm", "--version"], project_root),
+            _version_command(
+                "pnpm",
+                [
+                    sys.executable,
+                    str(project_root / "scripts" / "pnpm.py"),
+                    "--version",
+                ],
+                project_root / "frontend",
+            ),
             _version_command("uv", ["uv", "--version"], project_root),
             _version_command("nginx", ["nginx", "-v"], project_root),
             _version_command("docker", ["docker", "--version"], project_root),
@@ -216,13 +263,80 @@ def _validate_thread_id(thread_id: str) -> None:
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
+def _expand_launcher_variables(value: str, environment: dict[str, str]) -> str:
+    """Expand simple shell references in one pass, without executing shell syntax."""
+
+    def replace(match: re.Match[str]) -> str:
+        if match[0] == "\\$":
+            return "$"
+        if match[0] == "$$":
+            # One token, as in the shell: its second `$` never starts a reference.
+            return "$$"
+        name = match[1] or match[3]
+        resolved = environment.get(name, "")
+        return match[2] if match[2] is not None and not resolved else resolved
+
+    return re.sub(r"\\\$|\$\$|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
+
+
+def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
+    """Resolve launcher-relative runtime paths without exporting .env secrets."""
+    env_file = project_root / ".env"
+    names = ("DEER_FLOW_HOME", "DEER_FLOW_PROJECT_ROOT")
+    values = {name: os.environ.get(name) for name in names}
+    if env_file.is_file():
+        try:
+            from dotenv.parser import parse_stream
+
+            contents = env_file.read_text(encoding="utf-8-sig")
+        except (ImportError, OSError, UnicodeError):
+            # Diagnostics must still work with a broken environment or unreadable .env.
+            pass
+        else:
+            # serve.sh changes to the checkout before sourcing .env. Keep its
+            # assignment order in a private mapping; never export parsed secrets.
+            environment = {**os.environ, "PWD": str(project_root.resolve())}
+            with StringIO(contents) as stream:
+                for binding in parse_stream(stream):
+                    if not binding.key or binding.value is None or binding.error:
+                        continue
+                    quote = binding.original.string.split("=", 1)[-1].lstrip()[:1]
+                    value = binding.value
+                    if quote != "'":
+                        if quote != '"':
+                            value = os.path.expanduser(value)
+                        value = _expand_launcher_variables(value, environment)
+                    environment[binding.key] = value
+                    if binding.key in names:
+                        # Even an empty .env assignment overrides inherited exports.
+                        values[binding.key] = value
+    home = values["DEER_FLOW_HOME"]
+    runtime_project = values["DEER_FLOW_PROJECT_ROOT"]
+    if home:
+        return [((project_root / home).resolve(), "{DEER_FLOW_HOME}")]
+    if runtime_project:
+        # The local launcher pins this home independently of the project root.
+        # Keep the standalone harness location as a second candidate.
+        return [
+            (project_root / "backend" / ".deer-flow", ""),
+            (
+                (project_root / runtime_project).resolve() / ".deer-flow",
+                "{DEER_FLOW_PROJECT_ROOT}/.deer-flow",
+            ),
+        ]
+    return [
+        (project_root / ".deer-flow", ""),
+        (project_root / "backend" / ".deer-flow", ""),
+    ]
+
+
 def _candidate_thread_data_dirs(project_root: Path, thread_id: str) -> list[Path]:
     _validate_thread_id(thread_id)
-    candidates = [
-        project_root / ".deer-flow" / "threads" / thread_id / "user-data",
-        project_root / "backend" / ".deer-flow" / "threads" / thread_id / "user-data",
-    ]
-    for base in (project_root / ".deer-flow" / "users", project_root / "backend" / ".deer-flow" / "users"):
+    roots = _thread_data_roots(project_root)
+    candidates = []
+    for root, _ in roots:
+        candidates.append(root / "threads" / thread_id / "user-data")
+        base = root / "users"
         if base.exists():
             candidates.extend(user_dir / "threads" / thread_id / "user-data" for user_dir in base.iterdir() if user_dir.is_dir())
     return candidates
@@ -232,6 +346,12 @@ def _display_path(path: Path, project_root: Path) -> str:
     try:
         return path.resolve().relative_to(project_root.resolve()).as_posix()
     except (OSError, ValueError):
+        for root, marker in _thread_data_roots(project_root):
+            if marker:
+                try:
+                    return marker + "/" + path.resolve().relative_to(root.resolve()).as_posix()
+                except (OSError, ValueError):
+                    pass
         return redact_text(path.as_posix())
 
 
@@ -265,7 +385,8 @@ def _file_manifest(root: Path, *, max_files: int = 500) -> list[dict[str, Any]]:
 
 def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]:
     """Collect a thread file manifest without reading user file contents."""
-    for data_dir in _candidate_thread_data_dirs(project_root, thread_id):
+    candidates = _candidate_thread_data_dirs(project_root, thread_id)
+    for data_dir in candidates:
         if data_dir.exists():
             return {
                 "thread_id": thread_id,
@@ -278,7 +399,7 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
     return {
         "thread_id": thread_id,
         "found": False,
-        "checked_layouts": [_display_path(path, project_root) for path in _candidate_thread_data_dirs(project_root, thread_id)],
+        "checked_layouts": [_display_path(path, project_root) for path in candidates],
     }
 
 
@@ -781,6 +902,10 @@ def create_support_bundle(
     config_path = (config_path or project_root / "config.yaml").resolve()
     extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
     out_path = (out_path or _default_out_path(project_root)).resolve()
+    # `--out` names the zip, so a directory there would only fail inside
+    # zipfile with a raw PermissionError/IsADirectoryError.
+    if out_path.is_dir():
+        raise ValueError(f"--out must be a file path, not a directory: {out_path}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if thread_id:
         _validate_thread_id(thread_id)
@@ -846,7 +971,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
     parser.add_argument("--extensions-config", type=Path, default=None, help="Path to extensions_config.json")
     parser.add_argument("--thread-id", default=None, help="Optional thread id to include file manifests for")
-    parser.add_argument("--out", type=Path, default=None, help="Output zip path")
+    parser.add_argument("--out", type=Path, default=None, help="Output zip file path")
     parser.add_argument("--include-doctor", action="store_true", help="Include redacted make doctor output")
     return parser.parse_args(argv)
 

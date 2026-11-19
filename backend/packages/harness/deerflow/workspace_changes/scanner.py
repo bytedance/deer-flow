@@ -3,8 +3,11 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import tempfile
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
+
+from deerflow.constants import BROWSER_FRAMES_DIRNAME, MCP_INTERNAL_DIRNAME, TOOL_RESULTS_DIRNAME
 
 from .types import (
     DiffUnavailableReason,
@@ -19,8 +22,24 @@ EXCLUDED_DIR_NAMES = {
     ".hg",
     ".svn",
     ".cache",
+    # Stdio MCP subprocess temp/debug files live below this server-owned
+    # namespace. They remain addressable when a tool returns their path, but
+    # they are not user-authored workspace deliverables or workspace changes.
+    MCP_INTERNAL_DIRNAME,
     ".next",
     ".venv",
+    # Transient per-step browser screenshots: live progress feedback surfaced in
+    # the browser panel + inline thumbnails, not workspace deliverables. Shared
+    # constant with the browser tools so the name cannot drift out of sync.
+    BROWSER_FRAMES_DIRNAME,
+    # Externalized oversized tool outputs (the tool-output budget middleware's
+    # default storage_subdir): process feedback the model reads back via
+    # read_file, not workspace deliverables — same intent as the browser frames
+    # exclusion above. Without this, a run that externalizes any tool output
+    # would trip run delivery verification (produced output never presented)
+    # and fail as an error. Custom storage_subdir values are passed through
+    # ``extra_excluded_dir_names`` instead.
+    TOOL_RESULTS_DIRNAME,
     "__pycache__",
     "build",
     "dist",
@@ -96,11 +115,19 @@ def scan_workspace_roots(
     include_text: bool = True,
     text_paths: set[str] | None = None,
     text_cache_dir: Path | None = None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> WorkspaceSnapshot:
     resolved_limits = limits or WorkspaceChangeLimits()
     cache_dir = Path(text_cache_dir) if text_cache_dir is not None else None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
+    # Operator-customized tool_output.storage_subdir values arrive here; the
+    # default name is already part of EXCLUDED_DIR_NAMES, so merging is safe.
+    # Only single-segment directory names are meaningful: os.walk yields
+    # one-segment dirnames, so a nested value like "cache/tool-results" would
+    # never match. ToolOutputConfig enforces the single-segment contract, so a
+    # multi-segment value is a caller error, not a silent no-op.
+    excluded_dir_names = EXCLUDED_DIR_NAMES | extra_excluded_dir_names if extra_excluded_dir_names else EXCLUDED_DIR_NAMES
     files: dict[str, FileSnapshot] = {}
     scanned = 0
     truncated = False
@@ -110,7 +137,7 @@ def scan_workspace_roots(
             continue
 
         for dirpath, dirnames, filenames in os.walk(root.host_path, followlinks=False):
-            dirnames[:] = [dirname for dirname in dirnames if dirname not in EXCLUDED_DIR_NAMES and not (Path(dirpath) / dirname).is_symlink()]
+            dirnames[:] = [dirname for dirname in sorted(dirnames) if dirname not in excluded_dir_names and not (Path(dirpath) / dirname).is_symlink()]
             for filename in sorted(filenames):
                 if scanned >= resolved_limits.max_scanned_files:
                     truncated = True
@@ -121,7 +148,18 @@ def scan_workspace_roots(
                     )
 
                 host_file = Path(dirpath) / filename
-                if host_file.is_symlink() or not host_file.is_file():
+                if host_file.is_symlink():
+                    # A symlink must never be followed for stat/content purposes: its
+                    # target can point anywhere on the host (including outside the
+                    # scanned root), so it is recorded as a metadata-only stub -
+                    # mirroring how binary/large/sensitive-looking files are handled
+                    # below - instead of being silently omitted from the snapshot.
+                    symlink_snapshot = _snapshot_symlink(root, host_file)
+                    if symlink_snapshot is not None:
+                        files[symlink_snapshot.path] = symlink_snapshot
+                        scanned += 1
+                    continue
+                if not host_file.is_file():
                     continue
 
                 snapshot = _snapshot_file(
@@ -181,7 +219,10 @@ def _snapshot_file(
         return None
 
     binary = host_file.suffix.lower() in BINARY_EXTENSIONS or _looks_binary(sample)
-    sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
+    try:
+        sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
+    except FileNotFoundError:
+        return None
     text: str | None = None
     text_path: str | None = None
     reason: DiffUnavailableReason | None = None
@@ -222,10 +263,99 @@ def _snapshot_file(
     )
 
 
+def _normalize_symlink_target(target: str) -> str:
+    """Strip the Windows extended-length prefix from a symlink target.
+
+    ``os.readlink`` on Windows reports absolute targets in extended-length
+    form (``\\\\?\\C:\\...`` or ``\\\\?\\UNC\\server\\share``). Recorded targets
+    are surfaced in workspace-change events and compared against ordinary
+    paths, so keep the plain spelling.
+
+    On POSIX this is a provable identity: the strip only applies on Windows
+    hosts. ``readlink(2)`` returns the literal string the link was created
+    with, and backslash is a valid filename byte on Linux — a target string
+    that merely starts with ``\\\\?\\`` there must be recorded verbatim.
+
+    On Windows, only extended *drive-letter* paths are stripped. Other
+    ``\\\\?\\`` namespace forms (volume-GUID paths, device paths) are kept
+    verbatim: stripping them would leave a relative-looking remainder that
+    no longer names the target's namespace.
+    """
+    if os.name != "nt":
+        return target
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[len("\\\\?\\UNC\\") :]
+    if target.startswith("\\\\?\\") and len(target) >= 7 and target[4].isascii() and target[4].isalpha() and target[5] == ":" and target[6] in "\\/":
+        return target[4:]
+    return target
+
+
+def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | None:
+    # Deliberately never follows the link (no read_bytes()/open() on the target):
+    # the target may point anywhere on the host, including outside the scanned
+    # root, so stat'ing or reading through it here would risk exposing arbitrary
+    # host file content/metadata as if it belonged to the workspace.
+    try:
+        stat = host_file.lstat()
+        size = stat.st_size
+        mtime_ns = stat.st_mtime_ns
+        relative = host_file.relative_to(root.host_path).as_posix()
+        virtual_path = f"{root.virtual_prefix}/{relative}"
+        sensitive = is_sensitive_workspace_path(virtual_path)
+    except OSError:
+        return None
+
+    try:
+        target = os.readlink(host_file)
+    except OSError:
+        target = None
+    else:
+        target = _normalize_symlink_target(target)
+
+    return FileSnapshot(
+        path=virtual_path,
+        root=root.name,
+        size=size,
+        mtime_ns=mtime_ns,
+        sha256=None,
+        binary=False,
+        sensitive=sensitive,
+        text=None,
+        content_unavailable_reason="symlink",
+        symlink=True,
+        symlink_target=target,
+    )
+
+
+def _publish_text_atomically(path: Path, content: str) -> None:
+    """Publish text through a temporary file so a partial write cannot survive.
+
+    ``newline="\\n"`` keeps the publication byte-exact on every host: the
+    default text-mode translation would rewrite a decoded CRLF snapshot's
+    ``\\n`` characters into ``os.linesep`` on Windows, turning ``\\r\\n``
+    content into ``\\r\\r\\n`` bytes that every later reader serves verbatim
+    as the file's text.
+    """
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _cache_text_file(text: str, virtual_path: str, cache_dir: Path) -> Path:
+    """Cache decoded text atomically; the caller serves this path as file content."""
     cache_name = hashlib.sha256(virtual_path.encode("utf-8")).hexdigest()
     target = cache_dir / cache_name
-    target.write_text(text, encoding="utf-8")
+    _publish_text_atomically(target, text)
     return target
 
 

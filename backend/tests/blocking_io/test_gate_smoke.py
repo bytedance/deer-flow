@@ -33,6 +33,15 @@ async def test_gate_catches_unoffloaded_blocking_io_in_deerflow_module(tmp_path:
         ensure_sqlite_parent_dir(str(db_file))
 
 
+async def test_gate_catches_hostname_resolution_on_the_loop() -> None:
+    # Blockbuster's default rules miss module-level socket.getaddrinfo; the
+    # project rule must catch a synchronous SSRF-guard lookup on the loop.
+    from deerflow.community.url_safety import resolve_host_addresses
+
+    with pytest.raises(BlockingError):
+        resolve_host_addresses("127.1")
+
+
 async def test_gate_restores_blockbuster_patches_after_exceptions() -> None:
     original_stat = os.stat
 

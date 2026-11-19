@@ -7,9 +7,12 @@ from datetime import UTC, datetime
 from html import escape
 from typing import Any
 
-from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
+from langchain_core.messages import AnyMessage
 
+from deerflow.agents.middlewares.receipt_verification import render_citation_verdict, validate_receipt_verdict
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.thread_state import DelegationEntry
+from deerflow.subagents.acceptance_checks import AcceptanceVerdict, render_acceptance_segment, validate_acceptance_verdict
 from deerflow.subagents.status_contract import (
     read_subagent_result_metadata,
 )
@@ -50,7 +53,7 @@ def _escape_context_text(value: object) -> str:
     return escape(" ".join(str(value).split()), quote=False)
 
 
-def _status_guidance(status: str, stop_reason: str | None = None) -> str:
+def _status_guidance(status: str, stop_reason: str | None = None, acceptance_verdict: AcceptanceVerdict | None = None) -> str:
     if stop_reason:
         # A guardrail cap ended this run early (#3875 Phase 2): the status is
         # still completed/failed, and ``stop_reason`` carries *why* it stopped
@@ -63,7 +66,17 @@ def _status_guidance(status: str, stop_reason: str | None = None) -> str:
     if status == "in_progress":
         return "already delegated; do NOT delegate again; wait for or build on the result"
     if status == "completed":
-        return "completed result; do NOT delegate again; reuse this result"
+        leaves = acceptance_verdict["leaves"] if acceptance_verdict is not None else []
+        if not leaves:
+            return "execution finished; inspect self-report before reuse; avoid duplicate work"
+        actions = ["execution finished; retain useful work"]
+        if any(leaf["checked"] and not leaf["holds"] for leaf in leaves):
+            actions.append("repair/recheck unmet criteria")
+        if any(not leaf["checked"] for leaf in leaves):
+            actions.append("verify load-bearing UNVERIFIED criteria or preserve uncertainty")
+        if len(actions) == 1:
+            actions.append("reuse checked outputs; validate load-bearing claims")
+        return "; ".join(actions)
     if status == "failed":
         return "failed attempt; may retry with a changed plan"
     if status == "cancelled":
@@ -85,48 +98,32 @@ def _tool_call_name(tool_call: dict[str, Any]) -> str:
     return ""
 
 
-def _tool_call_id(tool_call: dict[str, Any]) -> str | None:
-    tool_call_id = tool_call.get("id")
-    return str(tool_call_id) if tool_call_id else None
-
-
-def _tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
-    args = tool_call.get("args")
-    return args if isinstance(args, dict) else {}
-
-
 def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
-    """Enumerate `task` delegations from AI tool calls and paired results."""
-    entries_by_id: dict[str, DelegationEntry] = {}
-    order: list[str] = []
-    now = _utc_now_iso()
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in message.tool_calls or []:
-            if _tool_call_name(tool_call) != "task":
-                continue
-            tool_call_id = _tool_call_id(tool_call)
-            if tool_call_id is None:
-                continue
-            args = _tool_call_args(tool_call)
-            description = str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP]
-            if tool_call_id not in entries_by_id:
-                order.append(tool_call_id)
-            entries_by_id[tool_call_id] = {
-                "id": tool_call_id,
-                "description": description,
-                "subagent_type": str(args.get("subagent_type") or ""),
-                "status": "in_progress",
-                "created_at": now,
-            }
+    """Enumerate `task` delegations from AI tool calls and paired results.
 
-    for message in messages:
-        if not isinstance(message, ToolMessage):
+    Tool-call ids are unique per response, not per conversation, so each call
+    is its own delegation, identified with the AIMessage that issued it, and
+    takes only the result of its own response (``pair_tool_call_results``).
+    """
+    entries: list[DelegationEntry] = []
+    now = _utc_now_iso()
+    for occurrence in pair_tool_call_results(messages):
+        if _tool_call_name(occurrence.tool_call) != "task":
             continue
-        tool_call_id = str(message.tool_call_id) if message.tool_call_id else ""
-        entry = entries_by_id.get(tool_call_id)
-        if entry is None:
+        tool_call_id = occurrence.call_id
+        args = occurrence.args
+        entry: DelegationEntry = {
+            "id": tool_call_id,
+            "description": str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP],
+            "subagent_type": str(args.get("subagent_type") or ""),
+            "status": "in_progress",
+            "created_at": now,
+        }
+        if isinstance(occurrence.message.id, str) and occurrence.message.id:
+            entry["dispatch_message_id"] = occurrence.message.id
+        entries.append(entry)
+        message = occurrence.result
+        if message is None:
             continue
         structured = read_subagent_result_metadata(message.additional_kwargs)
         if structured is None:
@@ -135,6 +132,12 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
         stop_reason = structured.get("stop_reason")
         if stop_reason:
             entry["stop_reason"] = stop_reason
+        receipt_verdict = structured.get("receipt_verdict")
+        if receipt_verdict:
+            entry["receipt_verdict"] = receipt_verdict
+        acceptance_verdict = structured.get("acceptance_verdict")
+        if acceptance_verdict:
+            entry["acceptance_verdict"] = acceptance_verdict
         result_text = structured.get("result_brief") or structured.get("error") or _STATUS_ONLY_RESULT_BRIEFS.get(structured["status"])
         if result_text:
             result_sha256 = structured.get("result_sha256") or hashlib.sha256(result_text.encode("utf-8")).hexdigest()
@@ -145,33 +148,67 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
                     "result_ref": str(message.id or tool_call_id),
                 }
             )
-    return [entries_by_id[tool_call_id] for tool_call_id in order]
+    return entries
 
 
 def _fits_budget(lines: list[str], candidate: str, max_chars: int) -> bool:
     return len("\n".join([*lines, candidate])) <= max_chars
 
 
+def _render_acceptance_gaps(verdict: AcceptanceVerdict) -> str:
+    """Keep one actionable example of each unresolved kind after compaction.
+
+    Criteria and details are untrusted durable data. Bound and escape each
+    field separately, and keep both kinds even when failures fill the list.
+    The complete verdict stays in the ledger state.
+    """
+    gaps = [leaf for leaf in verdict["leaves"] if not leaf["checked"] or not leaf["holds"]]
+    rendered = []
+    for checked, marker in ((True, "does not hold"), (False, "UNVERIFIED")):
+        leaf = next((leaf for leaf in gaps if leaf["checked"] == checked), None)
+        if leaf is not None:
+            criterion = _escape_context_text(_bound_text(leaf["criterion"], 160))
+            detail = _escape_context_text(_bound_text(leaf["detail"], 120))
+            rendered.append(f"[{marker}] {criterion} — {detail}")
+    omitted = len(gaps) - len(rendered)
+    if omitted:
+        rendered.append(f"{omitted} more unresolved criteria (not shown)")
+    return "; ".join(rendered)
+
+
 def _render_entry_line(entry: DelegationEntry) -> str:
     status = _escape_context_text(entry["status"])
     description = _escape_context_text(entry["description"])
     subagent_type = _escape_context_text(entry["subagent_type"])
-    guidance = _status_guidance(entry["status"], entry.get("stop_reason"))
+    acceptance_verdict = validate_acceptance_verdict(entry.get("acceptance_verdict"))
+    guidance = _status_guidance(entry["status"], entry.get("stop_reason"), acceptance_verdict)
     line = f"- [{status}] {description} (via {subagent_type}; {guidance})"
     result_brief = entry.get("result_brief")
     if result_brief:
         line += f" -> {_escape_context_text(_bound_text(result_brief, _LEDGER_ENTRY_RESULT_RENDER_CAP))}"
+    receipt_verdict = validate_receipt_verdict(entry.get("receipt_verdict"))
+    if receipt_verdict is not None:
+        segment = render_citation_verdict(receipt_verdict)
+        if segment:
+            line += f" · {segment}"
+    if acceptance_verdict is not None:
+        segment = render_acceptance_segment(acceptance_verdict)
+        if segment:
+            line += f" · {segment}"
+        gaps = _render_acceptance_gaps(acceptance_verdict)
+        if gaps:
+            line += f" · {gaps}"
     return line
 
 
 def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int = _LEDGER_RENDER_CHAR_BUDGET) -> str:
-    """Render the delegation ledger as model-visible system context."""
+    """Render the delegation ledger as model-visible durable context data."""
     if not entries:
         return ""
 
     lines = [
         "## Work already delegated",
-        "Newest entries are shown first. In-progress entries are already delegated. Completed entries are reusable results. Failed, cancelled, or timed-out entries are prior attempts.",
+        "Newest entries first. In-progress work is already delegated. Completed means execution ended, not task acceptance. Retain useful work and address remaining gaps within the current budget.",
     ]
     omitted = 0
     for index, entry in enumerate(reversed(entries)):

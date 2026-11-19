@@ -36,7 +36,7 @@ _TOTAL_LIMIT_STOP_MSG = (
 
 
 def _clamp_subagent_limit(value: int) -> int:
-    """Clamp subagent limit to valid range [2, 4]."""
+    """Clamp subagent limit to the hard safety range [1, 64]."""
     return clamp_subagent_concurrency(value)
 
 
@@ -57,11 +57,20 @@ def _append_text(content: Any, text: str) -> Any:
     return f"{content}\n\n{text}"
 
 
-def _delegation_id(entry: object) -> str | None:
+def _delegation_id(entry: object) -> tuple[str, str | None] | None:
+    """One delegation: its call id plus the AIMessage that issued it.
+
+    Providers can reuse a call id in a later response of the same run, so the
+    call id alone would count several delegations as one. Same fields as
+    ``thread_state.delegation_key``, without the run id this count filters on.
+    """
     if not isinstance(entry, dict):
         return None
     entry_id = entry.get("id")
-    return str(entry_id) if entry_id else None
+    if not entry_id:
+        return None
+    dispatch_id = entry.get("dispatch_message_id")
+    return str(entry_id), str(dispatch_id) if dispatch_id else None
 
 
 def _delegation_run_id(entry: object) -> str | None:
@@ -104,7 +113,8 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed.
-            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [2, 4].
+            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Callers pass the value
+            already clamped to the configured process execution capacity.
         max_total: Maximum number of subagent calls allowed across the run.
             Defaults to 6. Clamped to [1, 50].
     """
@@ -113,6 +123,12 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         super().__init__()
         self.max_concurrent = _clamp_subagent_limit(max_concurrent)
         self.max_total = _clamp_total_subagent_limit(max_total)
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {
+            "max_concurrent": self.max_concurrent,
+            "max_total": self.max_total,
+        }
 
     def _truncate_task_calls(self, state: AgentState, runtime: Runtime | None = None) -> dict | None:
         messages = state.get("messages", [])

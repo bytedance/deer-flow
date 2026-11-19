@@ -1,7 +1,7 @@
 """Phase-2 (self-contained DeerMem) tests.
 
 Covers: DI construction (owns storage/updater/queue/llm), zero-config defaults,
-``trace_id`` threading to the optional ``tracing_callback``, langfuse being
+``trace_id`` threading to the optional ``callbacks`` hook, langfuse being
 optional, ``hide_from_ui`` default-skip + hook-keep, empty ``storage_class``
 (portable default), and portability -- ``backends/deermem/`` has exactly one
 ``from deerflow`` line (the ABC contract) and can be vendored into another agent
@@ -13,18 +13,21 @@ injected onto the updater so no network is needed.
 
 from __future__ import annotations
 
+import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+from deerflow.agents.memory.backends.deermem.deermem.core import storage as deermem_storage
 from deerflow.agents.memory.backends.deermem.deermem.core.message_processing import (
     filter_messages_for_memory,
 )
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
-from deerflow.agents.memory.backends.deermem.deermem.core.updater import _trim_facts_to_max
+from deerflow.agents.memory.manager import MemoryCallbacks, MemoryCorruptionError
 
 
 @pytest.fixture
@@ -46,12 +49,58 @@ class _FakeLLM:
         return type("R", (), {"content": self._payload})()
 
 
-def _deermem_with_fake_llm(backend_config=None, payload=None) -> DeerMem:
-    dm = DeerMem(backend_config=backend_config)
+def _deermem_with_fake_llm(backend_config=None, payload=None, callbacks=None) -> DeerMem:
+    dm = DeerMem(backend_config=backend_config, callbacks=callbacks)
     fake = _FakeLLM(payload)
     dm._llm = fake
     dm._updater._llm = fake
     return dm
+
+
+def _legacy_alias_normalize_category(fact: dict) -> None:
+    """The pre-native-category ``storage._normalize_category``.
+
+    Historical builds parked any label outside CORE_CATEGORIES in
+    ``categoryExtension`` and stored ``category="other"``; migration-retry and
+    update-path regressions below replay data an interrupted such build left
+    behind, so the tests need the exact historical writer.
+    """
+    raw_category = fact.get("category", "context")
+    if not isinstance(raw_category, str):
+        raise ValueError("fact.category must be a string")
+    category = raw_category or "context"
+    if category not in deermem_storage.CORE_CATEGORIES:
+        fact.setdefault("categoryExtension", category)
+        fact["category"] = "other"
+    else:
+        fact["category"] = category
+
+
+def test_add_swallows_queue_full_so_backpressure_does_not_break_caller(deermem_data_dir, caplog) -> None:
+    """Regression: QueueFull raised under backpressure is caught in
+    DeerMem.add (the backend owns the queue, so it owns the degradation) so
+    memory backpressure degrades to "update skipped" instead of propagating into
+    MemoryMiddleware.after_agent and breaking the agent run -- peer middlewares
+    self-guard the same way."""
+    import logging
+
+    dm = _deermem_with_fake_llm(backend_config={"storage_path": str(deermem_data_dir), "queue_max_depth": 1})
+    # Stop the debounce timer so enqueued items stay pending (the cap persists
+    # across the second add instead of being drained by a timer fire).
+    dm._queue._schedule_timer = lambda *a, **k: None
+
+    conv = [HumanMessage("Please explain quantum computing in detail"), AIMessage("Quantum computing uses qubits and superposition.")]
+    # First add fills the queue to its depth cap (non-signal, new key).
+    dm.add("thread-A", conv, agent_name="lead_agent", user_id="u")
+    assert dm._queue.pending_count == 1
+
+    # Second add for a different key hits the cap -> QueueFull internally. It
+    # must be caught: no exception escapes DeerMem.add.
+    with caplog.at_level(logging.WARNING, logger="deerflow.agents.memory.backends.deermem.deer_mem"):
+        dm.add("thread-B", conv, agent_name="lead_agent", user_id="u")
+    assert "rejected under backpressure" in caplog.text
+    # thread-B was rejected (not enqueued); only thread-A remains.
+    assert dm._queue.pending_count == 1
 
 
 def test_di_construction_owns_dependencies():
@@ -61,6 +110,37 @@ def test_di_construction_owns_dependencies():
     # dependencies are wired (DI), not globals:
     assert dm._updater._storage is dm._storage
     assert dm._queue._updater is dm._updater
+
+
+def test_from_config_keeps_backend_config_pure_of_injected_hooks(deermem_data_dir):
+    """Host hooks (should_keep_hidden_message / trace_context_manager / host_llm)
+    arrive as from_config kwargs and are parsed into DeerMemConfig
+    (self._config, PrivateAttr); the instance's backend_config field stays the
+    pure data the host passed (no callables / LLM), so it remains serializable
+    and matches the README contract ("host hooks ... NOT in backend_config")."""
+
+    def _keep(ak):
+        return False
+
+    trace_cm = object()  # sentinel; trace_context_manager is typed Any
+    fake_llm = _FakeLLM()
+    dm = DeerMem.from_config(
+        backend_config={"storage_path": str(deermem_data_dir), "max_facts": 20},
+        mode="middleware",
+        should_keep_hidden_message=_keep,
+        trace_context_manager=trace_cm,
+        host_llm_factory=lambda: fake_llm,
+        callbacks=None,
+    )
+    # hooks reached DeerMemConfig (PrivateAttr) -- wired, not lost
+    assert dm._config.should_keep_hidden_message is _keep
+    assert dm._config.trace_context_manager is trace_cm
+    assert dm._config.host_llm is fake_llm
+    # backend_config field is the pure original data (no injected hooks)
+    assert dm.backend_config == {"storage_path": str(deermem_data_dir), "max_facts": 20}
+    assert "should_keep_hidden_message" not in dm.backend_config
+    assert "trace_context_manager" not in dm.backend_config
+    assert "host_llm" not in dm.backend_config
 
 
 def test_zero_config_defaults_run_non_llm_ops(deermem_data_dir):
@@ -74,13 +154,102 @@ def test_zero_config_defaults_run_non_llm_ops(deermem_data_dir):
     assert dm.get_memory(user_id="u")["facts"][0]["content"] == "x"
 
 
-def test_trace_id_threads_through_to_tracing_callback(deermem_data_dir):
+def test_get_context_injects_facts_only_in_middleware_mode(deermem_data_dir):
+    backend_config = {
+        "storage_path": str(deermem_data_dir),
+        "retrieval_adapter": "",
+        "token_counting": "char",
+    }
+    middleware = DeerMem(backend_config=backend_config, mode="middleware")
+    middleware.import_memory(
+        {
+            "user": {
+                "workContext": {"summary": "Works on DeerFlow memory."},
+            },
+            "history": {
+                "recentMonths": {"summary": "Recently redesigned storage."},
+            },
+            "facts": [
+                {
+                    "id": "fact_tool_only",
+                    "content": "Use FTS5 for active fact recall.",
+                    "category": "constraint",
+                    "confidence": 0.9,
+                    "source": "manual",
+                }
+            ],
+        },
+        user_id="u",
+    )
+
+    middleware_context = middleware.get_context(user_id="u")
+    tool_context = DeerMem(backend_config=backend_config, mode="tool").get_context(user_id="u")
+
+    assert "Works on DeerFlow memory." in middleware_context
+    assert "Recently redesigned storage." in middleware_context
+    assert "Use FTS5 for active fact recall." in middleware_context
+    assert "Works on DeerFlow memory." in tool_context
+    assert "Recently redesigned storage." in tool_context
+    assert "Use FTS5 for active fact recall." not in tool_context
+    assert "Facts:" not in tool_context
+
+
+def test_import_without_agent_name_persists_facts_in_default_markdown_bucket(deermem_data_dir):
+    dm = DeerMem(backend_config=None)
+    dm.import_memory(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                {
+                    "id": "fact_default_import",
+                    "content": "imported through the default manager scope",
+                    "category": "context",
+                    "confidence": 0.8,
+                    "source": "import",
+                }
+            ],
+        },
+        user_id="alice",
+    )
+
+    assert [fact["id"] for fact in dm.get_memory(user_id="alice")["facts"]] == ["fact_default_import"]
+    facts_root = deermem_data_dir / "users" / "alice" / "agents" / "__default__" / "facts"
+    assert [path.stem for path in facts_root.glob("**/*.md")] == ["fact_default_import"]
+
+
+def test_import_empty_summary_sections_replace_existing_summaries_with_complete_defaults(deermem_data_dir):
+    dm = DeerMem(backend_config=None)
+    existing = dm.get_memory(user_id="alice")
+    existing["user"]["workContext"] = {"summary": "old work", "updatedAt": "old"}
+    existing["user"]["personalContext"] = {"summary": "old personal", "updatedAt": "old"}
+    existing["history"]["recentMonths"] = {"summary": "old history", "updatedAt": "old"}
+    dm.import_memory(existing, user_id="alice")
+
+    imported = dm.import_memory({"user": {}, "history": {}, "facts": []}, user_id="alice")
+
+    assert imported["user"] == {
+        "workContext": {"summary": "", "updatedAt": ""},
+        "personalContext": {"summary": "", "updatedAt": ""},
+        "topOfMind": {"summary": "", "updatedAt": ""},
+        "cognitiveStyle": {"summary": "", "updatedAt": ""},
+    }
+    assert imported["history"] == {
+        "recentMonths": {"summary": "", "updatedAt": ""},
+        "earlierContext": {"summary": "", "updatedAt": ""},
+        "longTermBackground": {"summary": "", "updatedAt": ""},
+    }
+
+
+def test_trace_id_threads_through_to_callbacks(deermem_data_dir):
+    """trace_id reaches the pre-LLM-call callbacks hook (on_memory_llm_call)."""
     calls = []
 
-    def tracer(cfg, *, thread_id, user_id, trace_id, model_name):
-        calls.append((thread_id, trace_id, model_name))
+    class _RecordingCallbacks(MemoryCallbacks):
+        def on_memory_llm_call(self, invoke_config, *, thread_id, user_id, trace_id, model_name):
+            calls.append((thread_id, trace_id, model_name))
 
-    dm = _deermem_with_fake_llm({"tracing_callback": tracer, "model": {"provider": "openai", "model": "gpt-x", "api_key": "k", "base_url": "u"}})
+    dm = _deermem_with_fake_llm({"model": {"provider": "openai", "model": "gpt-x", "api_key": "k", "base_url": "u"}}, callbacks=_RecordingCallbacks())
     dm.add(
         thread_id="t1",
         messages=[HumanMessage(content="hi"), AIMessage(content="hello")],
@@ -92,9 +261,66 @@ def test_trace_id_threads_through_to_tracing_callback(deermem_data_dir):
     assert calls and calls[0] == ("t1", "trace-42", "gpt-x")
 
 
-def test_tracing_callback_optional_no_langfuse(deermem_data_dir):
+def test_default_passive_update_persists_fact_in_reserved_default_bucket(deermem_data_dir):
+    dm = _deermem_with_fake_llm(payload='{"user":{},"history":{},"newFacts":[{"content":"Default agent fact","category":"context","confidence":0.9,"scope":"user","durability":"durable","authority":"descriptive"}],"factsToRemove":[]}')
+
+    dm.add(
+        thread_id="default-thread",
+        messages=[HumanMessage(content="remember this"), AIMessage(content="understood")],
+        user_id="alice",
+    )
+    dm._queue.flush()
+
+    assert [fact["content"] for fact in dm.get_memory(user_id="alice")["facts"]] == ["Default agent fact"]
+    facts_root = deermem_data_dir / "users" / "alice" / "agents" / "__default__" / "facts"
+    assert list(facts_root.glob("**/*.md"))
+
+
+def test_clear_all_memory_removes_global_summaries_and_every_agent_fact(deermem_data_dir):
+    dm = DeerMem()
+    imported = dm.get_memory(user_id="alice")
+    imported["user"]["workContext"] = {"summary": "shared profile", "updatedAt": "now"}
+    imported["facts"] = [
+        {
+            "id": "fact_default",
+            "content": "default fact",
+            "category": "context",
+            "confidence": 0.9,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "source": "manual",
+        }
+    ]
+    dm.import_memory(imported, user_id="alice")
+    dm.create_fact("custom fact", agent_name="custom-agent", user_id="alice")
+    custom_dir = deermem_data_dir / "users" / "alice" / "agents" / "custom-agent"
+    config_path = custom_dir / "config.yaml"
+    config_path.write_text("name: custom-agent\n", encoding="utf-8")
+
+    cleared = dm.clear_memory(user_id="alice")
+
+    assert cleared["user"]["workContext"]["summary"] == ""
+    assert cleared["facts"] == []
+    assert dm.get_memory(agent_name="custom-agent", user_id="alice")["facts"] == []
+    assert config_path.read_text(encoding="utf-8") == "name: custom-agent\n"
+
+
+def test_scoped_clear_preserves_shared_summaries(deermem_data_dir):
+    dm = DeerMem()
+    imported = dm.get_memory(user_id="alice")
+    imported["user"]["workContext"] = {"summary": "shared profile", "updatedAt": "now"}
+    dm.import_memory(imported, user_id="alice")
+    dm.create_fact("custom fact", agent_name="custom-agent", user_id="alice")
+
+    cleared = dm.clear_memory(agent_name="custom-agent", user_id="alice")
+
+    assert cleared["facts"] == []
+    assert cleared["user"]["workContext"]["summary"] == "shared profile"
+    assert dm.get_memory(user_id="alice")["user"]["workContext"]["summary"] == "shared profile"
+
+
+def test_callbacks_optional_no_langfuse(deermem_data_dir):
     dm = _deermem_with_fake_llm({"model": {"provider": "openai", "model": "gpt-x", "api_key": "k", "base_url": "u"}})
-    assert dm._config.tracing_callback is None  # langfuse not hard-required
+    assert dm.callbacks is None  # no callbacks = no langfuse (not hard-required)
     dm.add(
         thread_id="t2",
         messages=[HumanMessage(content="hi"), AIMessage(content="hello")],
@@ -102,7 +328,7 @@ def test_tracing_callback_optional_no_langfuse(deermem_data_dir):
         user_id="u2",
         trace_id="t-99",
     )
-    dm._queue.flush()  # no callback, no error, update completes
+    dm._queue.flush()  # no callbacks, no error, update completes
 
 
 def test_hide_from_ui_default_skip_hook_keeps():
@@ -135,37 +361,84 @@ def test_portability_only_abc_contract_imports_deerflow():
                 deerflow_imports.append((p.relative_to(root).as_posix(), s))
     assert len(deerflow_imports) == 1, deerflow_imports
     assert deerflow_imports[0][0] == "deer_mem.py"
-    assert "memory.manager import MemoryManager" in deerflow_imports[0][1]
+    assert deerflow_imports[0][1].startswith("from deerflow.agents.memory.manager import ")
 
 
 # Minimal vendored host contract (what another agent would ship). DeerMem only
 # needs this ABC -- nothing else from a host.
 _VENDORED_MANAGER_PY = '''
-"""Vendored host contract (minimal ABC) for the portability demo."""
-from abc import ABC, abstractmethod
-from typing import Any
+"""Vendored host contract (pydantic BaseModel + three-tier ABC) for the portability demo."""
+from abc import abstractmethod
+from typing import Any, ClassVar, Literal
 
-class MemoryManager(ABC):
-    def __init__(self, backend_config: dict | None = None) -> None:
-        self._backend_config = backend_config
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class MemoryManager(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    backend_config: dict[str, Any] = Field(default_factory=dict)
+    mode: Literal["middleware", "tool"] = "middleware"
+    callbacks: Any = None
+    supports_search: ClassVar[bool] = False
+
+    @field_validator("backend_config", mode="before")
+    @classmethod
+    def _coerce_backend_config(cls, value):
+        return value or {}
+
+    @model_validator(mode="after")
+    def _check_invariants(self):
+        if self.mode == "tool" and not type(self).supports_search:
+            raise ValueError("tool mode requires search")
+        return self
+
+    # Tier 1: abstract (every backend must implement).
     @abstractmethod
     def add(self, thread_id, messages, *, agent_name=None, user_id=None, trace_id=None) -> None: ...
     @abstractmethod
-    def add_nowait(self, thread_id, messages, *, agent_name=None, user_id=None) -> None: ...
-    @abstractmethod
     def get_context(self, user_id, *, agent_name=None, thread_id=None) -> str: ...
+    @classmethod
     @abstractmethod
-    def search(self, query, top_k=5, *, user_id=None, agent_name=None) -> list: ...
-    @abstractmethod
-    def get_memory(self, *, user_id=None, agent_name=None) -> dict: ...
-    @abstractmethod
-    def delete_memory(self, *, user_id=None, agent_name=None) -> None: ...
-    @abstractmethod
-    def clear_memory(self, *, user_id=None, agent_name=None) -> dict: ...
-    @abstractmethod
-    def import_memory(self, memory_data, *, user_id=None, agent_name=None) -> dict: ...
-    @abstractmethod
-    def export_memory(self, *, user_id=None, agent_name=None) -> dict: ...
+    def from_config(cls, backend_config, *, mode="middleware", **host_hooks): ...
+
+    # Tier 2: management defaults (override if supported).
+    def add_nowait(self, thread_id, messages, *, agent_name=None, user_id=None) -> None:
+        self.add(thread_id, messages, agent_name=agent_name, user_id=user_id)
+    def search(self, query, top_k=5, *, user_id=None, agent_name=None, category=None) -> list:
+        raise NotImplementedError
+    def get_memory(self, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def delete_memory(self, *, user_id=None, agent_name=None) -> None:
+        raise NotImplementedError
+    def clear_memory(self, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def import_memory(self, memory_data, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def export_memory(self, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def shutdown_flush(self, timeout) -> bool:
+        return True
+
+    # Tier 3: optional hooks (override if supported).
+    def warm(self) -> bool | None:
+        return None
+    def reload_memory(self, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def create_fact(self, content, category="context", confidence=0.5, *, agent_name=None, user_id=None):
+        raise NotImplementedError
+    def delete_fact(self, fact_id, *, agent_name=None, user_id=None) -> dict:
+        raise NotImplementedError
+    def update_fact(self, fact_id, content=None, category=None, confidence=None, *, agent_name=None, user_id=None) -> dict:
+        raise NotImplementedError
+    def on_pre_compress(self, messages) -> str:
+        return ""
+    def on_turn_start(self, turn_number, message, **kwargs) -> None:
+        return None
+
+class MemoryConflictError(RuntimeError): ...
+class MemoryCorruptionError(RuntimeError): ...
+class MemoryDuplicateFactIdError(ValueError): ...
 '''
 
 
@@ -190,10 +463,11 @@ def test_portability_vendor_to_other_agent(tmp_path, monkeypatch):
     # Repoint the single ABC-contract import line to the vendored manager.
     deer_mem_file = dst_pkg / "deer_mem.py"
     text = deer_mem_file.read_text(encoding="utf-8")
-    assert "from deerflow.agents.memory.manager import MemoryManager" in text
+    contract_import = "from deerflow.agents.memory.manager import "
+    assert contract_import in text
     text = text.replace(
-        "from deerflow.agents.memory.manager import MemoryManager",
-        "from otheragent.manager import MemoryManager",
+        contract_import,
+        "from otheragent.manager import ",
     )
     deer_mem_file.write_text(text, encoding="utf-8")
 
@@ -208,6 +482,11 @@ def test_portability_vendor_to_other_agent(tmp_path, monkeypatch):
             user_id="ua",
         )
         assert "y" in dm.get_context(user_id="ua")
+        host_manager = importlib.import_module("otheragent.manager")
+        backup = dm.get_memory(user_id="ua")
+        backup["facts"] *= 2
+        with pytest.raises(host_manager.MemoryDuplicateFactIdError, match="Duplicate fact id"):
+            dm.import_memory(backup, user_id="ua")
     finally:
         for k in [k for k in list(sys.modules) if k.startswith("otheragent_deermem") or k == "otheragent"]:
             sys.modules.pop(k, None)
@@ -229,7 +508,7 @@ def test_per_user_memory_path_matches_host_safe_user_id(deermem_data_dir):
     user_id = "test-user-123@example.com"
     # storage_path mirrors what the host factory injects (runtime_home / base_dir)
     dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
-    dm.create_fact("User prefers concise answers", category="preference", user_id=user_id)
+    dm.create_fact("User prefers concise answers", category="preference", agent_name="default", user_id=user_id)
 
     expected_safe = make_safe_user_id(user_id)
     expected_file = deermem_data_dir / "users" / expected_safe / "memory.json"
@@ -237,28 +516,6 @@ def test_per_user_memory_path_matches_host_safe_user_id(deermem_data_dir):
     # DeerMem used the host-identical safe_user_id (not some other encoding).
     user_dirs = [p.name for p in (deermem_data_dir / "users").iterdir() if p.is_dir()]
     assert user_dirs == [expected_safe], f"safe_user_id diverged from host: {user_dirs}"
-
-
-def test_trim_facts_to_max_coerces_non_float_confidence():
-    """Non-float stored confidence must not crash the max_facts trim sort.
-
-    Regression: the vendored copy used ``key=lambda f: f.get("confidence", 0)``
-    which raised TypeError comparing None/str against float once ``len > max_facts``
-    (legacy / imported facts with abnormal confidence). This is the #4034 intent
-    that the module-skipped test files never exercised against the vendored
-    updater; pinning it here so the rename can't silently drop the coercion again.
-    """
-    facts = [
-        {"id": "a", "confidence": None},
-        {"id": "b", "confidence": "0.9"},  # numeric string
-        {"id": "c", "confidence": 0.8},
-        {"id": "d", "confidence": "high"},  # non-numeric
-    ]
-    # No TypeError; coerced ranking: b("0.9"->0.9) > c(0.8) > a(None->0.5)=d("high"->0.5).
-    kept = _trim_facts_to_max(facts, max_facts=2)
-    assert [f["id"] for f in kept] == ["b", "c"]
-    # Below the cap -> returned unchanged (no sort, no crash).
-    assert _trim_facts_to_max(facts, max_facts=10) == facts
 
 
 def test_create_fact_trims_to_max_and_signals_eviction(deermem_data_dir):
@@ -306,6 +563,411 @@ def test_search_survives_non_float_confidence(deermem_data_dir):
     # No TypeError; all three match "query"; ranked by coerced confidence desc:
     # b("0.9"->0.9) > a(None->0.5)=c("high"->0.5), stable so a before c.
     assert [r["id"] for r in results] == ["b", "a", "c"]
+
+
+def test_create_fact_category_round_trips_into_search_and_documents(deermem_data_dir):
+    """A non-core category label must survive the write and stay searchable.
+
+    Regression: ``storage._normalize_category`` rewrote every label outside
+    CORE_CATEGORIES to "other" (parking the original in a write-only
+    ``categoryExtension`` field), so a fact added via
+    ``memory_add(category="personal")`` -- an example label in the memory_add
+    docstring -- was persisted as "other", never matched
+    ``memory_search(category="personal")`` ("Only facts with this exact category
+    are returned"), and kept reporting "other" in get_memory documents.
+    """
+    dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
+    memory_data, fact_id = dm.create_fact(
+        "The user lives in Paris",
+        category="personal",
+        confidence=0.9,
+        user_id="u1",
+    )
+    assert fact_id is not None
+
+    assert next(f for f in memory_data["facts"] if f["id"] == fact_id)["category"] == "personal"
+    document = dm.get_memory(user_id="u1")
+    assert next(f for f in document["facts"] if f["id"] == fact_id)["category"] == "personal"
+
+    results = dm.search("Paris", top_k=10, user_id="u1", category="personal")
+    assert [f["id"] for f in results] == [fact_id]
+
+
+def test_interrupted_legacy_migration_retry_recovers_aliased_category(deermem_data_dir, monkeypatch):
+    """Regression: a migration interrupted after its Markdown commit recovers.
+
+    An older build (pre-native-category ``_normalize_category``) committed a
+    per-agent legacy JSON migration and stopped before deleting the JSON.  Its
+    Markdown fact holds ``category="other"`` + ``categoryExtension="personal"``
+    while the retained JSON holds ``category="personal"``.  The next build's
+    migration candidate keeps "personal" natively, so the retry must recognize
+    the alias as the same fact and finish recovery (delete the JSON) instead of
+    raising a migration conflict that fails every read and retry for the agent
+    (HTTP 500 at the Gateway).  A genuinely different label must still conflict.
+    """
+    dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
+    memory_path = dm._storage._get_memory_file_path("researcher", user_id="u1")
+    legacy_path = FileMemoryStorage._legacy_agent_memory_path(dm._storage, memory_path, "researcher")
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "version": "1.0",
+                "lastUpdated": "2026-09-01T00:00:00Z",
+                "user": {},
+                "history": {},
+                "facts": [
+                    {
+                        "id": "fact_interrupted_personal",
+                        "content": "The user's sister is called Lea",
+                        "category": "personal",
+                        "confidence": 0.9,
+                        "source": "manual",
+                        "createdAt": "2026-09-01T00:00:00Z",
+                        "revision": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    retained = legacy_path.read_bytes()
+
+    native_normalize = deermem_storage._normalize_category
+    monkeypatch.setattr(deermem_storage, "_normalize_category", _legacy_alias_normalize_category)
+    dm.get_memory(agent_name="researcher", user_id="u1")  # the old Gateway commits the migration
+    legacy_path.write_bytes(retained)  # ... and stops before the unlink
+    monkeypatch.setattr(deermem_storage, "_normalize_category", native_normalize)
+
+    # The retry must complete recovery instead of raising a conflict.
+    document = dm.get_memory(agent_name="researcher", user_id="u1")
+    assert not legacy_path.exists()
+    fact = next(f for f in document["facts"] if f["id"] == "fact_interrupted_personal")
+    # The already-committed Markdown fact is adopted as-is, not rewritten.
+    assert (fact["category"], fact.get("categoryExtension")) == ("other", "personal")
+
+    # Recovery must not relax genuine conflicts: a retained JSON label that
+    # disagrees with the committed alias still stops the migration and keeps
+    # the legacy file for a human decision.
+    payload = json.loads(retained)
+    payload["facts"][0]["category"] = "work"
+    legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(MemoryCorruptionError):
+        dm.get_memory(agent_name="researcher", user_id="u1")
+    assert legacy_path.exists()
+
+
+def test_update_legacy_aliased_fact_to_native_category_clears_extension(deermem_data_dir, monkeypatch):
+    """Regression: rewriting a legacy "other"+extension fact drops the stale extension.
+
+    ``_normalize_fact`` deep-copies every key, so a legacy fact persisted as
+    ``category="other"`` + ``categoryExtension="personal"`` that is updated to
+    the now-native ``category="personal"`` used to keep the stale extension --
+    contradicting the Gateway contract that the field is only set "when
+    category is 'other'".  The update must clear it, and the rewritten fact
+    must be findable by its native label.
+    """
+    dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
+    native_normalize = deermem_storage._normalize_category
+    monkeypatch.setattr(deermem_storage, "_normalize_category", _legacy_alias_normalize_category)
+    _, fact_id = dm.create_fact(
+        "The user's sister is called Lea",
+        category="personal",
+        agent_name="researcher",
+        user_id="u1",
+    )
+    monkeypatch.setattr(deermem_storage, "_normalize_category", native_normalize)
+
+    stored = next(f for f in dm.get_memory(agent_name="researcher", user_id="u1")["facts"] if f["id"] == fact_id)
+    assert (stored["category"], stored.get("categoryExtension")) == ("other", "personal")
+
+    updated = dm.update_fact(fact_id, category="personal", agent_name="researcher", user_id="u1")
+
+    fact = next(f for f in updated["facts"] if f["id"] == fact_id)
+    assert fact["category"] == "personal"
+    assert "categoryExtension" not in fact
+    assert fact["revision"] == 2
+    results = dm.search("sister", top_k=10, user_id="u1", agent_name="researcher", category="personal")
+    assert [f["id"] for f in results] == [fact_id]
+
+
+def test_query_search_records_access_but_default_injection_does_not(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "token_counting": "char",
+            "fact_eviction_policy": "hybrid-v1",
+        }
+    )
+    dm.create_fact(
+        "User prefers concise answers",
+        category="preference",
+        confidence=0.8,
+        user_id="u1",
+    )
+
+    dm.get_context(user_id="u1")
+    assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
+
+    results = dm.search("concise", user_id="u1")
+    usage = dm._storage.get_fact_usage(agent_name="__default__", user_id="u1")
+    assert len(results) == 1
+    fact_id = results[0]["id"]
+    assert usage[fact_id]["accessCount"] == 1
+
+    dm.delete_fact(fact_id, user_id="u1")
+    dm._storage.record_fact_accesses(
+        [fact_id],
+        agent_name="__default__",
+        user_id="u1",
+    )
+    assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
+
+
+def test_default_confidence_policy_does_not_collect_hybrid_usage(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "token_counting": "char",
+        }
+    )
+    dm.create_fact("User prefers concise answers", user_id="u1")
+
+    assert dm.search("concise", user_id="u1")
+    assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
+
+
+@pytest.fixture
+def recent_fact_timestamp():
+    """Keep recent facts fresh regardless of when the eviction tests run."""
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem_data_dir, recent_fact_timestamp):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "fact_eviction_policy": "hybrid-v1",
+            "max_facts": 10,
+        }
+    )
+    dm.import_memory(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                *[
+                    {
+                        "id": f"high_{index}",
+                        "content": f"high {index}",
+                        "category": "preference",
+                        "confidence": 0.99,
+                        "createdAt": recent_fact_timestamp,
+                    }
+                    for index in range(8)
+                ],
+                {
+                    "id": "stale_high",
+                    "content": "stale high confidence",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2025-01-01T00:00:00Z",
+                },
+                {
+                    "id": "confirmed_recently",
+                    "content": "recently confirmed preference",
+                    "category": "preference",
+                    "confidence": 0.7,
+                    "createdAt": "2025-01-01T00:00:00Z",
+                    "lastConfirmedAt": recent_fact_timestamp,
+                },
+            ],
+        },
+        user_id="u1",
+    )
+
+    memory, created_id = dm.create_fact(
+        "new useful context",
+        category="context",
+        confidence=0.8,
+        user_id="u1",
+    )
+
+    kept_ids = {fact["id"] for fact in memory["facts"]}
+    assert created_id is not None
+    assert "confirmed_recently" in kept_ids
+    assert "stale_high" not in kept_ids
+
+
+def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir, recent_fact_timestamp):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "fact_eviction_policy": "hybrid-v1",
+            "max_facts": 10,
+        }
+    )
+    memory = dm.import_memory(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                *[
+                    {
+                        "id": f"high_{index}",
+                        "content": f"high {index}",
+                        "category": "preference",
+                        "confidence": 0.99,
+                        "createdAt": recent_fact_timestamp,
+                    }
+                    for index in range(8)
+                ],
+                {
+                    "id": "stale_high",
+                    "content": "stale high confidence",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2025-01-01T00:00:00Z",
+                },
+                {
+                    "id": "confirmed_recently",
+                    "content": "recently confirmed preference",
+                    "category": "preference",
+                    "confidence": 0.7,
+                    "createdAt": "2025-01-01T00:00:00Z",
+                    "lastConfirmedAt": recent_fact_timestamp,
+                },
+                {
+                    "id": "new_context",
+                    "content": "new useful context",
+                    "category": "context",
+                    "confidence": 0.8,
+                    "createdAt": recent_fact_timestamp,
+                },
+            ],
+        },
+        user_id="u1",
+    )
+
+    kept_ids = {fact["id"] for fact in memory["facts"]}
+    assert len(kept_ids) == 10
+    assert "confirmed_recently" in kept_ids
+    assert "stale_high" not in kept_ids
+
+
+def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir, recent_fact_timestamp):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "fact_eviction_policy": "hybrid-v1",
+            "max_facts": 10,
+        }
+    )
+    dm.import_memory(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                {
+                    "id": f"preference_{index}",
+                    "content": f"preference {index}",
+                    "category": "preference",
+                    "confidence": 0.99,
+                    "createdAt": recent_fact_timestamp,
+                }
+                for index in range(10)
+            ],
+        },
+        user_id="u1",
+    )
+
+    memory, correction_id = dm.create_fact(
+        "Never repeat this corrected behavior",
+        category="correction",
+        confidence=0.1,
+        user_id="u1",
+    )
+
+    assert correction_id is not None
+    assert correction_id in {fact["id"] for fact in memory["facts"]}
+    memory_path = dm._storage._get_memory_file_path("__default__", user_id="u1")
+    audit_path = memory_path.parent / "agents" / "__default__" / ".metadata" / "eviction-audit.json"
+    assert audit_path.is_file()
+    assert "Never repeat this corrected behavior" not in audit_path.read_text()
+
+
+def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_dir, recent_fact_timestamp):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "fact_eviction_shadow_enabled": True,
+            "max_facts": 10,
+        }
+    )
+    facts = [
+        *[
+            {
+                "id": f"high_{index}",
+                "content": f"high {index}",
+                "category": "preference",
+                "confidence": 0.99,
+                "createdAt": recent_fact_timestamp,
+            }
+            for index in range(8)
+        ],
+        {
+            "id": "stale_high",
+            "content": "stale high confidence",
+            "category": "preference",
+            "confidence": 0.9,
+            "createdAt": "2025-01-01T00:00:00Z",
+        },
+        {
+            "id": "confirmed_recently",
+            "content": "recently confirmed preference",
+            "category": "preference",
+            "confidence": 0.7,
+            "createdAt": "2025-01-01T00:00:00Z",
+            "lastConfirmedAt": recent_fact_timestamp,
+        },
+    ]
+    dm.import_memory({"user": {}, "history": {}, "facts": facts}, user_id="u1")
+
+    memory, _ = dm.create_fact("new useful context", confidence=0.8, user_id="u1")
+
+    kept_ids = {fact["id"] for fact in memory["facts"]}
+    assert "stale_high" in kept_ids
+    assert "confirmed_recently" not in kept_ids
+    memory_path = dm._storage._get_memory_file_path("__default__", user_id="u1")
+    audit = (memory_path.parent / "agents" / "__default__" / ".metadata" / "eviction-audit.json").read_text()
+    assert '"disagrees": true' in audit
+
+
+def test_clear_memory_removes_usage_and_eviction_sidecars(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "max_facts": 10,
+        }
+    )
+    for index in range(10):
+        dm.create_fact(f"query fact {index}", confidence=0.9, user_id="u1")
+    dm.search("query", user_id="u1")
+    dm.create_fact("capacity rejected", confidence=0.1, user_id="u1")
+    memory_path = dm._storage._get_memory_file_path("__default__", user_id="u1")
+    metadata_path = memory_path.parent / "agents" / "__default__" / ".metadata"
+    assert metadata_path.is_dir()
+
+    dm.clear_memory(user_id="u1")
+
+    assert not metadata_path.exists()
 
 
 def test_is_human_clarification_response_matches_host_read():
@@ -430,3 +1092,76 @@ def test_from_backend_config_null_values_do_not_warn_as_unknown(caplog):
     with caplog.at_level("WARNING", logger=cfg_logger):
         DeerMemConfig.from_backend_config({"model": None})
     assert not any("Unknown backend_config keys" in r.message for r in caplog.records)
+
+
+def test_apply_updates_cognitive_style_and_fact_category(deermem_data_dir) -> None:
+    dm = DeerMem(backend_config=None)
+    current_memory = dm.get_memory(user_id="cognitive-user")
+
+    result = dm._updater._apply_updates(
+        current_memory,
+        {
+            "user": {
+                "cognitiveStyle": {
+                    "summary": "Prefers conclusions first, then details.",
+                    "shouldUpdate": True,
+                    "scope": "user",
+                    "authority": "descriptive",
+                }
+            },
+            "newFacts": [
+                {
+                    "content": "User prefers conclusions before implementation details.",
+                    "category": "cognitive",
+                    "confidence": 0.92,
+                    "scope": "user",
+                    "durability": "durable",
+                    "authority": "descriptive",
+                }
+            ],
+        },
+        thread_id="thread-cognitive",
+    )
+
+    assert result["user"]["cognitiveStyle"]["summary"] == "Prefers conclusions first, then details."
+    assert result["user"]["cognitiveStyle"]["updatedAt"]
+    assert result["facts"][0]["category"] == "cognitive"
+    assert result["facts"][0]["source"] == "thread-cognitive"
+
+
+def test_import_memory_persists_normalized_legacy_payload(deermem_data_dir) -> None:
+    dm = DeerMem(backend_config=None)
+    legacy = {
+        "version": "1.0",
+        "lastUpdated": "",
+        "user": {},
+        "history": {},
+        "facts": [{"content": "User prefers conclusions first.", "category": "cognitive"}],
+    }
+
+    result = dm.import_memory(legacy, user_id="legacy-user")
+
+    assert result["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert result["facts"][0]["id"].startswith("fact_")
+    assert result["facts"][0]["category"] == "cognitive"
+    assert result["facts"][0]["confidence"] == 0.5
+    assert result["facts"][0]["createdAt"] == ""
+    assert result["facts"][0]["source"] == "unknown"
+
+
+@pytest.mark.parametrize("facts", [[{"id": "keep", "content": "   "}], [None], {}, None, "missing", [{"id": "keep", "content": 42}], [{"id": "new", "content": "valid"}, {}]])
+def test_replacement_import_rejects_unrecoverable_facts_without_writes(deermem_data_dir, facts):
+    dm = DeerMem(backend_config=None)
+    before = dm.import_memory({"user": {}, "history": {}, "facts": [{"id": "keep", "content": "Saved preference"}]}, user_id="alice")
+    snapshot = {str(path.relative_to(deermem_data_dir)): path.read_bytes() for path in deermem_data_dir.rglob("*") if path.is_file()}
+
+    payload = {"user": {}, "history": {}, "facts": facts}
+    if facts == "missing":
+        payload.pop("facts")
+    with pytest.raises(ValueError, match="facts"):
+        dm.import_memory(payload, user_id="alice")
+
+    assert {str(path.relative_to(deermem_data_dir)): path.read_bytes() for path in deermem_data_dir.rglob("*") if path.is_file()} == snapshot
+    reloaded = DeerMem(backend_config=None).get_memory(user_id="alice")
+    assert reloaded["facts"] == before["facts"]
+    assert reloaded["revision"] == before["revision"]

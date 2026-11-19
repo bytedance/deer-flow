@@ -13,20 +13,20 @@ def _queue(updater: MagicMock | None = None) -> MemoryUpdateQueue:
 
 def test_queue_add_preserves_existing_correction_flag_for_same_thread() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
-        queue.add(thread_id="thread-1", messages=["first"], correction_detected=True)
-        queue.add(thread_id="thread-1", messages=["second"], correction_detected=False)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], signals=frozenset({"correction"}))
+        queue.add(thread_id="thread-1", messages=["second"], signals=frozenset())
 
-    assert len(queue._queue) == 1
-    assert queue._queue[0].messages == ["second"]
-    assert queue._queue[0].correction_detected is True
+    assert len(queue._items) == 1
+    assert queue._items[0].messages == ["second"]
+    assert "correction" in queue._items[0].signals
 
 
 def test_process_queue_forwards_correction_flag_to_updater() -> None:
     mock_updater = MagicMock()
     mock_updater.update_memory.return_value = True
     queue = _queue(mock_updater)
-    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent", correction_detected=True)]
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent", signals=frozenset({"correction"}))]
 
     queue._process_queue()
 
@@ -34,29 +34,30 @@ def test_process_queue_forwards_correction_flag_to_updater() -> None:
         messages=["conversation"],
         thread_id="thread-1",
         agent_name="lead_agent",
-        correction_detected=True,
-        reinforcement_detected=False,
+        signals=frozenset({"correction"}),
         user_id=None,
         trace_id=None,
+        bypass_watermark=False,
+        judge=True,
     )
 
 
 def test_queue_add_preserves_existing_reinforcement_flag_for_same_thread() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
-        queue.add(thread_id="thread-1", messages=["first"], reinforcement_detected=True)
-        queue.add(thread_id="thread-1", messages=["second"], reinforcement_detected=False)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], signals=frozenset({"reinforcement"}))
+        queue.add(thread_id="thread-1", messages=["second"], signals=frozenset())
 
-    assert len(queue._queue) == 1
-    assert queue._queue[0].messages == ["second"]
-    assert queue._queue[0].reinforcement_detected is True
+    assert len(queue._items) == 1
+    assert queue._items[0].messages == ["second"]
+    assert "reinforcement" in queue._items[0].signals
 
 
 def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
     mock_updater = MagicMock()
     mock_updater.update_memory.return_value = True
     queue = _queue(mock_updater)
-    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent", reinforcement_detected=True)]
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent", signals=frozenset({"reinforcement"}))]
 
     queue._process_queue()
 
@@ -64,10 +65,11 @@ def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
         messages=["conversation"],
         thread_id="thread-1",
         agent_name="lead_agent",
-        correction_detected=False,
-        reinforcement_detected=True,
+        signals=frozenset({"reinforcement"}),
         user_id=None,
         trace_id=None,
+        bypass_watermark=False,
+        judge=True,
     )
 
 
@@ -99,7 +101,7 @@ def test_add_nowait_cancels_existing_timer_and_starts_immediate_timer() -> None:
     existing_timer.cancel.assert_called_once_with()
     timer_cls.assert_called_once_with(0, queue._process_queue)
     assert queue.pending_count == 1
-    assert queue._queue[0].agent_name == "lead-agent"
+    assert queue._items[0].agent_name == "lead-agent"
     assert created_timer.daemon is True
     created_timer.start.assert_called_once_with()
 
@@ -127,14 +129,14 @@ def test_finishing_worker_reschedules_once_when_reprocess_pending() -> None:
     schedules exactly one follow-up run (not a per-arrival timer spin)."""
     mock_updater = MagicMock()
     queue = _queue(mock_updater)
-    queue._queue = [ConversationContext(thread_id="thread-1", messages=["first"], agent_name="lead_agent")]
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["first"], agent_name="lead_agent")]
     queue._reprocess_pending = True
     created_timer = MagicMock()
 
     def _enqueue_more_while_processing(**_kwargs) -> bool:
         # Simulate a new update arriving mid-processing so the finally block sees
         # remaining work and reschedules exactly once.
-        queue._queue.append(ConversationContext(thread_id="thread-2", messages=["second"], agent_name="lead_agent"))
+        queue._items.append(ConversationContext(thread_id="thread-2", messages=["second"], agent_name="lead_agent"))
         return True
 
     mock_updater.update_memory.side_effect = _enqueue_more_while_processing
@@ -142,7 +144,7 @@ def test_finishing_worker_reschedules_once_when_reprocess_pending() -> None:
     with patch("deerflow.agents.memory.backends.deermem.deermem.core.queue.threading.Timer", return_value=created_timer) as timer_cls:
         queue._process_queue()
 
-    timer_cls.assert_called_once_with(0, queue._process_queue)
+    timer_cls.assert_called_once_with(0.05, queue._process_queue)
     assert created_timer.daemon is True
     created_timer.start.assert_called_once_with()
     assert queue._reprocess_pending is False
@@ -154,7 +156,7 @@ def test_finishing_worker_does_not_reschedule_when_no_work_remains() -> None:
     mock_updater = MagicMock()
     mock_updater.update_memory.return_value = True
     queue = _queue(mock_updater)
-    queue._queue = [ConversationContext(thread_id="thread-1", messages=["only"], agent_name="lead_agent")]
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["only"], agent_name="lead_agent")]
     queue._reprocess_pending = True
 
     with patch("deerflow.agents.memory.backends.deermem.deermem.core.queue.threading.Timer") as timer_cls:
@@ -188,29 +190,29 @@ def test_flush_nowait_is_non_blocking() -> None:
 
 def test_queue_keeps_updates_for_different_agents_in_same_thread() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
+    with patch.object(queue, "_rearm_timer_locked"):
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
     assert queue.pending_count == 2
-    assert [context.agent_name for context in queue._queue] == ["agent-a", "agent-b"]
+    assert [context.agent_name for context in queue._items] == ["agent-a", "agent-b"]
 
 
 def test_queue_still_coalesces_updates_for_same_agent_in_same_thread() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
-        queue.add(thread_id="thread-1", messages=["first"], agent_name="agent-a", correction_detected=True)
-        queue.add(thread_id="thread-1", messages=["second"], agent_name="agent-a", correction_detected=False)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="agent-a", signals=frozenset({"correction"}))
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="agent-a", signals=frozenset())
 
     assert queue.pending_count == 1
-    assert queue._queue[0].agent_name == "agent-a"
-    assert queue._queue[0].messages == ["second"]
-    assert queue._queue[0].correction_detected is True
+    assert queue._items[0].agent_name == "agent-a"
+    assert queue._items[0].messages == ["second"]
+    assert "correction" in queue._items[0].signals
 
 
 def test_process_queue_updates_different_agents_in_same_thread_separately() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
+    with patch.object(queue, "_rearm_timer_locked"):
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
@@ -224,8 +226,8 @@ def test_process_queue_updates_different_agents_in_same_thread_separately() -> N
     assert mock_updater.update_memory.call_count == 2
     mock_updater.update_memory.assert_has_calls(
         [
-            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", correction_detected=False, reinforcement_detected=False, user_id=None, trace_id=None),
-            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", correction_detected=False, reinforcement_detected=False, user_id=None, trace_id=None),
+            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, judge=True),
+            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, judge=True),
         ]
     )
 
@@ -234,7 +236,7 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
     mock_updater = MagicMock()
     mock_updater.update_memory.return_value = True
     queue = _queue(mock_updater)
-    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent", trace_id="trace-memory-1")]
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent", trace_id="trace-memory-1")]
 
     queue._process_queue()
 
@@ -242,10 +244,11 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
         messages=["conversation"],
         thread_id="thread-1",
         agent_name="lead_agent",
-        correction_detected=False,
-        reinforcement_detected=False,
+        signals=frozenset(),
         user_id=None,
         trace_id="trace-memory-1",
+        bypass_watermark=False,
+        judge=True,
     )
 
 
@@ -272,7 +275,7 @@ def test_flush_sync_drains_pending_queue_and_returns_true() -> None:
     mock_updater = MagicMock()
     mock_updater.update_memory.return_value = True
     queue = _queue(mock_updater)
-    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
 
     with (
         patch(_QUEUE_MODULE + ".MemoryUpdater", create=True),
@@ -286,17 +289,18 @@ def test_flush_sync_drains_pending_queue_and_returns_true() -> None:
         messages=["conversation"],
         thread_id="thread-1",
         agent_name="lead_agent",
-        correction_detected=False,
-        reinforcement_detected=False,
+        signals=frozenset(),
         user_id=None,
         trace_id=None,
+        bypass_watermark=False,
+        judge=False,
     )
 
 
 def test_flush_sync_returns_false_when_flush_exceeds_timeout() -> None:
     """flush_sync does not block past ``timeout``; a slow flush returns False."""
     queue = _queue()
-    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
     release = threading.Event()
 
     def _slow_flush() -> None:
@@ -379,7 +383,7 @@ def test_flush_sync_returns_false_when_flush_raises() -> None:
     caller never logs a contradictory 'completed' next to the exception
     (review comment #2)."""
     queue = _queue()
-    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
 
     with patch.object(queue, "flush", side_effect=RuntimeError("boom")):
         completed = queue.flush_sync(timeout=5.0)
@@ -393,7 +397,7 @@ def test_flush_sync_skips_inter_item_delay_on_drain_path() -> None:
     mock_updater = MagicMock()
     mock_updater.update_memory.return_value = True
     queue = _queue(mock_updater)
-    queue._queue = [ConversationContext(thread_id=f"thread-{i}", messages=["conversation"], agent_name="lead_agent") for i in range(3)]
+    queue._items = [ConversationContext(thread_id=f"thread-{i}", messages=["conversation"], agent_name="lead_agent") for i in range(3)]
 
     with patch(_QUEUE_MODULE + ".time.sleep") as mock_sleep:
         completed = queue.flush_sync(timeout=5.0)
@@ -403,3 +407,105 @@ def test_flush_sync_skips_inter_item_delay_on_drain_path() -> None:
     # No inter-item rate-limit sleep on the drain path.
     mock_sleep.assert_not_called()
     assert mock_updater.update_memory.call_count == 3
+
+
+def test_cancel_by_agent_drops_matching_pending_and_preserves_others() -> None:
+    """#5037: deleting/clearing an agent must drop its debounce buffer only."""
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["keep"], agent_name="alice", user_id="u1")
+        queue.add(thread_id="t2", messages=["drop"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t3", messages=["other-user"], agent_name="bob", user_id="u2")
+
+    existing_timer = MagicMock()
+    queue._timer = existing_timer
+
+    removed = queue.cancel_by_agent("bob", user_id="u1")
+
+    assert removed == 1
+    assert queue.pending_count == 2
+    assert {(c.agent_name, c.user_id) for c in queue._items} == {("alice", "u1"), ("bob", "u2")}
+    existing_timer.cancel.assert_not_called()
+
+
+def test_cancel_by_agent_all_agents_for_user_cancels_timer_when_empty() -> None:
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["a"], agent_name="alice", user_id="u1")
+        queue.add(thread_id="t2", messages=["b"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t3", messages=["c"], agent_name="alice", user_id="u2")
+
+    existing_timer = MagicMock()
+    queue._timer = existing_timer
+
+    removed = queue.cancel_by_agent(user_id="u1", all_agents=True)
+
+    assert removed == 2
+    assert queue.pending_count == 1
+    assert queue._items[0].user_id == "u2"
+    existing_timer.cancel.assert_not_called()
+
+    removed_rest = queue.cancel_by_agent(user_id="u2", all_agents=True)
+    assert removed_rest == 1
+    assert queue.pending_count == 0
+    existing_timer.cancel.assert_called_once_with()
+    assert queue._timer is None
+
+
+def test_cancel_by_agent_without_user_id_only_drops_legacy_scope() -> None:
+    """user_id=None mirrors storage: legacy root only, not every user."""
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["legacy"], agent_name="bob", user_id=None)
+        queue.add(thread_id="t2", messages=["alice"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t3", messages=["other"], agent_name="alice", user_id=None)
+
+    removed = queue.cancel_by_agent("bob", user_id=None)
+
+    assert removed == 1
+    assert {(c.agent_name, c.user_id) for c in queue._items} == {("bob", "u1"), ("alice", None)}
+
+
+def test_cancel_all_agents_without_user_id_only_drops_legacy_scope() -> None:
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["legacy-a"], agent_name="a", user_id=None)
+        queue.add(thread_id="t2", messages=["legacy-b"], agent_name="b", user_id=None)
+        queue.add(thread_id="t3", messages=["named"], agent_name="a", user_id="u1")
+
+    removed = queue.cancel_by_agent(user_id=None, all_agents=True)
+
+    assert removed == 2
+    assert queue.pending_count == 1
+    assert queue._items[0].user_id == "u1"
+
+
+def test_cancel_by_agent_does_not_touch_in_flight_batch() -> None:
+    """Contexts already pulled out of `_items` keep running (#5037 residual)."""
+    mock_updater = MagicMock()
+    mock_updater.update_memory.return_value = True
+    queue = _queue(mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["in-flight"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t2", messages=["still-pending"], agent_name="bob", user_id="u1")
+
+    with queue._lock:
+        in_flight = queue._items[:1]
+        queue._items = queue._items[1:]
+        queue._processing = True
+
+    removed = queue.cancel_by_agent("bob", user_id="u1")
+    assert removed == 1
+    assert queue.pending_count == 0
+    # Simulate the worker finishing the already-pulled context.
+    mock_updater.update_memory(
+        messages=in_flight[0].messages,
+        thread_id=in_flight[0].thread_id,
+        agent_name=in_flight[0].agent_name,
+        signals=frozenset(),
+        user_id=in_flight[0].user_id,
+        trace_id=None,
+        bypass_watermark=False,
+        judge=True,
+    )
+    mock_updater.update_memory.assert_called_once()

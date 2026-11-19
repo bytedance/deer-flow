@@ -30,6 +30,7 @@ every backend benefits from a single fix instead of per-provider patches.
 from collections.abc import Awaitable, Callable
 from typing import override
 
+from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
@@ -106,6 +107,7 @@ def _coalesce_request(request: ModelRequest) -> ModelRequest | None:
     merged_kwargs: dict = {}
     for p in parts:
         merged_kwargs.update(p.additional_kwargs or {})
+    merged_kwargs.update(provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "system_coalescing"))
     merged = SystemMessage(
         content="\n\n".join(_flatten_content(p.content) for p in parts),
         id=first.id,
@@ -125,6 +127,14 @@ class SystemMessageCoalescingMiddleware(AgentMiddleware[AgentState]):
     keeps the checkpoint structure intact for every consumer that scans history
     (memory builder, journal, summarization, dynamic-context detection).
     """
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        # No constructor parameters: the merge strategy and reminder-dedup rule
+        # below are the middleware's entire behaviour, so they are the policy.
+        return {
+            "strategy": "merge_leading_system_message",
+            "dynamic_context_reminder_dedup": "keep_last",
+        }
 
     @staticmethod
     def _maybe_coalesce(request: ModelRequest) -> ModelRequest:

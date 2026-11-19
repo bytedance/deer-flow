@@ -12,7 +12,13 @@ import {
   XIcon,
   ZapIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import { toast } from "sonner";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
@@ -48,25 +54,38 @@ import {
   DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
+import {
+  isArtifactRewriteClarification,
+  type ArtifactSelectionEdit,
+} from "@/core/artifacts/selection";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
-  hasOpenHumanInputRequest,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import {
+  getResolvedMode,
+  isThinkingRequired,
+  reasoningEffortForMode,
+  resolveReasoningEffort,
+  supportsThinking as modelSupportsThinking,
+} from "@/core/models/reasoning";
 import type { Model } from "@/core/models/types";
 import { useLocalSettings } from "@/core/settings";
 import {
   buildParentConversationContext,
   buildReferenceMessageMetadata,
   buildSidecarContextPrompt,
+  isSameSidecarContext,
 } from "@/core/sidecar";
 import { createSidecarThread } from "@/core/sidecar/api";
 import {
   useDeleteThread,
+  useThreadMetadata,
   useThreadStream,
   type ThreadStreamOptions,
 } from "@/core/threads/hooks";
@@ -80,20 +99,17 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../../ai-elements/model-selector";
 import { MessageList, MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "../messages";
 import { useThread as useParentThread } from "../messages/context";
 import { ModeHoverGuide } from "../mode-hover-guide";
+import {
+  ModelPicker,
+  ModelPickerContent,
+  ModelPickerTrigger,
+} from "../model-picker-content";
 import { Tooltip } from "../tooltip";
 
+import { ArtifactRewriteReview } from "./artifact-rewrite-review";
 import { type SidecarReference, useSidecar } from "./context";
 import { ReferenceAttachmentSummary } from "./reference-attachments";
 
@@ -117,29 +133,6 @@ function buildHiddenSidecarContextMessage({
 
 type SidecarInputMode = NonNullable<ThreadStreamOptions["context"]["mode"]>;
 
-function getResolvedMode(
-  mode: ThreadStreamOptions["context"]["mode"],
-  supportsThinking: boolean,
-): SidecarInputMode {
-  if (!supportsThinking && mode !== "flash") {
-    return "flash";
-  }
-  if (mode) {
-    return mode;
-  }
-  return supportsThinking ? "pro" : "flash";
-}
-
-function reasoningEffortForMode(mode: SidecarInputMode) {
-  return mode === "ultra"
-    ? "high"
-    : mode === "pro"
-      ? "medium"
-      : mode === "thinking"
-        ? "low"
-        : "minimal";
-}
-
 function promptMessageFiles(message: PromptInputMessage) {
   return message.files.flatMap((file) =>
     file.file instanceof File ? [file.file] : [],
@@ -148,6 +141,8 @@ function promptMessageFiles(message: PromptInputMessage) {
 
 export function SidecarPanel({ className }: { className?: string }) {
   const { t } = useI18n();
+  const { user } = useAuth();
+  const canDeleteThreads = hasPermission(user, PERMISSIONS.THREADS_DELETE);
   const sidecar = useSidecar();
   const { thread: parentThread } = useParentThread();
   const [localSettings] = useLocalSettings();
@@ -160,6 +155,11 @@ export function SidecarPanel({ className }: { className?: string }) {
   const [queuedSubmit, setQueuedSubmit] = useState<{
     message: PromptInputMessage;
     references: SidecarReference[];
+    artifactEdit: ArtifactSelectionEdit | null;
+    onSent: () => void;
+    // Settles the composer's submit with the queued send's outcome.
+    resolve: () => void;
+    reject: (error: unknown) => void;
   } | null>(null);
   const { data: uploadLimits } = useUploadLimits(
     sidecar.sidecarThreadId ?? sidecar.parentThreadId,
@@ -175,7 +175,10 @@ export function SidecarPanel({ className }: { className?: string }) {
     );
   }, [models, sidecar.context.model_name]);
 
-  const supportThinking = selectedModel?.supports_thinking ?? false;
+  const threadMetadata = useThreadMetadata(sidecar.sidecarThreadId, {
+    enabled: !sidecar.isMock,
+    isMock: sidecar.isMock,
+  });
 
   const {
     thread,
@@ -184,6 +187,10 @@ export function SidecarPanel({ className }: { className?: string }) {
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    approvalRequests,
+    hasPendingApproval,
+    submitHitlApproval,
+    waitingForInputRunIds,
   } = useThreadStream({
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
@@ -192,6 +199,9 @@ export function SidecarPanel({ className }: { className?: string }) {
     onStart: (createdThreadId) => {
       sidecar.setSidecarThreadId(createdThreadId);
     },
+    restInterrupts: threadMetadata.data?.interrupts,
+    restInterruptsLoading: threadMetadata.isLoading,
+    restInterruptsError: threadMetadata.isError,
   });
 
   const referenceCountLabel = useMemo(() => {
@@ -209,14 +219,6 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const hasPendingReferences = sidecar.activeReferences.length > 0;
   const hasSidecarThread = Boolean(sidecar.sidecarThreadId);
-  const hasOpenHumanInputCard = useMemo(
-    () =>
-      hasOpenHumanInputRequest(
-        thread.messages,
-        (message) => !isHiddenFromUIMessage(message),
-      ),
-    [thread.messages],
-  );
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
     : "off";
@@ -226,9 +228,9 @@ export function SidecarPanel({ className }: { className?: string }) {
     creatingThread ||
     Boolean(queuedSubmit) ||
     isUploading ||
-    hasOpenHumanInputCard ||
     (hasSidecarThread && isHistoryLoading) ||
     (sidecar.isMock ?? false) ||
+    hasPendingApproval ||
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
 
   useEffect(() => {
@@ -241,13 +243,17 @@ export function SidecarPanel({ className }: { className?: string }) {
     );
     const fallbackModel = currentModel ?? models[0]!;
     const nextModelName = fallbackModel.name;
-    const nextMode = getResolvedMode(
-      sidecar.context.mode,
-      fallbackModel.supports_thinking ?? false,
-    );
+    const nextMode = getResolvedMode(sidecar.context.mode, fallbackModel);
     const modeChanged = sidecar.context.mode !== nextMode;
+    const nextEffort = modeChanged
+      ? reasoningEffortForMode(nextMode, fallbackModel)
+      : resolveReasoningEffort(fallbackModel, sidecar.context.reasoning_effort);
 
-    if (sidecar.context.model_name === nextModelName && !modeChanged) {
+    if (
+      sidecar.context.model_name === nextModelName &&
+      !modeChanged &&
+      nextEffort === sidecar.context.reasoning_effort
+    ) {
       return;
     }
 
@@ -255,9 +261,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       ...sidecar.context,
       model_name: nextModelName,
       mode: nextMode,
-      reasoning_effort: modeChanged
-        ? reasoningEffortForMode(nextMode)
-        : sidecar.context.reasoning_effort,
+      reasoning_effort: nextEffort,
     });
   }, [models, sidecar]);
 
@@ -294,18 +298,15 @@ export function SidecarPanel({ className }: { className?: string }) {
       if (!model) {
         return;
       }
-      const nextMode = getResolvedMode(
-        sidecar.context.mode,
-        model.supports_thinking ?? false,
-      );
+      const nextMode = getResolvedMode(sidecar.context.mode, model);
       const modeChanged = sidecar.context.mode !== nextMode;
       sidecar.setContext({
         ...sidecar.context,
         model_name: modelName,
         mode: nextMode,
         reasoning_effort: modeChanged
-          ? reasoningEffortForMode(nextMode)
-          : sidecar.context.reasoning_effort,
+          ? reasoningEffortForMode(nextMode, model)
+          : resolveReasoningEffort(model, sidecar.context.reasoning_effort),
       });
       setModelDialogOpen(false);
     },
@@ -314,14 +315,14 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const handleModeSelect = useCallback(
     (mode: SidecarInputMode) => {
-      const nextMode = getResolvedMode(mode, supportThinking);
+      const nextMode = getResolvedMode(mode, selectedModel);
       sidecar.setContext({
         ...sidecar.context,
         mode: nextMode,
-        reasoning_effort: reasoningEffortForMode(nextMode),
+        reasoning_effort: reasoningEffortForMode(nextMode, selectedModel),
       });
     },
-    [sidecar, supportThinking],
+    [sidecar, selectedModel],
   );
 
   const ensureSidecarThread = useCallback(
@@ -356,17 +357,31 @@ export function SidecarPanel({ className }: { className?: string }) {
       threadId: string,
       message: PromptInputMessage,
       references: SidecarReference[],
+      artifactEdit: ArtifactSelectionEdit | null,
       onSent?: () => void,
       additionalKwargs?: Record<string, unknown>,
     ) => {
-      const contexts = references.map((reference) => reference.context);
+      const referencedContexts = references.map(
+        (reference) => reference.context,
+      );
+      const contexts = artifactEdit
+        ? [
+            artifactEdit.context,
+            ...referencedContexts.filter(
+              (context) => !isSameSidecarContext(context, artifactEdit.context),
+            ),
+          ]
+        : referencedContexts;
       const parentConversation = buildParentConversationContext(
         parentThread.messages,
       );
-      const hiddenContextPrompt =
+      let hiddenContextPrompt =
         contexts.length > 0 || parentConversation.length > 0
           ? buildSidecarContextPrompt(contexts, { parentConversation })
           : null;
+      if (artifactEdit) {
+        hiddenContextPrompt = `${hiddenContextPrompt ?? ""}\n\nRewrite only the first referenced passage (the artifact selection) according to the user's request. Other references provide context. Return the replacement text itself, without explanations or an enclosing code fence. Preserve surrounding Markdown structure when relevant. The user will review the replacement and apply it to the original file's draft; do not write or recreate that file in this side chat.`;
+      }
       await sendMessage(threadId, message, undefined, {
         additionalInputMessages: hiddenContextPrompt
           ? [
@@ -378,6 +393,7 @@ export function SidecarPanel({ className }: { className?: string }) {
           : [],
         additionalKwargs: {
           sidecar_visible_message: true,
+          ...(artifactEdit ? { artifact_selection_edit: artifactEdit.id } : {}),
           ...(contexts.length > 0
             ? buildReferenceMessageMetadata(contexts)
             : {}),
@@ -397,6 +413,7 @@ export function SidecarPanel({ className }: { className?: string }) {
 
       let sent = false;
       const pendingReferences = [...sidecar.activeReferences];
+      const edit = sidecar.artifactEdit;
       await submitToSidecarThread(
         sidecar.sidecarThreadId,
         {
@@ -404,6 +421,14 @@ export function SidecarPanel({ className }: { className?: string }) {
           files: [],
         },
         pendingReferences,
+        edit &&
+          isArtifactRewriteClarification(
+            thread.messages,
+            edit.id,
+            request.request_id,
+          )
+          ? edit
+          : null,
         () => {
           sent = true;
           if (pendingReferences.length > 0) {
@@ -417,7 +442,18 @@ export function SidecarPanel({ className }: { className?: string }) {
       );
       return sent;
     },
-    [sidecar, submitToSidecarThread],
+    [sidecar, submitToSidecarThread, thread.messages],
+  );
+
+  const handleSubmitApproval = useCallback(
+    (
+      request: (typeof approvalRequests)[number],
+      responses: Parameters<typeof submitHitlApproval>[2],
+    ) =>
+      sidecar.sidecarThreadId
+        ? submitHitlApproval(sidecar.sidecarThreadId, request, responses)
+        : false,
+    [sidecar.sidecarThreadId, submitHitlApproval],
   );
 
   useEffect(() => {
@@ -431,29 +467,19 @@ export function SidecarPanel({ className }: { className?: string }) {
       sidecar.sidecarThreadId,
       nextSubmit.message,
       nextSubmit.references,
-      // Clear references only once the send genuinely proceeds; a send dropped
-      // by the in-flight guard leaves them attached instead of losing them.
-      () => {
-        if (nextSubmit.references.length > 0) {
-          sidecar.clearActiveReferences();
-        }
-      },
-    ).catch((error) => {
-      toast.error(
-        error instanceof Error ? error.message : t.sidecar.sendFailed,
-      );
-    });
+      nextSubmit.artifactEdit,
+      nextSubmit.onSent,
+    ).then(nextSubmit.resolve, nextSubmit.reject);
   }, [
     queuedSubmit,
     sidecar,
     sidecar.sidecarThreadId,
     submitToSidecarThread,
-    t.sidecar.sendFailed,
     thread.isLoading,
   ]);
 
   const handleSubmit = useCallback(
-    async (message: PromptInputMessage) => {
+    async (message: PromptInputMessage, event: FormEvent<HTMLFormElement>) => {
       const text = message.text.trim();
       const files = promptMessageFiles(message);
       if ((!text && message.files.length === 0) || disabled) {
@@ -466,10 +492,29 @@ export function SidecarPanel({ className }: { className?: string }) {
       }
 
       const pendingReferences = [...sidecar.activeReferences];
+      const edit = sidecar.artifactEdit;
+      const submitter = (event.nativeEvent as SubmitEvent).submitter;
+      const artifactEdit =
+        submitter?.getAttribute("value") === "rewrite" ? edit : null;
+      const onSent = () => {
+        if (pendingReferences.length > 0) sidecar.clearActiveReferences();
+        if (edit && !artifactEdit) sidecar.clearArtifactEdit(edit.id);
+      };
       try {
         if (!sidecar.sidecarThreadId) {
           await ensureSidecarThread(pendingReferences);
-          setQueuedSubmit({ message, references: pendingReferences });
+          // The first send waits for the new thread to reach the stream hook.
+          // Settle with that send so the composer clears only once it is sent.
+          await new Promise<void>((resolve, reject) => {
+            setQueuedSubmit({
+              message,
+              references: pendingReferences,
+              artifactEdit,
+              onSent,
+              resolve,
+              reject,
+            });
+          });
           return;
         }
 
@@ -477,16 +522,15 @@ export function SidecarPanel({ className }: { className?: string }) {
           sidecar.sidecarThreadId,
           message,
           pendingReferences,
-          () => {
-            if (pendingReferences.length > 0) {
-              sidecar.clearActiveReferences();
-            }
-          },
+          artifactEdit,
+          onSent,
         );
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : t.sidecar.sendFailed,
         );
+        // Reject so PromptInput keeps the draft and attachments for a retry.
+        throw error;
       }
     },
     [
@@ -500,11 +544,16 @@ export function SidecarPanel({ className }: { className?: string }) {
     ],
   );
 
-  const discardDraftAndClose = useCallback(() => {
+  const clearSelectedReferences = useCallback(() => {
+    sidecar.clearArtifactEdit();
     sidecar.clearActiveReferences();
+  }, [sidecar]);
+
+  const discardDraftAndClose = useCallback(() => {
+    clearSelectedReferences();
     sidecar.setSidecarThreadId(null);
     sidecar.close();
-  }, [sidecar]);
+  }, [clearSelectedReferences, sidecar]);
 
   const handleDelete = useCallback(async () => {
     const threadId = sidecar.sidecarThreadId;
@@ -550,7 +599,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 : t.sidecar.noContext}
           </div>
         </div>
-        {hasSidecarThread ? (
+        {hasSidecarThread && canDeleteThreads && (
           <Tooltip content={t.sidecar.delete}>
             <Button
               aria-label={t.sidecar.delete}
@@ -563,22 +612,21 @@ export function SidecarPanel({ className }: { className?: string }) {
               <Trash2Icon />
             </Button>
           </Tooltip>
-        ) : (
-          // No conversation yet — nothing to delete, so this just discards the
-          // draft and closes the panel. A plain X (no confirm) keeps it light.
-          <Tooltip content={t.common.close}>
-            <Button
-              aria-label={t.common.close}
-              className="text-muted-foreground hover:text-foreground"
-              data-testid="sidecar-close-button"
-              size="icon-sm"
-              variant="ghost"
-              onClick={() => discardDraftAndClose()}
-            >
-              <XIcon />
-            </Button>
-          </Tooltip>
         )}
+        <Tooltip content={t.common.close}>
+          <Button
+            aria-label={t.common.close}
+            className="text-muted-foreground hover:text-foreground"
+            data-testid="sidecar-close-button"
+            size="icon-sm"
+            variant="ghost"
+            onClick={() =>
+              hasSidecarThread ? sidecar.close() : discardDraftAndClose()
+            }
+          >
+            <XIcon />
+          </Button>
+        </Tooltip>
       </header>
 
       <div className="min-h-0 flex-1">
@@ -596,6 +644,18 @@ export function SidecarPanel({ className }: { className?: string }) {
             sidecarSurface
             initialScroll="instant"
             resizeScroll="instant"
+            approvalRequests={approvalRequests}
+            approvalMetadataLoading={
+              hasPendingApproval && approvalRequests.length === 0
+            }
+            approvalMetadataError={
+              hasPendingApproval &&
+              approvalRequests.length === 0 &&
+              threadMetadata.isError
+            }
+            onReloadApprovalMetadata={() => threadMetadata.refetch()}
+            waitingForInputRunIds={waitingForInputRunIds}
+            onSubmitApproval={handleSubmitApproval}
             onSubmitHumanInput={
               sidecar.isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
                 ? undefined
@@ -611,6 +671,15 @@ export function SidecarPanel({ className }: { className?: string }) {
         )}
       </div>
 
+      {sidecar.artifactEdit && (
+        <ArtifactRewriteReview
+          key={sidecar.artifactEdit.id}
+          edit={sidecar.artifactEdit}
+          messages={thread.messages}
+          disabled={disabled || !!thread.error || parentThread.isLoading}
+          onCancel={() => sidecar.clearArtifactEdit()}
+        />
+      )}
       <div className="bg-background/95 shrink-0 px-3 pt-3 pb-4 sm:px-4">
         <PromptInputProvider key={sidecar.parentThreadId}>
           <PromptInput
@@ -631,7 +700,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 <ReferenceAttachmentSummary
                   references={sidecar.activeReferences}
                   testId="sidecar-reference-attachment"
-                  onClear={() => sidecar.clearActiveReferences()}
+                  onClear={clearSelectedReferences}
                 />
               )}
             </PromptInputHeader>
@@ -647,14 +716,13 @@ export function SidecarPanel({ className }: { className?: string }) {
                 <SidecarAddAttachmentsButton uploadLimits={uploadLimits} />
                 <SidecarModeMenu
                   context={sidecar.context}
-                  supportThinking={supportThinking}
+                  model={selectedModel}
                   onModeSelect={handleModeSelect}
                 />
               </PromptInputTools>
               <PromptInputTools className="min-w-0 justify-end">
                 <SidecarModelSelector
                   className="max-w-40 min-w-0 sm:max-w-56 @max-[240px]:hidden"
-                  context={sidecar.context}
                   models={models}
                   open={modelDialogOpen}
                   selectedModel={selectedModel}
@@ -673,6 +741,16 @@ export function SidecarPanel({ className }: { className?: string }) {
                     variant="outline"
                   />
                 </Tooltip>
+                {sidecar.artifactEdit && (
+                  <Button
+                    type="submit"
+                    value="rewrite"
+                    size="sm"
+                    disabled={disabled}
+                  >
+                    {t.artifactSelection.rewrite}
+                  </Button>
+                )}
               </PromptInputTools>
             </PromptInputFooter>
           </PromptInput>
@@ -762,15 +840,17 @@ function SidecarAddAttachmentsButton({
 
 function SidecarModeMenu({
   context,
-  supportThinking,
+  model,
   onModeSelect,
 }: {
   context: ThreadStreamOptions["context"];
-  supportThinking: boolean;
+  model: Model | undefined;
   onModeSelect: (mode: SidecarInputMode) => void;
 }) {
   const { t } = useI18n();
-  const mode = getResolvedMode(context.mode, supportThinking);
+  const supportThinking = modelSupportsThinking(model);
+  const thinkingRequired = isThinkingRequired(model);
+  const mode = getResolvedMode(context.mode, model);
 
   return (
     <PromptInputActionMenu>
@@ -802,34 +882,36 @@ function SidecarModeMenu({
           <DropdownMenuLabel className="text-muted-foreground text-xs">
             {t.inputBox.mode}
           </DropdownMenuLabel>
-          <PromptInputActionMenuItem
-            className={cn(
-              mode === "flash"
-                ? "text-accent-foreground"
-                : "text-muted-foreground/65",
-            )}
-            onSelect={() => onModeSelect("flash")}
-          >
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-1 font-bold">
-                <ZapIcon
-                  className={cn(
-                    "mr-2 size-4",
-                    mode === "flash" && "text-accent-foreground",
-                  )}
-                />
-                {t.inputBox.flashMode}
+          {!thinkingRequired && (
+            <PromptInputActionMenuItem
+              className={cn(
+                mode === "flash"
+                  ? "text-accent-foreground"
+                  : "text-muted-foreground/65",
+              )}
+              onSelect={() => onModeSelect("flash")}
+            >
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-1 font-bold">
+                  <ZapIcon
+                    className={cn(
+                      "mr-2 size-4",
+                      mode === "flash" && "text-accent-foreground",
+                    )}
+                  />
+                  {t.inputBox.flashMode}
+                </div>
+                <div className="pl-7 text-xs">
+                  {t.inputBox.flashModeDescription}
+                </div>
               </div>
-              <div className="pl-7 text-xs">
-                {t.inputBox.flashModeDescription}
-              </div>
-            </div>
-            {mode === "flash" ? (
-              <CheckIcon className="ml-auto size-4" />
-            ) : (
-              <div className="ml-auto size-4" />
-            )}
-          </PromptInputActionMenuItem>
+              {mode === "flash" ? (
+                <CheckIcon className="ml-auto size-4" />
+              ) : (
+                <div className="ml-auto size-4" />
+              )}
+            </PromptInputActionMenuItem>
+          )}
           {supportThinking && (
             <PromptInputActionMenuItem
               className={cn(
@@ -926,7 +1008,6 @@ function SidecarModeMenu({
 
 function SidecarModelSelector({
   className,
-  context,
   models,
   open,
   selectedModel,
@@ -934,54 +1015,33 @@ function SidecarModelSelector({
   onOpenChange,
 }: {
   className?: string;
-  context: ThreadStreamOptions["context"];
   models: Model[];
   open: boolean;
   selectedModel?: Model;
   onModelSelect: (modelName: string) => void;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useI18n();
-
   if (!selectedModel) {
     return null;
   }
 
   return (
-    <ModelSelector open={open} onOpenChange={onOpenChange}>
-      <ModelSelectorTrigger asChild>
+    <ModelPicker open={open} onOpenChange={onOpenChange}>
+      <ModelPickerTrigger asChild>
         <PromptInputButton className={cn("min-w-0 px-2!", className)}>
-          <div className="flex min-w-0 flex-col items-start text-left">
-            <ModelSelectorName className="truncate text-xs font-normal">
+          <div className="flex min-w-0 flex-col text-left">
+            <span className="flex-1 truncate text-left text-xs font-normal">
               {selectedModel.display_name}
-            </ModelSelectorName>
+            </span>
           </div>
         </PromptInputButton>
-      </ModelSelectorTrigger>
-      <ModelSelectorContent>
-        <ModelSelectorInput placeholder={t.inputBox.searchModels} />
-        <ModelSelectorList>
-          {models.map((model) => (
-            <ModelSelectorItem
-              key={model.name}
-              value={model.name}
-              onSelect={() => onModelSelect(model.name)}
-            >
-              <div className="flex min-w-0 flex-1 flex-col">
-                <ModelSelectorName>{model.display_name}</ModelSelectorName>
-                <span className="text-muted-foreground truncate text-[10px]">
-                  {model.model}
-                </span>
-              </div>
-              {model.name === context.model_name ? (
-                <CheckIcon className="ml-auto size-4" />
-              ) : (
-                <div className="ml-auto size-4" />
-              )}
-            </ModelSelectorItem>
-          ))}
-        </ModelSelectorList>
-      </ModelSelectorContent>
-    </ModelSelector>
+      </ModelPickerTrigger>
+      <ModelPickerContent
+        open={open}
+        models={models}
+        selectedModelName={selectedModel.name}
+        onModelSelect={onModelSelect}
+      />
+    </ModelPicker>
   );
 }

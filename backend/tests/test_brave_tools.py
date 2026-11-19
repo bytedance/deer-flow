@@ -354,6 +354,47 @@ class TestWebSearchTool:
         assert params["q"] == "hello world"
         assert params["count"] == 5
 
+    @pytest.mark.parametrize(
+        ("time_range", "expected_freshness"),
+        [
+            ("day", "pd"),
+            ("week", "pw"),
+            ("month", "pm"),
+            ("year", "py"),
+        ],
+    )
+    def test_maps_time_range_to_freshness(self, mock_config_with_key, time_range: str, expected_freshness: str):
+        results = [{"title": "T", "url": "https://x.com", "description": "D"}]
+        mock_resp = _make_brave_response(results)
+
+        with patch("deerflow.community.brave.tools.httpx.Client") as mock_client_cls:
+            mock_get = mock_client_cls.return_value.__enter__.return_value.get
+            mock_get.return_value = mock_resp
+
+            from deerflow.community.brave.tools import web_search_tool
+
+            web_search_tool.invoke({"query": "latest releases", "time_range": time_range})
+
+            params = mock_get.call_args.kwargs["params"]
+
+        assert params["freshness"] == expected_freshness
+
+    def test_omits_freshness_without_time_range(self, mock_config_with_key):
+        results = [{"title": "T", "url": "https://x.com", "description": "D"}]
+        mock_resp = _make_brave_response(results)
+
+        with patch("deerflow.community.brave.tools.httpx.Client") as mock_client_cls:
+            mock_get = mock_client_cls.return_value.__enter__.return_value.get
+            mock_get.return_value = mock_resp
+
+            from deerflow.community.brave.tools import web_search_tool
+
+            web_search_tool.invoke({"query": "stable documentation"})
+
+            params = mock_get.call_args.kwargs["params"]
+
+        assert "freshness" not in params
+
     def test_long_query_is_truncated_to_brave_limit(self, mock_config_with_key):
         results = [{"title": "T", "url": "https://x.com", "description": "D"}]
         mock_resp = _make_brave_response(results)
@@ -690,3 +731,10 @@ def test_package_exports_image_search_tool():
     from deerflow.community.brave.tools import image_search_tool as direct_image_search_tool
 
     assert image_search_tool is direct_image_search_tool
+
+
+def test_coerce_max_results_inf_falls_back_to_default():
+    """A YAML `.inf` max_results must fall back to the default, not crash."""
+    import deerflow.community.brave.tools as brave_mod
+
+    assert brave_mod._coerce_max_results(float("inf")) == brave_mod._DEFAULT_MAX_RESULTS

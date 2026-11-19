@@ -12,6 +12,36 @@ def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
+def _extract_nginx_location_block(content: str, location: str) -> str:
+    needle = f"location {location} {{"
+    start = content.find(needle)
+    assert start != -1, f"missing nginx {needle}"
+
+    brace_start = content.find("{", start)
+    assert brace_start != -1, f"missing nginx block opener for {needle}"
+
+    depth = 0
+    for index in range(brace_start, len(content)):
+        char = content[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start : index + 1]
+
+    raise AssertionError(f"missing nginx block closer for {needle}")
+
+
+def _assert_frontend_upgrade_header_is_conditional(content: str) -> None:
+    frontend_block = _extract_nginx_location_block(content, "/")
+
+    assert "map $http_upgrade $connection_upgrade" in content
+    assert "proxy_set_header Upgrade $http_upgrade;" in frontend_block
+    assert "proxy_set_header Connection $connection_upgrade;" in frontend_block
+    assert "proxy_set_header Connection 'upgrade';" not in frontend_block
+
+
 def test_root_makefile_no_longer_exposes_transition_gateway_targets():
     makefile = _read("Makefile")
 
@@ -68,6 +98,21 @@ def test_local_dev_gateway_reload_excludes_runtime_state_with_absolute_dirs():
     assert "--reload-exclude='.deer-flow/'" not in serve_sh
 
 
+def test_backend_make_dev_gateway_reload_excludes_runtime_state_with_absolute_dirs():
+    makefile = _read("backend/Makefile")
+
+    assert "DEER_FLOW_HOME ?= $(CURDIR)/.deer-flow" in makefile
+    assert "DEER_FLOW_HOME := $(abspath $(DEER_FLOW_HOME))" in makefile
+    assert "BACKEND_SANDBOX_HOME := $(abspath $(CURDIR)/sandbox)" in makefile
+    assert 'mkdir -p "$(DEER_FLOW_HOME)" "$(BACKEND_SANDBOX_HOME)"' in makefile
+    # The launch line may carry runtime-only uv flags (`--locked` pins the
+    # extension lock); what this guards is that DEER_FLOW_HOME is exported on it,
+    # so the reload-excludes below resolve to the same absolute directories.
+    assert re.search(r'DEER_FLOW_HOME="\$\(DEER_FLOW_HOME\)" uv run(?: --(?:locked|no-sync))? uvicorn', makefile)
+    assert '--reload-exclude="$(DEER_FLOW_HOME)"' in makefile
+    assert '--reload-exclude="$(BACKEND_SANDBOX_HOME)"' in makefile
+
+
 def test_backend_container_only_exposes_gateway_port():
     dockerfile = _read("backend/Dockerfile")
 
@@ -102,6 +147,38 @@ def test_nginx_defers_cors_to_gateway_allowlist():
         assert "Access-Control-Allow-Credentials" not in content
         assert "proxy_hide_header 'Access-Control-Allow-" not in content
         assert "if ($request_method = 'OPTIONS')" not in content
+
+
+def test_nginx_frontend_upgrade_header_is_conditional():
+    for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
+        content = _read(path)
+
+        _assert_frontend_upgrade_header_is_conditional(content)
+
+
+def test_nginx_frontend_upgrade_check_allows_dedicated_websocket_locations():
+    content = """
+http {
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      '';
+    }
+
+    server {
+        location /api/threads/123/browser/stream {
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+        }
+
+        location / {
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+        }
+    }
+}
+"""
+
+    _assert_frontend_upgrade_header_is_conditional(content)
 
 
 def test_gateway_cors_configuration_uses_gateway_allowlist():

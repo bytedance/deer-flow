@@ -1,6 +1,12 @@
 "use client";
 
-import { BotIcon, MessageSquareIcon, Trash2Icon } from "lucide-react";
+import {
+  BotIcon,
+  DownloadIcon,
+  MessageSquareIcon,
+  Settings2Icon,
+  Trash2Icon,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type ComponentProps, type ReactElement, useState } from "react";
 import { toast } from "sonner";
@@ -28,10 +34,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useDeleteAgent } from "@/core/agents";
+import { exportAgentPackage, useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
+
+import { AgentSettingsDialog } from "./agent-settings-dialog";
 
 interface AgentCardProps {
   agent: Agent;
@@ -101,10 +109,15 @@ function TruncatedBadge({
 }
 
 export function AgentCard({ agent }: AgentCardProps) {
+  const displayName = agent.display_name?.length
+    ? agent.display_name
+    : agent.name;
   const { t } = useI18n();
   const router = useRouter();
   const deleteAgent = useDeleteAgent();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   function handleChat() {
     router.push(`/workspace/agents/${agent.name}/chats/new`);
@@ -120,6 +133,29 @@ export function AgentCard({ agent }: AgentCardProps) {
     }
   }
 
+  async function handleExport() {
+    setExporting(true);
+    try {
+      const agentPackage = await exportAgentPackage(agent.name);
+      const blob = new Blob([JSON.stringify(agentPackage, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${agent.name}.deerflow-agent.json`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      toast.success(t.agents.exportSuccess);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <>
       <Card className="group flex flex-col transition-shadow hover:shadow-md">
@@ -130,9 +166,9 @@ export function AgentCard({ agent }: AgentCardProps) {
                 <BotIcon className="h-5 w-5" />
               </div>
               <div className="min-w-0">
-                <TruncatedTooltip text={agent.name}>
+                <TruncatedTooltip text={displayName}>
                   <CardTitle className="truncate text-base">
-                    {agent.name}
+                    {displayName}
                   </CardTitle>
                 </TruncatedTooltip>
                 {agent.model && (
@@ -154,7 +190,8 @@ export function AgentCard({ agent }: AgentCardProps) {
           )}
         </CardHeader>
 
-        {(agent.tool_groups?.length ?? agent.skills?.length ?? 0) > 0 && (
+        {((agent.tool_groups?.length ?? 0) > 0 ||
+          (agent.skills?.length ?? 0) > 0) && (
           <CardContent className="pt-0 pb-3">
             <div className="flex flex-wrap gap-1">
               {agent.tool_groups?.map((group) => (
@@ -186,6 +223,25 @@ export function AgentCard({ agent }: AgentCardProps) {
             <Button
               size="icon"
               variant="ghost"
+              className="h-8 w-8 shrink-0"
+              onClick={handleExport}
+              disabled={exporting}
+              title={t.agents.exportAgent}
+            >
+              <DownloadIcon className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 shrink-0"
+              onClick={() => setSettingsOpen(true)}
+              title={t.agents.settings}
+            >
+              <Settings2Icon className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
               className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
               onClick={() => setDeleteOpen(true)}
               title={t.agents.delete}
@@ -195,6 +251,16 @@ export function AgentCard({ agent }: AgentCardProps) {
           </div>
         </CardFooter>
       </Card>
+
+      {/* Agent settings — mounted only while open so its form state always
+          re-seeds from the latest agent props (avoids stale values on reopen). */}
+      {settingsOpen && (
+        <AgentSettingsDialog
+          agent={agent}
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+        />
+      )}
 
       {/* Delete Confirm */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>

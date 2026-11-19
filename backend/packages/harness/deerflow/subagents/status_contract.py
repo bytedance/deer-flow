@@ -7,7 +7,7 @@ consumers read the structured facts carried inside
 - ``subagent_status``: one of ``SUBAGENT_STATUS_VALUES``.
 - ``subagent_stop_reason`` (optional): when a guardrail cap ended the run
   early, one of ``SUBAGENT_STOP_REASON_VALUES`` (``token_capped`` /
-  ``turn_capped`` / ``loop_capped``). Additive (#3875 Phase 2): a capped run
+  ``turn_capped`` / ``loop_capped`` / ``model_length_capped``). Additive (#3875 Phase 2): a capped run
   that still produced a final answer stays ``status=completed`` and carries
   the cap here; a capped run with no usable output is ``status=failed`` +
   ``stop_reason``. Old frontends ignore the unknown field.
@@ -19,9 +19,23 @@ consumers read the structured facts carried inside
   by this delegated run.
 - ``subagent_token_usage`` (optional): final cumulative ``input_tokens`` /
   ``output_tokens`` / ``total_tokens`` snapshot when the provider reported it.
+- ``subagent_tool_receipts`` (optional): the child's harvested tool receipts
+  (RFC #4651 PR2), transported in full; present on terminal statuses when
+  the run produced stamped receipts.
+- ``subagent_receipt_verdict`` (optional, ``completed`` only): the
+  parent-side citation-check verdict — advisory execution evidence; the
+  ``citation_resolved`` vocabulary never claims task acceptance.
+- ``subagent_acceptance_verdict`` (optional, ``completed`` only, RFC #4651
+  PR4): the deterministic acceptance-checklist verdict — per-criterion
+  ``checked``/``holds`` leaves; unchecked criteria render UNVERIFIED, never
+  silently passed.
 
 The shared fixture at ``contracts/subagent_status_contract.json`` pins
-the enum values across Python and TypeScript.
+the enum values (``valid_status_values`` / ``valid_stop_reason_values``)
+across Python and TypeScript. ``subagent_acceptance_verdict`` is
+deliberately outside that fixture: it is a validated JSON structure (see
+``validate_acceptance_verdict``), not an enum vocabulary, and no
+TypeScript consumer reads it.
 """
 
 from __future__ import annotations
@@ -31,6 +45,10 @@ import re
 from collections.abc import Mapping
 from typing import Any, Literal, NotRequired, TypedDict
 
+from deerflow.agents.middlewares.receipt_verification import ReceiptVerdict, validate_receipt_verdict
+from deerflow.agents.middlewares.tool_receipt import is_valid_receipt
+from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
+
 SUBAGENT_STATUS_KEY = "subagent_status"
 SUBAGENT_STOP_REASON_KEY = "subagent_stop_reason"
 SUBAGENT_ERROR_KEY = "subagent_error"
@@ -38,6 +56,9 @@ SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief"
 SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256"
 SUBAGENT_MODEL_NAME_KEY = "subagent_model_name"
 SUBAGENT_TOKEN_USAGE_KEY = "subagent_token_usage"
+SUBAGENT_TOOL_RECEIPTS_KEY = "subagent_tool_receipts"
+SUBAGENT_RECEIPT_VERDICT_KEY = "subagent_receipt_verdict"
+SUBAGENT_ACCEPTANCE_VERDICT_KEY = "subagent_acceptance_verdict"
 SUBAGENT_METADATA_TEXT_MAX_CHARS = 2000
 
 #: The producer always emits ``hashlib.sha256(...).hexdigest()`` — 64
@@ -69,12 +90,13 @@ SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
 
 #: Why a guardrail cap ended a run early. Carried on the additive
 #: ``subagent_stop_reason`` field, never as a status enum value.
-SubagentStopReasonValue = Literal["token_capped", "turn_capped", "loop_capped"]
+SubagentStopReasonValue = Literal["token_capped", "turn_capped", "loop_capped", "model_length_capped"]
 
 SUBAGENT_STOP_REASON_VALUES: tuple[SubagentStopReasonValue, ...] = (
     "token_capped",
     "turn_capped",
     "loop_capped",
+    "model_length_capped",
 )
 
 #: Human-readable label folded into the model-visible result text when a cap
@@ -83,6 +105,7 @@ _STOP_REASON_LABELS: dict[SubagentStopReasonValue, str] = {
     "token_capped": "token budget",
     "turn_capped": "turn budget",
     "loop_capped": "repeated tool-call loop",
+    "model_length_capped": "model output length limit",
 }
 
 #: Statuses that carry a recoverable result in ``subagent_result_brief`` /
@@ -111,6 +134,9 @@ class StructuredSubagentResult(TypedDict):
     result_brief: NotRequired[str]
     result_sha256: NotRequired[str]
     error: NotRequired[str]
+    tool_receipts: NotRequired[list[dict[str, Any]]]
+    receipt_verdict: NotRequired[ReceiptVerdict]
+    acceptance_verdict: NotRequired[AcceptanceVerdict]
 
 
 def _bound_metadata_text(text: str, cap: int = SUBAGENT_METADATA_TEXT_MAX_CHARS) -> str:
@@ -135,6 +161,9 @@ def make_subagent_additional_kwargs(
     stop_reason: SubagentStopReasonValue | None = None,
     model_name: str | None = None,
     token_usage: Mapping[str, object] | None = None,
+    tool_receipts: list[dict[str, Any]] | None = None,
+    receipt_verdict: Mapping[str, object] | None = None,
+    acceptance_verdict: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the ``additional_kwargs`` payload the middleware stamps.
 
@@ -168,6 +197,16 @@ def make_subagent_additional_kwargs(
     normalized_usage = normalize_token_usage(token_usage)
     if normalized_usage is not None:
         payload[SUBAGENT_TOKEN_USAGE_KEY] = normalized_usage
+    if isinstance(tool_receipts, list):
+        cleaned_receipts = [dict(receipt) for receipt in tool_receipts if is_valid_receipt(receipt)]
+        if cleaned_receipts:
+            payload[SUBAGENT_TOOL_RECEIPTS_KEY] = cleaned_receipts
+    validated_verdict = validate_receipt_verdict(receipt_verdict)
+    if validated_verdict is not None:
+        payload[SUBAGENT_RECEIPT_VERDICT_KEY] = validated_verdict
+    validated_acceptance = validate_acceptance_verdict(acceptance_verdict)
+    if validated_acceptance is not None:
+        payload[SUBAGENT_ACCEPTANCE_VERDICT_KEY] = validated_acceptance
     return payload
 
 
@@ -283,4 +322,15 @@ def read_subagent_result_metadata(
         payload["stop_reason"] = raw_stop_reason
     elif legacy_stop_reason is not None:
         payload["stop_reason"] = legacy_stop_reason
+    raw_receipts = additional_kwargs.get(SUBAGENT_TOOL_RECEIPTS_KEY)
+    if isinstance(raw_receipts, list):
+        cleaned_receipts = [dict(receipt) for receipt in raw_receipts if is_valid_receipt(receipt)]
+        if cleaned_receipts:
+            payload["tool_receipts"] = cleaned_receipts
+    validated_verdict = validate_receipt_verdict(additional_kwargs.get(SUBAGENT_RECEIPT_VERDICT_KEY))
+    if validated_verdict is not None:
+        payload["receipt_verdict"] = validated_verdict
+    validated_acceptance = validate_acceptance_verdict(additional_kwargs.get(SUBAGENT_ACCEPTANCE_VERDICT_KEY))
+    if validated_acceptance is not None:
+        payload["acceptance_verdict"] = validated_acceptance
     return payload

@@ -8,11 +8,19 @@ The adapter maps :class:`~deerflow.guardrails.provider.GuardrailRequest`
 fields to :class:`~deerflow.authz.provider.AuthzRequest` fields, calls the
 authorization provider, and converts the :class:`~deerflow.authz.provider.AuthzDecision`
 back to a :class:`~deerflow.guardrails.provider.GuardrailDecision`.
+
+Principal construction delegates to
+:func:`~deerflow.authz.principal.build_principal_from_context` so Layer 1
+(tool assembly) and Layer 2 (this adapter) share a single identity builder
+with consistent ``default_role`` and ``attributes`` semantics.
 """
 
 from __future__ import annotations
 
-from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
+from collections.abc import Iterable
+
+from deerflow.authz.principal import build_principal_from_context
+from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, GuardrailRequest
 
 
@@ -23,13 +31,20 @@ class GuardrailAuthorizationAdapter:
     which is correct for the tool-execution path. A different resource/action
     pair can be injected if the adapter is reused outside the tool path.
 
-    .. note::
-
-        ``Principal.is_internal`` is not populated by this adapter — the
-        correct signal (``auth_source == AUTH_SOURCE_INTERNAL``) lives on
-        ``request.state``, not on :class:`GuardrailRequest`. The field
-        retains its dataclass default (``False``) until Phase 1 threads it
-        into run context, so both layers derive it from one source.
+    Args:
+        provider: The authorization provider to delegate decisions to.
+        default_role: Role used when ``user_role`` is absent or empty in the
+            runtime context. Must be passed by Phase 1B wiring from
+            ``AuthorizationConfig.default_role``.
+        resource_type: Resource type for all ``AuthzRequest`` instances.
+        action: Action for all ``AuthzRequest`` instances.
+        infrastructure_tools: Framework tool *objects* created by this build
+            from an already authorized capability set. The exemption binds to
+            object identity — never to a name or a provenance label — so a
+            same-named foreign tool, or one self-declaring
+            ``deerflow_tool_source: "builtin"``, is not exempt. Callers pass
+            the current build's concrete tool objects (e.g. the deferred
+            setup's generated ``tool_search``), not static config.
     """
 
     name = "authorization"
@@ -38,22 +53,49 @@ class GuardrailAuthorizationAdapter:
         self,
         provider: AuthorizationProvider,
         *,
+        default_role: str = "user",
         resource_type: str = "tool",
         action: str = "call",
+        infrastructure_tools: Iterable[object] = (),
     ) -> None:
         self._provider = provider
+        self._default_role = default_role
         self._resource_type = resource_type
         self._action = action
+        self._infrastructure_tools = tuple(infrastructure_tools)
+
+    def _infrastructure_decision(self, request: GuardrailRequest) -> GuardrailDecision | None:
+        """Allow this build's host-created framework tools without a second decision.
+
+        The exemption binds to the concrete tool *object* the host created for
+        this build, not to a name or a provenance label: a request that enters
+        the guardrail with ``tool=None`` (an unregistered/dynamic name) is not
+        exempt and goes to the provider.
+        """
+        if request.tool_identity is None or not any(request.tool_identity is tool for tool in self._infrastructure_tools):
+            return None
+        return GuardrailDecision(
+            allow=True,
+            reasons=[GuardrailReason(code="authz.infrastructure_tool")],
+            policy_id="authz:infrastructure",
+        )
 
     def _to_authz(self, gr: GuardrailRequest) -> AuthzRequest:
         """Map a guardrail request to an authorization request."""
+        principal = build_principal_from_context(
+            {
+                "user_id": gr.user_id,
+                "user_role": gr.user_role,
+                "oauth_provider": gr.oauth_provider,
+                "oauth_id": gr.oauth_id,
+                "channel_user_id": gr.channel_user_id,
+                "is_internal": gr.is_internal,
+                "authz_attributes": gr.authz_attributes,
+            },
+            default_role=self._default_role,
+        )
         return AuthzRequest(
-            principal=Principal(
-                user_id=gr.user_id,
-                role=gr.user_role,
-                oauth_provider=gr.oauth_provider,
-                oauth_id=gr.oauth_id,
-            ),
+            principal=principal,
             resource=self._resource_type,
             action=self._action,
             target=gr.tool_name,
@@ -65,6 +107,7 @@ class GuardrailAuthorizationAdapter:
                 "is_subagent": gr.is_subagent,
                 "agent_id": gr.agent_id,
                 "timestamp": gr.timestamp,
+                "tool_provenance": gr.tool_provenance,
             },
         )
 
@@ -89,6 +132,8 @@ class GuardrailAuthorizationAdapter:
         here would duplicate that logic and risk divergent behavior between
         the two layers.
         """
+        if infrastructure_decision := self._infrastructure_decision(request):
+            return infrastructure_decision
         decision = self._provider.authorize(self._to_authz(request))
         return self._to_guardrail(decision)
 
@@ -97,5 +142,7 @@ class GuardrailAuthorizationAdapter:
 
         See :meth:`evaluate` for exception-propagation rationale.
         """
+        if infrastructure_decision := self._infrastructure_decision(request):
+            return infrastructure_decision
         decision = await self._provider.aauthorize(self._to_authz(request))
         return self._to_guardrail(decision)

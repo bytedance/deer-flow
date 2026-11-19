@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -5,6 +6,13 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BrowserlessFetchResult:
+    html: str
+    target_status_code: str
+    target_status: str
 
 
 @dataclass(frozen=True)
@@ -23,6 +31,46 @@ def _get_header(headers: Any, name: str) -> str:
     return str(headers.get(name.lower(), ""))
 
 
+async def _settle(future: "asyncio.Future[Any]") -> Any:
+    """Await a future that owns a resource, even if this task is cancelled again.
+
+    Cleanup must not be the thing that gets abandoned: the caller remembers its
+    own cancellation and re-raises it once the resource is released.
+    """
+    while True:
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            if future.cancelled():
+                raise
+
+
+async def _open_client(**kwargs: Any) -> httpx.AsyncClient:
+    """Build an ``httpx.AsyncClient`` without loading TLS trust on the event loop.
+
+    The constructor resolves the system trust store synchronously, so it has to
+    run in a thread. That alone is not enough: a cancellation can arrive while
+    the worker is still inside the constructor, and then the await is abandoned
+    while the thread goes on to hand back a live client that nobody closes. So
+    own the construction as a task and, once cancelled, wait for it and close
+    whatever it produced before the cancellation propagates.
+    """
+    construction: asyncio.Task[httpx.AsyncClient] = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, **kwargs))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+        try:
+            late_client = await _settle(construction)
+        except Exception as error:
+            logger.error(f"Browserless HTTPX client construction failed after cancellation: {error!s}")
+        else:
+            try:
+                await _settle(asyncio.create_task(late_client.aclose()))
+            except Exception as error:
+                logger.error(f"Closing a Browserless HTTPX client built after cancellation failed: {error!s}")
+        raise
+
+
 class BrowserlessClient:
     """Client for Browserless headless Chrome API."""
 
@@ -30,6 +78,15 @@ class BrowserlessClient:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout_s = timeout_s
+
+    def _auth_params(self) -> dict[str, str] | None:
+        """Query parameters that authenticate a request to Browserless.
+
+        Browserless reads the token from the ``token`` query parameter or the
+        ``Authorization`` header only, and its request-body schemas reject
+        unknown keys, so the token must never be sent in the JSON body.
+        """
+        return {"token": self.token} if self.token else None
 
     async def fetch_html(
         self,
@@ -42,6 +99,53 @@ class BrowserlessClient:
         reject_request_pattern: list[str] | None = None,
     ) -> str:
         """Fetch the rendered HTML of a page using Browserless.
+
+        Public string contract: this always returns either the rendered HTML or
+        an "Error: ..." string, never a richer result object. Callers that also
+        need the target page's real status (Browserless returns HTTP 200 for the
+        render request itself even when the target page responded with a 4xx/5xx
+        or an anti-bot block page) should use fetch_html_with_status() instead.
+
+        Args:
+            url: The URL to fetch.
+            wait_for_event: Wait for a page event (e.g. "networkidle", "load").
+            wait_for_timeout_ms: Extra wait after page load.
+            wait_for_selector: CSS selector to wait for.
+            wait_for_selector_timeout_ms: Timeout for selector wait.
+            reject_resource_types: Resource types to block (e.g. ["image"]).
+            reject_request_pattern: URL patterns to block.
+
+        Returns:
+            Rendered HTML content, or an "Error: ..." string on failure.
+        """
+        result = await self.fetch_html_with_status(
+            url=url,
+            wait_for_event=wait_for_event,
+            wait_for_timeout_ms=wait_for_timeout_ms,
+            wait_for_selector=wait_for_selector,
+            wait_for_selector_timeout_ms=wait_for_selector_timeout_ms,
+            reject_resource_types=reject_resource_types,
+            reject_request_pattern=reject_request_pattern,
+        )
+        return result.html if isinstance(result, BrowserlessFetchResult) else result
+
+    async def fetch_html_with_status(
+        self,
+        url: str,
+        wait_for_event: str = "",
+        wait_for_timeout_ms: int = 0,
+        wait_for_selector: str = "",
+        wait_for_selector_timeout_ms: int = 5000,
+        reject_resource_types: list[str] | None = None,
+        reject_request_pattern: list[str] | None = None,
+    ) -> BrowserlessFetchResult | str:
+        """Fetch the rendered HTML of a page using Browserless, with target status.
+
+        Same request/response handling as fetch_html(), except a successful fetch
+        returns a BrowserlessFetchResult carrying the target page's real status
+        headers instead of a bare string, so a caller can tell a genuine 200 apart
+        from a render-succeeded-but-target-errored (or anti-bot blocked) response.
+        Use fetch_html() instead when only the HTML/error string is needed.
 
         Only sends accepted parameters for the current Browserless API version.
         Sets a default navigation timeout (30s) via query param.
@@ -56,14 +160,13 @@ class BrowserlessClient:
             reject_request_pattern: URL patterns to block.
 
         Returns:
-            Rendered HTML content.
+            Fetch result with the rendered HTML and target-page status headers,
+            or an "Error: ..." string on failure.
         """
         payload: dict[str, Any] = {
             "url": url,
         }
 
-        if self.token:
-            payload["token"] = self.token
         if wait_for_event:
             payload["waitForEvent"] = wait_for_event
         if wait_for_timeout_ms > 0:
@@ -80,10 +183,13 @@ class BrowserlessClient:
 
         logger.debug(f"Fetching URL via Browserless: {url}")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            # Construction loads TLS trust synchronously, off the loop, and owns the
+            # client even when this coroutine is cancelled mid-construction.
+            async with await _open_client(timeout=self.timeout_s) as client:
                 resp = await client.post(
                     f"{self.base_url}/content",
                     json=payload,
+                    params=self._auth_params(),
                     headers={
                         "Content-Type": "application/json",
                         "Cache-Control": "no-cache",
@@ -103,7 +209,11 @@ class BrowserlessClient:
                 if not html or not html.strip():
                     return "Error: Browserless returned empty response"
 
-                return html
+                return BrowserlessFetchResult(
+                    html=html,
+                    target_status_code=_get_header(resp.headers, "X-Response-Code"),
+                    target_status=_get_header(resp.headers, "X-Response-Status"),
+                )
 
         except httpx.TimeoutException:
             return f"Error: Browserless request timed out after {self.timeout_s}s"
@@ -163,15 +273,15 @@ class BrowserlessClient:
         if best_attempt:
             payload["bestAttempt"] = True
 
-        params = {"token": self.token} if self.token else None
-
         logger.debug(f"Capturing URL screenshot via Browserless: {url}")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            # Construction loads TLS trust synchronously, off the loop, and owns the
+            # client even when this coroutine is cancelled mid-construction.
+            async with await _open_client(timeout=self.timeout_s) as client:
                 resp = await client.post(
                     f"{self.base_url}/screenshot",
                     json=payload,
-                    params=params,
+                    params=self._auth_params(),
                     headers={
                         "Content-Type": "application/json",
                         "Cache-Control": "no-cache",

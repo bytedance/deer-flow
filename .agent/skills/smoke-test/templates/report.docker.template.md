@@ -162,7 +162,7 @@ Commit Message: {{git_commit_message}}
 1. [ ] Review references/troubleshooting.md for common solutions
 2. [ ] Check Docker logs: `make docker-logs`
 3. [ ] Verify configuration file format and content
-4. [ ] If needed, fully reset the environment: `make clean && make config && make docker-init && make docker-start`
+4. [ ] If needed, fully reset the environment: `make docker-stop && make clean && make config && make docker-init && make docker-start`
 
 ---
 

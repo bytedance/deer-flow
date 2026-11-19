@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from deerflow_extension_api.provenance import MESSAGE_CONTENT_KIND_KEY, MESSAGE_PRODUCER_KIND_KEY
 from langchain_core.messages import HumanMessage
 from mcp.types import TextContent
 
@@ -186,6 +187,8 @@ async def test_middleware_injects_hook_context_into_model_messages():
     assert canary in message.content
     assert message.additional_kwargs.get(IDENTITY_HOOKS_CONTEXT_KEY) is True
     assert message.additional_kwargs.get("hide_from_ui") is True
+    assert message.additional_kwargs.get(MESSAGE_CONTENT_KIND_KEY) == "middleware_injection"
+    assert message.additional_kwargs.get(MESSAGE_PRODUCER_KIND_KEY) == "identity_hooks"
 
 
 @pytest.mark.asyncio
@@ -209,6 +212,62 @@ async def test_middleware_fires_once_per_thread_across_instances():
 
     assert second is None
     run_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stdio_hook_presents_session_binding_and_separate_scope():
+    """Stdio prefetch must present the pool binding and must not take the tool session."""
+    from deerflow.mcp.session_pool import MCPSessionPool, ServerBinding
+
+    config = _lithtrix_hooks_config()
+    session = AsyncMock()
+    session.call_tool = AsyncMock(return_value=_FakeCallToolResult("HOOK_CONTEXT_CANARY_bound"))
+    binding = ServerBinding(domain="deployment", server_name="lithtrix", epoch=1, fingerprint="fp")
+
+    class _Pool(MCPSessionPool):
+        def __init__(self) -> None:
+            self.binding = binding
+            self.session_kwargs: dict[str, Any] | None = None
+
+        def ensure_binding(self, server_name: str, fingerprint: str, *, domain: str = "deployment") -> ServerBinding:
+            assert server_name == "lithtrix"
+            assert isinstance(fingerprint, str) and fingerprint
+            assert domain == "deployment"
+            return self.binding
+
+        async def get_session(self, server_name: str, scope_key: str, connection: dict, *, binding: ServerBinding | None = None, domain: str = "deployment"):
+            self.session_kwargs = {
+                "server_name": server_name,
+                "scope_key": scope_key,
+                "binding": binding,
+                "domain": domain,
+                "transport": connection.get("transport"),
+            }
+            return session
+
+    pool = _Pool()
+
+    async def _call(session_arg, _pool, *, tool_name, arguments, call_kwargs, **_kwargs):
+        return await session_arg.call_tool(tool_name, arguments, **call_kwargs)
+
+    with (
+        patch("deerflow.agents.middlewares.identity_hooks_middleware.get_session_pool", return_value=pool),
+        patch("deerflow.agents.middlewares.identity_hooks_middleware.call_pooled_session_tool", side_effect=_call),
+    ):
+        result = await run_session_start_hooks(
+            config=config,
+            thread_id="thread-1",
+            user_id="user-1",
+            thread_incarnation="incarnation-1",
+        )
+
+    assert pool.session_kwargs is not None
+    assert pool.session_kwargs["binding"] is binding
+    assert pool.session_kwargs["transport"] == "stdio"
+    assert pool.session_kwargs["scope_key"].startswith("v2:")
+    assert "identity-hooks:incarnation-1" in pool.session_kwargs["scope_key"]
+    assert result is not None
+    assert "HOOK_CONTEXT_CANARY_bound" in result
 
 
 def test_identity_hooks_middleware_is_lead_only():

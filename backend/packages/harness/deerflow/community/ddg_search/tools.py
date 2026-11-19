@@ -7,9 +7,24 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
+from deerflow.community.search_time_range import DDGS_TIMELIMIT_BY_TIME_RANGE, SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
+
+
+class DDGSearchError(RuntimeError):
+    """Raised when a DuckDuckGo search cannot be executed.
+
+    ``_search_text`` returns an empty list when the search ran and matched
+    nothing. Execution failures (client initialization, rate limits,
+    timeouts, blocked requests, SDK errors, a missing ddgs dependency) raise
+    this error instead, so ``web_search_tool`` can report the failure rather
+    than "No results found".
+    """
+
 
 DEFAULT_BACKEND = "auto"
 DEFAULT_REGION = "wt-wt"
@@ -17,6 +32,10 @@ DEFAULT_SAFESEARCH = "moderate"
 DEFAULT_WIKIPEDIA_REGION = "us-en"
 
 WIKIPEDIA_BACKENDS = {"auto", "all", "wikipedia"}
+# ddgs 9.14.1: enabled text engines whose implementations honor ``timelimit``.
+# Google and Bing also implement it but are disabled upstream in this release.
+TIME_RANGE_CAPABLE_BACKENDS = ("brave", "duckduckgo", "yahoo")
+DEFAULT_TIME_RANGE_BACKEND = ",".join(TIME_RANGE_CAPABLE_BACKENDS)
 WIKIPEDIA_LANGUAGE_ALIASES = {
     "jp": "ja",
     "kr": "ko",
@@ -35,6 +54,20 @@ def _normalize_backend(backend: str | list[str] | tuple[str, ...] | None) -> str
 
 def _normalize_setting(value: str | None, default: str) -> str:
     return str(value).strip() if value else default
+
+
+def _resolve_time_range_backend(backend: str | list[str] | tuple[str, ...] | None) -> str:
+    """Exclude DDGS text backends that ignore the native time limit."""
+    normalized_backend = _normalize_backend(backend)
+    configured_backends = [part.strip().lower() for part in normalized_backend.split(",") if part.strip()]
+    if any(part in {"auto", "all"} for part in configured_backends):
+        return DEFAULT_TIME_RANGE_BACKEND
+
+    supported_backends = [part for part in configured_backends if part in TIME_RANGE_CAPABLE_BACKENDS]
+    excluded_backends = [part for part in configured_backends if part not in TIME_RANGE_CAPABLE_BACKENDS]
+    if excluded_backends:
+        logger.warning("Ignoring DDGS backends without time-range support: %s", ", ".join(excluded_backends))
+    return ",".join(supported_backends) or DEFAULT_TIME_RANGE_BACKEND
 
 
 def _backend_includes_wikipedia(backend: str | list[str] | tuple[str, ...] | None) -> bool:
@@ -86,10 +119,11 @@ def _resolve_ddgs_region(query: str, region: str | None, backend: str | list[str
 
 def _search_text(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     region: str | None = DEFAULT_REGION,
     safesearch: str | None = DEFAULT_SAFESEARCH,
     backend: str | list[str] | tuple[str, ...] | None = DEFAULT_BACKEND,
+    time_range: SearchTimeRange | None = None,
 ) -> list[dict]:
     """
     Execute text search using DuckDuckGo.
@@ -100,46 +134,62 @@ def _search_text(
         region: Search region
         safesearch: Safe search level
         backend: DDGS backend(s), e.g. "auto", "duckduckgo", or "duckduckgo,brave"
+        time_range: Optional relative publication/update window
 
     Returns:
         List of search results
+
+    Raises:
+        DDGSearchError: If the search could not be executed, including a
+            ``DDGS`` client that fails to initialize. A genuinely empty
+            result set is not an error and still returns an empty list.
     """
     try:
         from ddgs import DDGS
-    except ImportError:
-        logger.error("ddgs library not installed. Run: pip install ddgs")
-        return []
-
-    ddgs = DDGS(timeout=30)
+    except ImportError as e:
+        raise DDGSearchError("ddgs library not installed. Run: pip install ddgs") from e
 
     try:
-        backend = _normalize_backend(backend)
+        # Constructing the client can already fail (proxy or client setup), so
+        # it stays inside the boundary that maps failures to DDGSearchError.
+        ddgs = DDGS(timeout=30)
+
+        backend = _resolve_time_range_backend(backend) if time_range is not None else _normalize_backend(backend)
         safesearch = _normalize_setting(safesearch, DEFAULT_SAFESEARCH)
         effective_region = _resolve_ddgs_region(query, region, backend)
-        results = ddgs.text(
-            query,
-            region=effective_region,
-            safesearch=safesearch,
-            max_results=max_results,
-            backend=backend,
-        )
+        search_kwargs: dict[str, object] = {
+            "region": effective_region,
+            "safesearch": safesearch,
+            "max_results": max_results,
+            "backend": backend,
+        }
+        if time_range is not None:
+            search_kwargs["timelimit"] = DDGS_TIMELIMIT_BY_TIME_RANGE[time_range]
+        results = ddgs.text(query, **search_kwargs)
         return list(results) if results else []
 
     except Exception as e:
-        logger.error(f"Failed to search web: {e}")
-        return []
+        # ddgs signals a genuinely empty result set with the exact message
+        # "No results found."; every other failure (rate limit, timeout,
+        # blocked HTML, SDK error) must surface as an error instead, or the
+        # agent reads an outage as "no matches" and rewrites the query.
+        if str(e).strip().rstrip(".!").lower() == "no results found":
+            return []
+        raise DDGSearchError(f"{type(e).__name__}: {e}") from e
 
 
 @tool("web_search", parse_docstring=True)
 def web_search_tool(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
+    time_range: SearchTimeRange | None = None,
 ) -> str:
     """Search the web for information. Use this tool to find current information, news, articles, and facts from the internet.
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of results to return. Default is 5.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
     region = DEFAULT_REGION
@@ -153,13 +203,18 @@ def web_search_tool(
         safesearch = config.model_extra.get("safesearch", safesearch)
         backend = config.model_extra.get("backend", backend)
 
-    results = _search_text(
-        query=query,
-        max_results=max_results,
-        region=region,
-        safesearch=safesearch,
-        backend=backend,
-    )
+    try:
+        results = _search_text(
+            query=query,
+            max_results=coerce_max_results(max_results, provider="DDG Search", logger=logger),
+            region=region,
+            safesearch=safesearch,
+            backend=backend,
+            time_range=time_range,
+        )
+    except DDGSearchError as e:
+        logger.error("DuckDuckGo search failed: %s", e)
+        return json.dumps({"error": f"DuckDuckGo search failed: {e}", "query": query}, ensure_ascii=False)
 
     if not results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
@@ -167,7 +222,7 @@ def web_search_tool(
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("href", r.get("link", "")),
+            "url": safe_public_result_url(r.get("href", r.get("link"))),
             "content": r.get("body", r.get("snippet", "")),
         }
         for r in results

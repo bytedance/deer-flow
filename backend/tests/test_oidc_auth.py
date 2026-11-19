@@ -1,10 +1,18 @@
+import asyncio
+import re
+import time
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, quote, urlsplit
 
+import httpx
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
+from jwt.algorithms import RSAAlgorithm
 
 from app.gateway.auth.models import User
-from app.gateway.auth.oidc import OIDCError, OIDCIdentity, OIDCMetadata, OIDCService, OIDCValidationError
+from app.gateway.auth.oidc import OIDCError, OIDCIdentity, OIDCMetadata, OIDCService, OIDCUserInfoMismatch, OIDCValidationError
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from deerflow.config.auth_config import OIDCProviderConfig
 
@@ -29,6 +37,139 @@ def _identity(**overrides):
     }
     values.update(overrides)
     return OIDCIdentity(**values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint_query",
+    [
+        "",
+        "?",
+        "?prompt=login",
+        "?login_hint=user%2Btag%40example.com&empty=&resource=first&resource=second",
+    ],
+)
+@pytest.mark.parametrize("with_pkce_and_nonce", [False, True])
+async def test_oidc_authorization_url_preserves_endpoint_query(endpoint_query, with_pkce_and_nonce):
+    service = OIDCService()
+    metadata = OIDCMetadata(
+        issuer="https://issuer.example.com",
+        authorization_endpoint=f"https://issuer.example.com/auth{endpoint_query}",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint=None,
+        jwks_uri="https://issuer.example.com/jwks",
+    )
+    try:
+        url = service.build_authorization_url(
+            metadata=metadata,
+            client_id="deer-flow",
+            redirect_uri="https://app.example.com/api/auth/callback/test",
+            scopes=["openid", "email"],
+            state="state+with&reserved=characters",
+            nonce="test-nonce" if with_pkce_and_nonce else None,
+            code_challenge="test-challenge" if with_pkce_and_nonce else None,
+        )
+    finally:
+        await service.close()
+
+    parsed = urlsplit(url)
+    expected = parse_qs(endpoint_query.lstrip("?"), keep_blank_values=True)
+    expected.update(
+        response_type=["code"],
+        client_id=["deer-flow"],
+        redirect_uri=["https://app.example.com/api/auth/callback/test"],
+        scope=["openid email"],
+        state=["state+with&reserved=characters"],
+    )
+    if with_pkce_and_nonce:
+        expected.update(nonce=["test-nonce"], code_challenge=["test-challenge"], code_challenge_method=["S256"])
+    assert (parsed.scheme, parsed.netloc, parsed.path) == ("https", "issuer.example.com", "/auth")
+    assert parse_qs(parsed.query, keep_blank_values=True) == expected
+    if endpoint_query.lstrip("?"):
+        assert parsed.query.startswith(endpoint_query[1:] + "&")
+
+
+async def _start_oidc_login(monkeypatch, provider, path="/api/v1/auth/oauth/keycloak"):
+    from types import SimpleNamespace
+
+    import httpx
+    from fastapi import FastAPI
+
+    import deerflow.config.app_config as app_config_module
+    from app.gateway.auth import oidc_state
+    from app.gateway.auth.config import AuthConfig
+    from app.gateway.routers import auth as auth_router
+
+    service = OIDCService()
+    config = SimpleNamespace(auth=SimpleNamespace(oidc=SimpleNamespace(enabled=True, providers={"keycloak": provider})))
+    monkeypatch.setattr(app_config_module, "get_app_config", lambda: config)
+    monkeypatch.setattr(auth_router, "_get_oidc_service", lambda: service)
+    monkeypatch.setattr(oidc_state, "get_auth_config", lambda: AuthConfig(jwt_secret="test-secret-for-oidc-query-parameters-min-32"))
+
+    async def discovery_get(url):
+        assert url == "https://issuer.example.com/.well-known/openid-configuration"
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            json={
+                "issuer": provider.issuer,
+                "authorization_endpoint": "https://issuer.example.com/auth",
+                "token_endpoint": "https://issuer.example.com/token",
+                "jwks_uri": "https://issuer.example.com/jwks",
+            },
+        )
+
+    monkeypatch.setattr(service._http, "get", discovery_get)
+    app = FastAPI()
+    app.include_router(auth_router.router)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://app.example.com") as client:
+            return await client.get(path, follow_redirects=False)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_oidc_login_redirect_preserves_configured_endpoint_query(monkeypatch):
+    from app.gateway.auth import oidc_state
+
+    provider = _provider_config(authorization_endpoint="https://issuer.example.com/auth?prompt=login")
+    response = await _start_oidc_login(monkeypatch, provider)
+
+    assert response.status_code == 302
+    query = parse_qs(urlsplit(response.headers["location"]).query)
+    assert query["prompt"] == ["login"]
+    assert query["response_type"] == ["code"]
+    assert query["client_id"] == [provider.client_id]
+    assert query["code_challenge_method"] == ["S256"]
+    state = oidc_state._verify_state_signed(response.cookies["df_oidc_state_keycloak"])
+    assert state is not None
+    assert query["state"] == [state.state]
+    assert query["nonce"] == [state.nonce]
+    assert query["code_challenge"] == [oidc_state.compute_code_challenge(state.code_verifier)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "next_query,expected",
+    [
+        ("%2Fworkspace%2Fchats%2Fabc-123", "/workspace/chats/abc-123"),
+        # Browsers delete tab, LF and CR before parsing the callback's next, so
+        # each of these would land on //evil.example.
+        ("%2F%0A%2F%2Fevil.example", "/workspace"),
+        ("%2F%09%2F%2Fevil.example", "/workspace"),
+        ("%2F%0D%2F%2Fevil.example", "/workspace"),
+    ],
+)
+async def test_oidc_login_stores_only_a_safe_next_path(monkeypatch, next_query, expected):
+    from app.gateway.auth import oidc_state
+
+    response = await _start_oidc_login(monkeypatch, _provider_config(), path=f"/api/v1/auth/oauth/keycloak?next={next_query}")
+
+    assert response.status_code == 302
+    state = oidc_state._verify_state_signed(response.cookies["df_oidc_state_keycloak"])
+    assert state is not None
+    assert state.next_path == expected
 
 
 @pytest.mark.asyncio
@@ -405,3 +546,456 @@ def test_oidc_redirect_uri_fallback_plain_host_when_no_proxy_headers():
     result = _resolve_oidc_redirect_uri(req, "keycloak", cfg)
 
     assert result == "http://localhost:8001/api/v1/auth/callback/keycloak"
+
+
+def test_oidc_callback_rejects_non_ascii_state_as_mismatch(monkeypatch):
+    """A percent-encoded non-ASCII ``state`` is a 403 mismatch, not a 500."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import deerflow.config.app_config as app_config_module
+    from app.gateway.auth.config import AuthConfig, get_auth_config, set_auth_config
+    from app.gateway.auth.oidc_state import OIDCStatePayload, _sign_state_payload
+    from app.gateway.routers import auth as auth_router
+
+    previous_auth_config = get_auth_config()
+    set_auth_config(AuthConfig(jwt_secret="test-secret-key-for-oidc-state-mismatch-min-32"))
+    try:
+        oidc_config = SimpleNamespace(enabled=True, providers={"keycloak": _provider_config()})
+        monkeypatch.setattr(app_config_module, "get_app_config", lambda: SimpleNamespace(auth=SimpleNamespace(oidc=oidc_config)))
+        app = FastAPI()
+        app.include_router(auth_router.router)
+        client = TestClient(app)
+        client.cookies.set("df_oidc_state_keycloak", _sign_state_payload(OIDCStatePayload(provider="keycloak", state="expected-state")))
+
+        response = client.get("/api/v1/auth/callback/keycloak", params={"code": "code", "state": "expected-st\xe4te"})
+    finally:
+        set_auth_config(previous_auth_config)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "OIDC state mismatch"
+
+
+def _metadata() -> OIDCMetadata:
+    return OIDCMetadata(
+        issuer="https://issuer.example.com",
+        authorization_endpoint="https://issuer.example.com/auth",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint=None,
+        jwks_uri="https://issuer.example.com/jwks",
+    )
+
+
+def _service_with_signing_key() -> tuple[OIDCService, object]:
+    service = OIDCService()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    service._load_jwks = AsyncMock(return_value={})
+    service._resolve_signing_key = AsyncMock(return_value=private_key.public_key())
+    return service, private_key
+
+
+def _id_token(private_key, nonce: str) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {"iss": "https://issuer.example.com", "aud": "deer-flow", "sub": "s1", "exp": now + 300, "iat": now, "nonce": nonce},
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "k1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_mismatch_with_non_ascii_is_rejected_not_a_type_error():
+    """The nonce claim is provider-controlled text, so a mismatch must reject
+    with OIDCValidationError; the raw str comparison raised TypeError instead,
+    turning the callback's sso_failed redirect into a 500 (#6076 fixed the
+    same five compare sites and left this one behind)."""
+    service, private_key = _service_with_signing_key()
+
+    with pytest.raises(OIDCValidationError, match="nonce does not match"):
+        await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, "nònce-é"), nonce="expected")
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_match_with_non_ascii_is_accepted():
+    """A matching non-ASCII nonce keeps its bytes: equality survives the comparison."""
+    service, private_key = _service_with_signing_key()
+
+    claims = await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, "nònce-é"), nonce="nònce-é")
+
+    assert claims["nonce"] == "nònce-é"
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_claim_of_non_string_type_is_rejected_not_an_attribute_error():
+    """A provider returning a truthy non-string nonce claim (e.g. an int) must
+    reject with OIDCValidationError like every other malformed nonce; reaching
+    the comparison helper raised AttributeError on .encode() and turned the
+    callback's sso_failed redirect into a 500."""
+    service, private_key = _service_with_signing_key()
+
+    with pytest.raises(OIDCValidationError, match="nonce claim is not a string"):
+        await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, 12345), nonce="expected")
+
+
+# ── Malformed provider bodies ─────────────────────────────────────────────
+#
+# A provider in maintenance can answer 200 with an HTML page, and a broken one
+# with any JSON value. Every such body must surface as OIDCError so the login
+# route keeps its 502 and the callback its sso_failed redirect; a raw
+# JSONDecodeError / KeyError / AttributeError turned both into a 500.
+
+_ISSUER = "https://issuer.example.com"
+_DISCOVERY = {
+    "issuer": _ISSUER,
+    "authorization_endpoint": f"{_ISSUER}/auth",
+    "token_endpoint": f"{_ISSUER}/token",
+    "userinfo_endpoint": f"{_ISSUER}/userinfo",
+    "jwks_uri": f"{_ISSUER}/jwks",
+}
+_HTML_PAGE = httpx.Response(200, text="<html>Down for maintenance</html>", headers={"content-type": "text/html"})
+
+
+def _service_answering(responses: dict[str, object]) -> OIDCService:
+    """OIDCService whose HTTP client answers each URL path from ``responses``.
+
+    A value is either a ready ``httpx.Response`` or a JSON body served as 200.
+    """
+    service = OIDCService()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = responses[request.url.path]
+        return body if isinstance(body, httpx.Response) else httpx.Response(200, json=body)
+
+    service._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return service
+
+
+def _signed_provider(**claims) -> tuple[str, dict]:
+    """Return an ID token for ``_ISSUER`` and the JWKS that verifies it.
+
+    ``claims`` override the default ID token claims.
+    """
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = int(time.time())
+    id_token = jwt.encode(
+        {"iss": _ISSUER, "aud": "deer-flow", "sub": "s1", "exp": now + 300, "iat": now, "email": "user@example.com", "email_verified": True, **claims},
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "k1"},
+    )
+    jwk = RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
+    return id_token, {"keys": [{**jwk, "kid": "k1"}]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "document",
+    [
+        _HTML_PAGE,
+        ["not", "an", "object"],
+        {key: value for key, value in _DISCOVERY.items() if key != "authorization_endpoint"},
+        {**_DISCOVERY, "issuer": 42},
+        {**_DISCOVERY, "jwks_uri": ["https://issuer.example.com/jwks"]},
+        {**_DISCOVERY, "userinfo_endpoint": 42},
+    ],
+    ids=["html", "json-list", "missing-endpoint", "non-string-issuer", "non-string-endpoint", "non-string-userinfo"],
+)
+async def test_oidc_discover_wraps_malformed_document_and_does_not_cache_it(document):
+    service = _service_answering({"/.well-known/openid-configuration": document})
+    try:
+        with pytest.raises(OIDCError):
+            await service.discover(_ISSUER)
+        assert service._metadata_cache == {}
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("discovered_issuer", "message"),
+    [
+        (42, "non-string issuer field"),
+        (0, "non-string issuer field"),
+        (False, "non-string issuer field"),
+        ([], "non-string issuer field"),
+        ("", "missing the issuer field"),
+        (None, "missing the issuer field"),
+    ],
+)
+async def test_oidc_discover_reports_wrong_typed_issuer_apart_from_missing_one(discovered_issuer, message):
+    document = {key: value for key, value in _DISCOVERY.items() if key != "issuer"}
+    if discovered_issuer is not None:
+        document["issuer"] = discovered_issuer
+    service = _service_answering({"/.well-known/openid-configuration": document})
+    try:
+        with pytest.raises(OIDCError, match=message):
+            await service.discover(_ISSUER)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_oidc_discover_override_fills_an_endpoint_the_document_omits():
+    service = _service_answering({"/.well-known/openid-configuration": {key: value for key, value in _DISCOVERY.items() if key != "authorization_endpoint"}})
+    try:
+        metadata = await service.discover(_ISSUER, {"authorization_endpoint": f"{_ISSUER}/custom-auth"})
+    finally:
+        await service.close()
+
+    assert metadata.authorization_endpoint == f"{_ISSUER}/custom-auth"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [_HTML_PAGE, ["id_token"]], ids=["html", "json-list"])
+async def test_oidc_exchange_code_wraps_malformed_token_response(body):
+    service = _service_answering({"/token": body})
+    try:
+        with pytest.raises(OIDCError, match="^Token response is not"):
+            await service.exchange_code(_metadata(), "deer-flow", "secret", "code", "https://app.example.com/callback")
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [_HTML_PAGE, [{"kty": "RSA"}], {"keys": "k1"}], ids=["html", "json-list", "keys-not-a-list"])
+async def test_oidc_load_jwks_wraps_malformed_jwks_and_does_not_cache_it(body):
+    service = _service_answering({"/jwks": body})
+    try:
+        with pytest.raises(OIDCError, match="^JWKS response"):
+            await service._load_jwks(f"{_ISSUER}/jwks")
+        assert service._jwks_cache == {}
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_oidc_signing_key_lookup_skips_non_object_jwks_entries():
+    id_token, jwks = _signed_provider()
+    service = _service_answering({"/jwks": {"keys": ["junk", 42, *jwks["keys"]]}})
+    try:
+        claims = await service.validate_id_token(_metadata(), "deer-flow", id_token)
+    finally:
+        await service.close()
+
+    assert claims["sub"] == "s1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("id_token", ["not-a-jwt", 12345], ids=["garbage", "non-string"])
+async def test_oidc_validate_id_token_rejects_malformed_token_header(id_token):
+    _, jwks = _signed_provider()
+    service = _service_answering({"/jwks": jwks})
+    try:
+        with pytest.raises(OIDCValidationError, match="^ID token is malformed"):
+            await service.validate_id_token(_metadata(), "deer-flow", id_token)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [_HTML_PAGE, ["sub"]], ids=["html", "json-list"])
+async def test_oidc_callback_falls_back_to_id_token_when_userinfo_body_is_malformed(body):
+    """UserInfo is best-effort: a malformed body must not abort the login."""
+    id_token, jwks = _signed_provider()
+    service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": body})
+    metadata = OIDCMetadata(**_DISCOVERY)
+    try:
+        identity = await service.authenticate_callback("keycloak", metadata, "deer-flow", "secret", "code", "https://app.example.com/callback")
+    finally:
+        await service.close()
+
+    assert identity.subject == "s1"
+    assert identity.email == "user@example.com"
+
+
+# ── UserInfo subject check ────────────────────────────────────────────────
+#
+# OIDC Core 5.3.2: the UserInfo ``sub`` must exactly match the ID token's
+# before any UserInfo claim is used. A response without a ``sub`` cannot be
+# tied to this login, so it is rejected like a mismatching one; otherwise its
+# email and email_verified replace the signed ID token's.
+
+# Each case carries the reason the Gateway logs, so an operator can tell an
+# absent ``sub`` from a malformed one.
+_UNUSABLE_SUB_CASES = [
+    pytest.param({}, "UserInfo response has no sub claim", id="missing"),
+    pytest.param({"sub": ""}, "UserInfo response has no sub claim", id="empty"),
+    pytest.param({"sub": None}, "UserInfo response has no sub claim", id="null"),
+    pytest.param({"sub": ["s1"]}, "UserInfo sub claim is not a string (list)", id="non-string"),
+    pytest.param({"sub": 1}, "UserInfo sub claim is not a string (int)", id="number"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sub_field", "message"),
+    [
+        *_UNUSABLE_SUB_CASES,
+        pytest.param({"sub": "s2"}, "does not match", id="other-subject"),
+        pytest.param({"sub": "S1"}, "does not match", id="other-case"),
+    ],
+)
+async def test_oidc_fetch_userinfo_rejects_a_response_not_bound_to_the_id_token(sub_field, message):
+    service = _service_answering({"/userinfo": {**sub_field, "email": "other@example.com", "email_verified": True}})
+    try:
+        with pytest.raises(OIDCUserInfoMismatch, match=re.escape(message)):
+            await service.fetch_userinfo(OIDCMetadata(**_DISCOVERY), "access", expected_sub="s1")
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_oidc_fetch_userinfo_returns_a_response_for_the_same_subject():
+    body = {"sub": "s1", "email": "user@example.com", "name": "User"}
+    service = _service_answering({"/userinfo": body})
+    try:
+        assert await service.fetch_userinfo(OIDCMetadata(**_DISCOVERY), "access", expected_sub="s1") == body
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("sub_field", "reason"), _UNUSABLE_SUB_CASES)
+async def test_oidc_callback_keeps_id_token_claims_when_userinfo_has_no_usable_sub(sub_field, reason, caplog):
+    id_token, jwks = _signed_provider(email="user@example.com", email_verified=False, name="ID Token User")
+    userinfo = {**sub_field, "email": "admin@example.com", "email_verified": True, "name": "Someone Else"}
+    service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": userinfo})
+    try:
+        with caplog.at_level("WARNING", logger="app.gateway.auth.oidc"):
+            identity = await service.authenticate_callback("keycloak", OIDCMetadata(**_DISCOVERY), "deer-flow", "secret", "code", "https://app.example.com/callback")
+    finally:
+        await service.close()
+
+    assert (identity.subject, identity.email, identity.email_verified, identity.name) == ("s1", "user@example.com", False, "ID Token User")
+    assert "admin@example.com" not in identity.claims.values()
+    assert reason in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_oidc_callback_uses_userinfo_claims_for_the_same_subject():
+    id_token, jwks = _signed_provider(email="user@example.com", email_verified=False)
+    userinfo = {"sub": "s1", "email": "user@corp.example", "email_verified": True, "name": "UserInfo User"}
+    service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": userinfo})
+    try:
+        identity = await service.authenticate_callback("keycloak", OIDCMetadata(**_DISCOVERY), "deer-flow", "secret", "code", "https://app.example.com/callback")
+    finally:
+        await service.close()
+
+    assert (identity.subject, identity.email, identity.email_verified, identity.name) == ("s1", "user@corp.example", True, "UserInfo User")
+
+
+@pytest.mark.asyncio
+async def test_oidc_userinfo_without_sub_cannot_make_a_first_login_an_admin():
+    """End to end: a sub-less UserInfo email must not reach admin_emails."""
+    id_token, jwks = _signed_provider(email="user@example.com", email_verified=True)
+    service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": {"email": "admin@example.com", "email_verified": True}})
+    try:
+        identity = await service.authenticate_callback("keycloak", OIDCMetadata(**_DISCOVERY), "deer-flow", "secret", "code", "https://app.example.com/callback")
+    finally:
+        await service.close()
+
+    local_provider = AsyncMock()
+    local_provider.get_user_by_oauth.return_value = None
+    local_provider.get_user_by_email.return_value = None
+    await get_or_provision_oidc_user(
+        provider_id="keycloak",
+        provider_config=_provider_config(admin_emails=["admin@example.com"]),
+        identity=identity,
+        local_provider=local_provider,
+    )
+
+    local_provider.create_oauth_user.assert_awaited_once_with(email="user@example.com", oauth_provider="keycloak", oauth_id="s1", system_role="user")
+
+
+def _oidc_router_client(monkeypatch, service: OIDCService, *, enabled: bool = True):
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import deerflow.config.app_config as app_config_module
+    from app.gateway.auth import oidc_state
+    from app.gateway.auth.config import AuthConfig
+    from app.gateway.routers import auth as auth_router
+
+    oidc_config = SimpleNamespace(enabled=enabled, providers={"keycloak": _provider_config()}, frontend_base_url="")
+    monkeypatch.setattr(app_config_module, "get_app_config", lambda: SimpleNamespace(auth=SimpleNamespace(oidc=oidc_config)))
+    monkeypatch.setattr(auth_router, "_get_oidc_service", lambda: service)
+    monkeypatch.setattr(oidc_state, "get_auth_config", lambda: AuthConfig(jwt_secret="test-secret-for-oidc-malformed-bodies-min-32"))
+    app = FastAPI()
+    app.include_router(auth_router.router)
+    return TestClient(app, follow_redirects=False)
+
+
+def test_oidc_login_returns_502_when_discovery_is_an_html_page(monkeypatch):
+    service = _service_answering({"/.well-known/openid-configuration": _HTML_PAGE})
+    client = _oidc_router_client(monkeypatch, service)
+    try:
+        response = client.get("/api/v1/auth/oauth/keycloak")
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Failed to connect to SSO provider"}
+
+
+def test_oidc_callback_redirects_sso_failed_when_token_response_is_an_html_page(monkeypatch):
+    from app.gateway.auth.oidc_state import OIDCStatePayload, _sign_state_payload
+
+    service = _service_answering({"/.well-known/openid-configuration": _DISCOVERY, "/token": _HTML_PAGE})
+    client = _oidc_router_client(monkeypatch, service)
+    client.cookies.set("df_oidc_state_keycloak", _sign_state_payload(OIDCStatePayload(provider="keycloak", state="expected-state")))
+
+    try:
+        response = client.get("/api/v1/auth/callback/keycloak", params={"code": "code", "state": "expected-state"})
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login?error=sso_failed"
+
+
+_FORGED_LOG_LINE = "\n2026-01-01 00:00:00 INFO app.gateway.auth: forged line\r"
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["oidc-enabled", "oidc-disabled"])
+def test_oidc_callback_provider_error_log_strips_newlines(monkeypatch, caplog, enabled):
+    """The provider-error branch logs before any check, so every value is unauthenticated input."""
+    service = _service_answering({})
+    client = _oidc_router_client(monkeypatch, service, enabled=enabled)
+
+    try:
+        with caplog.at_level("WARNING", logger="app.gateway.routers.auth"):
+            response = client.get(
+                f"/api/v1/auth/callback/{quote('keycloak' + _FORGED_LOG_LINE)}",
+                params={"error": f"access_denied{_FORGED_LOG_LINE}", "error_description": f"denied{_FORGED_LOG_LINE}"},
+            )
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login?error=sso_failed"
+    [record] = [r for r in caplog.records if r.name == "app.gateway.routers.auth"]
+    logged = record.getMessage()
+    assert "\n" not in logged
+    assert "\r" not in logged
+    joined = _FORGED_LOG_LINE.replace("\n", "").replace("\r", "")
+    assert f"keycloak{joined}: access_denied{joined} (description: denied{joined})" in logged
+
+
+def test_oidc_callback_provider_error_log_without_description(monkeypatch, caplog):
+    service = _service_answering({})
+    client = _oidc_router_client(monkeypatch, service)
+
+    try:
+        with caplog.at_level("WARNING", logger="app.gateway.routers.auth"):
+            response = client.get("/api/v1/auth/callback/keycloak", params={"error": "access_denied"})
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 302
+    [record] = [r for r in caplog.records if r.name == "app.gateway.routers.auth"]
+    assert record.getMessage() == "OIDC provider returned error for keycloak: access_denied (description: None)"

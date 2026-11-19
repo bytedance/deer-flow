@@ -6,16 +6,21 @@ import {
   canPolishInput,
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
+  filterSkillsForAgent,
   finishGoalRequest,
+  getGoalObjectiveCounter,
   getInputSubmitAction,
-  getLeadingSlashSkillQuery,
-  getMatchingSkillSuggestions,
+  getLeadingSlashCommandQuery,
+  getMatchingSlashCommands,
+  GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
   isAbortError,
   isCurrentGoalRequest,
+  isGoalObjectiveTooLong,
+  MAX_GOAL_OBJECTIVE_CHARS,
   parseCompactCommand,
   parseGoalCommand,
   readGoalResponseError,
-  type SlashSuggestion,
+  type SlashCommandSuggestion,
 } from "@/components/workspace/input-box-helpers";
 import type { Skill } from "@/core/skills";
 
@@ -29,13 +34,12 @@ function makeSkill(name: string, enabled = true): Skill {
 
 // Builtin command names are bare (no leading slash); the composer renders them
 // as `/${name}`. Mirror that shape here.
-const builtins: SlashSuggestion[] = [
+const builtins: SlashCommandSuggestion[] = [
   {
     name: "goal",
     description: "Set, show, or clear an active goal",
-    kind: "builtin",
   },
-  { name: "new", description: "Start a new thread", kind: "builtin" },
+  { name: "compact", description: "Compact earlier context" },
 ];
 
 describe("parseGoalCommand", () => {
@@ -61,6 +65,98 @@ describe("parseGoalCommand", () => {
     expect(parseGoalCommand("/goalkeeper do thing")).toBeNull();
     expect(parseGoalCommand("hello")).toBeNull();
     expect(parseGoalCommand("/new")).toBeNull();
+  });
+});
+
+describe("isGoalObjectiveTooLong", () => {
+  it("allows objectives up to the limit", () => {
+    expect(isGoalObjectiveTooLong("a")).toBe(false);
+    expect(isGoalObjectiveTooLong("a".repeat(MAX_GOAL_OBJECTIVE_CHARS))).toBe(
+      false,
+    );
+  });
+
+  it("flags objectives past the limit", () => {
+    expect(
+      isGoalObjectiveTooLong("a".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1)),
+    ).toBe(true);
+  });
+
+  it("mirrors the backend limit of 4000 characters", () => {
+    expect(MAX_GOAL_OBJECTIVE_CHARS).toBe(4000);
+  });
+
+  it("counts interior whitespace because the backend validates raw request length", () => {
+    const interiorPastLimit = `${"a".repeat(2000)}    ${"a".repeat(1999)}`;
+    expect(interiorPastLimit.length).toBe(MAX_GOAL_OBJECTIVE_CHARS + 3);
+    expect(isGoalObjectiveTooLong(interiorPastLimit)).toBe(true);
+  });
+
+  it("uses the parsed objective after command boundary whitespace is trimmed", () => {
+    const command = parseGoalCommand(
+      `/goal    ${"a".repeat(MAX_GOAL_OBJECTIVE_CHARS)}   `,
+    );
+    expect(command).toEqual({
+      kind: "set",
+      objective: "a".repeat(MAX_GOAL_OBJECTIVE_CHARS),
+    });
+    if (command?.kind !== "set") {
+      throw new Error("expected a /goal set command");
+    }
+    expect(isGoalObjectiveTooLong(command.objective)).toBe(false);
+  });
+});
+
+describe("getGoalObjectiveCounter", () => {
+  it("returns null for non-goal or non-set inputs", () => {
+    expect(getGoalObjectiveCounter("hello")).toBeNull();
+    expect(getGoalObjectiveCounter("/goal")).toBeNull();
+    expect(getGoalObjectiveCounter("/goal clear")).toBeNull();
+  });
+
+  it("stays hidden while the objective is comfortably under the limit", () => {
+    expect(getGoalObjectiveCounter("/goal ship it")).toBeNull();
+    const justBelowThreshold = "a".repeat(
+      GOAL_OBJECTIVE_COUNTER_VISIBLE_AT - 1,
+    );
+    expect(getGoalObjectiveCounter(`/goal ${justBelowThreshold}`)).toBeNull();
+  });
+
+  it("appears once the objective reaches the visibility threshold", () => {
+    const atThreshold = "a".repeat(GOAL_OBJECTIVE_COUNTER_VISIBLE_AT);
+    expect(getGoalObjectiveCounter(`/goal ${atThreshold}`)).toEqual({
+      length: GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: false,
+    });
+  });
+
+  it("marks the counter over the limit and measures raw parsed length", () => {
+    const overLimit = "a".repeat(MAX_GOAL_OBJECTIVE_CHARS + 5);
+    expect(getGoalObjectiveCounter(`/goal ${overLimit}`)).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS + 5,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: true,
+    });
+
+    // Interior whitespace is preserved in the request body, so it must count
+    // toward the same raw max_length enforced by the backend binding.
+    const padded = `${"a".repeat(2000)}    ${"a".repeat(1999)}`;
+    expect(getGoalObjectiveCounter(`/goal ${padded}`)).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS + 3,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: true,
+    });
+
+    expect(
+      getGoalObjectiveCounter(
+        `/goal    ${"a".repeat(MAX_GOAL_OBJECTIVE_CHARS)}   `,
+      ),
+    ).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: false,
+    });
   });
 });
 
@@ -186,63 +282,65 @@ describe("canPolishInput", () => {
   });
 });
 
-describe("getLeadingSlashSkillQuery", () => {
+describe("getLeadingSlashCommandQuery", () => {
   it("returns the query for a leading slash token", () => {
-    expect(getLeadingSlashSkillQuery("/rev")).toBe("rev");
-    expect(getLeadingSlashSkillQuery("/")).toBe("");
+    expect(getLeadingSlashCommandQuery("/rev")).toBe("rev");
+    expect(getLeadingSlashCommandQuery("/")).toBe("");
   });
 
   it("returns null when there is no leading slash or the token is not bare", () => {
-    expect(getLeadingSlashSkillQuery("rev")).toBeNull();
-    expect(getLeadingSlashSkillQuery("/rev now")).toBeNull();
-    expect(getLeadingSlashSkillQuery("/a/b")).toBeNull();
+    expect(getLeadingSlashCommandQuery("rev")).toBeNull();
+    expect(getLeadingSlashCommandQuery("/rev now")).toBeNull();
+    expect(getLeadingSlashCommandQuery("/a/b")).toBeNull();
   });
 });
 
-describe("getMatchingSkillSuggestions", () => {
-  it("excludes disabled skills and ranks prefix matches first", () => {
+describe("filterSkillsForAgent", () => {
+  it("keeps all skills when the agent inherits the global catalog", () => {
+    const skills = [makeSkill("research"), makeSkill("writer")];
+
+    expect(filterSkillsForAgent(skills, null)).toEqual(skills);
+    expect(filterSkillsForAgent(skills, undefined)).toEqual(skills);
+  });
+
+  it("keeps only skills allowed by the active agent", () => {
     const skills = [
-      makeSkill("deep-research"),
-      makeSkill("review"),
-      makeSkill("reviewer-disabled", false),
+      makeSkill("research"),
+      makeSkill("writer"),
+      makeSkill("disabled-writer", false),
     ];
 
-    const result = getMatchingSkillSuggestions(skills, "rev", []);
-
-    expect(result.map((s) => s.name)).toEqual(["review"]);
-    expect(result.every((s) => s.kind === "skill")).toBe(true);
-  });
-
-  it("includes matching builtin commands after skills", () => {
-    const result = getMatchingSkillSuggestions(
-      [makeSkill("goal-helper")],
-      "goal",
-      builtins,
-    );
-
-    expect(result.map((s) => s.name)).toContain("goal-helper");
-    expect(result.map((s) => s.name)).toContain("goal");
-  });
-
-  it("excludes skills that collide with builtin command names", () => {
-    const result = getMatchingSkillSuggestions(
-      [makeSkill("goal"), makeSkill("goal-helper")],
-      "goal",
-      builtins,
-    );
-
-    expect(result.map((s) => `${s.kind}:${s.name}`)).toEqual([
-      "skill:goal-helper",
-      "builtin:goal",
+    expect(filterSkillsForAgent(skills, ["writer", "missing"])).toEqual([
+      makeSkill("writer"),
     ]);
   });
 
-  it("caps the number of suggestions", () => {
-    const skills = Array.from({ length: 10 }, (_, i) =>
-      makeSkill(`skill-${i}`),
-    );
-    const result = getMatchingSkillSuggestions(skills, "", []);
-    expect(result.length).toBeLessThanOrEqual(6);
+  it("treats an empty allowlist as no skills available", () => {
+    expect(filterSkillsForAgent([makeSkill("research")], [])).toEqual([]);
+  });
+});
+
+describe("getMatchingSlashCommands", () => {
+  it("offers the builtin commands for an empty query", () => {
+    expect(
+      getMatchingSlashCommands("", builtins).map((item) => item.name),
+    ).toEqual(["goal", "compact"]);
+  });
+
+  it("matches command names case-insensitively", () => {
+    expect(
+      getMatchingSlashCommands("GO", builtins).map((item) => item.name),
+    ).toEqual(["goal"]);
+  });
+
+  it("matches command descriptions", () => {
+    expect(
+      getMatchingSlashCommands("context", builtins).map((item) => item.name),
+    ).toEqual(["compact"]);
+  });
+
+  it("returns no commands for an unmatched skill query", () => {
+    expect(getMatchingSlashCommands("research", builtins)).toEqual([]);
   });
 });
 

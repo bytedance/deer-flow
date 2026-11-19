@@ -6,11 +6,12 @@ read from the global ``{base_dir}/skills/public/`` (read-only).
 
 Layout::
 
-    <host_root>/public/<name>/SKILL.md            ← global, read-only
-    <user_custom_root>/<name>/SKILL.md             ← per-user, read-write
-    <user_custom_root>/.history/<name>.jsonl       ← per-user history
-    <user_skills_root>/_skill_states.json          ← per-user enabled state
-    <global_custom_root>/<name>/SKILL.md           ← legacy fallback, read-only
+    <host_root>/public/<name>/SKILL.md                   ← global, read-only
+    <user_custom_root>/<name>/SKILL.md                   ← per-user, read-write
+    <integrations_root>/<provider>/<name>/SKILL.md       ← global, read-only
+    <user_custom_root>/.history/<name>.jsonl             ← per-user history
+    <user_skills_root>/_skill_states.json                ← per-user enabled state
+    <global_custom_root>/<name>/SKILL.md                 ← legacy fallback, read-only
 
 Fallback: when a user has no custom skills yet, global ``skills/custom/``
 skills are yielded as ``SkillCategory.LEGACY`` (read-only) so they are
@@ -38,10 +39,13 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.diagnostics import SkillLoadDiagnostic
+from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-from deerflow.skills.storage.skill_storage import SKILL_MD_FILE
+from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, walk_skill_directories
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +85,9 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         self._user_id = _validate_user_id(user_id)
         paths = get_paths()
+        self._paths = paths
         self._user_custom_root: Path = paths.user_custom_skills_dir(self._user_id)
+        self._integrations_root: Path = paths.integration_skills_dir()
         self._user_skills_root: Path = paths.user_skills_dir(self._user_id)
         self._global_custom_root: Path = self._host_root / SkillCategory.CUSTOM.value
         self._skill_states_file: Path = self._user_skills_root / "_skill_states.json"
@@ -95,7 +101,16 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         Returns a dict keyed by skill name, each value being
         ``{"enabled": True/False}``.  Returns an empty dict if the file
-        does not exist or is unreadable.
+        does not exist or cannot be decoded.
+
+        Undecodable bytes degrade to "no overrides", i.e. FAIL OPEN: every
+        skill the user had disabled reads as enabled again.  That matches what
+        malformed JSON already did, and it is deliberate - the alternative,
+        denying every custom skill, locks a user out of their own tree over one
+        stray byte.  ``sandbox/tools.py::_is_disabled_skill_path`` says corrupt
+        state must fail CLOSED on purpose: it decides access for one already
+        named skill, where denying is the safe verdict.  The two are not in
+        conflict; do not "align" them without deciding which side loses data.
         """
         if not self._skill_states_file.exists():
             return {}
@@ -104,8 +119,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Failed to read skill states file %s", self._skill_states_file)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            # A decode failure means the user's disabled set is discarded, and the
+            # next toggle rewrites this file: keep the reason in the log.
+            logger.warning("Failed to read skill states file %s: %s", self._skill_states_file, exc)
         return {}
 
     def _write_skill_states(self, states: dict[str, dict[str, bool]]) -> None:
@@ -127,15 +144,13 @@ class UserScopedSkillStorage(LocalSkillStorage):
         )
         tmp_path = Path(tmp_path_str)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(states, f, indent=2)
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+            fd = None  # The file object now owns the descriptor.
+            with handle:
+                json.dump(states, handle, indent=2)
             tmp_path.replace(self._skill_states_file)
-        except Exception:
-            # Best-effort cleanup of the temp file on failure.
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        except BaseException:
+            cleanup_failed_atomic_write(tmp_path, fd)
             raise
 
     def get_skill_enabled_state(self, skill_name: str) -> bool:
@@ -151,9 +166,11 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
     def set_skill_enabled_state(self, skill_name: str, enabled: bool) -> None:
         """Set the enabled state for a custom/legacy skill and persist."""
-        states = self._read_skill_states()
-        states[skill_name] = {"enabled": enabled}
-        self._write_skill_states(states)
+        removal_names = (skill_name,) if not enabled else ()
+        with self._skill_projection_mutation(remove_names=removal_names, names=(skill_name,)):
+            states = self._read_skill_states()
+            states[skill_name] = {"enabled": enabled}
+            self._write_skill_states(states)
 
     # ------------------------------------------------------------------
     # Path helpers — redirect custom skill paths to user directory
@@ -178,6 +195,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # ------------------------------------------------------------------
 
     def load_skills(self, *, enabled_only: bool = False) -> list:
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(self):
+            return self._load_skills_unlocked(enabled_only=enabled_only)
+
+    def _load_skills_unlocked(self, *, enabled_only: bool = False) -> list:
         """Discover all skills and merge enabled state per isolation scope.
 
         Delegates skill discovery and PUBLIC enabled-state to
@@ -202,16 +225,30 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # being silently re-enabled by an absent per-user entry, while still
         # letting the per-user state override the global default when both
         # are present. PUBLIC skill state remains governed solely by
-        # extensions_config (handled by ``super().load_skills`` above).
-        from deerflow.config.extensions_config import get_extensions_config
+        # extensions_config (handled by ``super().load_skills`` above). Re-read
+        # from disk here too so another worker's update cannot be masked by
+        # this process's singleton cache while rebuilding a user projection.
+        from deerflow.config.extensions_config import ExtensionsConfig, _describe_load_failure
 
-        extensions_config = get_extensions_config()
-        skills = [
-            dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
-            if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
-            else s
-            for s in skills
-        ]
+        try:
+            extensions_config = ExtensionsConfig.from_file()
+            skills = [
+                dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
+                if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
+                else s
+                for s in skills
+            ]
+        except Exception as e:
+            # Same degraded mode as ``LocalSkillStorage.load_skills``: a config
+            # that cannot be read says nothing about which skills are enabled,
+            # so the per-user AND cannot be evaluated. Raising here would take
+            # the whole user-scoped listing down over an unrelated defect in the
+            # file, so fail closed instead — every skill is listed, none is
+            # enabled. ``from_file`` resolves ``$VAR`` placeholders before
+            # validation, so only the failure shape is safe to log (see
+            # ``_describe_load_failure``).
+            logger.warning("Failed to load extensions config; treating every user-scoped skill as disabled (%s)", _describe_load_failure(e))
+            skills = [dataclasses.replace(s, enabled=False) for s in skills]
 
         if enabled_only:
             skills = [s for s in skills if s.enabled]
@@ -256,26 +293,75 @@ class UserScopedSkillStorage(LocalSkillStorage):
         is_global_custom_fallback = (self._global_custom_root / normalized_name / SKILL_MD_FILE).exists()
         if is_global_public:
             raise ValueError(f"'{name}' is a built-in skill. Use the skill_manage tool to create your own version — it will shadow the built-in one.")
+        is_integration = any((candidate / SKILL_MD_FILE).exists() for candidate in self._integrations_root.glob(f"*/{normalized_name}") if candidate.is_dir())
         if is_global_custom_fallback:
             raise ValueError(f"'{name}' is a legacy shared skill (not editable). To customise it, create your own version with the same name — it will shadow the shared one.")
+        if is_integration:
+            raise ValueError(f"'{name}' is a managed integration skill and cannot be edited. Create a custom skill with another name if you need a modified workflow.")
         raise FileNotFoundError(f"Custom skill '{name}' not found.")
+
+    def load_custom_skill_diagnostics(self) -> list[SkillLoadDiagnostic]:
+        """Scan only owned packages; legacy/shared and external links are excluded.
+
+        Unlike runtime discovery's external-package compatibility, management
+        diagnostics cannot establish ownership outside the caller's custom root.
+        Root ancestors must not redirect into another user's storage either.
+        """
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(self):
+            root = self._user_custom_root
+            expected = self._paths.base_dir.resolve() / "users" / self._user_id / "skills" / "custom"
+            if root.resolve() != expected or not root.is_dir():
+                return []
+            diagnostics: list[SkillLoadDiagnostic] = []
+            for current, dirs, files in walk_skill_directories(root):
+                package_dir = Path(current)
+                if not package_dir.resolve().is_relative_to(expected):
+                    dirs.clear()
+                    continue
+                dirs[:] = sorted(name for name in dirs if not name.startswith("."))
+                if SKILL_MD_FILE not in files:
+                    continue
+                dirs.clear()
+                try:
+                    skill_file = (package_dir / SKILL_MD_FILE).resolve(strict=True)
+                    if not skill_file.is_relative_to(expected):
+                        continue
+                    # Preserve the logical SKILL.md name for owned internal links.
+                    parse_skill_file(package_dir / SKILL_MD_FILE, SkillCategory.CUSTOM, package_dir.relative_to(root), diagnostics=diagnostics)
+                except (OSError, RuntimeError):
+                    # A concurrently removed/retargeted package is not a YAML error.
+                    continue
+            return diagnostics
 
     def _iter_skill_files(self) -> Iterable[tuple[SkillCategory, Path, Path]]:
         # 1. Public skills: always from global root
         public_path = self._host_root / SkillCategory.PUBLIC.value
         if public_path.exists() and public_path.is_dir():
-            for current_root, dir_names, file_names in os.walk(public_path, followlinks=True):
+            for current_root, dir_names, file_names in walk_skill_directories(public_path):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
                 dir_names.clear()
                 yield SkillCategory.PUBLIC, public_path, Path(current_root) / SKILL_MD_FILE
 
-        # 2. Custom skills: prefer user-level directory
+        # 2. Managed integration skills: globally installed, read-only. Their
+        # enabled state is still merged from this user's _skill_states.json.
+        integration_path = self._integrations_root
+        if integration_path.exists() and integration_path.is_dir():
+            for current_root, dir_names, file_names in walk_skill_directories(integration_path):
+                dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
+                if SKILL_MD_FILE not in file_names:
+                    continue
+                dir_names.clear()
+                yield SkillCategory.INTEGRATION, integration_path, Path(current_root) / SKILL_MD_FILE
+
+        # 3. Custom skills: prefer user-level directory
         user_custom_exists = False
         user_custom_path = self._user_custom_root
         if user_custom_path.exists() and user_custom_path.is_dir():
-            for current_root, dir_names, file_names in os.walk(user_custom_path, followlinks=True):
+            for current_root, dir_names, file_names in walk_skill_directories(user_custom_path):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != ".history")
                 if SKILL_MD_FILE not in file_names:
                     continue
@@ -283,7 +369,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 user_custom_exists = True
                 yield SkillCategory.CUSTOM, user_custom_path, Path(current_root) / SKILL_MD_FILE
 
-        # 3. Fallback: if user has no custom skills, load from global custom
+        # 4. Fallback: if user has no custom skills, load from global custom
         #    as LEGACY (read-only) so legacy skills are visible but not
         #    editable/deletable by the user. LEGACY skills are mounted at
         #    /mnt/skills/legacy/<name>/ in the sandbox so their supporting
@@ -291,7 +377,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         if not user_custom_exists:
             global_custom_path = self._global_custom_root
             if global_custom_path.exists() and global_custom_path.is_dir():
-                for current_root, dir_names, file_names in os.walk(global_custom_path, followlinks=True):
+                for current_root, dir_names, file_names in walk_skill_directories(global_custom_path):
                     dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != ".history")
                     if SKILL_MD_FILE not in file_names:
                         continue
@@ -309,8 +395,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
         path = Path(archive_path)
         custom_dir = self._user_custom_root
 
-        # Ensure user custom directory exists
-        custom_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure user custom directory exists. This is filesystem work too, so
+        # it goes through the same worker-thread discipline as the phases below
+        # — the install route awaits this coroutine on the Gateway event loop.
+        await asyncio.to_thread(custom_dir.mkdir, parents=True, exist_ok=True)
 
         # The per-file security scan is an async LLM call and must stay on the
         # event loop; every filesystem phase around it runs in a worker thread.
@@ -318,7 +406,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         try:
             skill_dir, skill_name, target = await asyncio.to_thread(self._prepare_skill_archive, path, Path(tmp), custom_dir, archive_path)
 
-            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, app_config=self._app_config)
 
             await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
             logger.info("Skill %r installed to %s for user %s", skill_name, target, self._user_id)
@@ -342,20 +430,19 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # ------------------------------------------------------------------
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
-        # Ensure user custom skills directory exists
-        self._user_custom_root.mkdir(parents=True, exist_ok=True)
-        target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(target.parent),
-        ) as tmp_file:
-            tmp_file.write(content)
-            tmp_path = Path(tmp_file.name)
-        tmp_path.replace(target)
-        make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+        with self._skill_projection_mutation(names=(name,)):
+            target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
+                    tmp_path = Path(tmp_file.name)
+                    tmp_file.write(content)
+                tmp_path.replace(target)
+                make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+            finally:
+                if tmp_path is not None:
+                    cleanup_failed_atomic_write(tmp_path)
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -370,22 +457,46 @@ class UserScopedSkillStorage(LocalSkillStorage):
         """Host path to this user's custom skills root directory."""
         return self._user_custom_root
 
+    def get_integrations_root(self) -> Path:
+        """Host path to the global managed integration skills root directory."""
+        return self._integrations_root
+
+    def get_user_integrations_root(self) -> Path:
+        """Compatibility alias for :meth:`get_integrations_root`."""
+        return self.get_integrations_root()
+
     # ------------------------------------------------------------------
-    # Path validation — accept per-user custom root as well as global root
+    # Path validation — accept public, per-user custom, and integration roots
     # ------------------------------------------------------------------
 
     def validate_skill_file_path(self, skill_file: Path) -> Path:
-        """Accept files under *either* the global root or the per-user custom root.
+        """Accept files under the public, per-user custom, or integration root.
 
-        Custom skills live in ``_user_custom_root`` which is not a sub-path
-        of ``_host_root``, so the default implementation's single-root check
-        would reject them.  This override allows both roots.
+        Custom and managed integration skills live outside ``_host_root``, so
+        the default implementation's single-root check would reject them.
+        One-level package-directory symlinks under either configured custom-skill
+        category root retain the operator-managed external-skill compatibility
+        of the base storage.
         """
+        if skill_file.is_symlink():
+            raise ValueError(f"Resolved skill file {skill_file} must stay within the configured skill roots and cannot be a symlink.")
         resolved_file = skill_file.resolve()
-        for allowed_root in (self._host_root.resolve(), self._user_custom_root.resolve()):
+        allowed_roots = (
+            self._host_root.resolve(),
+            self._user_custom_root.resolve(),
+            self._integrations_root.resolve(),
+        )
+        for allowed_root in allowed_roots:
             try:
                 resolved_file.relative_to(allowed_root)
                 return resolved_file
             except ValueError:
                 continue
-        raise ValueError(f"Resolved skill file {resolved_file} must stay within either the global skills root ({self._host_root.resolve()}) or the per-user custom root ({self._user_custom_root.resolve()}).")
+        if any(self._is_external_skill_directory_symlink(skill_file, custom_root) for custom_root in (self._user_custom_root, self._global_custom_root)):
+            return resolved_file
+        raise ValueError(
+            f"Resolved skill file {resolved_file} must stay within the global skills root "
+            f"({self._host_root.resolve()}), the per-user custom root "
+            f"({self._user_custom_root.resolve()}), or the managed integration skills root "
+            f"({self._integrations_root.resolve()})."
+        )

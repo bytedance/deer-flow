@@ -37,10 +37,118 @@ logger = logging.getLogger(__name__)
 _MAX_RECOVERY_ERROR_DETAIL_LEN = 500
 _UNKNOWN_TOOL_NAME = "unknown_tool"
 _EMPTY_TOOL_NAME_ERROR = "Tool call could not be executed because its name was missing or empty."
+_SYNTHETIC_TOOL_CALL_ID_PREFIX = "deerflow_synthetic_tool_call_"
+
+# Middleware producers spell an absent provider ID differently: "" is the canonical
+# spelling, but ``str(tool_call.get("id", ""))`` yields "None" once the key is present
+# with a null value, and the artifact/deferred/knowledge middlewares fall back to
+# "missing_tool_call_id". They all answer the same call, so pairing treats them alike.
+_ABSENT_TOOL_CALL_ID_SPELLINGS = frozenset({"None", "missing_tool_call_id"})
+
+
+def _canonical_tool_call_id(tool_call_id: object) -> object:
+    """Return one value for every spelling middleware uses for "this call had no ID"."""
+    return "" if _absent_tool_call_id(tool_call_id) else tool_call_id
+
+
+def _absent_tool_call_id(tool_call_id: object) -> bool:
+    """Whether an ID is missing in any spelling: null, blank, or a producer sentinel."""
+    if not _valid_tool_call_id(tool_call_id):
+        return True
+    return isinstance(tool_call_id, str) and tool_call_id in _ABSENT_TOOL_CALL_ID_SPELLINGS
+
+
+def _same_tool_call_id(left: object, right: object) -> bool:
+    return _canonical_tool_call_id(left) == _canonical_tool_call_id(right)
 
 
 def _valid_tool_name(name: object) -> bool:
     return isinstance(name, str) and bool(name.strip())
+
+
+def _valid_tool_call_id(tool_call_id: object) -> bool:
+    return isinstance(tool_call_id, str) and bool(tool_call_id.strip())
+
+
+def _tool_call_name(tool_call: dict) -> object:
+    """Return a call's declared name, mirroring _message_tool_calls' raw-payload fallback."""
+    name = tool_call.get("name")
+    if _valid_tool_name(name):
+        return name
+    function = tool_call.get("function")
+    return function.get("name") if isinstance(function, dict) else name
+
+
+def _names_can_pair(call_name: object, result_name: object) -> bool:
+    """Whether a result's name contradicts a call's name.
+
+    Either side may legitimately be missing (the empty-name sibling recovery exists
+    for exactly that), and a missing name cannot contradict anything — only two
+    usable names that differ rule the pairing out.
+    """
+    if not _valid_tool_name(call_name) or not _valid_tool_name(result_name):
+        return True
+    return call_name.strip() == result_name.strip()
+
+
+def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tuple[list, list[dict], bool]:
+    """Replace malformed ids in one tool-call list with stable synthetic ids.
+
+    The id is derived from the call's position so both the pairing pass and the
+    model-bound message agree on it without threading state between them.
+
+    Returns the rewritten list, one ``{original, synthetic, name}`` claim entry per
+    relabelled call, and whether anything changed.
+    """
+    relabeled: list = []
+    assigned: list[dict] = []
+    changed = False
+    for position, tool_call in enumerate(tool_calls):
+        if not isinstance(tool_call, dict) or _valid_tool_call_id(tool_call.get("id")):
+            relabeled.append(tool_call)
+            continue
+        synthetic = f"{_SYNTHETIC_TOOL_CALL_ID_PREFIX}{msg_index}_{source}_{position}"
+        relabeled.append({**tool_call, "id": synthetic})
+        changed = True
+        assigned.append({"original": tool_call.get("id"), "synthetic": synthetic, "name": _tool_call_name(tool_call)})
+    return relabeled, assigned, changed
+
+
+def _turn_malformed_result_count(messages: list, start: int) -> int:
+    """Count the unpaired results issued by the turn opened at ``start``."""
+    count = 0
+    for msg in messages[start + 1 :]:
+        if getattr(msg, "type", None) == "ai":
+            break
+        if isinstance(msg, ToolMessage) and _absent_tool_call_id(msg.tool_call_id):
+            count += 1
+    return count
+
+
+def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional: bool) -> str | None:
+    """Consume the open malformed call that ``result`` answers, returning its new id.
+
+    Malformed originals are all equally empty, so they cannot identify their own
+    result; ``open_calls`` is already scoped to the issuing turn. Within that turn the
+    result's name narrows the candidates, and only a *forced* choice is taken:
+
+    * one compatible call — its name, or being the turn's only call, identifies it;
+    * several compatible calls — position identifies them, but only while ``positional``
+      holds, i.e. every open call in the turn has a result. Identical parallel calls
+      (two ``bash``) are distinguishable by nothing else, and order here is a
+      construction guarantee rather than an assumption about the provider: LangGraph's
+      ``ToolNode`` builds the results with ``asyncio.gather`` / ``executor.map`` over
+      ``tool_calls``, both of which yield in input order however the tools interleave.
+      A *missing* result means a call was interrupted — this middleware's own trigger —
+      so the surviving results can no longer be trusted to line up with the calls.
+
+    Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
+    what an unattributable result gets today — better than inventing a pairing.
+    """
+    candidates = [position for position, entry in enumerate(open_calls) if _same_tool_call_id(entry["original"], result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
+    if not candidates or (len(candidates) > 1 and not positional):
+        return None
+    return open_calls.pop(candidates[0])["synthetic"]
 
 
 def _normalize_tool_name(name: object) -> str:
@@ -57,7 +165,7 @@ def _parse_json_object(value: object) -> dict | None:
         return None
     try:
         parsed = json.loads(value)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -67,7 +175,7 @@ def _normalize_tool_arguments(arguments: object) -> str:
     if isinstance(arguments, dict):
         try:
             return json.dumps(arguments, ensure_ascii=False, allow_nan=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             return "{}"
     return arguments if _parse_json_object(arguments) is not None else "{}"
 
@@ -109,7 +217,13 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             normalized.append(normalized_call)
 
         raw_tool_calls = (getattr(msg, "additional_kwargs", None) or {}).get("tool_calls") or []
-        if not tool_calls:
+        # The raw payload is a fallback serialization of the same calls: the
+        # OpenAI serializer reaches for it only once BOTH structured views are
+        # empty (mirrors the gating in _normalize_tool_call_ids).  Collecting
+        # it while invalid_tool_calls is non-empty would count the same call
+        # twice and emit two ToolMessages for one id — the exact duplicate-id
+        # shape strict providers reject.
+        if not tool_calls and not getattr(msg, "invalid_tool_calls", None):
             for raw_tc in raw_tool_calls:
                 if not isinstance(raw_tc, dict):
                     continue
@@ -267,19 +381,89 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             return msg
         return msg.model_copy(update=update)
 
+    @staticmethod
+    def _normalize_tool_call_ids(messages: list) -> list:
+        """Return messages with malformed tool-call ids replaced by synthetic ids.
+
+        A provider that omits a tool-call id parses into a well-formed ``tool_calls``
+        entry with an empty/``None`` id. Such an id can never enter the pairing set
+        below, so the call's own result is dropped as an orphan and no placeholder
+        replaces it — the request then reaches the provider with an empty id and the
+        tool result gone. Normalizing ids up front lets the pairing and placeholder
+        logic treat the call like any other, mirroring the empty-name recovery.
+        """
+        rewritten: dict[int, object] = {}
+        # Malformed calls from the most recent AIMessage that are still unanswered.
+        # Walking in document order and resetting here is what scopes a result to the
+        # turn that issued it: a result never answers a call from an earlier turn, so
+        # an earlier dangling call must not consume a later turn's result.
+        open_calls: list[dict] = []
+        # Whether this turn's results line up 1:1 with its malformed calls, which is what
+        # lets position break a tie between otherwise indistinguishable siblings.
+        positional = False
+
+        for index, msg in enumerate(messages):
+            if getattr(msg, "type", None) == "ai":
+                update: dict = {}
+                assigned: list[dict] = []
+                structured = getattr(msg, "tool_calls", None) or []
+                additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+                raw_tool_calls = additional_kwargs.get("tool_calls")
+
+                invalid = getattr(msg, "invalid_tool_calls", None) or []
+                sources: list[tuple[str, list, str]] = [
+                    ("call", structured, "tool_calls"),
+                    ("invalid", invalid, "invalid_tool_calls"),
+                ]
+                # The raw payload is a fallback view of the same calls, so relabel it only when
+                # it is the view actually serialized: the OpenAI serializer reaches for it only
+                # once *both* structured views are empty. Minting an id for a shadowed raw view
+                # would owe a placeholder to a call the provider never sees, putting an orphan
+                # tool result on the wire.
+                if not structured and not invalid and isinstance(raw_tool_calls, list):
+                    sources.append(("raw", raw_tool_calls, "additional_kwargs"))
+
+                for source, tool_calls, field in sources:
+                    relabeled, source_assigned, changed = _relabel_tool_call_ids(tool_calls, index, source)
+                    assigned.extend(source_assigned)
+                    if not changed:
+                        continue
+                    update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
+
+                open_calls = assigned
+                positional = _turn_malformed_result_count(messages, index) == len(assigned)
+                if update:
+                    rewritten[index] = msg.model_copy(update=update)
+                continue
+
+            # Re-point an already-paired result at its call's new id so the pairing
+            # below keeps it instead of dropping it as an orphan. Results carrying a
+            # producer sentinel are still unpaired — the sentinel is not the call's id.
+            if not isinstance(msg, ToolMessage) or not _absent_tool_call_id(msg.tool_call_id):
+                continue
+            synthetic = _claim_synthetic_id(open_calls, msg, positional)
+            if synthetic is not None:
+                rewritten[index] = msg.model_copy(update={"tool_call_id": synthetic})
+
+        if not rewritten:
+            return messages
+        return [rewritten.get(index, msg) for index, msg in enumerate(messages)]
+
     def _build_patched_messages(self, messages: list) -> list | None:
         """Return messages with tool results grouped after their tool-call AIMessage.
 
         This normalizes model-bound causal order before provider serialization while
         preserving already-valid transcripts unchanged.
         """
+        normalized = self._normalize_tool_call_ids(messages)
+
         tool_messages_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-        for msg in messages:
+        for msg in normalized:
             if isinstance(msg, ToolMessage):
                 tool_messages_by_id[msg.tool_call_id].append(msg)
 
         tool_call_ids: set[str] = set()
-        for msg in messages:
+        for msg in normalized:
             if getattr(msg, "type", None) != "ai":
                 continue
             for tc in self._message_tool_calls(msg):
@@ -290,7 +474,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         patched: list = []
         patch_count = 0
         drop_count = 0
-        for msg in messages:
+        for msg in normalized:
             if isinstance(msg, ToolMessage):
                 if msg.tool_call_id in tool_call_ids:
                     continue  # Will be re-emitted after its AIMessage

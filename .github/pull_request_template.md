@@ -27,6 +27,7 @@ Fixes #
 - [ ] **Frontend UI** — page / component / setting / interaction under `frontend/`
 - [ ] **Backend API** — endpoint / SSE event / request-response shape under `backend/app`
 - [ ] **Agents / LangGraph** — agent node, graph wiring, `langgraph.json`, or prompt change
+  - Prompt-layer self-check: for every data source in the new text, what is its trust level, and which channel should it ride? Model-supplied or user-influenceable values belong on the untrusted, sanitized data channel (e.g. the task `HumanMessage`) — never interpolated into framework-owned system text, even neutralized.
 - [ ] **Sandbox** — `docker/` or sandboxed execution
 - [ ] **Skills** — change under `skills/`
 - [ ] **Dependencies** — new/upgraded entry in `backend/pyproject.toml` or `frontend/package.json` (say what it buys us)
@@ -45,11 +46,21 @@ Fixes #
 
 <!-- Skip (delete) this section if this PR is not a bug fix.
 
-     Bugs should be encoded as a failing test that goes red before the fix.
+     Fold regression cases into the owning module's existing suite instead of
+     creating a new test file per fix.
      Confirm:
-       - Test path that reproduces the bug:
+       - Existing suite + test case that reproduces the bug:
        - Did it go red on `main` and green on this branch? (yes / no)
        - If a red test wasn't cheap to write, explain why and what you did instead. -->
+
+
+## Test footprint
+
+<!-- Keep CI shards within budget: add cases to the module's behavioral suite
+     and delete or update superseded tests in the same PR. -->
+
+- **Net test line delta** (`+<added> / -<removed>` across test files):
+- **Merged or pruned old tests?** (`yes` — list consolidated/deleted test paths, or `no` — explain why net growth is needed):
 
 
 ## Validation

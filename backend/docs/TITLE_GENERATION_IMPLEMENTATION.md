@@ -42,7 +42,7 @@ title:
 
 ### 3. 文档
 
-#### [`docs/AUTO_TITLE_GENERATION.md`](../docs/AUTO_TITLE_GENERATION.md) (新建)
+#### [`docs/AUTO_TITLE_GENERATION.md`](AUTO_TITLE_GENERATION.md) (新建)
 - ✅ 完整的功能说明文档
 - ✅ 实现方式和架构设计
 - ✅ 配置说明
@@ -220,7 +220,7 @@ pytest
 
 ## 📚 相关资源
 
-- [完整文档](../docs/AUTO_TITLE_GENERATION.md)
+- [完整文档](AUTO_TITLE_GENERATION.md)
 - [LangGraph Middleware](https://langchain-ai.github.io/langgraph/concepts/middleware/)
 - [LangGraph State 管理](https://langchain-ai.github.io/langgraph/concepts/low_level/#state)
 - [LangGraph Checkpointer](https://langchain-ai.github.io/langgraph/concepts/persistence/)

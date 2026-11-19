@@ -31,3 +31,7 @@ config.yaml
 
 # Claude Code settings
 .claude/settings.local.json
+
+# pytest --basetemp workaround dirs (sandbox tmp_path permission)
+.pytest_tmp/
+.pytest_tmp_run/

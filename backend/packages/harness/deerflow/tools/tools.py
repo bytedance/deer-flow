@@ -1,19 +1,41 @@
+import copy
+import itertools
 import logging
+import threading
 
 from langchain.tools import BaseTool
+from langchain_core.language_models import BaseChatModel
+from pydantic import BaseModel
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.tool_config import ToolConfig
+from deerflow.constants import CONVERSATION_TOOL_USE
+from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
-from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, review_skill_package, task_tool, view_image_tool
-from deerflow.tools.mcp_metadata import tag_mcp_tool
+from deerflow.scheduler.runtime import SchedulerRunCapability, is_scheduler_capability, scheduler_tools_enabled
+from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
+from deerflow.tools.artifact_handoff import present_shared_artifact
+from deerflow.tools.builtins import (
+    ask_clarification_tool,
+    build_inspect_run_status_tool,
+    cancel_background_task,
+    list_background_tasks,
+    list_uploaded_files,
+    present_file_tool,
+    review_skill_package,
+    task_tool,
+    view_image_tool,
+)
+from deerflow.tools.mcp_metadata import get_mcp_source, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
 
 BUILTIN_TOOLS = [
     present_file_tool,
+    present_shared_artifact,
     ask_clarification_tool,
     review_skill_package,
 ]
@@ -22,6 +44,15 @@ SUBAGENT_TOOLS = [
     task_tool,
     # task_status_tool is no longer exposed to LLM (backend handles polling internally)
 ]
+
+# These operations are assembled from the host grant in get_available_tools().
+# Registering a tool path in YAML cannot widen that grant or its interaction mode.
+_HOST_GRANTED_TOOL_USES = frozenset(
+    {
+        "deerflow.tools.scheduled_tasks:schedule_task",
+        "deerflow.tools.scheduled_tasks:stop_scheduled_task",
+    }
+)
 
 
 def _is_host_bash_tool(tool: object) -> bool:
@@ -35,11 +66,98 @@ def _is_host_bash_tool(tool: object) -> bool:
     return False
 
 
+_sync_invocable_tool_lock = threading.Lock()
+
+
 def _ensure_sync_invocable_tool(tool: BaseTool) -> BaseTool:
-    """Attach a sync wrapper to async-only tools used by sync agent callers."""
-    if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
-        tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
+    """Attach a sync wrapper to async-only tools used by sync agent callers.
+
+    The wrapped objects are process-wide singletons (BUILTIN_TOOLS /
+    SUBAGENT_TOOLS / MCP cache entries) and tool assembly may now run on
+    worker threads concurrently; double-checked locking makes the in-place
+    ``tool.func`` wrap explicitly single-shot instead of incidental.
+    """
+    if getattr(tool, "func", None) is not None or getattr(tool, "coroutine", None) is None:
+        return tool
+    with _sync_invocable_tool_lock:
+        if getattr(tool, "func", None) is None:
+            tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
     return tool
+
+
+def _extract_max_tokens(model_config: object | None) -> int | None:
+    """Safely extract a positive integer max_tokens from a model config object.
+
+    Handles ModelConfig (where max_tokens may be stored as an extra dynamic field),
+    dicts, SimpleNamespace, or test stubs. Rejects booleans, mocks, non-numeric
+    values, non-finite numbers, negative numbers, zero, and None.
+    """
+    if model_config is None:
+        return None
+    raw = model_config.get("max_tokens") if isinstance(model_config, dict) else getattr(model_config, "max_tokens", None)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        val = int(raw)
+        return val if val > 0 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _clone_tool_with_description(tool: BaseTool, description: str) -> BaseTool:
+    """Return a copy of tool with an updated description, leaving the original intact."""
+    if isinstance(tool, BaseModel):
+        return tool.model_copy(update={"description": description})
+    cloned = copy.copy(tool)
+    cloned.description = description
+    return cloned
+
+
+def _select_tool_configs(config: AppConfig, groups: list[str] | None, include_conversation_reader: bool) -> list[ToolConfig]:
+    """Return the configured tool entries this assembly may expose, in config order.
+
+    Every exclusion rule is a pure per-entry predicate, so they are evaluated in
+    a single pass with the config-wide decisions computed once up front.
+    """
+    group_filter = None if groups is None else set(groups)
+    knowledge_enabled = bool(getattr(getattr(config, "knowledge_base", None), "enabled", False))
+    host_bash_allowed = is_host_bash_allowed(config)
+
+    selected: list[ToolConfig] = []
+    for tool in config.tools:
+        if group_filter is not None and tool.group not in group_filter:
+            continue
+        if tool.use in _HOST_GRANTED_TOOL_USES:
+            continue
+        if not include_conversation_reader and tool.use == CONVERSATION_TOOL_USE:
+            continue
+        # Knowledge tools are opt-in as a group. Provider connection and retrieval
+        # settings live on each tool entry; the generic capability flag controls
+        # whether the group is exposed at all.
+        if not knowledge_enabled and tool.group == "knowledge":
+            continue
+        # Do not expose host bash by default when LocalSandboxProvider is active.
+        if not host_bash_allowed and _is_host_bash_tool(tool):
+            continue
+        selected.append(tool)
+    return selected
+
+
+def _write_file_budget_note(max_tokens: int | None) -> str | None:
+    """Return the write_file per-response budget hint, or None when no usable cap exists."""
+    if max_tokens is None:
+        return None
+    try:
+        safe_chars = int(max_tokens * 3 * 0.7)
+    except OverflowError:
+        # Even finite caps can be too large for this optional estimate.
+        return None
+    return (
+        f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
+        f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
+        "For larger documents, write the first section now, "
+        "then use append=True for subsequent sections."
+    )
 
 
 def get_available_tools(
@@ -48,7 +166,13 @@ def get_available_tools(
     model_name: str | None = None,
     subagent_enabled: bool = False,
     *,
+    mcp_plugins: list[str] | None = None,
+    include_upload_tool: bool = True,
+    include_conversation_reader: bool = False,
+    scheduler_capability: SchedulerRunCapability | None = None,
     app_config: AppConfig | None = None,
+    extensions=None,
+    chat_model: BaseChatModel | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -59,25 +183,45 @@ def get_available_tools(
         groups: Optional list of tool groups to filter by.
         include_mcp: Whether to include tools from MCP servers (default: True).
         model_name: Optional model name to determine if vision tools should be included.
+        chat_model: Constructed model whose effective output cap supplies write_file
+            guidance. When supplied, an absent cap omits the hint; only callers
+            without a model fall back to the configured profile.
         subagent_enabled: Whether to include subagent tools (task, task_status).
+        include_upload_tool: Whether to include ``list_uploaded_files`` (default: True).
+            Ordinary task subagents enable it only after snapshotting the
+            parent's current-run upload state. Durable batch and non-standard
+            subagent callers without that state keep it disabled.
+        include_conversation_reader: Allow the configured conversation reader
+            only when the host provides its authorized runtime capability.
+            Defaults to false for embedded callers and subagents.
+        scheduler_capability: Current-run host grant for conversation schedule
+            management or own-schedule stopping. Omitted for embedded,
+            bootstrap and subagent assembly.
 
     Returns:
         List of available tools.
     """
     config = app_config or get_app_config()
-    tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
 
-    # Do not expose host bash by default when LocalSandboxProvider is active.
-    if not is_host_bash_allowed(config):
-        tool_configs = [tool for tool in tool_configs if not _is_host_bash_tool(tool)]
+    # If no model_name specified, use the first model (default)
+    if model_name is None and config.models:
+        model_name = config.models[0].name
+    model_config = config.get_model_config(model_name) if model_name else None
 
-    loaded_tools_raw = [(cfg, resolve_variable(cfg.use, BaseTool)) for cfg in tool_configs]
+    # Annotate write_file with the constructed model's effective output budget so the
+    # model does not assume the 80 KB streaming ceiling is the practical limit
+    # for a single completion. The tool is cloned to avoid mutating the
+    # module-level singleton in-place across assemblies or leaking guidance to
+    # models configured without max_tokens.
+    budget_note = _write_file_budget_note(_extract_max_tokens(chat_model if chat_model is not None else model_config))
 
-    # Warn when the config ``name`` field and the tool object's ``.name``
-    # attribute diverge — this mismatch is the root cause of issue #1803 where
-    # the LLM receives one name in its tool schema but the runtime router
-    # recognises a different name, producing "not a valid tool" errors.
-    for cfg, loaded in loaded_tools_raw:
+    loaded_tools: list[BaseTool] = []
+    for cfg in _select_tool_configs(config, groups, include_conversation_reader):
+        loaded = resolve_variable(cfg.use, BaseTool)
+        # Warn when the config ``name`` field and the tool object's ``.name``
+        # attribute diverge — this mismatch is the root cause of issue #1803 where
+        # the LLM receives one name in its tool schema but the runtime router
+        # recognises a different name, producing "not a valid tool" errors.
         if cfg.name != loaded.name:
             logger.warning(
                 "Tool name mismatch: config name %r does not match tool .name %r (use: %s). The tool's own .name will be used for binding.",
@@ -85,11 +229,23 @@ def get_available_tools(
                 loaded.name,
                 cfg.use,
             )
-
-    loaded_tools = [_ensure_sync_invocable_tool(t) for _, t in loaded_tools_raw]
+        loaded = _ensure_sync_invocable_tool(loaded)
+        if budget_note is not None and loaded.name == "write_file" and hasattr(loaded, "description"):
+            description = getattr(loaded, "description", "") or ""
+            if "PER-RESPONSE BUDGET:" not in description:
+                loaded = _clone_tool_with_description(loaded, f"{description}{budget_note}")
+        loaded_tools.append(loaded)
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
+    if scheduler_tools_enabled(config) and is_scheduler_capability(scheduler_capability):
+        from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
+
+        builtin_tools.append(schedule_task if scheduler_capability.mode == "interactive" else stop_scheduled_task)
+    if is_mcp_task_runtime_available():
+        builtin_tools.extend((list_background_tasks, cancel_background_task))
+    if include_upload_tool:
+        builtin_tools.append(list_uploaded_files)
     skill_evolution_config = getattr(config, "skill_evolution", None)
     if getattr(skill_evolution_config, "enabled", False):
         from deerflow.tools.skill_manage_tool import skill_manage_tool
@@ -99,14 +255,15 @@ def get_available_tools(
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
-        logger.info("Including subagent tools (task)")
+        if is_subagent_batch_runtime_available():
+            from deerflow.subagents.batch_runtime import get_subagent_batch_submitter
+            from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
 
-    # If no model_name specified, use the first model (default)
-    if model_name is None and config.models:
-        model_name = config.models[0].name
+            builtin_tools.extend(bind_batch_tools(submitter_provider=get_subagent_batch_submitter, app_config=config))
+        logger.info("Including native subagent tools")
 
     # Add view_image_tool only if the model supports vision
-    model_config = config.get_model_config(model_name) if model_name else None
+    builtin_tools.append(build_inspect_run_status_tool(context_window=model_config.context_window if model_config else None))
     if model_config is not None and model_config.supports_vision:
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
@@ -120,25 +277,64 @@ def get_available_tools(
     if include_mcp:
         try:
             from deerflow.config.extensions_config import ExtensionsConfig
-            from deerflow.mcp.cache import get_cached_mcp_tools
+            from deerflow.mcp.cache import get_cached_mcp_tools, refresh_mcp_cache_if_active
 
-            extensions_config = ExtensionsConfig.from_file()
-            if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
-                if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+            try:
+                extensions_config = ExtensionsConfig.from_file()
+            except Exception as exc:
+                # Only this call carries the resolved-credential risk:
+                # from_file() resolves $VAR values before validation, so a
+                # ValidationError message can embed secrets. Log the type only.
+                logger.error("Failed to load MCP extensions config (%s)", type(exc).__name__)
+            else:
+                if extensions_config.get_enabled_mcp_servers():
+                    mcp_tools = get_cached_mcp_tools()
+                    if mcp_tools:
+                        logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
-                    # Tag MCP-sourced tools so deferred-tool assembly (done at
-                    # the agent construction site, AFTER tool-policy filtering)
-                    # can identify them. No ContextVar / registry is built here;
-                    # the deferred catalog + tool_search tool are assembled per
-                    # agent from the policy-filtered tool list.
-                    for t in mcp_tools:
-                        tag_mcp_tool(t)
+                        # Tag MCP-sourced tools so deferred-tool assembly at each
+                        # agent construction site can identify them. Lead agents
+                        # assemble their full configured MCP catalog; subagents
+                        # may pass an already filtered list reflecting their own
+                        # tool configuration and authorization.
+                        for t in mcp_tools:
+                            tag_mcp_tool(t)
+                else:
+                    # A change that disables the last MCP server must still retire
+                    # the previously initialized cache and its pooled sessions.
+                    # This never initializes tools: a process that never initialized
+                    # MCP pays no config-hashing or discovery cost, while one that
+                    # did still checks the existing cache for staleness.
+                    refresh_mcp_cache_if_active()
+                from deerflow.mcp.user_tools import get_user_mcp_tools
+
+                try:
+                    personal_tools, personal_config = get_user_mcp_tools()
+                except Exception as exc:
+                    # Invalid personal credentials must neither be logged nor
+                    # bypass explicit selection of the platform tools.
+                    logger.warning("Could not load personal MCP tools (%s)", type(exc).__name__)
+                    personal_tools, personal_config = [], ExtensionsConfig()
+                colliding_names = extensions_config.mcp_servers.keys() & personal_config.mcp_servers.keys()
+                if colliding_names:
+                    # A deployment name can match a generated personal runtime
+                    # name. Keep only the deployment tool and its routing metadata.
+                    logger.warning("Skipping personal MCP tools with deployment name collisions: %s", sorted(colliding_names))
+                    personal_tools = [tool for tool in personal_tools if (source := get_mcp_source(tool)) and source["server_name"] not in colliding_names]
+                    available_servers = {name: server for name, server in personal_config.mcp_servers.items() if name not in colliding_names}
+                    personal_config = personal_config.model_copy(update={"mcp_servers": available_servers})
+                mcp_tools = [*mcp_tools, *personal_tools]
+                extensions_config = extensions_config.model_copy(update={"mcp_servers": {**extensions_config.mcp_servers, **personal_config.mcp_servers}})
+                if mcp_plugins is not None:
+                    from deerflow.capabilities.runtime import filter_mcp_plugins
+
+                    mcp_tools = filter_mcp_plugins(mcp_tools, mcp_plugins, extensions_config)
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
-        except Exception as e:
-            logger.error(f"Failed to get cached MCP tools: {e}")
+        except Exception:
+            # Tool caching, pool cleanup and plugin filtering raise ordinary
+            # exceptions whose messages are safe and needed for debugging.
+            logger.exception("Failed to get cached MCP tools")
 
     # Add invoke_acp_agent tool if any ACP agents are configured
     acp_tools: list[BaseTool] = []
@@ -162,10 +358,16 @@ def get_available_tools(
     # Deduplicate by tool name — config-loaded tools take priority, followed by
     # built-ins, MCP tools, and ACP tools.  Duplicate names cause the LLM to
     # receive ambiguous or concatenated function schemas (issue #1803).
-    all_tools = [_ensure_sync_invocable_tool(t) for t in loaded_tools + builtin_tools + mcp_tools + acp_tools]
+    from deerflow.extensions import get_agent_build_extensions
+    from deerflow.extensions.plugin_tools import build_plugin_tools
+
+    # Keep plugin-vs-plugin validation strict. Host/plugin collisions use the
+    # ordinary-first deduplication below, without dropping unrelated tools.
+    plugin_tools = build_plugin_tools(extensions if extensions is not None else get_agent_build_extensions(), groups=groups)
     seen_names: set[str] = set()
     unique_tools: list[BaseTool] = []
-    for t in all_tools:
+    for t in itertools.chain(loaded_tools, builtin_tools, mcp_tools, acp_tools, plugin_tools):
+        t = _ensure_sync_invocable_tool(t)
         if t.name not in seen_names:
             unique_tools.append(t)
             seen_names.add(t.name)

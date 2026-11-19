@@ -10,16 +10,19 @@ Field names mirror the pre-abstraction ``MemoryConfig`` private fields so the
 migration is a pure move (config.yaml ``memory.<field>`` ->
 ``memory.backend_config.<field>``). ``model`` is a nested ``DeerMemModelConfig``
 (provider/model/api_key/base_url/temperature) consumed by ``core/llm.py``;
-``tracing_callback`` (step 14) and ``should_keep_hidden_message`` (step 15) are
-optional host-injected hooks (None = DeerMem defaults).
+``should_keep_hidden_message`` is an optional host-injected hook (None =
+DeerMem default); tracing is via the base ``MemoryManager.callbacks`` field
+(``on_memory_llm_call`` before the LLM call), not a DeerMemConfig slot.
 """
 
 from __future__ import annotations
 
 import logging
+import math
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,9 @@ class DeerMemModelConfig(BaseModel):
 class DeerMemConfig(BaseModel):
     """DeerMem-private configuration (self-contained, host-agnostic)."""
 
+    prompt_prepend: str = Field(default="", strict=True, description="Literal operator instructions prepended to the memory-update system message")
+    prompt_append: str = Field(default="", strict=True, description="Literal operator instructions appended to the memory-update system message")
+
     # ── Storage ──────────────────────────────────────────────────────────
     storage_path: str = Field(
         default="",
@@ -50,17 +56,138 @@ class DeerMemConfig(BaseModel):
     )
     storage_class: str = Field(
         default="",
-        description="Dotted class path for an alternative storage provider; empty (default) = FileMemoryStorage (no importlib, portable).",
+        description=(
+            "Dotted class path for an alternative storage provider, or a built-in alias: "
+            "``file`` = FileMemoryStorage (default) or ``markdown`` = MarkdownMemoryStorage "
+            "(tolerant load path, same JSON on disk); empty (default) = FileMemoryStorage "
+            "(no importlib, portable)."
+        ),
+    )
+    strict_user_scope: bool = Field(
+        default=False,
+        description="Require user_id for every storage scope. False preserves no-auth and legacy callers.",
+    )
+    manifest_filename: str = Field(
+        default="memory.json",
+        description="User-global summary JSON filename. Kept under this name for config compatibility; must be a plain .json filename.",
+    )
+    file_lock_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Maximum wait for the per-scope cross-process advisory file lock.",
+    )
+    retrieval_adapter: str = Field(
+        default="fts5",
+        description=(
+            "Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort. "
+            "Search bypasses this adapter when retrieval_relevance_enabled is true; indexing remains configured."
+        ),
+    )
+    retrieval_index_path: str = Field(
+        default="",
+        description=(
+            "Directory holding the derived SQLite FTS5 retrieval index. Empty (default) = ``{storage_path}/.retrieval``; "
+            "a relative path is resolved against storage_path; an absolute path is used as-is. The index is rebuildable, "
+            "so Gateway instances that share storage_path must each point this at instance-local disk: SQLite WAL is "
+            "unsupported on network filesystems, and peers would rebuild or delete each other's index."
+        ),
+    )
+    fact_dedup_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in deterministic near-duplicate gate for NEW facts (issue "
+            "#5252). When true, a proposed new fact whose bounded "
+            "token-Jaccard similarity to an existing fact in the same "
+            "user/agent scope AND category reaches "
+            "fact_dedup_similarity_threshold merges into that fact instead "
+            "of being appended: the existing id/content/createdAt are kept, "
+            "confidence is raised to max(old, new), and source is refreshed "
+            "only when confidence increases. Correction replacements and "
+            "proposed removal targets are excluded from near-dedup. "
+            "False preserves the legacy behavior exactly."
+        ),
+    )
+    fact_dedup_similarity_threshold: float = Field(
+        default=0.7,
+        ge=0.5,
+        le=1.0,
+        description=("Minimum bounded token-Jaccard similarity for the write-side near-duplicate merge gate. Used only when fact_dedup_enabled is true."),
+    )
+    retrieval_relevance_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in relevance-aware retrieval (issue #4495). When true, "
+            "search bypasses retrieval_adapter (including FTS5 and custom factories); "
+            "memory_search ranks all facts in scope by deterministic lexical "
+            "relevance combined with confidence, related facts are returned "
+            "even without a literal substring match, and prompt injection "
+            "ranks facts against the current query. False preserves the "
+            "legacy confidence-based behavior exactly."
+        ),
+    )
+    retrieval_relevance_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight of lexical relevance vs confidence in the combined retrieval score. 0.0 = confidence only; 1.0 = relevance only. Used only when retrieval_relevance_enabled is true.",
+    )
+    retrieval_diversity_weight: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Greedy MMR similarity penalty that demotes near-duplicate facts during relevance-aware ranking. 0.0 (default) = no diversification. Used only when retrieval_relevance_enabled is true.",
     )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(
         default=30,
         ge=1,
         le=300,
-        description="Seconds to wait before processing queued updates (debounce).",
+        description="Per-conversation quiet period before queued extraction becomes eligible.",
+    )
+    max_wait_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Maximum debounce deferral from a conversation's first pending update. Continuous same-key updates cannot postpone eligibility beyond this limit. Extraction remains serial: consumer backlog and LLM latency can delay completion."
+        ),
+    )
+    queue_max_depth: int = Field(
+        default=1000,
+        ge=0,
+        description=("Backpressure cap on pending items. 0 = unlimited. When the cap is reached, new non-signal updates are rejected (QueueFull); signal updates are always admitted so important memories are never shed."),
     )
     # ── Facts ────────────────────────────────────────────────────────────
     max_facts: int = Field(default=100, ge=10, le=500, description="Maximum number of facts to store.")
+    fact_eviction_policy: Literal["confidence", "hybrid-v1"] = Field(
+        default="confidence",
+        description=("Capacity-eviction policy. 'confidence' preserves the historical behavior; 'hybrid-v1' combines confidence, explicit-confirmation freshness, and query-driven access heat with bounded correction slots."),
+    )
+    fact_eviction_shadow_enabled: bool = Field(
+        default=False,
+        description=("When true, also compute hybrid-v1 during confidence-policy trims and include its disagreement in the metadata-only eviction audit."),
+    )
+    eviction_confidence_weight: float = Field(default=0.65, ge=0.0, le=1.0)
+    eviction_confirmation_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    eviction_access_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    eviction_confirmation_half_life_days: int = Field(default=90, ge=1, le=3650)
+    eviction_access_half_life_days: int = Field(default=30, ge=1, le=3650)
+    eviction_correction_reserved_fraction: float = Field(default=0.10, ge=0.0, le=1.0)
+    eviction_correction_reserved_max: int = Field(default=10, ge=0, le=100)
+    eviction_reserved_categories: list[str] = Field(
+        default_factory=lambda: ["correction"],
+        description=("Fact categories eligible for reserved capacity slots in hybrid-v1 eviction. Defaults to ['correction'] for historical compatibility."),
+    )
+    eviction_decay_exempt_categories: list[str] = Field(
+        default_factory=list,
+        description=("Fact categories exempt from confirmation freshness time-decay in hybrid-v1 eviction (e.g. permanent preferences and user identity)."),
+    )
+    eviction_audit_max_entries: int = Field(
+        default=200,
+        ge=0,
+        le=10000,
+        description="Maximum metadata-only capacity-eviction audit events per user/agent scope; 0 disables the audit.",
+    )
     fact_confidence_threshold: float = Field(
         default=0.7,
         ge=0.0,
@@ -179,7 +306,57 @@ class DeerMemConfig(BaseModel):
         le=20,
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
     )
-    # ── LLM (step 13: structured model sub-config consumed by core/llm.py build_llm) ──
+    # ── Extraction quality callback (post-invoke observability) ─────────
+    project_memory: Any = Field(default=None, exclude=True, description="Optional host hook preparing a separate project fact pool for the same extraction call.")
+
+    extraction_callback: Any = Field(
+        default=None,
+        description=(
+            "Optional ``callback(metrics)`` invoked AFTER the extraction LLM "
+            "call (token usage, facts passing/rejected by the confidence "
+            "filter, rejection rate, prompt version). The host injects a "
+            "Langfuse-based callback to emit an extraction span; None = no "
+            "post-invoke observability. Set programmatically (not from YAML)."
+        ),
+    )
+    # ── Memory judge (pre-screen + signal classification) ────────────────
+    judge: Any = Field(
+        default=None,
+        description=(
+            "Optional host-injected memory judge ``judge(context) -> MemoryBatchVerdict``: "
+            "decides whether this batch is worth an extraction call (pre-screening) and "
+            "supplies model hint labels (signal classification). None (default) = no judging, "
+            "leaving the extraction path byte-identical to a deployment without this feature. "
+            "Set programmatically by the host factory (not from YAML)."
+        ),
+    )
+    # ── Watermark (in-memory LRU + persisted per-agent sidecar) ──────────
+    watermark_max_keys: int = Field(
+        default=4096,
+        ge=0,
+        description=(
+            "Soft cap on the in-memory conversation-watermark cache (one entry "
+            "per distinct thread/user/agent) and on each agent's persisted "
+            "watermarks.json sidecar (one entry per thread). Over capacity the "
+            "cache drops its least-recently-used entry and the sidecar its "
+            "least-recently-advanced thread; a thread missing from both "
+            "re-extracts one batch on its next turn. 0 = unbounded."
+        ),
+    )
+    # ── Message processing (externalized patterns / prompts) ──
+    patterns_dir: str | None = Field(
+        default=None,
+        description=(
+            "Directory with {signal}.yaml files overriding bundled signal-detection patterns "
+            "(correction, reinforcement, preference, identity, goal, decision). None (default) "
+            "= bundled core/message_patterns/. When set explicitly, every signal file must exist."
+        ),
+    )
+    prompts_dir: str | None = Field(
+        default=None,
+        description=("Directory with custom memory-extraction prompt templates (memory_update.chat.yaml, staleness_review.yaml, consolidation.yaml, fact_extraction.yaml). None (default) = bundled core/prompts/."),
+    )
+    # ── LLM (structured model sub-config consumed by core/llm.py build_llm) ──
     model: DeerMemModelConfig = Field(
         default_factory=DeerMemModelConfig,
         description=(
@@ -190,17 +367,9 @@ class DeerMemConfig(BaseModel):
             "but non-LLM ops still work."
         ),
     )
-    # ── Hooks (steps 14-15: optional host-injected callables; None = DeerMem defaults) ──
-    tracing_callback: Any = Field(
-        default=None,
-        description=(
-            "Optional observability callback (e.g. langfuse) invoked before the "
-            "memory-update LLM call as "
-            "``callback(invoke_config, *, thread_id, user_id, trace_id, model_name)``. "
-            "None = no tracing (langfuse not hard-required). Set programmatically "
-            "(callables cannot come from YAML)."
-        ),
-    )
+    # ── Hooks (optional host-injected callables; None = DeerMem defaults) ──
+    # Tracing is via the base ``MemoryManager.callbacks`` field
+    # (``on_memory_llm_call`` before the LLM call), not a DeerMemConfig slot.
     should_keep_hidden_message: Any = Field(
         default=None,
         description=("Optional ``hook(additional_kwargs) -> bool``; when set, ``hide_from_ui`` messages are kept if it returns True. None = skip all ``hide_from_ui`` (host-agnostic safe default). Set programmatically."),
@@ -223,10 +392,36 @@ class DeerMemConfig(BaseModel):
             "``trace_id`` into the host request-trace ContextVar for the memory-"
             "update worker thread (Timer / executor), restoring structured-log "
             "trace correlation. None = no binding (DeerMem standalone; trace_id "
-            "still reaches ``tracing_callback`` and the log message text). Set "
+            "still reaches ``on_memory_llm_call`` and the log message text). Set "
             "programmatically."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_storage_path_is_directory(self) -> DeerMemConfig:
+        """DeerMem treats ``storage_path`` as a root DIRECTORY (per-user memory
+        under ``{storage_path}/users/{uid}/memory.json``). A file-style value
+        (e.g. a leftover ``.json`` from the pre-abstraction file-path semantics)
+        would make ``FileMemoryStorage.save``'s ``mkdir(parents=True)`` raise
+        ``NotADirectoryError`` (caught as OSError -> silent write failure). Fail
+        loud at construction instead (memory is persistent state -- a wrong root
+        is a data-integrity footgun). Lives here (not the host factory) so it
+        fires even when DeerMem is built standalone / bypassing the factory.
+        Empty storage_path (zero-config -> host injects a dir) is allowed.
+        """
+        if self.storage_path:
+            resolved = Path(self.storage_path)
+            if resolved.is_file():
+                raise ValueError(
+                    f"memory.backend_config.storage_path={self.storage_path!r} "
+                    f"resolves to an existing file {resolved}; DeerMem treats "
+                    f"storage_path as a root DIRECTORY (per-user memory under "
+                    f"{{storage_path}}/users/{{uid}}/memory.json). Point it at a directory."
+                )
+        weight_sum = self.eviction_confidence_weight + self.eviction_confirmation_weight + self.eviction_access_weight
+        if not math.isclose(weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("DeerMem eviction weights must sum to 1.0")
+        return self
 
     @classmethod
     def from_backend_config(cls, backend_config: dict[str, Any] | None) -> DeerMemConfig:
@@ -245,6 +440,7 @@ class DeerMemConfig(BaseModel):
         """
         if not backend_config:
             return cls()
+        backend_config = dict(backend_config)
         known = {k: v for k, v in backend_config.items() if k in cls.model_fields and v is not None}
         unknown = sorted(k for k in backend_config if k not in cls.model_fields)
         if unknown:

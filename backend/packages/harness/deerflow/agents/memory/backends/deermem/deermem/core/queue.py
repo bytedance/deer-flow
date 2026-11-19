@@ -1,4 +1,24 @@
-"""Memory update queue with debounce mechanism."""
+"""Memory update queue with debounce mechanism.
+
+The queue collects normal conversation contexts and processes them after a
+per-key debounce period; multiple normal contexts for the same
+``(thread_id, user_id, agent_name)`` key are coalesced into one update. A
+monotonic deadline caps debounce deferral at ``max_wait_seconds`` from the
+first pending arrival. One timer wakes for the earliest deadline; the single
+consumer processes only eligible items unless explicitly flushed. Emergency
+pre-compaction snapshots stay separate and are immediately eligible.
+
+The queue is a process-local in-memory list plus a debounce
+:class:`~threading.Timer`. Items still pending at process exit are lost
+(best-effort :meth:`MemoryUpdateQueue.flush_sync` drain softens this for
+graceful shutdown). Memory updates are best-effort: a failed or lost normal update
+is re-fed on the next conversation turn (the middleware passes the full
+conversation each cycle, and the updater's watermark does not advance on
+failure), so an in-memory queue covers the realistic graceful-deploy case
+without a persistence layer. Emergency snapshots cannot rely on that retry
+because compaction removes their messages; they are still in-memory only and
+can be lost on process exit or extraction failure.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +36,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_EMERGENCY_BACKLOG_WARNING_DEPTH = 32
+
+
+class QueueFull(Exception):
+    """Raised when a non-signal update is rejected under backpressure.
+
+    Signal-bearing updates (any detected signal) are always admitted so that
+    important memories are never shed; only non-signal updates are rejected
+    once ``queue_max_depth`` is reached. Callers may catch this to degrade
+    (e.g. fall back to a synchronous write on the emergency path).
+    """
+
+
+def queue_key(
+    thread_id: str,
+    user_id: str | None,
+    agent_name: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Return the debounce identity for a memory update target."""
+    return (thread_id, user_id, agent_name)
+
 
 @dataclass
 class ConversationContext:
@@ -27,25 +68,35 @@ class ConversationContext:
     agent_name: str | None = None
     user_id: str | None = None
     trace_id: str | None = None
-    correction_detected: bool = False
-    reinforcement_detected: bool = False
+    signals: frozenset[str] = field(default_factory=frozenset)
+    # Emergency (summarization) flushes bypass the updater's index watermark:
+    # the subset they carry is a one-shot "extract before removal" snapshot whose
+    # own length would otherwise regress the conversation watermark. Each stays
+    # separate from other emergency snapshots and a pending normal update for the
+    # same key, so no compacted partition or un-extracted normal tail is replaced. See
+    # ``_enqueue_locked``'s match-key + backpressure handling.
+    bypass_watermark: bool = False
+    # Monotonic scheduling times; timestamp remains wall-clock metadata.
+    first_at: float = field(default_factory=time.monotonic)
+    due_at: float = 0.0
 
 
 class MemoryUpdateQueue:
     """Queue for memory updates with debounce mechanism.
 
     This queue collects conversation contexts and processes them after
-    a configurable debounce period. Multiple conversations received within
-    the debounce window are batched together.
+    a per-conversation debounce period. Conversations whose deadlines have
+    elapsed are batched together; unrelated arrivals cannot postpone them.
     """
 
     def __init__(self, config: DeerMemConfig, updater: MemoryUpdater):
         """Initialize the memory update queue with injected config + updater."""
         self._config = config
         self._updater = updater
-        self._queue: list[ConversationContext] = []
+        self._items: list[ConversationContext] = []
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
+        self._timer_due_at: float | None = None
         self._processing = False
         # Thread currently running ``_process_queue`` (None when idle). ``flush_sync``
         # joins an in-flight worker instead of reporting a false-positive "completed"
@@ -54,15 +105,6 @@ class MemoryUpdateQueue:
         self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
 
-    @staticmethod
-    def _queue_key(
-        thread_id: str,
-        user_id: str | None,
-        agent_name: str | None,
-    ) -> tuple[str, str | None, str | None]:
-        """Return the debounce identity for a memory update target."""
-        return (thread_id, user_id, agent_name)
-
     def add(
         self,
         thread_id: str,
@@ -70,8 +112,7 @@ class MemoryUpdateQueue:
         agent_name: str | None = None,
         user_id: str | None = None,
         trace_id: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] | None = None,
     ) -> None:
         """Add a conversation to the update queue.
 
@@ -84,8 +125,9 @@ class MemoryUpdateQueue:
                 raw threads).
             trace_id: Request trace id captured at enqueue time so the
                 later Timer thread can attach it to memory LLM tracing metadata.
-            correction_detected: Whether recent turns include an explicit correction signal.
-            reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+            signals: Signal classes detected in the conversation (correction /
+                reinforcement / preference / ...), used as extraction hints. Any
+                signal is admitted under backpressure.
         """
         with self._lock:
             self._enqueue_locked(
@@ -94,12 +136,12 @@ class MemoryUpdateQueue:
                 agent_name=agent_name,
                 user_id=user_id,
                 trace_id=trace_id,
-                correction_detected=correction_detected,
-                reinforcement_detected=reinforcement_detected,
+                signals=frozenset(signals) if signals else frozenset(),
+                bypass_watermark=False,
             )
-            self._reset_timer()
+            self._rearm_timer_locked()
 
-        logger.info("Memory update queued for thread %s, queue size: %d", thread_id, len(self._queue))
+        logger.info("Memory update queued for thread %s, queue size: %d", thread_id, len(self._items))
 
     def add_nowait(
         self,
@@ -108,8 +150,7 @@ class MemoryUpdateQueue:
         agent_name: str | None = None,
         user_id: str | None = None,
         trace_id: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] | None = None,
     ) -> None:
         """Add a conversation and start processing immediately in the background."""
         with self._lock:
@@ -119,12 +160,12 @@ class MemoryUpdateQueue:
                 agent_name=agent_name,
                 user_id=user_id,
                 trace_id=trace_id,
-                correction_detected=correction_detected,
-                reinforcement_detected=reinforcement_detected,
+                signals=frozenset(signals) if signals else frozenset(),
+                bypass_watermark=True,
             )
             self._schedule_timer(0)
 
-        logger.info("Memory update queued for immediate processing on thread %s, queue size: %d", thread_id, len(self._queue))
+        logger.info("Memory update queued for immediate processing on thread %s, queue size: %d", thread_id, len(self._items))
 
     def _enqueue_locked(
         self,
@@ -134,35 +175,82 @@ class MemoryUpdateQueue:
         agent_name: str | None,
         user_id: str | None,
         trace_id: str | None,
-        correction_detected: bool,
-        reinforcement_detected: bool,
-    ) -> None:
-        queue_key = self._queue_key(thread_id, user_id, agent_name)
-        existing_context = next(
-            (context for context in self._queue if self._queue_key(context.thread_id, context.user_id, context.agent_name) == queue_key),
-            None,
-        )
-        merged_correction_detected = correction_detected or (existing_context.correction_detected if existing_context is not None else False)
-        merged_reinforcement_detected = reinforcement_detected or (existing_context.reinforcement_detected if existing_context is not None else False)
+        signals: frozenset[str],
+        bypass_watermark: bool = False,
+    ) -> ConversationContext:
+        key = queue_key(thread_id, user_id, agent_name)
+        # Only normal updates carry cumulative history and can replace an older
+        # normal update. Each emergency snapshot carries messages about to be
+        # removed by one compaction: a later snapshot may be disjoint and must
+        # not replace it. Keep emergency snapshots separate, in arrival order,
+        # from each other and from the pending normal update for this key.
+        existing = None
+        if not bypass_watermark:
+            existing = next(
+                (c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) == key and not c.bypass_watermark),
+                None,
+            )
+        # Backpressure: once depth reaches the cap, reject NEW non-signal normal
+        # items. Same-key normal updates merge (do not grow depth); signal-bearing items
+        # and emergency (bypass) flushes are always admitted. Signals capture
+        # important memories, and the emergency path captures messages about to
+        # be removed by summarization -- neither can be re-fed next turn, so
+        # shedding them under load would lose data rather than merely defer it.
+        max_depth = self._config.queue_max_depth
+        if max_depth > 0 and not bypass_watermark and not signals and existing is None and len(self._items) >= max_depth:
+            raise QueueFull(f"memory update queue is full (depth {len(self._items)} >= {max_depth}); non-signal update for thread {thread_id} rejected")
+
+        # Merge by signal union: a signal seen on any update for this key stays.
+        merged_signals = signals | (existing.signals if existing is not None else frozenset())
+        now = time.monotonic()
+        first_at = existing.first_at if existing is not None else now
+        due_at = now if bypass_watermark else min(now + self._config.debounce_seconds, first_at + self._config.max_wait_seconds)
+        # A forced flush's deadline must survive same-key coalescing.
+        if existing is not None and existing.due_at <= now:
+            due_at = existing.due_at
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
             agent_name=agent_name,
             user_id=user_id,
             trace_id=trace_id,
-            correction_detected=merged_correction_detected,
-            reinforcement_detected=merged_reinforcement_detected,
+            signals=merged_signals,
+            bypass_watermark=bypass_watermark,
+            first_at=first_at,
+            due_at=due_at,
         )
+        if existing is not None:
+            self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
+        self._items.append(context)
+        if bypass_watermark and len(self._items) >= _EMERGENCY_BACKLOG_WARNING_DEPTH:
+            emergency_depth = sum(c.bypass_watermark and queue_key(c.thread_id, c.user_id, c.agent_name) == key for c in self._items)
+            # Warn at 32, 64, 128, ... pending snapshots for this key. Deriving
+            # the depth from pending items naturally resets after drain/cancel,
+            # without retaining per-key warning state or warning on every arrival.
+            if emergency_depth >= _EMERGENCY_BACKLOG_WARNING_DEPTH and emergency_depth & (emergency_depth - 1) == 0:
+                logger.warning(
+                    "Memory extraction backlog: %d pending emergency snapshots for thread %r (user_id=%r, agent_name=%r); retaining all snapshots in memory. Check extraction latency; pending snapshots can be lost on process exit.",
+                    emergency_depth,
+                    thread_id,
+                    user_id,
+                    agent_name,
+                )
+        return context
 
-        self._queue = [context for context in self._queue if self._queue_key(context.thread_id, context.user_id, context.agent_name) != queue_key]
-        self._queue.append(context)
-
-    def _reset_timer(self) -> None:
-        """Reset the debounce timer."""
-        config = self._config
-        self._schedule_timer(config.debounce_seconds)
-
-        logger.debug("Memory update timer set for %ss", config.debounce_seconds)
+    def _rearm_timer_locked(self) -> None:
+        """Wake for the earliest deadline. Caller must hold ``_lock``."""
+        if not self._items:
+            return
+        if self._processing:
+            self._reprocess_pending = True
+            return
+        now = time.monotonic()
+        due_at = min(c.due_at for c in self._items)
+        # Keep an already-armed earlier wakeup. Recreating it on every arrival
+        # can itself starve a due item under sufficiently frequent traffic.
+        if self._timer is not None and self._timer_due_at is not None and self._timer_due_at <= due_at:
+            return
+        self._schedule_timer(max(0.05, due_at - now))
 
     def _schedule_timer(self, delay_seconds: float) -> None:
         """Schedule queue processing after the provided delay."""
@@ -174,19 +262,30 @@ class MemoryUpdateQueue:
             delay_seconds,
             self._process_queue,
         )
+        # Track the logical deadline, not the rounded wakeup time. Otherwise
+        # arrivals during the 50 ms rearm floor could keep restarting it.
+        self._timer_due_at = min((c.due_at for c in self._items), default=time.monotonic() + delay_seconds)
         self._timer.daemon = True
         self._timer.start()
 
-    def _process_queue(self, *, skip_inter_item_delay: bool = False) -> None:
-        """Process all queued conversation contexts.
+    def _process_queue(self, *, skip_inter_item_delay: bool = False, due_only: bool = True) -> None:
+        """Process due contexts, or all pending contexts for an explicit flush.
 
         Args:
+            due_only: Select only eligible contexts. Explicit flushes set
+                this to False to drain even contexts still debouncing.
             skip_inter_item_delay: When set, skip the inter-item rate-limit
                 ``time.sleep``. Intended for the shutdown-drain path
                 (:meth:`flush_sync`), which races a bounded timeout and should
                 not waste budget sleeping between items.
         """
         with self._lock:
+            # A canceled callback may already be waiting for the lock. Cancel
+            # the currently armed wakeup before selecting/rearming deadlines.
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+                self._timer_due_at = None
             if self._processing:
                 # Another worker is already draining the queue. Instead of
                 # spawning a tight timer spin (repeatedly re-scheduling a
@@ -196,14 +295,17 @@ class MemoryUpdateQueue:
                 self._reprocess_pending = True
                 return
 
-            if not self._queue:
+            if not self._items:
                 return
 
+            now = time.monotonic()
+            contexts_to_process = [c for c in self._items if not due_only or c.due_at <= now]
+            if not contexts_to_process:
+                self._rearm_timer_locked()
+                return
             self._processing = True
             self._processing_thread = threading.current_thread()
-            contexts_to_process = self._queue.copy()
-            self._queue.clear()
-            self._timer = None
+            self._items = [c for c in self._items if due_only and c.due_at > now]
 
         logger.info("Processing %d queued memory updates", len(contexts_to_process))
 
@@ -217,10 +319,15 @@ class MemoryUpdateQueue:
                         messages=context.messages,
                         thread_id=context.thread_id,
                         agent_name=context.agent_name,
-                        correction_detected=context.correction_detected,
-                        reinforcement_detected=context.reinforcement_detected,
+                        signals=context.signals,
                         user_id=context.user_id,
                         trace_id=context.trace_id,
+                        bypass_watermark=context.bypass_watermark,
+                        # The shutdown drain never pre-screens (design L7): its
+                        # budget belongs to persistence, and a judge request would
+                        # spend part of a bounded shutdown window on a cost
+                        # optimization instead of on saving queued work.
+                        judge=not skip_inter_item_delay,
                     )
                     if success:
                         succeeded += 1
@@ -248,10 +355,14 @@ class MemoryUpdateQueue:
             with self._lock:
                 self._processing = False
                 self._processing_thread = None
-                if self._reprocess_pending:
-                    self._reprocess_pending = False
-                    if self._queue:
-                        self._schedule_timer(0)
+                # Reschedule inside the lock: ``_schedule_timer`` read-cancels-
+                # reassigns ``self._timer`` non-atomically, and a concurrent
+                # ``add``'s ``_rearm_timer_locked`` (also under the lock) touches the
+                # same field. Holding the lock makes the reschedule atomic w.r.t.
+                # ``add``. ``_schedule_timer`` only calls ``Timer.start()`` (no
+                # synchronous lock acquisition), so this cannot deadlock.
+                self._reprocess_pending = False
+                self._rearm_timer_locked()
 
     def flush(self, *, skip_inter_item_delay: bool = False) -> None:
         """Force immediate processing of the queue.
@@ -267,8 +378,14 @@ class MemoryUpdateQueue:
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+                self._timer_due_at = None
+            # If another worker is busy, its follow-up must still honor this
+            # explicit drain even though ordinary deadlines are in the future.
+            now = time.monotonic()
+            for context in self._items:
+                context.due_at = min(context.due_at, now)
 
-        self._process_queue(skip_inter_item_delay=skip_inter_item_delay)
+        self._process_queue(skip_inter_item_delay=skip_inter_item_delay, due_only=False)
 
     def flush_sync(self, timeout: float) -> bool:
         """Best-effort synchronous flush bounded by ``timeout`` seconds.
@@ -306,7 +423,7 @@ class MemoryUpdateQueue:
         # (1) Wait for an in-flight _process_queue first (bounded). Otherwise
         # flush() would see _processing=True, no-op, and we would report
         # success while that worker is still mid-LLM-call on a daemon thread
-        # that exit will kill — losing the contexts it already pulled out.
+        # that exit will kill - losing the contexts it already pulled out.
         with self._lock:
             in_flight = self._processing_thread
         if in_flight is not None:
@@ -338,14 +455,62 @@ class MemoryUpdateQueue:
         if not finished:
             return False
         # flush() returned; only report success if no worker raced back in.
-        return bool(success) and not self.is_processing
+        return bool(success) and not self.is_processing and self.pending_count == 0
 
     def flush_nowait(self) -> None:
         """Start queue processing immediately in a background thread."""
         with self._lock:
+            now = time.monotonic()
+            for context in self._items:
+                context.due_at = min(context.due_at, now)
             # Daemon thread: queued messages may be lost if the process exits
             # before _process_queue completes. Acceptable for best-effort memory updates.
             self._schedule_timer(0)
+
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        all_agents: bool = False,
+    ) -> int:
+        """Drop pending contexts for a scope without processing them.
+
+        Matches ``(agent_name, user_id)`` against items still sitting in
+        ``_items``. Contexts already pulled out by an in-flight
+        :meth:`_process_queue` worker are deliberately left alone -- interrupting
+        mid-LLM-call belongs to a durable outbox, not this in-memory debounce
+        queue.
+
+        Args:
+            agent_name: Canonical agent bucket to cancel. Ignored when
+                ``all_agents`` is True.
+            user_id: When set, only that user's pending contexts are eligible.
+                When omitted, only the legacy ``user_id is None`` root is
+                cancelled (mirrors storage), whether ``all_agents`` is set or not.
+            all_agents: When True, ignore ``agent_name`` and cancel every agent
+                bucket in the matched user scope (used by ``clear_memory`` with
+                ``agent_name=None``).
+
+        Returns:
+            Number of pending contexts removed.
+        """
+        with self._lock:
+            before = len(self._items)
+
+            def _keep(context: ConversationContext) -> bool:
+                # Scope matches storage: user_id=None is the legacy no-user root
+                # only (None == None), never "every user".
+                if not all_agents and context.agent_name != agent_name:
+                    return True
+                return context.user_id != user_id
+
+            self._items = [context for context in self._items if _keep(context)]
+            removed = before - len(self._items)
+            if removed and not self._items and self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            return removed
 
     def clear(self) -> None:
         """Clear the queue without processing.
@@ -356,7 +521,7 @@ class MemoryUpdateQueue:
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
-            self._queue.clear()
+            self._items = []
             self._processing = False
             self._processing_thread = None
             self._reprocess_pending = False
@@ -365,7 +530,7 @@ class MemoryUpdateQueue:
     def pending_count(self) -> int:
         """Get the number of pending updates."""
         with self._lock:
-            return len(self._queue)
+            return len(self._items)
 
     @property
     def is_processing(self) -> bool:

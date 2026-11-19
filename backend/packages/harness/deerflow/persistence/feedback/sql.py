@@ -8,12 +8,19 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
+
+_UPSERT_MAX_ATTEMPTS = 3
+
+
+class FeedbackAlreadyExistsError(Exception):
+    """The user already has feedback for this run (``uq_feedback_thread_run_user``)."""
 
 
 class FeedbackRepository:
@@ -39,7 +46,11 @@ class FeedbackRepository:
         message_id: str | None = None,
         comment: str | None = None,
     ) -> dict:
-        """Create a feedback record. rating must be +1 or -1."""
+        """Create a feedback record. rating must be +1 or -1.
+
+        Raises ``FeedbackAlreadyExistsError`` when the user already has
+        feedback for this run; use ``upsert`` to replace it.
+        """
         if rating not in (1, -1):
             raise ValueError(f"rating must be +1 or -1, got {rating}")
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.create")
@@ -55,7 +66,27 @@ class FeedbackRepository:
         )
         async with self._sf() as session:
             session.add(row)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                # Only a committed row for this (thread, run, user) key means
+                # "already exists"; any other violation propagates unchanged.
+                # A NULL user_id never conflicts on that key.
+                if resolved_user_id is None:
+                    raise
+                existing = await session.scalar(
+                    select(FeedbackRow.feedback_id)
+                    .where(
+                        FeedbackRow.thread_id == thread_id,
+                        FeedbackRow.run_id == run_id,
+                        FeedbackRow.user_id == resolved_user_id,
+                    )
+                    .limit(1)
+                )
+                if existing is None:
+                    raise
+                raise FeedbackAlreadyExistsError(f"Feedback already exists for run {run_id}") from exc
             await session.refresh(row)
             return self._row_to_dict(row)
 
@@ -133,36 +164,48 @@ class FeedbackRepository:
         user_id: str | None | _AutoSentinel = AUTO,
         comment: str | None = None,
     ) -> dict:
-        """Create or update feedback for (thread_id, run_id, user_id). rating must be +1 or -1."""
+        """Create or update feedback for (thread_id, run_id, user_id). rating must be +1 or -1.
+
+        Two first submissions for one key can both miss the SELECT, and the
+        later INSERT then violates ``uq_feedback_thread_run_user``. That writer
+        rolls back and retries, so it re-reads the committed row and updates it
+        instead of failing the request.
+        """
         if rating not in (1, -1):
             raise ValueError(f"rating must be +1 or -1, got {rating}")
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.upsert")
+        stmt = select(FeedbackRow).where(
+            FeedbackRow.thread_id == thread_id,
+            FeedbackRow.run_id == run_id,
+            FeedbackRow.user_id == resolved_user_id,
+        )
         async with self._sf() as session:
-            stmt = select(FeedbackRow).where(
-                FeedbackRow.thread_id == thread_id,
-                FeedbackRow.run_id == run_id,
-                FeedbackRow.user_id == resolved_user_id,
-            )
-            result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
-            if row is not None:
-                row.rating = rating
-                row.comment = comment
-                row.created_at = datetime.now(UTC)
-            else:
-                row = FeedbackRow(
-                    feedback_id=str(uuid.uuid4()),
-                    run_id=run_id,
-                    thread_id=thread_id,
-                    user_id=resolved_user_id,
-                    rating=rating,
-                    comment=comment,
-                    created_at=datetime.now(UTC),
-                )
-                session.add(row)
-            await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
+            last_error: IntegrityError | None = None
+            for _ in range(_UPSERT_MAX_ATTEMPTS):
+                try:
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is not None:
+                        row.rating = rating
+                        row.comment = comment
+                        row.created_at = datetime.now(UTC)
+                    else:
+                        row = FeedbackRow(
+                            feedback_id=str(uuid.uuid4()),
+                            run_id=run_id,
+                            thread_id=thread_id,
+                            user_id=resolved_user_id,
+                            rating=rating,
+                            comment=comment,
+                            created_at=datetime.now(UTC),
+                        )
+                        session.add(row)
+                    await session.commit()
+                    await session.refresh(row)
+                    return self._row_to_dict(row)
+                except IntegrityError as exc:
+                    last_error = exc
+                    await session.rollback()
+            raise last_error  # type: ignore[misc]  # loop runs at least once
 
     async def delete_by_run(
         self,
@@ -187,17 +230,50 @@ class FeedbackRepository:
             await session.commit()
             return True
 
+    async def delete_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete the owner's feedback for every run of a thread.
+
+        ``user_id`` keeps the repository's three-state convention: ``AUTO``
+        resolves the request context, an explicit id scopes the delete to that
+        owner, and ``None`` removes every owner's rows (migration/CLI callers).
+        """
+        resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.delete_by_thread")
+
+        conditions = [FeedbackRow.thread_id == thread_id]
+        if resolved_user_id is not None:
+            conditions.append(FeedbackRow.user_id == resolved_user_id)
+
+        async with self._sf() as session:
+            count = await session.scalar(select(func.count()).select_from(FeedbackRow).where(*conditions)) or 0
+            if count:
+                await session.execute(delete(FeedbackRow).where(*conditions))
+            await session.commit()
+            return count
+
     async def list_by_thread_grouped(
         self,
         thread_id: str,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict[str, dict]:
-        """Return feedback grouped by run_id for a thread: {run_id: feedback_dict}."""
+        """Return feedback grouped by run_id for a thread: {run_id: feedback_dict}.
+
+        With an explicit ``None`` user id (unfiltered reads) several users may
+        hold feedback on the same run, so order deterministically — the
+        per-run collapse below keeps the last row per ``run_id``, i.e. the
+        most recently written feedback (``created_at`` is refreshed on
+        update), with ``feedback_id`` breaking ties.
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.list_by_thread_grouped")
         stmt = select(FeedbackRow).where(FeedbackRow.thread_id == thread_id)
         if resolved_user_id is not None:
             stmt = stmt.where(FeedbackRow.user_id == resolved_user_id)
+        stmt = stmt.order_by(FeedbackRow.created_at.asc(), FeedbackRow.feedback_id.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
@@ -209,7 +285,13 @@ class FeedbackRepository:
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict[str, dict]:
-        """Return feedback for only the selected runs in one thread."""
+        """Return feedback for only the selected runs in one thread.
+
+        Same deterministic ordering as :meth:`list_by_thread_grouped`: with an
+        explicit ``None`` user id the per-run collapse keeps the most recently
+        written feedback (``created_at`` is refreshed on update), ties broken
+        by ``feedback_id``.
+        """
         if not run_ids:
             return {}
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.list_by_run_ids")
@@ -219,6 +301,7 @@ class FeedbackRepository:
         )
         if resolved_user_id is not None:
             stmt = stmt.where(FeedbackRow.user_id == resolved_user_id)
+        stmt = stmt.order_by(FeedbackRow.created_at.asc(), FeedbackRow.feedback_id.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}

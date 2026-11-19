@@ -14,6 +14,103 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 4. Maintains AI/Tool message pairs together for context continuity
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
+Selected history is processed from oldest to newest in bounded text chunks.
+Each call receives the preceding summary plus the next source fragment. Already
+generated summaries, including legacy stored summaries and final model output,
+use at most half the raw-input budget. Oversized summaries retain their head and
+tail with an explicit `[summary shortened]` marker; selected raw history is never
+shortened this way. Unused carry capacity is available to source text. A single oversized
+message is split into contiguous fragments, including its middle. Input is
+PII-redacted before splitting, then escaped before insertion into prompt blocks.
+No human-anchor filter or successful "too long" placeholder can discard selected
+source. Recent-message retention and AI/Tool partition boundaries stay unchanged.
+
+State system messages, tagged dynamic-context reminders and the latest genuine
+user request remain outside compression. Summary source conversion uses message
+copies to include native document `text`/`content` plaintext, title and context
+in their original block order, before redaction and chunking. Nonempty string
+titles and context are retained even when the source is opaque, absent or
+malformed; unsupported source bodies are not stringified. A `content` source
+contributes only direct strings and `text` blocks. Nested `document` blocks are
+not traversed, including their metadata; recursive extraction is outside this
+fix's scope. Compaction does not decode binary documents, fetch remote media or
+change checkpoint content.
+
+Only after all chunks succeed are hooks, the compaction event, history capture
+and message replacement committed once. Any failed chunk leaves active history
+unchanged; manual `/compact` reports generation failure. A pass processes at most
+64 chunks, including cached chunks; hitting the limit also keeps original history.
+For a stable thread identity, a cap breach starts a five-minute cooldown keyed
+by user, thread, executor, opening source-message ID, prior summary and policy.
+Further automatic or manual attempts make no summary-model calls during that
+cooldown, even as history grows or middleware is rebuilt. A smaller source window,
+new summary/window or changed policy (including a larger input budget) allows an
+immediate retry. Warnings give the remaining delay and suggest increasing
+`trim_tokens_to_summarize` within model capacity or reducing selected history.
+The shared, locked cache keeps at most 128 hashed entries per process; eviction,
+process restart or another worker can permit an independent attempt. It is not a
+durable or distributed cost budget. Callers without a thread ID keep only the
+per-pass limit. Other generation failures retain their existing retry behavior.
+Configured/run-model fallback may make two candidate attempts per chunk, and SDK
+retries are separate. This bounds middleware steps, not a monetary bill or deadline.
+For legitimate histories beyond this limit, increase the existing per-call budget
+within the model's capacity or compact earlier. There is no new configuration.
+Impossibly small budgets that cannot fit a nonempty marked carry or source fail
+without eviction. `null` uses one unbounded input step and does not shorten carry.
+This guarantees new source input coverage, not lossless summaries: bounding
+already-compressed carry can omit earlier summarized facts.
+
+Prefix selection expands a local window and then searches within it using the
+actual token counter, avoiding repeated processing of the entire remaining source.
+Warning diagnostics include numeric budget, carry and progress values, never text.
+
+## Reuse and telemetry
+
+The middleware keeps a bounded cache of exact rendered summary prompts and ordered
+model candidate names whose first candidate returned the existing `summary_text`
+unchanged. A repeated input reuses that summary through the normal compaction path
+only if the current summary still matches the cached output. Responses from fallback
+candidates are never cached, so reuse cannot suppress retries after a primary
+invocation failure. Changed inputs, generation failures, and cache errors follow normal
+generation. This optimization assumes a successful first candidate would return the
+same result for identical input; stochastic model outputs can vary.
+
+Each successful summary result emits a `middleware:summarize` journal event with
+`action="summary_result"`. Its `changes` include:
+
+- `noop`: the result is byte-identical to the previous summary.
+- `llm_call_skipped`: every chunk in this pass came from the no-op cache.
+- `summary_chars`: length of the new summary.
+- `previous_summary_chars`: length of the previous summary, or `null` when there was none.
+- `summarized_message_count`: messages folded into this summary.
+- `call_count`: completed compaction passes, including cache reuse.
+- `noop_count`: completed results identical to the previous summary.
+- `skip_count`: completed results reused from the no-op cache.
+
+The middleware's corresponding `summary_call_count`, `summary_noop_count`, and
+`summary_skip_count` counters start at zero and are updated together under a lock.
+Event counter snapshots include their own result and remain consistent during
+concurrent compactions. Counters are cumulative across runs sharing that middleware
+instance; concurrent journal events may arrive in a different order.
+
+`call_count` is not an LLM request count: a pass can process multiple chunks and
+try multiple candidates. Use per-call LLM journal events
+for model usage and cost, and `skip_count / call_count` for the cache reuse rate.
+
+## Todo reminders
+
+Compaction filters `HumanMessage(name="todo_reminder")` snapshots after the
+trigger check and before selecting the retained tail. They enter neither summary
+generation/pre-compaction hooks nor retained messages, while `state["todos"]`
+remains unchanged. Only a successful compaction commits the removal; no-op and
+failure paths keep the original state. The following `TodoMiddleware.before_model`
+rebuilds one reminder from current todos when no `write_todos` call is still
+visible; empty todos need no reminder. Both automatic and manual compaction use
+this shared preparation path. Coverage: `tests/test_todo_compaction.py`.
+`todo_middleware.py::TODO_REMINDER_MESSAGE_NAME` owns the backend message name;
+the producer, presence check, and compaction filter share it. Its value remains
+`todo_reminder` for compatibility with the frontend's hidden-message filtering.
+
 ## Configuration
 
 Summarization is configured in `config.yaml` under the `summarization` key:
@@ -21,7 +118,7 @@ Summarization is configured in `config.yaml` under the `summarization` key:
 ```yaml
 summarization:
   enabled: true
-  model_name: null  # Use default model or specify a lightweight model
+  model_name: null  # null = summarize with the run's own model (see below); or name a lightweight model
 
   # Trigger conditions (OR logic - any condition triggers summarization)
   trigger:
@@ -61,8 +158,11 @@ summarization:
 
 #### `model_name`
 - **Type**: String or null
-- **Default**: `null` (uses default model)
-- **Description**: Model to use for generating summaries. Recommended to use a lightweight, cost-effective model like `gpt-4o-mini` or equivalent.
+- **Default**: `null`
+- **Description**: Model to use for generating summaries.
+  - **`null` (model ownership)**: summarize with the model the run actually executes with — the lead run's resolved model, a subagent's own model, or a thread's custom-agent model — **not** `config.models[0]`. This keeps compaction working on a run whose model is healthy even when `models[0]`'s provider is broken (expired key, quota, outage).
+  - **Set to a model name**: that model generates summaries. If its provider fails, compaction **falls back to the run's own model** so a broken summary provider cannot disable compaction while a working model is available. Recommended to use a lightweight, cost-effective model like `gpt-4o-mini` or equivalent.
+  - Ownership applies to all three paths — automatic lead compaction, subagent compaction, and manual `/compact`. Manual `/compact` resolves the run model with the same precedence as a normal run: the model selected for the request (`POST /api/threads/{id}/compact` body `model_name`, sent by the frontend from the composer's current model) → the thread's custom-agent model → the default. A whitespace-only summary response is treated as a generation failure (it is never committed as a valid empty summary).
 
 #### `trigger`
 - **Type**: Single `ContextSize` or list of `ContextSize` objects
@@ -91,6 +191,18 @@ summarization:
      type: fraction
      value: 0.8  # 80% of max input tokens
    ```
+
+   The percentage resolves from the **active run model's** declared
+   `context_window`: the lead model selected for this run, the subagent's own
+   model, or the model resolved for manual `/compact`. A separately configured
+   `summarization.model_name` generates the replacement summary but never sizes
+   the run model's context budget. Declare `context_window` on the run model's
+   entry in `config.yaml`. Third-party OpenAI-compatible models carry no built-in
+   capacity profile, so without a declared `context_window` the fraction clause
+   is dropped with a warning at agent build — any remaining absolute clauses
+   (`tokens` / `messages`) keep working. Fraction-based `keep` uses the same run
+   model profile and falls back to the documented message-count retention when
+   that profile is unavailable.
 
 **Multiple Triggers:**
 ```yaml
@@ -127,11 +239,11 @@ keep:
 #### `trim_tokens_to_summarize`
 - **Type**: Integer or null
 - **Default**: `4000`
-- **Description**: Maximum tokens to include when preparing messages for the summarization call itself. Set to `null` to skip trimming (not recommended for very long conversations).
+- **Description**: Per-step raw-text budget shared by generated carry (at most half) and the next chronological source chunk. Only generated or legacy summaries may be shortened, with a visible marker; raw source is covered without elision. A pass is limited to 64 chunks, retaining original history on failure or limit exhaustion. Escaping, wrapper tags, prompt overhead and SDK retries remain outside this budget. Set to `null` for one unbounded input step with no carry shortening (not recommended for very long conversations).
 
 #### `summary_prompt`
 - **Type**: String or null
-- **Default**: `null` (uses LangChain's default prompt)
+- **Default**: `null` (uses DeerFlow's built-in prompt)
 - **Description**: Custom prompt template for generating summaries. The prompt should guide the model to extract the most important context.
 
 #### `skill_file_read_tool_names`
@@ -142,11 +254,12 @@ keep:
 Legacy `preserve_recent_skill_*` settings are no longer used. Loaded skill retention is handled by the durable `skill_context` reference channel instead of by preserving raw skill-read messages in the summarization window.
 
 **Default Prompt Behavior:**
-The default LangChain prompt instructs the model to:
+The built-in DeerFlow prompt extends LangChain's prompt and asks the model to:
 - Extract highest quality/most relevant context
 - Focus on information critical to the overall goal
 - Avoid repeating completed actions
 - Return only the extracted context
+- Preserve current user requirements, literal approval phrases, conditions for acting, and later revisions
 
 ## How It Works
 
@@ -170,6 +283,11 @@ The default LangChain prompt instructs the model to:
 - Uses approximate token counting based on character count
 - For Anthropic models: ~3.3 characters per token
 - For other models: Uses LangChain's default estimation
+- For `VllmChatModel` using Chat Completions: History and token-based retention
+  estimates include the assistant reasoning replayed to vLLM. A non-null `reasoning` field takes
+  precedence over `reasoning_content`, including when it is empty. This applies
+  to both automatic and manual compaction. The estimate is approximate and
+  leaves the summary prompt and its trimming budget unchanged.
 - Can be customized with a custom `token_counter` function
 
 ### Message Preservation
@@ -185,6 +303,7 @@ The middleware intelligently preserves message context:
   [Generated summary text]
   </durable_context_data>
   ```
+- **Active goal**: When the thread has an active `/goal`, its objective opens the same data message on every model call, inside an `<active_goal>` element, so compaction cannot take the goal away with the message that stated it. The system contract then ends with a static exception: the agent works toward that element as it would a request in a user message, with no system or developer authority, while every other field value stays data, as does any other text that calls itself a goal. The exception covers only the element at the start of the data message, by position. Within that message every other field value is HTML-escaped, so only the renderer can produce the element; in the lead agent chain the input and tool-result sanitizers also escape `<active_goal>` in user input and remote tool results. Only the objective is rendered, not the evaluator's counters, so the block and the contract change only when the goal is set or cleared.
 
 ## Best Practices
 
@@ -223,9 +342,9 @@ The middleware intelligently preserves message context:
   - Summaries don't require the most powerful models
   - Significant cost savings on high-volume applications
 
-- **Default**: If `model_name` is `null`, uses the default model
-  - May be more expensive but ensures consistency
-  - Good for simple setups
+- **Default**: If `model_name` is `null`, summarizes with the run's own model (not `models[0]`)
+  - Keeps compaction working when `models[0]`'s provider is broken but the run's model is healthy
+  - Good for simple setups; no separate summary provider to keep credentialed
 
 ### Optimization Tips
 
@@ -311,7 +430,7 @@ middlewares such as title generation, memory queuing, and clarification:
 - Summarization configuration is loaded from `config.yaml`
 - Generated summaries are stored in `ThreadState.summary_text`, not as regular `messages`
 - The message reducer removes compacted raw messages while the checkpointer persists `summary_text`
-- DurableContextMiddleware projects `summary_text` back into later model calls as hidden durable context data
+- DurableContextMiddleware projects `summary_text` and the active `goal` objective back into later model calls as hidden durable context data
 
 ## Example Configurations
 

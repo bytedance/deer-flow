@@ -3,13 +3,22 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+from langchain.agents import create_agent
 from langchain.agents.middleware.types import ModelRequest
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import Runnable
+from langchain_core.tools import tool as as_tool
+from pydantic import Field, PrivateAttr
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from deerflow.agents.middlewares import skill_activation_middleware as middleware_module
 from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware, is_slash_skill_activation_reminder
+from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.paths import Paths
 from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES, parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
@@ -85,14 +94,26 @@ def test_parse_slash_skill_reference_rejects_invalid_names():
 
 
 def test_resolve_slash_skill_ignores_reserved_control_commands(tmp_path):
-    for command in ["bootstrap", "goal", "help", "memory", "models", "new", "status"]:
+    for command in sorted(RESERVED_SLASH_SKILL_NAMES):
+        if command == "context":
+            continue
         skill = _make_skill(tmp_path, command)
 
         assert resolve_slash_skill(f"/{command} create an agent", [skill]) is None
 
 
-def test_reserved_slash_skill_names_match_channel_commands():
-    assert RESERVED_SLASH_SKILL_NAMES == {command.removeprefix("/") for command in KNOWN_CHANNEL_COMMANDS}
+def test_channel_commands_are_reserved_slash_skill_names():
+    assert {command.removeprefix("/") for command in KNOWN_CHANNEL_COMMANDS} <= RESERVED_SLASH_SKILL_NAMES
+
+
+def test_context_compact_alias_is_reserved_without_becoming_channel_command(tmp_path):
+    assert "context" in RESERVED_SLASH_SKILL_NAMES
+    assert "/context" not in KNOWN_CHANNEL_COMMANDS
+
+    context_skill = _make_skill(tmp_path, "context")
+    assert parse_slash_skill_reference("/context compact") is None
+    assert parse_slash_skill_reference("/context use the skill") is not None
+    assert resolve_slash_skill("/context use the skill", [context_skill]) is not None
 
 
 def test_resolve_slash_skill_respects_available_skill_whitelist(tmp_path):
@@ -139,6 +160,102 @@ def test_skill_activation_middleware_injects_hidden_human_context_for_model_call
     assert "<user_request>\nanalyze uploads/foo.csv\n</user_request>" in activation_msg.content
     assert user_msg.content == original.content
     assert request.state["messages"] == [original]
+
+
+def test_skill_activation_middleware_reads_public_skill_from_real_user_scoped_storage(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "public" / "ppt-generation"
+    skill_dir.mkdir(parents=True)
+    skill_content = "---\nname: ppt-generation\ndescription: Create presentations\n---\n\n# Presentation workflow\n"
+    (skill_dir / "SKILL.md").write_text(skill_content, encoding="utf-8")
+
+    app_config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+    )
+    extensions_config = ExtensionsConfig()
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(lambda cls, config_path=None: extensions_config))
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: extensions_config)
+    storage = UserScopedSkillStorage("test-user", host_path=str(skills_root), app_config=app_config)
+    monkeypatch.setattr(middleware_module, "get_or_new_user_skill_storage", lambda user_id, **kwargs: storage)
+
+    middleware = SkillActivationMiddleware(
+        app_config=app_config,
+        user_id="test-user",
+        slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN,
+    )
+    original = HumanMessage(content="/ppt-generation Create a simple deck", id="msg-real-storage")
+    request = _make_model_request([original])
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert isinstance(result, AIMessage)
+    activation_msg, user_msg = captured["messages"]
+    assert is_slash_skill_activation_reminder(activation_msg)
+    assert "Presentation workflow" in activation_msg.content
+    assert user_msg is original
+
+
+def test_skill_activation_middleware_reads_external_custom_skill_directory_symlink(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    skill_dir = tmp_path / "external-skills" / "external-skill"
+    skill_dir.mkdir(parents=True)
+    skill_content = "---\nname: external-skill\ndescription: An external skill\n---\n\n# External skill\n"
+    (skill_dir / "SKILL.md").write_text(skill_content, encoding="utf-8")
+
+    user_custom_root = tmp_path / "users" / "test-user" / "skills" / "custom"
+    user_custom_root.mkdir(parents=True)
+    try:
+        (user_custom_root / "external-skill").symlink_to(skill_dir, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+        raise
+
+    app_config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+    )
+    extensions_config = ExtensionsConfig()
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(lambda cls, config_path=None: extensions_config))
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: extensions_config)
+
+    storage = UserScopedSkillStorage("test-user", host_path=str(skills_root), app_config=app_config)
+    monkeypatch.setattr(middleware_module, "get_or_new_user_skill_storage", lambda user_id, **kwargs: storage)
+
+    middleware = SkillActivationMiddleware(
+        app_config=app_config,
+        user_id="test-user",
+        slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN,
+    )
+    original = HumanMessage(content="/external-skill Run the external skill", id="msg-external-symlink")
+    request = _make_model_request([original])
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    activation_msg, user_msg = captured["messages"]
+    assert "# External skill" in activation_msg.content
+    assert user_msg is original
 
 
 def test_skill_activation_middleware_does_not_duplicate_existing_activation(monkeypatch, tmp_path):
@@ -282,6 +399,118 @@ def test_skill_activation_middleware_activates_once_across_tool_loop(monkeypatch
     assert sum(1 for kwargs in recorded if kwargs.get("action") == "activate") == 1
 
 
+class _ProviderUnavailable(Exception):
+    def __init__(self) -> None:
+        super().__init__("503 Service Unavailable")
+        self.status_code = 503
+        self.response = SimpleNamespace(status_code=503, headers={})
+
+
+class _ScriptedChatModel(FakeMessagesListChatModel):
+    """Fake chat model that records every request and raises scripted errors in order."""
+
+    failures: list[Exception] = Field(default_factory=list)
+    _seen_messages: list[list] = PrivateAttr(default_factory=list)
+
+    @property
+    def seen_messages(self) -> list[list]:
+        return self._seen_messages
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs) -> Runnable:
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self._seen_messages.append(list(messages))
+        if self.failures:
+            raise self.failures.pop(0)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def _run_retrying_slash_graph(monkeypatch, tmp_path, *, model, asynchronous=False):
+    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.config.app_config import AppConfig, LlmCallConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    disk_reads = {"n": 0}
+    real_read = SkillActivationMiddleware._read_skill_content
+
+    def counting_read(skill_file, skills_root, *, storage=None):
+        disk_reads["n"] += 1
+        return real_read(skill_file, skills_root, storage=storage)
+
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+    monkeypatch.setattr(SkillActivationMiddleware, "_read_skill_content", staticmethod(counting_read))
+
+    @as_tool
+    def echo(text: str) -> str:
+        """Echo the text back."""
+        return text
+
+    audits = []
+    usages = []
+    journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: audits.append(kwargs), record_skill_usage=usages.append)
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(retry_max_attempts=3, retry_base_delay_ms=0, retry_cap_delay_ms=0),
+    )
+    # Production order: LLMErrorHandling sits outside SkillActivation, so a retry
+    # runs SkillActivation's wrap again on the same request.
+    graph = create_agent(
+        model=model,
+        tools=[echo],
+        middleware=[LLMErrorHandlingMiddleware(app_config=app_config), SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)],
+    )
+    graph_input = {"messages": [HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")]}
+    context = {"__run_journal": journal}
+    config = {"recursion_limit": 20}
+    result = asyncio.run(graph.ainvoke(graph_input, context=context, config=config)) if asynchronous else graph.invoke(graph_input, context=context, config=config)
+    carries_skill = [any(is_slash_skill_activation_reminder(message) and "Use pandas." in message.content for message in messages) for messages in model.seen_messages]
+    return SimpleNamespace(result=result, carries_skill=carries_skill, disk_reads=disk_reads["n"], audits=audits, usages=usages)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_skill_activation_survives_a_retried_model_call_in_real_agent_graph(monkeypatch, tmp_path, asynchronous):
+    # The run key is recorded before the model call. When the activation call
+    # raises, LLMErrorHandling retries by running this wrap again on the same
+    # request; the retry must still carry SKILL.md, replayed from the recorded
+    # activation without a second disk read, audit event, or usage record.
+    model = _ScriptedChatModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "echo", "args": {"text": "hi"}, "id": "call-1"}]),
+            AIMessage(content="final answer"),
+        ],
+        failures=[_ProviderUnavailable()],
+    )
+
+    run = _run_retrying_slash_graph(monkeypatch, tmp_path, model=model, asynchronous=asynchronous)
+
+    # Failed activation call, its retry, then the tool loop's follow-up call.
+    assert run.carries_skill == [True, True, False]
+    assert run.result["messages"][-1].content == "final answer"
+    assert run.disk_reads == 1
+    assert sum(1 for kwargs in run.audits if kwargs.get("action") == "activate") == 1
+    assert [usage["name"] for usage in run.usages] == ["data-analysis"]
+    # The failed attempt's stamped response was discarded; the retry's response
+    # is the one that reaches state and must carry the usage evidence.
+    assert run.result["messages"][1].additional_kwargs["skill_usage"]["name"] == "data-analysis"
+
+
+def test_skill_activation_survives_an_empty_response_retry_in_real_agent_graph(monkeypatch, tmp_path):
+    # An empty response is not an exception inside this wrap: the handler returns,
+    # and LLMErrorHandling raises only after it, outside. The retry must still
+    # carry SKILL.md even though nothing failed from this middleware's view.
+    model = _ScriptedChatModel(responses=[AIMessage(content=""), AIMessage(content="final answer")])
+
+    run = _run_retrying_slash_graph(monkeypatch, tmp_path, model=model)
+
+    assert run.carries_skill == [True, True]
+    assert run.result["messages"][-1].content == "final answer"
+    assert run.result["messages"][-1].additional_kwargs["skill_usage"]["name"] == "data-analysis"
+    assert sum(1 for kwargs in run.audits if kwargs.get("action") == "activate") == 1
+    assert len(run.usages) == 1
+
+
 def test_skill_activation_middleware_reactivates_on_new_user_slash_command(monkeypatch, tmp_path):
     # The run-scoped dedup must not suppress a genuinely new activation: a later
     # user slash message (distinct id / text) keys differently, so it still
@@ -325,6 +554,43 @@ def test_skill_activation_middleware_reactivates_on_new_user_slash_command(monke
 
     # Two distinct activations recorded across the run.
     assert sum(1 for kwargs in recorded if kwargs.get("action") == "activate") == 2
+
+
+def test_skill_activation_strips_a_leading_bom_from_skill_content(monkeypatch, tmp_path):
+    """A SKILL.md saved by a Windows editor must reach the model without its BOM.
+
+    The frontmatter path already tolerates one — ``_FRONTMATTER_RE``
+    (``deerflow/skills/frontmatter.py``) consumes an optional leading BOM — so a
+    skill written by Notepad or PowerShell 5.1 parses and installs fine. That
+    tolerance covers the front matter only. Activation then reads the whole file
+    for the model, and reading it as plain ``utf-8`` there would hand the model a
+    body starting with U+FEFF and fingerprint that BOM in the ``sha256`` the
+    reminder publishes. This pins both halves.
+    """
+    body = "# Data Analysis\nUse pandas."
+    skill = _make_skill(tmp_path, "data-analysis", content=body)
+    # Re-write the same content with a UTF-8 BOM, the way those editors save.
+    skill.skill_file.write_text("\ufeff" + body, encoding="utf-8")
+
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    middleware.wrap_model_call(_make_model_request([original], runtime=SimpleNamespace(context=None)), handler)
+
+    reminders = [message for message in captured["messages"] if is_slash_skill_activation_reminder(message)]
+    assert len(reminders) == 1
+    content = reminders[0].content
+    assert "\ufeff" not in content
+    # The published digest fingerprints the skill, not the editor's byte-order mark:
+    # it equals the digest of the same file written without one.
+    assert f'sha256="{hashlib.sha256(body.encode("utf-8")).hexdigest()}"' in content
 
 
 def test_skill_activation_middleware_activates_per_call_when_run_context_is_none(monkeypatch, tmp_path):
@@ -408,7 +674,7 @@ def test_skill_activation_middleware_uses_original_user_content_when_uploads_are
 
     middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(
-        content="<uploaded_files>\n- report.pdf\n</uploaded_files>\n\n/data-analysis 分析这个文档",
+        content="<current_uploads>\n- report.pdf\n</current_uploads>\n\n/data-analysis 分析这个文档",
         id="msg-1",
         additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "/data-analysis 分析这个文档"},
     )
@@ -505,7 +771,7 @@ def test_skill_activation_middleware_async_records_activation_audit_event(monkey
     assert kwargs["changes"]["content_hash"] == hashlib.sha256(b"# Data Analysis\nUse pandas.").hexdigest()
 
 
-def test_skill_activation_middleware_ignores_activation_audit_errors(monkeypatch, tmp_path):
+def test_skill_activation_middleware_warns_and_ignores_activation_audit_errors(monkeypatch, tmp_path, caplog):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
@@ -517,10 +783,12 @@ def test_skill_activation_middleware_ignores_activation_audit_errors(monkeypatch
     def handler(model_request: ModelRequest):
         return AIMessage(content="ok")
 
-    result = middleware.wrap_model_call(_make_model_request([original], runtime=runtime), handler)
+    with caplog.at_level("WARNING"):
+        result = middleware.wrap_model_call(_make_model_request([original], runtime=runtime), handler)
 
     assert isinstance(result, AIMessage)
     assert result.content == "ok"
+    assert "Failed to record slash skill activation audit event" in caplog.text
 
 
 def test_skill_activation_middleware_activates_only_latest_real_user_message(monkeypatch, tmp_path):
@@ -679,7 +947,12 @@ def test_skill_activation_middleware_rejects_skill_file_outside_skills_root(monk
     outside_dir.mkdir()
     outside_file = outside_dir / "SKILL.md"
     outside_file.write_text("# Leaked\nDo not read me.", encoding="utf-8")
-    (skill_dir / "SKILL.md").symlink_to(outside_file)
+    try:
+        (skill_dir / "SKILL.md").symlink_to(outside_file)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+        raise
     skill = Skill(
         name="data-analysis",
         description="Description for data-analysis",
@@ -733,3 +1006,40 @@ def test_skill_activation_middleware_reports_invalid_utf8_skill_file_safely(monk
 
     assert isinstance(result, AIMessage)
     assert "could not be loaded safely" in result.content
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_slash_usage_snapshot_is_persisted_on_first_model_response_only(monkeypatch, tmp_path, asynchronous):
+    from langchain.agents.middleware.types import ModelResponse
+
+    content = "---\nname: data-analysis\ndescription: Analyze data.\n---\n# Original instructions"
+    skill = _make_skill(tmp_path, "data-analysis", content=content)
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    recorded = []
+    runtime = SimpleNamespace(context={"__run_journal": SimpleNamespace(record_skill_usage=recorded.append)})
+    user = HumanMessage(content="/data-analysis analyze", id="user-1")
+
+    def call(messages):
+        request = _make_model_request(messages, runtime=runtime)
+        response = ModelResponse(result=[AIMessage(content="Analyzing")])
+        if asynchronous:
+
+            async def handler(_request):
+                return response
+
+            return asyncio.run(middleware.awrap_model_call(request, handler))
+        return middleware.wrap_model_call(request, lambda _: response)
+
+    first = call([user])
+    snapshot = first.result[0].additional_kwargs["skill_usage"]
+    assert recorded == [snapshot]
+    assert snapshot["activation"] == "slash"
+    assert snapshot["name"] == "data-analysis"
+    assert snapshot["category"] == "custom"
+    assert snapshot["content"] == content
+    assert snapshot["path"] == "/mnt/skills/custom/data-analysis/SKILL.md"
+    skill.skill_file.write_text("Changed later", encoding="utf-8")
+    assert snapshot["content"] == content
+    # The tool loop's next call sees the answered slash message in state.
+    assert "skill_usage" not in call([user, *first.result]).result[0].additional_kwargs

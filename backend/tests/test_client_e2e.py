@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
+from test_mcp_cache_reconciliation import reconciler  # noqa: F401 - fixture re-export
 
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.app_config import AppConfig
@@ -338,7 +339,7 @@ class TestFileUploadIntegration:
         tid = str(uuid.uuid4())
 
         c.upload_files(tid, [test_file])
-        # Chat — the middleware should inject <uploaded_files> context
+        # Chat — the middleware should inject <current_uploads> context
         response = c.chat("What files are available?", thread_id=tid)
         assert isinstance(response, str) and len(response) > 0
 
@@ -698,11 +699,11 @@ class TestConfigManagement:
         assert "mcp_servers" in result
         assert isinstance(result["mcp_servers"], dict)
 
-    def test_update_mcp_config_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
+    def test_update_mcp_config_writes_and_invalidates(self, e2e_env, reconciler, tmp_path, monkeypatch):  # noqa: F811 - imported fixture
         """update_mcp_config() writes extensions_config.json and invalidates the agent."""
         # Set up a writable extensions_config.json
         config_file = tmp_path / "extensions_config.json"
-        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
+        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg:Middleware"]}))
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
 
         # Force reload so the singleton picks up our test file
@@ -725,11 +726,12 @@ class TestConfigManagement:
         # File should be written
         written = json.loads(config_file.read_text())
         assert "test-server" in written["mcpServers"]
+        assert written["middlewares"] == ["pkg:Middleware"]
 
     def test_update_skill_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
         """update_skill() writes extensions_config.json and invalidates the agent."""
         config_file = tmp_path / "extensions_config.json"
-        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
+        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg:Middleware"]}))
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
 
         from deerflow.config.extensions_config import reload_extensions_config
@@ -749,6 +751,8 @@ class TestConfigManagement:
         result = c.update_skill(skill_name, enabled=False)
         assert result["name"] == skill_name
         assert result["enabled"] is False
+        written = json.loads(config_file.read_text())
+        assert written["middlewares"] == ["pkg:Middleware"]
 
         # Agent should be invalidated
         assert c._agent is None

@@ -9,12 +9,304 @@ import {
   VideoIcon,
 } from "lucide-react";
 
+import { bundledCopy } from "@/core/extensions/documentation";
+
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
+  sharing: {
+    title: "Share conversation",
+    description:
+      "Anyone with the link can view this snapshot without signing in.",
+    scope:
+      "Includes visible conversation steps and presented output files. Later changes stay private. Revoke a link to stop future access; copies already downloaded or forked remain with their recipients.",
+    expiry: "Link expires after",
+    hour: "1 hour",
+    day: "1 day",
+    week: "7 days",
+    month: "30 days",
+    create: "Create snapshot link",
+    working: "Working…",
+    link: "Share link",
+    copy: "Copy link",
+    copied: "Copied",
+    links: "Created links",
+    noLinks: "No share links yet.",
+    revoke: "Revoke",
+    revoked: "Revoked",
+    expired: "Expired",
+    expires: "Expires",
+    loading: "Loading…",
+    failed: "Unable to complete this request. Try again.",
+    unavailable: "Sharing is unavailable on this server.",
+    conflict:
+      "Finish the current turn before sharing. If it is already finished, refresh or revoke an older link and try again.",
+    tooLarge:
+      "This conversation or its artifacts exceed the sharing size limit.",
+    readOnly: "Read-only snapshot",
+    fork: "Continue in my workspace",
+    forking: "Copying…",
+    missing: "This share link has expired, was revoked, or is unavailable.",
+    retry: "Retry",
+    artifacts: "Artifacts",
+    download: "Download",
+    preview: "Preview",
+    close: "Close preview",
+    you: "User",
+    assistant: "Assistant",
+    tool: "Tool result",
+    noPreview: "Download this file to open it.",
+    previewNote:
+      "Static preview. Interactive content may require downloading the file.",
+    previewLimited:
+      "Preview shows the first 512 KiB. Download for the complete file.",
+  },
+  usage: {
+    title: "Token usage",
+    description: "View input, output and cache-hit token usage.",
+    reportingNote:
+      "Recorded provider usage; active runs and missing provider reports may be incomplete. Cache hits are included in input tokens.",
+    period: "Usage period",
+    last7Days: "Last 7 days",
+    last30Days: "Last 30 days",
+    refresh: "Refresh",
+    tokens: "Total tokens",
+    runs: "Runs",
+    inputTokens: "Input tokens",
+    outputTokens: "Output tokens",
+    cachedTokens: "Cache-hit input tokens",
+    daily: "Daily token usage",
+    dailyDetails: "View daily details",
+    models: "Usage by model",
+    noUsage: "No usage recorded in this period.",
+    unknown: "Unknown",
+    timezoneNote: "Daily buckets use your browser's current UTC offset.",
+    date: "Date",
+    model: "Model",
+    noModels: "No model usage recorded in this period.",
+    noRuns: "No runs match this filter.",
+    recentRuns: "Recent runs",
+    recentRunsHint:
+      "All dates, newest first. Independent of the usage period above.",
+    status: "Run status",
+    allStatuses: "All statuses",
+    pending: "Queued",
+    running: "Running",
+    success: "Completed",
+    error: "Failed",
+    timeout: "Timed out",
+    interrupted: "Interrupted",
+    cancelled: "Cancelled",
+    unknownStatus: "Other status",
+    previous: "Previous page",
+    next: "Next page",
+    page: (page) => `Page ${page}`,
+    started: "Started",
+    duration: "Duration",
+    conversation: "Conversation",
+    untitled: "Untitled conversation",
+    details: "Error details",
+    loadFailed: "Usage data could not be loaded. Try again.",
+    retry: "Retry",
+    forbidden: "You do not have permission to view usage and runs.",
+    unavailable: "Usage reporting is unavailable on this server.",
+    databaseRequired:
+      "Usage reporting is unavailable. It requires a SQLite or PostgreSQL database. Contact your administrator if the problem persists.",
+    staticUnavailable: "Usage reporting is not available in the static demo.",
+    loading: "Loading usage…",
+  },
   // Locale meta
   locale: {
     localName: "English",
+  },
+
+  extensions: {
+    title: "Extensions",
+    navigation: "Extensions",
+    search: "Search extensions by name or purpose",
+    loading: "Loading extensions…",
+    pageLoading: "Loading extension…",
+    unavailable: "Extensions unavailable.",
+    retry: "Retry",
+    reload: "Reload",
+    reloadAll: "Reload extensions (refresh page)",
+    all: "All extensions",
+    notInstalled: "This extension is not installed.",
+    enabledManaged: "Enabled · Managed by your administrator",
+    disabledManaged: "Disabled · Managed by your administrator",
+    deploymentHint:
+      "Interface and browser features update on manual reload. Installation, activation and configuration are managed through deployment configuration or the CLI.",
+    moduleUnavailable: "Page module unavailable",
+    noResults: "No matching extensions.",
+    catalogEntry: "Catalog extension",
+    catalogHint:
+      "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
+    installationGuide: "Installation guide",
+    detail: {
+      guide: "Read the guide",
+      gettingStarted: "Get started",
+      requirements: "Before you start",
+      loaded: "Loaded",
+      loadedHint:
+        "This extension is loaded. Follow the usage instructions to get started.",
+      tools: "Registered tools",
+      pages: "Workspace pages",
+      management: "Usage & management",
+      readyHint:
+        "Your administrator has enabled this extension. It is ready to use.",
+      disabledHint:
+        "This extension is disabled. Ask your administrator to enable it.",
+      failedHint:
+        "The extension page could not load. Refresh extensions to try again.",
+      noPageHint:
+        "This extension has no standalone page. Check the guide for how to use it in conversations or tasks.",
+      guideHint:
+        "Read the guide to explore what this extension adds to DeerFlow and how to use it.",
+      technicalDetails: "Technical details",
+      package: "Package",
+      namespace: "Extension ID",
+      refresh: "Refresh extensions",
+      refreshHint:
+        "Refresh the page after your administrator updates an extension.",
+    },
+    catalog: {
+      officePreview: bundledCopy("deerflow-extension-office-preview", "en-US"),
+      workspaceSearch: {
+        title: "Conversation search",
+        description:
+          "Search historical message text and jump to the matching conversation turn.",
+      },
+      agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
+      bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
+      context: bundledCopy("deerflow-extension-jev-context", "en-US"),
+      classify: bundledCopy("deerflow-extension-jev-classify", "en-US"),
+      screening: bundledCopy("deerflow-extension-jev-screening", "en-US"),
+      workflows: bundledCopy("deerflow-extension-workflows", "en-US"),
+      reportSections: bundledCopy(
+        "deerflow-extension-report-sections",
+        "en-US",
+      ),
+      retrieval: bundledCopy("deerflow-extension-retrieval", "en-US"),
+      knowledge: bundledCopy("deerflow-extension-knowledge", "en-US"),
+      knowledgeManagement: bundledCopy(
+        "deerflow-extension-knowledge-management",
+        "en-US",
+      ),
+      knowledgePlatform: bundledCopy(
+        "deerflow-extension-knowledge-platform",
+        "en-US",
+      ),
+      knowledgeCenter: bundledCopy(
+        "deerflow-extension-knowledge-center",
+        "en-US",
+      ),
+      skillEvolution: bundledCopy(
+        "deerflow-extension-skill-evolution",
+        "en-US",
+      ),
+      lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
+      weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
+      example: bundledCopy("deerflow-extension-example", "en-US"),
+    },
+    pageUnavailable: "Extension page unavailable",
+    pageUnavailableHint:
+      "This page is not registered, or its plugin is disabled or unavailable.",
+    viewAll: "View extensions",
+    viewFailed: "Plugin view unavailable. Reload to retry.",
+    actionFailed: "Extension action unavailable. Try again.",
+    view: (name) => `View ${name}`,
+    open: (name) => `Open ${name}`,
+  },
+
+  capabilities: {
+    toolsAndIntegrations: "Tools & integrations",
+    icon: {
+      title: "Plugin icon",
+      upload: "Upload plugin icon",
+      change: "Choose image",
+      reset: "Restore default",
+      hint: "PNG, JPG or WebP · up to 2 MB. Changes take effect when you save.",
+      singleServer: "Upload an icon when adding one plugin at a time.",
+      errors: {
+        type: "Choose a PNG, JPG or WebP image.",
+        size: "The image must be 2 MB or smaller.",
+        invalid:
+          "Cannot read this image. Choose a valid image up to 16 megapixels.",
+      },
+    },
+    directory: {
+      categories: {
+        office: "Office & collaboration",
+        knowledge: "Documents & knowledge",
+        research: "Search & research",
+        business: "Business & data",
+        development: "Development & operations",
+        custom: "Custom plugins",
+      },
+      hints: {
+        office: "Keep your team in sync",
+        knowledge: "Make company knowledge accessible",
+        research: "Find sources and turn them into insights",
+        business: "Bring business context to every decision",
+        development: "Connect the tools your team builds with",
+        custom: "Your configured MCP servers",
+      },
+      connected: "Connected",
+      native: "Built-in support",
+      guide: "Setup guide",
+      candidate: "Suggested",
+      view: "View",
+      allCategories: "All categories",
+      source: "Open setup documentation",
+      setup: "How to connect",
+      notice:
+        "Discover integrations for your team. Connect accounts and configure access when you need them.",
+      configured: "Configured",
+      nativeHint: "Supported by DeerFlow · requires deployment configuration",
+      guideHint: "Setup reference · not connected",
+      unknownStatus: "Status unavailable",
+      notConnected: "Not connected",
+    },
+    integrationSkills: "From plugins",
+    sharedSkills: "Shared skills",
+    title: "Capability Center",
+    description: "Add tools and skills that help DeerFlow work your way.",
+    plugins: "Plugins",
+    skills: "Skills",
+    searchPlugins: "Search plugins by name or purpose",
+    searchSkills: "Search skills by name or purpose",
+    allPlugins: "All plugins",
+    installed: "Installed",
+    enabled: "Enabled",
+    disabled: "Disabled",
+    configure: "Configure",
+    details: "View details",
+    addPlugin: "Add MCP plugin",
+    builtin: "Built-in",
+    community: "Community",
+    custom: "My skills",
+    allSkills: "All skills",
+    availablePlugins: "Available plugins",
+    availableSkills: "Available skills",
+    pluginHint:
+      "Connect your everyday apps so your agent can access information and get work done.",
+    skillHint:
+      "Turn useful methods into skills, ready to use in any conversation.",
+    noResults: "No matches found",
+    larkName: "Lark / Feishu",
+    larkDescription:
+      "Work with documents, messages, calendars, and multidimensional tables in your conversations.",
+    larkTag: "Collaboration",
+    connect: "Connect",
+    notInstalled: "Not installed",
+    mcpDescription: "Let your agent use the tools provided by this plugin.",
+    mcpLabel: "MCP plugin",
+    pluginSettings: "Plugin settings",
+    communityTitle: "Bring a skill from the community",
+    communityDescription:
+      "Import a .skill file to manage and use it under My skills.",
+    skillEnabled: "Enable skill",
+    manage: "Manage",
   },
 
   // Common
@@ -24,12 +316,15 @@ export const enUS: Translations = {
     delete: "Delete",
     edit: "Edit",
     rename: "Rename",
+    renameFailed: "Failed to rename thread.",
     share: "Share",
     openInNewWindow: "Open in new window",
     close: "Close",
     more: "More",
     search: "Search",
     loadMore: "Load more",
+    scrollToBottom: "Scroll to bottom",
+    showingOf: (loaded, total) => `Showing ${loaded} of ${total}`,
     download: "Download",
     thinking: "Thinking",
     artifacts: "Artifacts",
@@ -37,6 +332,7 @@ export const enUS: Translations = {
     custom: "Custom",
     notAvailableInDemoMode: "Not available in demo mode",
     loading: "Loading...",
+    error: "Error:",
     version: "Version",
     lastUpdated: "Last updated",
     code: "Code",
@@ -50,15 +346,63 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    exportFailed: "Failed to export conversation.",
     regenerate: "Regenerate",
+    editAndRerun: "Edit and rerun",
+    updateAndRerun: "Update and rerun",
+    editRerunWarning:
+      "Rerunning restores conversation state only. Files, memory, and external actions are not undone.",
     branch: "Branch conversation",
     showArtifacts: "Show artifacts of this conversation",
+    browser: "Browser",
+    showBrowser: "Open browser panel",
+  },
+
+  browserStream: {
+    connecting: "Connecting…",
+    disconnected: "Disconnected",
+    handshakeTimeout:
+      "Live browser connection timed out. Check your network or proxy, then turn Live off and on to retry.",
+    connectionFailed:
+      "Live browser connection failed or closed. Check your connection and access permissions, then turn Live off and on to retry.",
+  },
+
+  skillUsage: {
+    used: "Skills used",
+    title: "Skills",
+    name: "Name",
+    description: "Description",
+    builtIn: "Built-in",
+    custom: "Custom",
+    integration: "Integration",
+    legacy: "Legacy",
+    copy: "Copy skill snapshot",
+    partial:
+      "This is a partial snapshot of the skill instructions loaded during this run.",
+  },
+
+  runDuration: {
+    reasoning: "Reasoning",
+    working: "Working…",
+    completedIn: (duration) => `Took ${duration}`,
+    description:
+      "Total task time, including model reasoning, tool calls, and waiting.",
+    lessThanSecond: "<1s",
+    hours: (value) => `${value}h`,
+    minutes: (value) => `${value}m`,
+    seconds: (value) => `${value}s`,
+    separator: " ",
   },
 
   // Home
   home: {
     docs: "Docs",
     blog: "Blog",
+    searchDocs: "Search docs…",
+    searchDocsLabel: "Search documentation",
+    searchNoResults: "No results. Try fewer or different words.",
+    searchLoadFailed: "Search is unavailable right now.",
+    searchLoading: "Loading…",
   },
 
   // Welcome
@@ -80,8 +424,116 @@ export const enUS: Translations = {
     linkCopied: "Link copied to clipboard",
   },
 
+  artifactSelection: {
+    rewrite: "Rewrite selection",
+    instructions:
+      "Describe the change, then choose Rewrite selection. To ask a regular question, use Send.",
+    exactRequired: "Switch to source to select an exact range for rewriting.",
+    review: "Review replacement",
+    original: "Selected passage",
+    replacement: "Replacement",
+    apply: "Apply to draft",
+    applied: "Selection replaced in the draft. Review and save the artifact.",
+    changed: "The file or draft changed. Select the passage again.",
+    limit: "Select up to 12,000 characters.",
+  },
+
+  artifactEditing: {
+    unsaved: "Unsaved",
+    saving: "Saving...",
+    saved: "Artifact saved",
+    exit: "Exit editing",
+    discard: "Discard changes",
+    discardChanges: "Discard the unsaved changes to this artifact?",
+    conflict:
+      "This artifact changed after you started editing. Discard your draft and reload before saving.",
+    conflictShort: "Changed remotely",
+    runInProgress: "Wait for the current agent run to finish before saving.",
+    saveFailed: "Failed to save artifact",
+  },
+
+  artifactPreview: {
+    preparingDownload: "Preparing download…",
+    retryDownload: "Retry download",
+    downloadFailed: "Download failed. Try again.",
+    downloadRequested: "Sent to browser downloads",
+    retry: "Retry preview",
+    unavailable:
+      "Preview is unavailable for this format. Download the original file to view it.",
+    loadingPreview: "Preparing preview...",
+    resourcesUnavailable:
+      "Some preview resources could not be loaded. View the source or download the files for the complete content.",
+    limited: (previewSize, totalSize) =>
+      totalSize
+        ? `Showing the first ${previewSize} of ${totalSize}.`
+        : `Showing the first ${previewSize}.`,
+    loadFullFile: "Load full file",
+    loadingFullFile: "Loading full file...",
+    previewFailed:
+      "This file could not be previewed. You can still download it.",
+    viewSource: "View source",
+    missingTarget: "This link does not say which artifact to display.",
+  },
+
+  artifactTable: {
+    title: "Table preview",
+    header: "First row as header",
+    column: (index) => `Column ${index}`,
+    total: (count) => `${count} rows`,
+    sample: (count) => `Preview of first ${count} rows`,
+    range: (start, end, limited) =>
+      `${start}–${end}${limited ? " of preview" : ""}`,
+    columnsLimited: "Showing the first 50 columns of the preview.",
+    uneven:
+      "Some rows have different numbers of fields. Missing fields are marked.",
+    empty: "This file is empty.",
+    incomplete:
+      "No complete records fit in this preview. View the source or download the file.",
+    failed:
+      "Unable to preview this table reliably. View the source or download the file.",
+    retry: "Retry preview",
+    previous: "Previous page",
+    next: "Next page",
+    cell: (row, column) => `View cell: row ${row}, column ${column}`,
+    cellValue: "Cell value",
+    missing: "Missing",
+    savedVersion:
+      "Opens or downloads the saved file. Your draft has not been saved.",
+  },
+
+  artifactArchive: {
+    downloadCurrent: (count) =>
+      `Download current versions (${count} ${count === 1 ? "file" : "files"})`,
+    currentVersionNotice:
+      "The file list comes from this response. Contents are the current versions and may have changed.",
+    downloadFailed: "Failed to download artifact archive.",
+  },
+
+  modelPicker: {
+    search: "Search models…",
+    provider: "Provider",
+    allProviders: "All providers",
+    noResults: "No matching models",
+    recent: "Recently used",
+
+    title: "Choose a model",
+    favorites: "Favorites",
+    otherModels: "Other models",
+    noModels: "No models available",
+    favoriteModel: (displayName, name) => `Favorite ${displayName} (${name})`,
+    sessionOnly: "Favorites are stored for this session only.",
+  },
+
   // Citations
   citations: {
+    viewKnowledgeSource: (title: string) => `View source: ${title}`,
+    sourcePages: (pages: string) => `Pages ${pages}`,
+    retrievedExcerpt:
+      "Evidence captured when this answer was researched. The source document may have changed since retrieval.",
+    excerptTruncated: "This excerpt was shortened to fit the retrieval limit.",
+    sourceUnavailable:
+      "Source evidence is unavailable in the loaded conversation.",
+    knowledgeSourcesSummary: (count: number) => `${count} knowledge sources`,
     sourcesSummary: (count) =>
       `Used ${count} ${count === 1 ? "source" : "sources"}`,
     citeCount: (count) => `${count} ${count === 1 ? "cite" : "cites"}`,
@@ -107,15 +559,47 @@ export const enUS: Translations = {
     largeUnavailable: "Large file. Diff omitted.",
     sensitiveUnavailable: "Sensitive path. Content hidden.",
     truncatedUnavailable: "Diff omitted because the change set is too large.",
+    symlinkUnavailable: "Symlink change. Diff unavailable.",
     truncatedSummary: "Some changes were truncated.",
   },
 
   // Input Box
   inputBox: {
+    mentionPicker: "Add a reference",
+    mentionSearch: "Search skills, project files, conversations and plugins",
+    mentionSkills: "Skills",
+    mentionFiles: "Project files",
+    mentionExtensions: "Plugins",
+    mentionExtensionsLimit: "Select up to 16 plugin references.",
+    mentionConversations: "Conversations",
+    mentionUpload: "Upload a file",
+    mentionEmpty: "No matching references in loaded results",
+    mentionLoadMore: "Load more",
+    mentionLoading: "Loading references…",
+    mentionFailed: "Could not load references. Try again.",
+    mentionRetry: "Retry",
+    mentionAttaching: "Adding file…",
+    mentionAttachFailed: "Could not add this file. Try again.",
+    mentionMultipleSkills:
+      "Select up to 16 skills per message; select a checked skill again to remove it.",
+    mentionNoProject: "Open a project chat to reference its documents.",
+    mentionUnavailable: "File unavailable",
+    mentionClose: "Close references",
+
     placeholder: "How can I assist you today?",
+    disclaimer: "DeerFlow is AI and can make mistakes",
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
+    referenceConversations: "Reference a conversation",
+    referenceConversationsSearch: "Search conversations",
+    referenceConversationsEmpty: "No conversations found",
+    referenceConversationsLimit: (max: number) =>
+      `Up to ${max} conversations per message`,
+    referenceConversationsRemove: (title: string) =>
+      `Remove reference to ${title}`,
+    referencedConversations: "Referenced conversations",
+    removeProjectAttachment: "Remove attached document",
     inputPolish: "Polish input",
     inputPolishing: "Polishing input...",
     inputPolishNoChanges: "This input is already clear.",
@@ -163,7 +647,11 @@ export const enUS: Translations = {
     reasoningEffortHigh: "High",
     reasoningEffortHighDescription:
       "Full-dimensional Logic Deduction + Multi-path Verification + Backward Check",
-    searchModels: "Search models...",
+    reasoningEffortXhigh: "Extra High",
+    reasoningEffortXhighDescription:
+      "Extended deduction beyond High; slowest, most thorough",
+    reasoningEffortMax: "Max",
+    reasoningEffortMaxDescription: "The provider's deepest reasoning budget",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
     followupLoading: "Generating follow-up questions...",
@@ -186,6 +674,63 @@ export const enUS: Translations = {
     goalNone: "No active goal.",
     goalActive: "Active goal: {goal}",
     goalFailed: "Goal command failed.",
+    goalTooLong: "Goal is too long. Keep it under {max} characters.",
+    goalLengthCounter: "Goal length: {length}/{max} characters",
+    goalBar: {
+      regionLabel: "Goal status",
+      inProgress: "In progress",
+      stopped: "Stopped",
+      waitingForYou: "Waiting for you",
+      waiting: "Waiting",
+      paused: "Paused",
+      waitingApproval: "Waiting for approval",
+      autoContinuedOnce: "Auto-continued once",
+      autoContinuedMany: "Auto-continued {count} times",
+      details: "Details",
+      hideDetails: "Hide details",
+      noteLabel: "Goal check note (from the checker)",
+      codeLabel: "Stop code",
+      assumptionTooltip:
+        "The agent filled in something the goal didn't specify and said so in its reply. Check the reply above.",
+      announce: "{status}: {detail}",
+      editLocked:
+        "Editing is off while a goal is set. Run /goal clear to edit.",
+      busy: "A run is still going in this chat. Try again when it finishes.",
+      next: {
+        limit:
+          "Continuation limit reached · {count}/{max}. It won't auto-continue again. Reply to keep going, or set the goal again with /goal <condition> to start a fresh count (this also starts a new run).",
+        autoOff:
+          "Goal check: not met yet. Auto-continue is off for this goal. Reply to keep going.",
+        noProgress:
+          "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
+        tokenCapped:
+          "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        loopCapped:
+          "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
+        recursionCapped:
+          "The run reached its step limit before finishing. Send a new message to continue; your goal stays active.",
+        missingEvidence:
+          "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
+        runFailed:
+          "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
+        needsInputCard: "Answer the question above to continue.",
+        needsInputReply: "Reply with the missing details to continue.",
+        needsApproval: "Review the tool approval above to continue.",
+        needsApprovalReload:
+          "Approval details failed to load. Use the reload-error panel above to try again.",
+        external:
+          "Goal check: waiting on something external. Send a message when it's ready.",
+        unchecked: "{reason}. It's checked again after your next message.",
+        unknown: "Send a message to keep going.",
+        paused:
+          "Auto-continued {count}/{max}. The run ended before the goal was confirmed. Send a message to check again.",
+      },
+      uncheckedReasons: {
+        evaluatorFailed: "The run itself may be fine",
+        noDurableEndOfTurn: "No final reply was saved",
+        threadChanged: "The chat changed during the check",
+      },
+    },
     compactSuccess:
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
@@ -240,6 +785,28 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    runInputMode: "Send while working",
+    queueMode: "Queue",
+    steerMode: "Steer",
+    queueModeHelp: "Run after the current task finishes",
+    steerModeHelp: "Adjust the current task at the next available point",
+    runInputSend: "Send update",
+    runInputTextOnly:
+      "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+    runInputUnavailable:
+      "The message was not confirmed. Check the task status and try again; your draft is kept.",
+    stopRun: "Stop current task",
+    runInputQueued: "Queued",
+    runInputSteering: "Waiting to apply",
+    runInputUnapplied: "Not applied in this run",
+    runInputRetry: "Send again",
+    runInputCancel: "Remove this message",
+    runInputDispatching: "Pending confirmation",
+    runInputReplayUnavailable:
+      "This run was adjusted while working. Send a new message to continue instead of replaying only part of it.",
+    stopStreamingUnavailable:
+      "Stopping the running turn is not permitted for your role.",
+    startTurnUnavailable: "Starting a new turn is not permitted for your role.",
   },
 
   // Sidebar
@@ -254,11 +821,266 @@ export const enUS: Translations = {
     agentsDisabledTooltip: "Feature not enabled",
   },
 
+  // Knowledge scope for custom-agent chat
+  knowledge: {
+    scope: {
+      title: "Knowledge scope",
+      description:
+        "Choose which allowed knowledge bases and documents this agent may search.",
+      buttonAll: "Knowledge · All",
+      buttonDisabled: "Knowledge · Off",
+      buttonDatasets: (datasets) =>
+        `Knowledge · ${datasets} ${datasets === 1 ? "base" : "bases"}`,
+      buttonDatasetsAndDocuments: (datasets, documents) =>
+        `Knowledge · ${datasets} ${datasets === 1 ? "base" : "bases"} · ${documents} ${documents === 1 ? "file" : "files"}`,
+      allDatasets: "All allowed knowledge bases",
+      selectedDatasets: "Selected knowledge bases",
+      disabled: "Off",
+      allDocuments: "All searchable files",
+      selectedDocuments: "Selected files",
+      searchDatasets: "Search knowledge bases",
+      searchDocuments: "Search files",
+      selectedCount: (count) => `${count} selected`,
+      files: "Files",
+      notSearchable: "Not searchable",
+      loadFailed:
+        "The catalog could not be loaded. Your current selection is unchanged.",
+      selectionInvalid: "This selection exceeds the supported size limits.",
+      previous: "Previous",
+      next: "Next",
+      agentUnavailable: "This agent does not allow the knowledge tool group.",
+      apply: "Apply",
+      historyAll: "Knowledge: all allowed bases",
+      historyDisabled: "Knowledge: off",
+      historySelected: (datasets, documents) =>
+        documents > 0
+          ? `Knowledge: ${datasets} ${datasets === 1 ? "base" : "bases"}, ${documents} ${documents === 1 ? "file" : "files"}`
+          : `Knowledge: ${datasets} ${datasets === 1 ? "base" : "bases"}`,
+    },
+  },
+  // Sidebar projects section
+  projects: {
+    title: "Projects",
+    newProject: "New project",
+    namePlaceholder: "Project name",
+    moveToProject: "Move to project",
+    moveToProjectHint:
+      "Moving a chat doesn't remove the content already in it.",
+    removeFromProject: "Remove from project",
+    archive: "Archive",
+    restore: "Restore",
+    deleteProject: "Delete project",
+    deleteProjectConfirm:
+      "Deleting this project unlinks its chats; chats, their history, and their files are not deleted. Shelf documents move to trash and stay recoverable for the retention window.",
+    archived: "Archived",
+    empty: "No chats in this project yet.",
+    newChat: "New chat",
+    create: "Create",
+    createFailed: "Failed to create project",
+    moveFailed: "Failed to move chat",
+    archiveFailed: "Failed to archive project",
+    restoreFailed: "Failed to restore project",
+    deleteFailed: "Failed to delete project",
+    switchToGrouped: "Group chats by project",
+    switchToFlat: "Show flat chat list",
+    threads: "Chats",
+    threadsLoadFailed: "Couldn't load project chats",
+    untitled: "Untitled",
+    settings: "Settings",
+    notFound: "Project not found or deleted.",
+    projectUnavailable:
+      "Couldn't link the chat to the project. Your message was not sent — try again.",
+    documents: "Documents",
+    documentsEmptyTitle: "No documents yet",
+    documentsEmptyHint:
+      "Upload files or save conversation files to build this project's shelf.",
+    instructions: "Instructions",
+    instructionsPlaceholder:
+      "Background, goals, and conventions the agent should always know for this project…",
+    instructionsByteCount: (used, max) => `${used} / ${max} bytes`,
+    instructionsTooLong: (max) =>
+      `Instructions are over the ${max}-byte limit. Shorten them to save.`,
+    instructionsSaved: "Saved",
+    instructionsSaveFailed: "Failed to save instructions",
+    documentsShelf: "Shelf",
+    documentsShelfHint: "Drop files here to add them to the shelf",
+    uploadDocuments: "Upload",
+    uploadingDocuments: "Uploading…",
+    uploadDocumentFailed: "Failed to upload document",
+    documentFromThread: (threadName, kind) => `from ${threadName} · ${kind}`,
+    documentKindUpload: "upload",
+    documentKindOutput: "output",
+    attachToThread: "Attach to chat",
+    attachDialogTitle: "Attach to chat",
+    attachDialogHint: "Choose a chat to attach this document to.",
+    attachNoThreads: "No chats available.",
+    attachFailed: "Failed to attach document",
+    attachedToThread: (name) => `Attached "${name}"`,
+    moveDocumentToTrash: "Move to trash",
+    moveDocumentToTrashTitle: "Move to trash?",
+    moveDocumentToTrashConfirm: (name, days) =>
+      `"${name}" will move to the trash and stay recoverable for ${days} days.`,
+    deleteDocumentFailed: "Failed to move document to trash",
+    contentMissing: "Content missing",
+    previewUnsupported:
+      "This file type can't be previewed in the browser. Download it to view it.",
+    archivedDocumentsBanner:
+      "This project is archived. Documents are read-only — upload, save to project, and trash are unavailable.",
+    conversationFiles: "Conversation files",
+    conversationFilesEmpty: "No files in this project's chats yet.",
+    threadFilesTruncated: (count) =>
+      `Only the first ${count} files of this chat are shown.`,
+    threadFilesBrowseInThread: "Browse all files in the chat",
+    saveToProject: "Save to project",
+    saveToProjectFailed: "Failed to save file to project",
+    savedToProject: (name) => `Saved "${name}" to the shelf`,
+    shelfNameLabel: "Shelf name",
+    viewTrash: "Trash",
+    documentsLoadFailed: "Couldn't load project documents",
+    threadFilesLoadFailed: "Couldn't load conversation files",
+    memoryTitle: "Project memory",
+    memoryAutoExtract: "Automatic extraction",
+    memoryDescription:
+      "Durable facts learned from this project’s conversations, used only in this project. Turning extraction off keeps existing memories; delete any fact you no longer want used. Automatic extraction requires global memory to be enabled.",
+    memoryEmpty:
+      "No project memories yet. Conventions and lessons from future project chats will appear here.",
+    memoryPromote: "Move to instructions",
+    memoryPromoted: "Moved to project instructions",
+    memorySaveFirst: "Save your instruction edits before moving a memory.",
+    memoryLoadFailed: "Couldn’t load project memory.",
+    memoryActionFailed:
+      "Couldn’t update project memory. Refresh and try again.",
+  },
+
+  trash: {
+    title: "Trash",
+    empty: "Trash is empty.",
+    loadFailed: "Couldn't load trash",
+    retry: "Try again",
+    originProject: (projectName) => `from ${projectName}`,
+    unknownProject: "Unknown project",
+    retentionLeft: (days) =>
+      days <= 0
+        ? "Less than a day left"
+        : days === 1
+          ? "1 day left"
+          : `${days} days left`,
+    restore: "Restore",
+    restoreFailed: "Failed to restore document",
+    restoredToast: (name) => `Restored "${name}"`,
+    restoreMergedToast: (name) =>
+      `"${name}" matched existing shelf content — merged.`,
+    restoreConflict:
+      "This document's content is missing or damaged, so it stays in the trash.",
+    restorePickProjectTitle: "Choose a project",
+    restorePickProjectHint:
+      "The original project is gone or archived. Pick an active project to restore into.",
+    deletePermanently: "Delete permanently",
+    deletePermanentlyTitle: "Delete permanently?",
+    deletePermanentlyConfirm: (name) =>
+      `"${name}" will be permanently deleted. This cannot be undone.`,
+    purgeFailed: "Failed to delete document",
+    emptyTrash: "Empty trash",
+    emptyTrashTitle: "Empty trash?",
+    emptyTrashConfirm: (count) =>
+      count === 1
+        ? "1 document will be permanently deleted. This cannot be undone."
+        : `${count} documents will be permanently deleted. This cannot be undone.`,
+    emptyTrashFailed: "Failed to empty trash",
+  },
+
+  backgroundTasks: {
+    label: "Background tasks",
+    title: "Background tasks",
+    description: "Long-running MCP work for this chat.",
+    active: "Active",
+    recent: "Recent",
+    empty: "No background tasks yet",
+    emptyHint: "Long-running MCP tasks started in this chat will appear here.",
+    loadFailed: "Couldn't load background tasks",
+    retry: "Try again",
+    cancel: "Cancel task",
+    cancelling: "Cancelling…",
+    cancelFailed: "Failed to cancel task",
+    cancellationRetrying: (attempt) =>
+      `Cancellation attempt ${attempt} failed; DeerFlow will keep retrying.`,
+    notificationRetrying: (attempt) =>
+      `Chat notification attempt ${attempt} failed; DeerFlow will retry with backoff.`,
+    notificationStopped:
+      "Chat notification delivery stopped after repeated or permanent failures.",
+    trackingDegraded: "Status checks are delayed; DeerFlow is still retrying.",
+    viewDetails: "View details",
+    hideDetails: "Hide details",
+    detailsFailed: "Couldn't load task details",
+    result: "Result",
+    resultArtifact: "Result artifact",
+    inputRequired: "Input required",
+    inputUnavailable:
+      "This integration cannot send your response back to the remote task yet.",
+    lastPollError: "Latest status error",
+    created: (time) => `Started ${time}`,
+    updated: (time) => `Updated ${time}`,
+    status: {
+      submitted: "Submitted",
+      working: "Working",
+      inputRequired: "Input needed",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
+  subagentBatches: {
+    label: "Batches",
+    title: "Subagent batches",
+    description: "Background batch work with saved progress.",
+    followUpPending: "The requested follow-up will continue after this batch.",
+    followUpStopped: "Automatic follow-up has stopped.",
+    workerUnavailable:
+      "The batch worker is not running. Historical batches remain available in read-only mode.",
+    empty: "No subagent batches yet",
+    emptyHint: "Explicit batch_task submissions in this chat will appear here.",
+    loadFailed: "Couldn't load subagent batches",
+    active: "Active",
+    recent: "Recent",
+    pause: "Pause",
+    resume: "Resume",
+    cancel: "Cancel",
+    retryItem: "Retry",
+    exportResults: "Export JSONL",
+    viewResult: "Review result",
+    resultTitle: "Batch result",
+    resultDescription: "Stored report and captured evidence for this item.",
+    report: "Report",
+    evidence: "Captured evidence",
+    noEvidence: "No captured evidence",
+    acceptance: "Acceptance",
+    noReport: "No report has been stored yet.",
+    loadResultFailed: "Couldn't load batch result",
+    truncated: "Report truncated",
+    omittedEvidence: (count) => `${count} evidence entries omitted`,
+    pagesLabel: "Pages",
+    viewItems: "View items",
+    hideItems: "Hide items",
+    itemsFailed: "Couldn't load batch items",
+    progress: (completed, total) => `${completed} of ${total} terminal`,
+    limits: (live, running) => `Live ${live} · running ${running}`,
+    status: {
+      queued: "Queued",
+      running: "Running",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: {
       cron: "Recurring",
       once: "One-time",
+      interval: "Interval",
     },
     preset: {
       label: "Repeat",
@@ -276,7 +1098,15 @@ export const enUS: Translations = {
       cron: "Cron expression",
       cronPlaceholder: "0 9 * * *",
       runAt: "Run at",
+      invalidRunAt:
+        "This local time does not exist in the selected timezone. Choose another time.",
       timezone: "Timezone",
+      intervalAmount: "Every",
+      intervalUnit: "Interval unit",
+      intervalUnitSeconds: "seconds",
+      intervalUnitMinutes: "minutes",
+      intervalUnitHours: "hours",
+      intervalMinHint: "Minimum {n} seconds.",
     },
     weekdays: {
       mon: "Mon",
@@ -290,100 +1120,450 @@ export const enUS: Translations = {
     preview: "Preview",
     cronHelp: "Open crontab.guru",
     create: {
-      title: "Create scheduled task",
-      taskTitle: "Task title",
-      prompt: "Prompt",
-      submit: "Create",
-      fillRequired: "Fill all required fields",
+      agent: "Agent",
+      leadAgent: "Default agent",
     },
-    context: {
-      fresh: "Fresh thread",
-      reuse: "Reuse thread",
-      threadIdPlaceholder: "Thread ID",
+    search: {
+      clear: "Clear search",
+      noResults: "No tasks match your search and filters.",
     },
-    filters: {
-      allStatuses: "All statuses",
-      enabled: "Enabled",
-      paused: "Paused",
-      completed: "Completed",
-      failed: "Failed",
-      allTypes: "All types",
-      cron: "Cron",
-      once: "Once",
+    page: {
+      description:
+        "Tasks DeerFlow runs for you on a schedule. You can also just ask in any chat.",
+      descriptionNoChat: "Tasks DeerFlow runs for you on a schedule.",
+      newTask: "New task",
+      tabs: {
+        all: "All",
+        active: "Active",
+        paused: "Paused",
+        finished: "Finished",
+      },
+      tabsLabel: "Filter by status",
+      search: "Search tasks",
+      emptyTitle: "No scheduled tasks yet",
+      emptyBody:
+        "Ask in any chat, for example “Every weekday at 9:00, summarize my GitHub notifications”, or create one here.",
+      emptyBodyNoChat: "Create a task and DeerFlow will run it on schedule.",
+      threadFilter: "Showing tasks from this chat",
+      showAll: "Show all",
+      schedulerOffTitle: "Automatic runs are off on this server",
+      schedulerOffBody:
+        "Tasks won't run on schedule until an administrator turns the scheduler on. You can still view tasks and their history, and run a task once now.",
+      createBlocked: "New tasks can't be created while automatic runs are off.",
+      unavailableTitle: "Scheduled tasks aren't available on this server",
+      unavailableBody: "Ask your administrator to turn them on.",
+      selectHint: "Select a task to see its details.",
+      tabCount: "{tab}, {count}",
+      loading: "Loading tasks…",
+      taskNotInChat: "This task isn't one of this chat's tasks.",
+    },
+    time: {
+      today: "Today {time}",
+      tomorrow: "Tomorrow {time}",
+      yesterday: "Yesterday {time}",
+      yourTime: "{time} your time",
+    },
+    timeInline: {
+      today: "today {time}",
+      tomorrow: "tomorrow {time}",
+      yesterday: "yesterday {time}",
+      yourTime: "{time} your time",
+    },
+    list: {
+      next: "Next: {time}",
+      pausedByAgentOn: "Paused by agent · {time}",
+      autoPausedLine: "Paused: missed its goal 3 runs in a row",
+      finishedLimit: "Finished · all {max} runs used",
+      finishedEnd: "Finished · end time passed",
+      runningNow: "Running now",
     },
     detail: {
-      contextMode: "Context mode",
-      thread: "Thread",
-      lastThread: "Last thread",
-      schedule: "Schedule",
-      nextRun: "Next run",
-      lastRun: "Last run",
-      lastRunId: "Last run id",
-      lastError: "Last error",
+      agent: "Agent",
       runsCount: "{count} runs",
       runsCountOne: "{count} run",
       noRuns: "No runs yet",
-      noSelection: "No scheduled task selected",
-      filteredByThread: "Filtered by thread: {id}",
       loadFailed: "Failed to load scheduled tasks",
+      runs: "Runs",
+      stopsWhen: "Stops when",
+      does: "Does",
+      goal: "Each run's goal",
+      notes: "Notes from chat",
+      history: "History",
+      next: "Next: {time}",
+      firstRun: "First run: {time}",
+      notWhilePaused: "Not running while paused",
+      ifResumed: "If resumed, next run: {time}",
+      noMoreRuns: "Finished — no more runs",
+      showAll: "Show all",
+      showLess: "Show less",
+      createdInChat: "Created in a chat",
+      openChat: "Open chat",
+      contextFresh: "Each run starts a new chat",
+      contextReuse: "Runs in an existing chat",
+      copyTaskId: "Copy task ID",
+      copied: "Copied",
+      moreActions: "More actions",
+      agentLine: "Agent: {name}",
+    },
+    stop: {
+      pausesItself: "{condition}, pauses itself",
+      reached: "Reached {time}",
+      noRule: "Runs until you pause it",
+      afterRuns: "After {max} automatic runs",
+      atTime: "At {time}",
+      capRuns: "Safety cap: {max} runs",
+      capRunsUsed: "Safety cap: {used} of {max} runs used",
+      capEnd: "Safety cap: ends {time}",
+      capBoth: "Safety cap: {max} runs or {time}, whichever comes first",
+      trialsDontCount: "Trial runs don't count.",
+      autoPauseRule: "Pauses after 3 runs in a row miss the goal",
+      goalTooltip:
+        "After each run DeerFlow checks the result against this goal. If it isn't met, the agent keeps working in that run. Meeting it doesn't end the schedule.",
+    },
+    notice: {
+      pausedByAgentTitle: "Paused by agent",
+      pausedByAgentBody:
+        "In the run from {time}, the agent found your stop condition met and paused the task. Resume it only if you want it to keep going.",
+      seeThatRun: "See that run",
+      autoPausedTitle: "Paused: missed its goal 3 runs in a row",
+      autoPausedBody:
+        "Latest reason: {reason}. Resuming keeps the count, so one more miss pauses it again. Editing the goal or instructions starts a new count.",
+      editGoal: "Edit goal",
+      openLatestRun: "Open latest run",
+      resumeAnyway: "Resume anyway",
+      limitTitle: "Finished: all {max} runs used",
+      limitBodyRuns:
+        "To keep it running, raise the run limit or remove it, then resume.",
+      limitBodyEnd:
+        "To keep it running, set a later end time or remove it, then resume.",
+      endTitle: "Finished: the end time {time} has passed",
+      extendLimit: "Extend limit",
+      onceFinished: "Finished: this one-time task has run.",
+      onceFailed:
+        "This one-time task didn't finish. Edit the time to run it again.",
+    },
+    renew: {
+      title: "Extend the safety cap",
+      bodyRuns:
+        "{used} of {max} automatic runs are used. Raise the limit or remove it to resume.",
+      bodyEnd: "The end time {time} has passed. Set a later one to resume.",
+      removeCap: "Remove this limit",
+      removeCapBlocked:
+        "Tasks created in chat that run more often than hourly need a safety cap.",
+      submit: "Resume",
+    },
+    notificationGroup: {
+      savedUnavailable:
+        "This task has a saved group destination, but group notifications are unavailable on this server.",
+      clearSaved: "Clear group notification",
+      bind: "Bind a Feishu group",
+      bindWecom: "Bind a WeCom group",
+      bindQq: "Bind a QQ group",
+      name: "Group name",
+      nameHint:
+        "Name this group so you can recognize it when choosing a notification destination. Rebind a group to change its name.",
+      refresh: "Refresh group list",
+      bindInstructions:
+        "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",
+      generating: "Generating a binding code…",
+      bindFailed: "Could not create a binding code. Try again.",
+      command: "Group binding command",
+      expiresAt: "Expires at {time}.",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      newCode: "Generate a new code",
+      close: "Close binding instructions",
+      label: "Also notify a group (optional)",
+      detailLabel: "Additional group",
+      none: "No additional group",
+      personalHint:
+        "Your personal notifications stay unchanged. The selected group also receives task updates.",
+      emptyHint: "Bind a group below, then refresh the list.",
+      loading: "Loading groups…",
+      unavailable: "Selected group unavailable",
+      unavailableHint:
+        "The selected group is no longer available. Keep it, remove it, or choose another group.",
+      unnamed: "Group name unavailable",
+      unnamedHint:
+        "Bind the group again with a recognizable name before selecting it.",
+      loadFailed:
+        "Could not load groups. Your selection is kept; you can save other changes or remove it.",
+    },
+    form: {
+      createTitle: "New scheduled task",
+      editTitle: "Edit task",
+      title: "Title",
+      instructions: "Instructions",
+      instructionsHint: "What each run should do.",
+      stopCondition: "Stops when (optional)",
+      stopConditionHint:
+        "Each run checks this and pauses the task when it's true, e.g. “every item on the checklist is checked”.",
+      goal: "Each run's goal (optional)",
+      goalHint: "What one run must achieve. Checked after every run.",
+      goalNeedsFresh: "A goal needs each run to start a new chat.",
+      maxRuns: "Safety cap: number of runs",
+      maxRunsHint:
+        "Automatic runs over the task's lifetime; trial runs excluded. {used} used so far.",
+      endAt: "Safety cap: end by",
+      invalidEndAt:
+        "This end time does not exist in the selected timezone. Choose another time.",
+      labelWithZone: "{label} ({tz})",
+      contextLabel: "Where runs happen",
+      clear: "Clear",
+      frequentNeedsCap:
+        "Tasks created in chat that run more often than hourly need a safety cap.",
+      schedule: "Runs",
+      agent: "Agent",
+      advanced: "Advanced",
+      contextFresh: "Start a new chat for each run",
+      contextReuse: "Run in an existing chat",
+      chatId: "Chat ID",
+      reuseNoticeTitle: "Uses this chat's history",
+      reuseNoticeDescription:
+        "If the chat is busy at the scheduled time, the run waits in a queue and starts when the chat is free. It fails if it waits longer than the configured limit.",
+      create: "Create",
+      save: "Save changes",
+      required: "Fill in the title, instructions and schedule.",
+      endAtPassed: "The original end time has passed; set a new one.",
+      copySuffix: "(copy)",
     },
     actions: {
       edit: "Edit",
-      cancelEdit: "Cancel edit",
       pause: "Pause",
       resume: "Resume",
-      trigger: "Trigger now",
+      runNow: "Run once now",
+      duplicate: "Duplicate",
       delete: "Delete",
+      openTask: "Open task",
+      openChat: "Open chat",
+      busyRunning: "Running now — try again when it finishes",
+      busyQueued: "A run is waiting to start; pause to cancel it",
+      busyQueuedPaused: "A run is waiting to start; try again when it finishes",
+      alreadyQueued: "A run is already waiting to start",
+      deleteTitle: "Delete “{title}”?",
+      deleteBody:
+        "Chats from past runs stay in your chat list. This can't be undone.",
     },
-    deleteConfirm:
-      "Are you sure you want to delete this scheduled task? This action cannot be undone.",
+    feedback: {
+      created: "Task created",
+      saved: "Changes saved",
+      paused: "Paused",
+      resumed: "Resumed · next run {time}",
+      resumedNoTime: "Resumed",
+      deleted: "Task deleted",
+      trialStarted: "Trial run started",
+      trialQueued: "Trial run queued; it starts when a slot is free",
+      alreadyQueued:
+        "A run is already waiting to start, so no extra trial was added",
+    },
     errors: {
       create: "Failed to create scheduled task",
       update: "Failed to update scheduled task",
       pause: "Failed to pause scheduled task",
       resume: "Failed to resume scheduled task",
-      trigger: "Failed to trigger scheduled task",
+      trigger: "Failed to start a trial run",
       delete: "Failed to delete scheduled task",
-    },
-    edit: {
-      titlePlaceholder: "Edit title",
-      promptPlaceholder: "Edit prompt",
-      submit: "Save edit",
+      withReason: "{action}: {reason}",
     },
     status: {
-      enabled: "Enabled",
+      enabled: "Active",
       paused: "Paused",
-      running: "Running",
-      completed: "Completed",
+      running: "Running now",
+      completed: "Finished",
       failed: "Failed",
       cancelled: "Cancelled",
+      pausedByAgent: "Paused by agent",
+      autoPaused: "Auto-paused",
+      deleted: "Deleted",
     },
-    runTrigger: { scheduled: "scheduled", manual: "manual" },
+    history: {
+      navigation: "Run history pages",
+      newer: "Newer runs",
+      older: "Older runs",
+      latest: "Latest runs",
+      page: "Page {page}",
+      paused:
+        "Automatic refresh is paused on older pages. Return to the latest runs to see current ones.",
+      loading: "Loading runs…",
+      loadFailed: "Couldn't load the run history.",
+      retry: "Try again",
+      runNumber: "Run {n}",
+      tokens: "{count} tokens",
+      continuations: "Kept working {n} more times to reach the goal",
+      details: "Details",
+      listLabel: "Runs of this task",
+      waitingForSlot: "Waiting for a free slot",
+    },
+    runTrigger: { scheduled: "Scheduled run", manual: "Trial run" },
     runStatus: {
       queued: "Queued",
+      launching: "Launching",
       running: "Running",
-      success: "Success",
+      success: "Done",
+      unmet: "Goal not met",
       failed: "Failed",
       skipped: "Skipped",
       interrupted: "Interrupted",
+    },
+    goal: {
+      met: "Goal met",
+      stopRequested: "This run paused the task",
+      assumptionBadge: "Assumption made",
+      assumptionTooltip:
+        "The agent filled in something your instructions didn't specify and said so in its reply. Open the run to check it.",
+      unchecked: "Couldn't check the goal",
+      reasons: {
+        missingEvidence: "Goal check: evidence missing",
+        needsUserInput: "Needs your input",
+        externalWait: "Goal check: waiting on something external",
+        runFailed: "Goal check: the run did not finish the work",
+        goalNotMetYet: "Goal check: not met yet",
+        maxContinuations: "Continuation limit reached",
+        noProgress: "No progress between turns",
+        tokenCapped: "Token budget reached",
+        loopCapped: "Repeated tool calls reached the safety limit",
+        recursionCapped: "The run reached its step limit",
+        evaluatorFailed: "Couldn't check the goal; the run itself may be fine",
+        noDurableEndOfTurn: "Couldn't check the goal: no final reply was saved",
+        threadChanged:
+          "Couldn't check the goal: the chat changed during the check",
+        noVerdict: "No goal verdict",
+      },
+    },
+    runErrors: {
+      restarted: "Interrupted: DeerFlow restarted during this run",
+      leaseLost: "Interrupted: the server running it stopped responding",
+      queueTimeout: "Skipped: it waited too long for a free slot",
+      pausedWhileQueued: "Cancelled because the task was paused",
+      deletedWhileQueued: "Cancelled because the task was deleted",
+      endReached: "Skipped: the safety cap was reached",
+      interrupted: "Stopped before it finished",
+      launchFailed: "This run couldn't start",
+      failed: "Failed while running. Open the chat to see where it stopped.",
+    },
+    apiErrors: {
+      generic: "Something went wrong.",
+      invalidRequest: "Some fields are invalid.",
+      invalidSchedule: "This schedule isn't valid.",
+      invalidScheduleType: "This kind of schedule isn't supported.",
+      invalidTimezone: "Unknown timezone.",
+      intervalTooShort: "Choose an interval of at least {min_seconds} seconds.",
+      intervalTooLong: "Choose an interval of 30 days or less.",
+      onceInPast: "Pick a time in the future.",
+      onceTooSoon: "Pick a time at least {min_seconds} seconds from now.",
+      onceTimePassed:
+        "This one-time task's time has passed. Edit the time to resume it.",
+      invalidContextMode: "This chat option isn't supported.",
+      reuseThreadRequiresThread: "Choose the chat to run in.",
+      threadNotFound: "That chat wasn't found.",
+      invalidAssistant: "That agent name isn't valid.",
+      unknownAssistant: "That agent wasn't found.",
+      invalidGoal: "The goal is empty or longer than {max_chars} characters.",
+      goalRequiresFreshThread: "A goal needs each run to start a new chat.",
+      invalidStopCondition:
+        "The stop condition must be at most {max_chars} characters.",
+      invalidNotificationGroup:
+        "This Feishu group is no longer available. Select another group or remove the additional notification.",
+      invalidMaxRuns: "The run limit must be a whole number of at least 1.",
+      endAtInPast: "Pick an end time in the future.",
+      endAtBeforeFirstRun: "The end time must leave room for at least one run.",
+      frequentRequiresLimit:
+        "Tasks that run more often than hourly need a safety cap: a run limit or an end time.",
+      maxRunsNotAboveUsed:
+        "The run limit must be more than the {used} runs already used.",
+      limitsExhaustedRuns:
+        "All {max_runs} automatic runs are used. Raise the limit to resume.",
+      limitsExhaustedEnd:
+        "The end time {end_at} has passed. Set a later end time to resume.",
+      taskNotFound: "This task no longer exists.",
+      taskRunning:
+        "This task is running right now. Try again when the run finishes.",
+      runQueued:
+        "A run is waiting to start. Pause the task to cancel it, then try again.",
+      taskChanged: "This task just changed. Refresh and try again.",
+      taskFinished: "This task has finished, so it can't be paused.",
+      taskQuotaExceeded:
+        "You already have {limit} active tasks created in chats, paused ones included. Delete some to create more.",
+      schedulerNotRunning:
+        "Automatic runs are off on this server, so new tasks can't be created.",
+      schedulerUnavailable:
+        "Scheduled tasks aren't available on this server right now.",
+      triggerFailed: "The run couldn't be started.",
+      permissionDenied: "You don't have permission to do this.",
+    },
+    events: {
+      stoppedWithCondition:
+        "{title} was paused by the agent. Stop condition met: {condition}",
+      stopped: "{title} was paused by the agent: its stop condition was met.",
+      autoPaused:
+        "{title} was paused automatically: 3 runs in a row missed the goal.",
+      finishedRuns: "{title} finished: all {max} runs are done.",
+      finishedOneRun: "{title} finished: its one run is done.",
+      finishedEnd: "{title} finished: its end time has passed.",
+      finished: "{title} finished.",
+      onceDone: "{title} has run.",
+      onceFailed: "{title} didn't finish.",
+      label: "Scheduled task update",
+      suffixLastFailed: "The last run failed.",
+      suffixLastUnmet: "The last run didn't meet the goal.",
+      suffixLastInterrupted: "The last run was interrupted.",
+      untitledTask: "Untitled task",
+    },
+    card: {
+      runs: "Runs",
+      stopsWhen: "Stops when",
+      results: "Results",
+      resultsFresh: "Each run opens a new chat",
+      resultsReuse: "Posted in this chat",
+      footer:
+        "Trial runs don't count toward the cap. To change the time or the stop condition, just say so here.",
+      deleted: "This task was deleted.",
+      trialStarted: "Trial run started",
+      schedulerOff:
+        "Automatic runs are off on this server, so this task won't run on schedule.",
+      refreshFailed: "Couldn't refresh this task.",
+      label: "Scheduled task {title}",
+    },
+    runThread: {
+      scheduledRun: "Scheduled run",
+      trialRun: "Trial run",
+      runNumber: "run {n}",
+      instructions: "Task instructions (sent automatically)",
+      stopsWhen: "Stops when: {condition}",
+      notes: "Notes from chat",
+      openTask: "Open task",
+    },
+    header: {
+      countLabel: "{count} scheduled tasks in this chat",
+      countLabelOne: "1 scheduled task in this chat",
+      runTask: "Scheduled task",
     },
     recipes: {
       label: "Quick create",
       trending: {
         title: "GitHub Trending daily",
         desc: "Summarize today's top 10 trending repos",
+        prompt:
+          "Use web_search to open today's GitHub Trending page, then summarize the top 10 repositories. For each: name, primary language, today's star delta, and a one-line description of what it is and why it's trending. Output as a markdown list.",
       },
       news: {
         title: "Daily tech news digest",
         desc: "Collect and summarize the day's top tech news",
+        prompt:
+          "Use web_search to collect today's top tech news across AI, developer tools, infrastructure, and security. Summarize the 5 most important items: headline, source, and a one-line takeaway each. Output as a markdown list.",
       },
       issues: {
         title: "GitHub Issue triage",
         desc: "Triage a repo's open issues (fill in {{repo}})",
+        prompt:
+          "Triage the open issues in {{repo}}: list the 10 most recent, label each as bug / feature / question, flag any that look stale or high-priority, and suggest 2 that are good first issues. Replace {{repo}} with the target repository (owner/name). Output as a markdown table.",
       },
       weekly: {
         title: "Weekly report",
         desc: "Compile a weekly summary, every Monday",
+        prompt:
+          "Compile a weekly report: what was accomplished this week, what is currently blocked, and the top 3 priorities for next week. Keep it concise and skimmable.",
       },
     },
   },
@@ -394,6 +1574,15 @@ export const enUS: Translations = {
     description:
       "Create and manage custom agents with specialized prompts and capabilities.",
     newAgent: "New Agent",
+    importAgent: "Import Agent",
+    importTitle: "Import custom agent",
+    importDescription:
+      "Choose the local name for this agent. Existing agents are never overwritten.",
+    importName: "Agent name",
+    importInvalidFile: "This file is not valid JSON",
+    importSuccess: "Agent imported",
+    exportAgent: "Export Agent",
+    exportSuccess: "Agent package downloaded",
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",
@@ -433,12 +1622,57 @@ export const enUS: Translations = {
       "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
     saveCommandMessage:
       "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.",
+    agentSaveFailed:
+      "DeerFlow could not save this agent. Review the tool error and try again.",
     agentCreatedPendingRefresh:
-      "The agent was created, but DeerFlow could not load it yet. Please refresh this page in a moment.",
+      "DeerFlow could not confirm the saved agent. Please try saving it again.",
     more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
+    settings: "Agent settings",
+    settingsTitle: "Agent settings",
+    settingsDisplayName: "Display name",
+    settingsDisplayNameTooLong:
+      "Display name must be at most 100 Unicode code points.",
+    settingsDisplayNameHint:
+      "Supports Unicode. Leave blank to use the agent identifier",
+    settingsToolGroups: "Tool access",
+    settingsToolGroupsHint:
+      "Restrict which configured tool groups this agent and its delegated tasks may use.",
+    settingsToolGroupsAll: "Use every configured tool group",
+    settingsToolGroupsLoadFailed: "Tool groups could not be loaded.",
+    settingsToolGroupUnavailable: "unavailable",
+    settingsDescription:
+      "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
+    settingsKnowledge: "Default knowledge",
+    settingsKnowledgeHint:
+      "New conversations use this knowledge scope. Individual messages can override it. Selecting all knowledge bases removes the binding.",
+    settingsKnowledgeReset: "Use all knowledge bases",
+    settingsKnowledgeSaveToolAccess:
+      "Save tool access before choosing default knowledge bases.",
+    settingsModel: "Default model",
+    settingsModelDefault: "Use global default",
+    settingsModelSwitchNeedsCatalog:
+      "Load the selected model before saving this model change. Retry loading, or restore the original model to save other changes.",
+    settingsReasoningUnsupported: "not supported",
+    settingsThinkingRequiredHint:
+      "This model requires thinking. The saved Off setting can prevent runs from starting. Choose Inherit or On to replace it.",
+    settingsReasoningUnsupportedHint:
+      "This saved value is not supported by the selected model. Choose Inherit or a supported value to replace it.",
+    settingsTemperature: "Temperature",
+    settingsTemperatureHint: "0 = deterministic, higher = more creative (0–2).",
+    settingsMaxTokens: "Max output tokens",
+    settingsMaxTokensPlaceholder: "Inherit from model",
+    settingsThinking: "Thinking mode",
+    settingsThinkingOn: "On",
+    settingsThinkingOff: "Off",
+    settingsReasoningEffort: "Reasoning effort",
+    settingsInherit: "Inherit",
+    settingsSaved: "Agent settings saved",
+    settingsInvalidTemperature: "Temperature must be between 0 and 2",
+    settingsInvalidMaxTokens:
+      "Max output tokens must be a positive integer up to 200,000",
   },
 
   // Breadcrumb
@@ -459,6 +1693,10 @@ export const enUS: Translations = {
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
+    modelLoadFailed:
+      "Models couldn't be loaded. Model selection and token usage may be unavailable.",
+    modelLoadRetry: "Retry",
+    modelLoadRetrying: "Retrying…",
   },
 
   // Conversation
@@ -467,14 +1705,68 @@ export const enUS: Translations = {
     startConversation: "Start a conversation to see messages here",
     branchCreated: "Conversation branch created",
     branchFailed: "Failed to branch conversation.",
+    streamReplayGap:
+      "Some live updates expired. The conversation was restored from saved state.",
+    streamServerError: (status) =>
+      `The service is temporarily unavailable (HTTP ${status}). Please try again.`,
+    outlineLabel: "Conversation outline",
+    outlineAttachmentFallback: "Image or file message",
   },
 
   // Chats
   chats: {
+    deleteChat: "Delete chat",
+    deleteConfirm: (title) =>
+      `Delete “${title}”? This will delete the conversation and its files. This action cannot be undone.`,
+    deleteFailed: "Failed to delete chat. Please try again.",
+    noActiveChats: "No recent chats",
+    activeChats: "Recent chats",
+    archivedChats: "Archived",
+    archiveChat: "Archive chat",
+    restoreChat: "Restore chat",
+    archiveSuccess: "Chat archived",
+    restoreSuccess: "Chat restored",
+    archiveFailed: "Failed to update archived chat",
+    archiveDescription:
+      "Archiving keeps messages and files. Running and scheduled tasks continue.",
+    undoArchive: "Undo",
+    noArchivedChats: "No archived chats",
+    noMatchingChats: "No matching chats in the loaded conversations",
+    loadChatsFailed: "Failed to load conversations",
+    retryLoadChats: "Retry",
     searchChats: "Search chats",
+    branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
+    pinChat: "Pin chat",
+    unpinChat: "Unpin chat",
+    pinChatFailed: "Failed to update pinned chat",
+  },
+
+  // Thread origin and unread markers
+  threads: {
+    unread: "Unread",
+    unreadLabel: "{title}, unread",
+    unreadLabelWithOrigin: "{origin}, {title}, unread",
+    origin: {
+      schedule: "Scheduled run",
+      fromProvider: (provider: string) => `From ${provider}`,
+      github: "From GitHub",
+      extension: "From an extension",
+      providers: {
+        buzz: "Buzz",
+        dingtalk: "DingTalk",
+        discord: "Discord",
+        feishu: "Feishu",
+        github: "GitHub",
+        qq: "QQ",
+        slack: "Slack",
+        telegram: "Telegram",
+        wechat: "WeChat",
+        wecom: "WeCom",
+      },
+    },
   },
 
   // Sidecar
@@ -521,11 +1813,96 @@ export const enUS: Translations = {
     unavailableShort: "Unavailable",
     setupTitle: (name: string) => `Connect ${name}`,
     setupEditTitle: (name: string) => `Modify ${name}`,
+    wechatQr: {
+      restart: "Scan again",
+      restartHint:
+        "Left the bot screen in WeChat? Start again with a new QR code.",
+      restartKeepCommand:
+        "The command you already copied stays valid until it expires.",
+      autoSave: "Your token will be saved automatically after confirmation.",
+      verifyTitle: "Enter the code shown in WeChat",
+      verifyDescription: "Enter the digits on your phone to finish connecting.",
+      verifyLabel: "Pairing code",
+      verifySubmit: "Continue connecting",
+      verifying: "Verifying…",
+      network: "WeChat is temporarily unreachable. Retrying automatically…",
+      invalid_response:
+        "WeChat returned an unexpected response. Refresh the QR code and try again.",
+      verification_rejected:
+        "The code did not match. Check the digits on your phone and try again.",
+      verification_blocked:
+        "Too many incorrect attempts. Wait a moment, then refresh the QR code.",
+      already_bound:
+        "WeChat says this bot is already linked. Close this dialog and check its connection, or choose a different bot on your phone.",
+      saved: "Token saved securely",
+      savedDescription:
+        "DeerFlow has saved your token on the server and started the WeChat channel.",
+      bindTitle: "One more step: link your account",
+      bindDescription:
+        "Send this command to the bot in WeChat to link it to your DeerFlow account.",
+      bindWaiting: "Waiting for your message in WeChat…",
+      bindLoading: "Preparing your account connection…",
+      bindFailed:
+        "Your token is saved, but account binding could not start. Try again.",
+      bindExpired:
+        "This binding code has expired. Generate a new one; no need to scan again.",
+      bindRetry: "Generate binding code",
+      copyCommand: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      connectedTitle: "WeChat is connected",
+      connectedDescription: "You can now send a message to your bot in WeChat.",
+      done: "Done",
+
+      login: "Scan QR code",
+      manual: "Use token",
+      description: "Connect WeChat to your DeerFlow workspace.",
+      loading: "Generating QR code…",
+      imageTitle: "WeChat login QR code",
+      scan: "Scan this code with WeChat, then confirm on your phone.",
+      scanned: "Code scanned. Confirm the login on your phone.",
+      expired: "This QR code has expired. Generate a new one.",
+      failed: "WeChat login failed or was cancelled. Try again.",
+      confirmed: "WeChat login confirmed.",
+      retry: "Refresh QR code",
+      methodLabel: "Connection method",
+      tokenTitle: "Connect with a bot token",
+      tokenDescription:
+        "Paste your existing WeChat iLink bot token to connect.",
+      tokenPlaceholder: "Paste your bot token",
+      tokenHint:
+        "Don’t have a token? Choose Scan QR code to connect with your phone.",
+      privacy: "Credentials are saved only on your server.",
+      waiting: "Waiting for scan",
+      scannedTitle: "Scan complete",
+      expiredTitle: "QR code expired",
+      failedTitle: "Unable to connect",
+    },
+    bindingCode: {
+      description: (provider: string) =>
+        `Send this command to the ${provider} bot to link it to your DeerFlow account.`,
+      loading: "Generating a binding code…",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      expiresAt: (time: string) => `Expires at ${time}`,
+      waiting: (provider: string) => `Waiting for your message in ${provider}…`,
+      connected: (provider: string) => `${provider} is connected`,
+      done: "Done",
+      expired: "This binding code has expired.",
+      newCode: "Generate a new code",
+      failed: "Could not create a binding code.",
+      tooManyCodes:
+        "Too many unused codes. Use a code you already have or wait about 10 minutes for them to expire.",
+      retry: "Try again",
+    },
     setupDescription:
       "Enter the values needed by this server process. They are not written to config.yaml.",
     saveAndConnect: "Save and connect",
     saveChanges: "Save changes",
     descriptions: {
+      buzz: "Buzz channels and direct messages through your DeerFlow agent.",
+      qq: "QQ direct messages and group @mentions over WebSocket.",
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",
       discord: "Discord server messages through your DeerFlow bot.",
@@ -535,6 +1912,13 @@ export const enUS: Translations = {
       wecom: "WeCom messages through your DeerFlow AI bot.",
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
+    scheduledUpdates: {
+      supported:
+        "Scheduled task updates: supported; manage in Notification settings",
+      supportedAfterConnect:
+        "Scheduled task updates: supported; connect to manage notifications",
+      unsupported: "Scheduled task updates: not available for this app yet",
+    },
   },
 
   // Page titles (document title)
@@ -547,6 +1931,19 @@ export const enUS: Translations = {
 
   // Tool calls
   toolCalls: {
+    details: "Tool details",
+    failed: "Failed",
+    scheduleTaskPending: "Scheduled task operation",
+    stopScheduledTaskPending: "Pause this scheduled task",
+    toolName: "Tool name",
+    callId: "Call ID",
+    input: "Input",
+    result: "Result",
+    error: "Error",
+    noResult: "No result received",
+    emptyResult: "Empty result",
+    truncated:
+      "Preview truncated; copying includes only the displayed preview.",
     moreSteps: (count: number) => `${count} more step${count === 1 ? "" : "s"}`,
     lessSteps: "Less steps",
     executeCommand: "Execute command",
@@ -566,6 +1963,27 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    browserNavigate: (url: string) => `Open ${url} in browser`,
+    browserNavigateGeneric: "Open page in browser",
+    browserClick: "Click element in browser",
+    browserType: "Type into browser field",
+    browserSnapshot: "Read page in browser",
+    browserGetText: "Read page text in browser",
+    browserBack: "Go back in browser",
+    browserScreenshot: "Capture browser screenshot",
+    browserClose: "Close browser",
+    scheduleTaskCreate: "Scheduled a task",
+    scheduleTaskUpdate: "Updated a scheduled task",
+    scheduleTaskList: "Checked scheduled tasks",
+    scheduleTaskPause: "Paused a scheduled task",
+    scheduleTaskResume: "Resumed a scheduled task",
+    scheduleTaskDelete: "Deleted a scheduled task",
+    scheduleTaskNote: "Saved a note for a scheduled task",
+    scheduleTaskTrial: "Started a trial run",
+    scheduleTaskGeneric: "Managed scheduled tasks",
+    scheduleTaskFailed: "The scheduled task change didn't go through",
+    stopScheduledTask:
+      "Paused this scheduled task (takes effect when this run ends)",
   },
 
   humanInput: {
@@ -576,11 +1994,72 @@ export const enUS: Translations = {
     otherPlaceholder: "Type another answer...",
     submit: "Submit",
     emptyError: "Enter an answer before submitting.",
+    requiredError: "Fill in all required fields before submitting.",
+    requiredA11yLabel: "required",
+    selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
+    approval: {
+      modeLabel: "Tool permissions",
+      modeAsk: "Ask",
+      modeAuto: "Auto",
+      modeFull: "Full access",
+      askDescription: "Ask before operations that require approval.",
+      autoDescription:
+        "Review each operation automatically; ask when risk or authorization needs your decision.",
+      fullDescription:
+        "Skip operation approvals. Deployment restrictions and account permissions still apply.",
+      approveThread: "Allow for this chat",
+      grantScope:
+        "Applies only to this tool with these exact arguments. Revoke from Tool permissions.",
+      editArguments: "Edit arguments",
+      fullArguments: "Complete arguments",
+      invalidArguments:
+        "Enter a valid JSON object. The server also validates the tool schema.",
+      revokeGrants: "Revoke chat approvals",
+      grantsRevoked: "Chat approvals revoked",
+      childApproval: "A subagent is waiting for your approval.",
+      title: "Tool approval required",
+      description:
+        "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
+      waiting: "Waiting for approval",
+      loading: "Loading approval details...",
+      loadFailed:
+        "Approval details could not be loaded. This conversation is still waiting for approval; reload the details before continuing.",
+      reload: "Reload approval details",
+      approve: "Approve",
+      reject: "Reject",
+      approveAll: "Approve all",
+      rejectAll: "Reject all and finish",
+      submitDecisions: "Submit decisions",
+      reasonLabel: "Rejection reason (optional)",
+      reasonPlaceholder: "Tell the agent why it should not run these tools...",
+      submitFailed:
+        "The approval could not be submitted. Review your decisions and try again.",
+      submitTimeout:
+        "The approval submission timed out and was stopped. Review your decisions and try again.",
+      featureDisabled:
+        "Tool approval is now disabled. You can still reject all and finish safely.",
+      noPending:
+        "This approval is no longer pending. Reload the conversation before retrying.",
+    },
   },
 
   // Subtasks
   uploads: {
+    status: {
+      pending: "Ready to send",
+      uploading: "Uploading…",
+      uploaded: "Uploaded",
+      failed: "Upload failed",
+      cancelled: "Cancelled",
+    },
+    cancelUpload: "Cancel upload",
+    retryUpload: "Retry upload",
+    notReady:
+      "Attachments are not ready. Retry failed files or remove them, then send again.",
+    attachment: "Attachment",
+    image: "Image",
+    removeAttachment: (filename) => `Remove attachment: ${filename}`,
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
@@ -638,7 +2117,47 @@ export const enUS: Translations = {
     removeTodo: (content: string) => `Remove To-do: ${content}`,
   },
 
+  contextUsage: {
+    label: "Context",
+    title: "Context window",
+    badgeAriaLabel: (percentage: string) =>
+      `Context window ${percentage}% full`,
+  },
+
   // Shortcuts
+  workspaceSearch: {
+    title: "Search conversations",
+    description: "Find conversations and messages, or run a command.",
+    placeholder: "Search titles and messages…",
+    open: "Search",
+    all: "All",
+    threads: "Conversations",
+    messages: "Messages",
+    includeArchived: "Include archived",
+    archived: "Archived",
+    recent: "Recent conversations",
+    searching: "Searching…",
+    indexing: "Preparing message search… Results will appear here shortly.",
+    unavailable:
+      "Message search is unavailable on this installation. You can search conversation titles.",
+    unsupported: "Search is unavailable in this view.",
+    error: "Search could not finish. Try again.",
+    empty: "No matches. Try another keyword or include archived conversations.",
+    more: "Show more results",
+    retry: "Try again",
+    hint: "↑ ↓ to navigate · Enter to open · > for commands",
+    user: "You",
+    assistant: "Assistant",
+    context: "Message context",
+    returnToLatest: "Return to latest messages",
+    loadingContext: "Loading message context…",
+    messageUnavailable:
+      "This message is no longer available. Return to the conversation to view its current history.",
+    matchedMessage: "Located message",
+    earlier: "Earlier messages",
+    later: "Later messages",
+    untitled: "Untitled conversation",
+  },
   shortcuts: {
     searchActions: "Search actions...",
     noResults: "No results found.",
@@ -654,13 +2173,121 @@ export const enUS: Translations = {
   settings: {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
+    models: {
+      connectionSettings: "Connection settings",
+      importTitle: "Fetch and add models",
+      importDescription:
+        "Fetch a provider catalog, select models, then test and add them. Each test may incur provider charges. Only models that pass the streaming tool-call test are enabled.",
+      savedConnection: "Use a saved connection",
+      newConnection: "New connection",
+      fetchModels: "Fetch models",
+      searchModels: "Search models…",
+      selectVisible: "Select visible",
+      clearSelection: "Clear selection",
+      alreadyConfigured: "Already configured",
+      noCatalogResults:
+        "No matching models. Try another search or add a model manually.",
+      catalogTruncated:
+        "This catalog was limited to 2,000 models or 20 pages. You can still add other model IDs manually.",
+      discovery_unsupported:
+        "This endpoint does not offer model discovery. Add a model ID manually.",
+      discovery_failed:
+        "Could not fetch the catalog. Check the connection and try again.",
+      importUncertain:
+        "Result not confirmed. Retry to check whether this model was saved.",
+      importStopped:
+        "Stopped. Completed models are saved; retry to reconcile the last request.",
+      stopImport: "Stop",
+      closeCatalog: "Done",
+      catalogCount: (visible, total, selected) =>
+        `${visible} / ${total} models · ${selected} selected`,
+      testAndAdd: (count) => `Test and add (${count})`,
+      title: "Models",
+      description:
+        "Manage shared models available to users. Models from the server configuration are read-only.",
+      adminOnly:
+        "Only administrators can manage shared models. This feature is unavailable in demos.",
+      add: "Add model",
+      loading: "Loading models…",
+      failed: "Could not complete the request.",
+      reload: "Reload",
+      empty: "No models configured.",
+      yaml: "Server configuration · read-only",
+      enabled: "Enabled",
+      disabled: "Disabled",
+      conflict: "This name is reserved by the server configuration.",
+      edit: "Edit model",
+      enable: "Enable",
+      disable: "Disable",
+      formDescription:
+        "Choose a provider and enter its API key and model ID. Testing sends a short streaming tool-call request and may incur provider charges.",
+      provider: "Provider",
+      name: "Unique name",
+      displayName: "Display name",
+      endpoint: "Base URL",
+      modelId: "Model ID",
+      keepKey: "Leave blank to keep the saved key",
+      optionalKey: "Optional for endpoints without authentication",
+      clearKey: "Remove the saved API key",
+      contextWindow: "Context window (optional)",
+      maxTokens: "Maximum output tokens (optional)",
+      vision: "Supports image input",
+      cancel: "Cancel",
+      test: "Test connection",
+      working: "Working…",
+      save: "Save",
+      saved: "Model saved",
+      success: "Streaming and tool-call test passed.",
+      tool_call_missing:
+        "The endpoint responded, but did not return a tool call. Check the model’s tool support.",
+      connection_failed:
+        "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
+      customProvider: "Custom OpenAI-compatible",
+      apiKey: "API Key",
+      advanced: "Advanced settings",
+      providerDefault: "Provider default",
+      requiredKey: "Enter the provider API key",
+      providerChanged:
+        "Connection changed. Enter a new API key; the saved key will not be reused.",
+      missing_api_key:
+        "This provider requires an API key. Enter a key, or disable the model before clearing its key.",
+      authentication_failed:
+        "Authentication failed. Check the API key and the provider region or plan.",
+      response_limit: "The test response exceeded its safe output limit.",
+      revisionConflict:
+        "The model changed or its name is reserved. Reload the list and reopen the editor. Your draft has been kept.",
+      keyOrCapabilities:
+        "Check the API key and capability overrides. Preset models must be disabled before removing their key.",
+      invalidModel:
+        "Invalid model configuration. Check the provider, model ID and advanced settings.",
+    },
+    users: {
+      title: "User management",
+      description:
+        "Suspend or restore sign-in for accounts on this deployment. A disabled account is rejected by every authentication surface; its active sessions end immediately.",
+      adminOnly:
+        "Only administrators can manage users. This feature is unavailable in demos.",
+      loading: "Loading users…",
+      failed: "Failed to load users.",
+      reload: "Reload",
+      empty: "No users yet.",
+      email: "Email",
+      role: "Role",
+      status: "Status",
+      active: "Active",
+      disabled: "Disabled",
+      disable: "Disable",
+      enable: "Enable",
+      updateFailed: "Failed to update the account.",
+    },
     sections: {
+      models: "Models",
+      users: "Users",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
       memory: "Memory",
-      tools: "Tools",
-      skills: "Skills",
+      subagents: "Subagents",
       notification: "Notification",
       about: "About",
     },
@@ -720,6 +2347,7 @@ export const enUS: Translations = {
         work: "Work",
         personal: "Personal",
         topOfMind: "Top of mind",
+        cognitiveStyle: "Thinking style",
         historyBackground: "History",
         recentMonths: "Recent months",
         earlierContext: "Earlier context",
@@ -738,6 +2366,7 @@ export const enUS: Translations = {
           },
           content: "Content",
           source: "Source",
+          unknown: "Unknown",
           createdAt: "CreatedAt",
           view: "View",
         },
@@ -754,13 +2383,88 @@ export const enUS: Translations = {
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
-      languageDescription: "Switch between languages.",
+      languageDescription:
+        "Choose the interface language and preferred language for replies.",
     },
     tools: {
-      title: "Tools",
-      description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
+      addServer: "Add server",
+      addServerDescription:
+        "Paste the JSON definition published by the MCP server. Both a bare server map and one wrapped in `mcpServers` are accepted. Existing names must be changed through Edit.",
+      addServerPlaceholder: `{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"]
+    }
+  }
+}`,
+      serverDefinitionLabel: "MCP server JSON definition",
+      definitionEmpty: "Paste an MCP server definition.",
+      definitionInvalidJson: "Enter valid JSON.",
+      definitionRootNotObject:
+        "Enter a JSON object describing one or more MCP servers.",
+      definitionNoServers: "No MCP server was found in the definition.",
+      definitionServerNotObject:
+        'The configuration for server "{name}" must be a JSON object.',
+      editServer: "Edit MCP server",
+      editServerDescription:
+        'Edit the complete JSON definition for "{name}". The server name is fixed; add a new server and remove this one to rename it.',
+      editSingleServer: "Edit exactly one MCP server at a time.",
+      editServerNameMismatch:
+        'Keep the existing server name "{name}" while editing.',
+      serverAlreadyExists:
+        'MCP server "{name}" already exists. Use Edit instead.',
+      removeServer: "Remove MCP server",
+      removeServerDescription:
+        'Remove "{name}" from the MCP configuration? Its tools stop being available to agents.',
+      unnamedServer: "(empty name)",
+    },
+    subagents: {
+      title: "Subagents",
+      description:
+        "Reusable workers that the Lead Agent and permitted Custom Agents can delegate bounded tasks to.",
+      executionNote:
+        "Each invocation starts a fresh temporary context with no persistent chat or memory and cannot ask the user follow-up questions. A system prompt changes behavior; tools and skills grant actual capabilities.",
+      adminNote:
+        "You can view the catalog. Only administrators can add, edit, enable, or delete subagents.",
+      create: "Add subagent",
+      empty: "No subagents are available.",
+      sourceBuiltin: "Built-in",
+      sourceConfig: "config.yaml",
+      sourceManaged: "Managed",
+      conflict: "Name conflict — excluded from runtime",
+      overridden: "Some runtime values are overridden by config.yaml",
+      createTitle: "Add managed subagent",
+      editTitle: "Edit managed subagent",
+      name: "Name",
+      nameHint: "Use letters, numbers, and hyphens only.",
+      displayName: "Display name",
+      descriptionLabel: "Delegation description",
+      systemPrompt: "System prompt",
+      model: "Model",
+      inheritModel: "Inherit from caller",
+      tools: "Allowed tools (comma-separated)",
+      skills: "Skills (comma-separated)",
+      listModeAll: "Inherit all available",
+      listModeNone: "Allow none",
+      listModeSelected: "Allow selected names",
+      listNamesPlaceholder: "Comma-separated names",
+      maxTurns: "Maximum turns",
+      timeout: "Timeout (seconds)",
+      created: "Subagent created",
+      saved: "Subagent saved",
+      deleted: "Subagent deleted",
+      deleteConfirm:
+        "Delete this managed subagent? Custom Agents may keep referencing its name, and recreating the same name will reconnect those bindings. This cannot be undone.",
+      bindingTitle: "Subagent access",
+      bindingDescription:
+        "Choose which subagents this Custom Agent may invoke. This is enforced by the server.",
+      allAllowed: "All enabled subagents",
+      noneAllowed: "No subagents",
+      selectedAllowed: "Selected subagents",
+      missing: "Missing or unavailable; deselect to remove",
     },
     channels: {
       title: "Channels",
@@ -769,10 +2473,288 @@ export const enUS: Translations = {
       disabled:
         "Channel connections are not enabled on this server. Ask an administrator to enable channel_connections.",
     },
-    skills: {
-      title: "Agent Skills",
+    integrations: {
+      title: "Integrations",
       description:
-        "Manage the configuration and enabled status of the agent skills.",
+        "Connect third-party tools and work platforms so agents can use them directly.",
+      refresh: "Refresh",
+      install: "Install",
+      reinstall: "Reinstall",
+      installing: "Installing...",
+      ready: "Ready",
+      pending: "Pending",
+      available: "Available",
+      unavailable: "Unavailable",
+      connected: "Connected",
+      loadFailed: "Failed to load integration status",
+      adminRequired: "Admin privileges are required to install integrations.",
+      lark: {
+        title: "Lark / Feishu CLI",
+        description:
+          "Install the official Lark/Feishu agent skills and let agents use Lark after authorization.",
+        skillPack: "Skill pack",
+        gatewayCli: "Gateway CLI",
+        auth: "Auth",
+        sandboxRuntime: "Sandbox runtime",
+        sandboxRuntimeInitContainer: "Provisioned by init container",
+        sandboxRuntimeBroker: "Provisioned by broker sidecar",
+        sandboxRuntimeGatewayDownload: "Provisioned by Gateway",
+        sandboxRuntimeNotReady:
+          "Not ready — lark-cli may be missing at chat time",
+        notInstalled: "Not installed",
+        skillsInstalled: (installed, expected) =>
+          `${installed}/${expected} skills installed`,
+        installedVersion: (version) => `Installed: ${version}`,
+        updateAvailable: (version) =>
+          `Update available: ${version} — admin reinstall updates the managed Gateway CLI and skill pack`,
+        runtimeVersionMismatch:
+          "Skill pack version differs from the Gateway runtime lark-cli; admin reinstall attempts to update the managed Gateway CLI and realign the skill pack",
+        authNotConfigured: "Not connected",
+        authConfigured: "Credentials configured (not live-verified)",
+        authConfiguredFor: (user) =>
+          `${user} · credentials configured (not live-verified)`,
+        connect: "Connect Lark",
+        authStarting: "Opening connection link...",
+        checkingConnection: "Checking connection...",
+        connectedAction: "Reconnect Lark",
+        requestPermissions: "Request permissions",
+        alreadyConnected:
+          "Lark is already connected. If authorization expires, refresh the status and reconnect.",
+        changeAppButton: "Change Lark app",
+        changeAppTitle: "Switch to a different Lark app",
+        changeAppDescription:
+          "Point your DeerFlow account at a different Lark/Feishu app. This only affects your account; other users are not changed.",
+        changeAppIdLabel: "App ID",
+        changeAppSecretLabel: "App Secret",
+        changeAppAuthResetNote:
+          "Switching revokes the previous app's authorization. You will authorize the new app next.",
+        changeAppSubmit: "Switch app",
+        changeAppReRegister: "Re-register in browser",
+        changeAppSwitched:
+          "Lark app switched. Reconnect to authorize the new app.",
+        brandFeishu: "Feishu",
+        brandLark: "Lark",
+        connectionStarted: "Connection link opened",
+        connectionReady: "Connection is ready. Opening authorization...",
+        authStarted:
+          "Authorization page opened. DeerFlow will detect completion automatically.",
+        authorizationStillPending:
+          'Authorization is not complete yet. Finish it in the browser; DeerFlow keeps checking automatically. You can click "I completed authorization" if the page does not update.',
+        permissionTitle: "Authorization scope",
+        permissionDescription:
+          "By default, DeerFlow only completes the base sign-in and does not request any business permissions. Select the domains you need here; connected users can re-authorize to add more (scopes accumulate).",
+        authDomains: {
+          calendar: {
+            label: "Calendar",
+            description:
+              "Events, free/busy, RSVP, and meeting-room scheduling.",
+          },
+          im: {
+            label: "Messenger",
+            description:
+              "Send/reply messages, manage group chats, search history, download media.",
+          },
+          docs: {
+            label: "Docs",
+            description: "Create, read, update, and search documents.",
+          },
+          drive: {
+            label: "Drive",
+            description:
+              "Upload/download files, search docs & wiki, manage comments.",
+          },
+          sheets: {
+            label: "Sheets",
+            description: "Read, write, append, find, and export spreadsheets.",
+          },
+          base: {
+            label: "Base",
+            description:
+              "Bitable tables, fields, records, views, dashboards, and workflows.",
+          },
+          wiki: {
+            label: "Wiki",
+            description: "Knowledge spaces, nodes, and wiki documents.",
+          },
+          task: {
+            label: "Tasks",
+            description:
+              "Tasks, task lists, subtasks, comments, and reminders.",
+          },
+          mail: {
+            label: "Mail",
+            description:
+              "Browse, search, read, send, reply, forward, and manage drafts.",
+          },
+          vc: {
+            label: "Meetings",
+            description: "Meeting records, minutes artifacts, and recordings.",
+          },
+          minutes: {
+            label: "Minutes",
+            description: "Meeting minutes content and transcripts.",
+          },
+          note: {
+            label: "Notes",
+            description: "Meeting notes and related content.",
+          },
+          slides: {
+            label: "Slides",
+            description: "Presentations and slide content.",
+          },
+          markdown: {
+            label: "Markdown",
+            description:
+              "Create, fetch, patch, and overwrite Drive-native .md files.",
+          },
+          mindnotes: {
+            label: "Mind notes",
+            description: "Mind notes content.",
+          },
+          contact: {
+            label: "Contacts",
+            description: "Look up users by name/email/phone and read profiles.",
+          },
+          approval: {
+            label: "Approval",
+            description:
+              "Query and act on approval tasks; cancel and CC instances.",
+          },
+          attendance: {
+            label: "Attendance",
+            description: "Query personal attendance check-in records.",
+          },
+          okr: {
+            label: "OKR",
+            description:
+              "Objectives, key results, alignments, indicators, and progress.",
+          },
+          event: {
+            label: "Events",
+            description: "Subscribe to and consume real-time platform events.",
+          },
+          apps: {
+            label: "Apps",
+            description:
+              "Create Spark/Miaoda apps, publish sites, and manage access scope.",
+          },
+          all: {
+            label: "All",
+            description:
+              "Request every business domain supported by lark-cli. Use this only when the missing permission is unclear.",
+          },
+        },
+        customScopeLabel: "Exact OAuth scope",
+        customScopePlaceholder: "For example calendar:calendar.event:read",
+        customScopeDescription:
+          "Advanced: if an error reports a missing scope, paste it here. Examples: calendar:calendar.event:read, calendar:calendar.free_busy:read.",
+        openConnectionLinkTitle: "Continue connecting Lark",
+        openConnectionLinkDescription:
+          "The first connection needs one browser confirmation from Lark. Open the link below and finish the prompt, then return here to continue authorization.",
+        openAuthLinkTitle: "Authorize Lark in your browser",
+        openAuthLinkDescription:
+          "Open the link below to authorize. DeerFlow keeps checking automatically and will save the connection after approval.",
+        waitingAuthTitle: "Waiting for Lark authorization",
+        waitingAuthDescription:
+          "Finish authorization in the browser page that just opened. DeerFlow will update this panel automatically; the button below is only a fallback.",
+        openAuthLink: "Open link",
+        copyAuthLink: "Copy link",
+        completeAuth: "I completed authorization",
+        continueAuth: "I completed browser confirmation, continue",
+        preparingAuthorization: "Preparing authorization...",
+        completingAuth: "Checking...",
+        authExpiresIn: (seconds) =>
+          `This link expires in about ${seconds} seconds.`,
+        installingTitle: "Installing official skill pack",
+        installingDescription:
+          "This usually finishes within 30 seconds; slower networks may take about 1 minute. The status refreshes automatically when installation completes.",
+        installNextTitle: "Install the official skill pack first",
+        installNextDescription:
+          "After installation, /lark-doc, /lark-im, /lark-sheets and related skills appear in the skill index.",
+        cliNextTitle: "Install Gateway CLI",
+        cliNextDescription:
+          "The skill pack is installed, but the Gateway cannot find lark-cli. Admin reinstall attempts to download the managed Gateway CLI; offline deployments can use an image with @larksuite/cli built in.",
+        configuredTitle: "Lark credentials are configured locally",
+        configuredDescription:
+          "Credentials are present, but their current validity has not been checked with Lark. Reconnect to refresh and live-verify authorization.",
+        connectedTitle: "Lark authorization is live-verified",
+        connectedDescription:
+          "The current user's authorization was verified with Lark during this connection flow. Reconnect whenever you need to refresh it or add permissions.",
+        authNextTitle: "Complete browser authorization next",
+        authNextDescription:
+          "Click “Connect Lark”; DeerFlow checks the current status first and opens browser authorization only when disconnected or expired.",
+      },
+    },
+    skills: {
+      diagnosticsTitle: "Could not load",
+      diagnosticsScope:
+        "Only YAML syntax errors in your own custom skills are shown. After correcting a SKILL.md file, reload skills. Missing frontmatter, metadata validation errors, and unreadable or non-UTF-8 files are not reported. Shared and externally linked packages are excluded.",
+      diagnosticsInvalid: "Invalid YAML frontmatter.",
+      diagnosticsQuote: "Quote values containing a colon followed by a space.",
+      diagnosticsRefresh: "Reload skills",
+      diagnosticsRefreshing: "Reloading skills…",
+      diagnosticsFailed:
+        "Could not check custom skills for YAML errors. Reload to try again.",
+      diagnosticsReloadFailed: "Could not reload skills. Try again.",
+      exportPrevious: "Previous 50 files",
+      exportNotices: {
+        skill_export_yaml_alias:
+          "YAML aliases are not supported for export. Replace aliases with explicit values in SKILL.md.",
+        skill_export_yaml_complexity:
+          "The YAML declarations are too deeply nested or complex to export.",
+        skill_export_invalid_declaration:
+          "A malformed credential declaration was omitted; inspect SKILL.md.",
+        skill_export_link: "Linked files or directories cannot be exported.",
+        skill_export_unsupported_node:
+          "Only ordinary files and directories are supported; hard links and special files cannot be exported.",
+        skill_export_invalid_path:
+          "This path is not portable or conflicts with another path.",
+        skill_export_nested_skill:
+          "Nested SKILL.md files are not accepted by the installer.",
+        skill_export_executable_binary:
+          "Executable binaries are not accepted by the installer.",
+        skill_export_invalid_frontmatter:
+          "SKILL.md must have valid declarations and its name must match the skill folder.",
+        skill_export_sensitive_filename:
+          "This filename may contain local credentials or repository metadata.",
+        skill_export_platform_declarations:
+          "Configure the declared tools and credentials in the destination environment.",
+      },
+      exportSkill: "Export",
+      exportTitle: "Export skill",
+      exportDescription: "Download the currently saved skill as a .skill file.",
+      exportLoading: "Preparing file list…",
+      exportFiles: "Files",
+      exportDirectories: "Directories",
+      exportSize: "Uncompressed size",
+      exportContents: "Package contents",
+      exportMore: "Next 50 files",
+      exportRequirements: "Declared requirements",
+      exportCompatibility: "Compatibility",
+      exportTools: "Allowed tools",
+      exportSecrets: "Credential names",
+      exportOptional: "optional",
+      exportRequired: "required",
+      exportUndeclared: "Not declared",
+      exportNone: "None",
+      exportScope:
+        "Includes all files inside this skill. Account settings, conversations and history outside the skill folder are excluded. Configure tools and credentials again on the destination.",
+      exportWarnings: "Check package contents",
+      exportWarningDescription:
+        "These notices are based on filenames and declarations. Secrets written inside package files are included unchanged. This is not a security scan.",
+      exportBlocked: "This package cannot be exported",
+      exportDownload: "Download .skill",
+      exportDownloading: "Preparing download…",
+      exportHandedOff: "File handed to your browser for download.",
+      exportChanged:
+        "The skill changed. Refresh the file list before downloading.",
+      exportRefresh: "Refresh file list",
+      exportFailed: "Could not export this skill. Try again.",
+      exportBusy: "Two exports are active. Try again shortly.",
+      exportTimeout: "Preparing the package timed out. Try again shortly.",
+      exportLimit: "The package exceeds an export limit.",
+      exportNotFound:
+        "This custom skill no longer exists. Refresh the skill list.",
       createSkill: "Create skill",
       emptyTitle: "No agent skill yet",
       emptyDescription:
@@ -781,6 +2763,11 @@ export const enUS: Translations = {
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
         "Admin privileges are required to install agent skills.",
+      installFromFile: "Install .skill",
+      installingArchive: "Installing...",
+      invalidArchive: "Choose a file with the .skill extension.",
+      archiveTooLarge: "The skill archive must be 100 MiB or smaller.",
+      installFailed: "Failed to install the skill archive.",
     },
     notification: {
       title: "Notification",
@@ -794,6 +2781,39 @@ export const enUS: Translations = {
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
+      channels: {
+        title: "Scheduled task notifications",
+        description:
+          "Choose which connected apps receive scheduled task updates. Turning these off does not affect chatting. Pending notifications and retries are cancelled, and turning them back on does not resend old updates. Notifications already being delivered may still arrive.",
+        providers: {
+          feishu: "Feishu / Lark",
+          wecom: "WeCom",
+          wechat: "WeChat",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) =>
+          `${provider} scheduled task notifications`,
+        eventsTitle: "Task & goal run notifications",
+        eventsDescription:
+          "Optional IM reminders for ordinary web or background task runs and goals on your enabled apps above (off by default).",
+        events: {
+          run_completed: "Task or goal completed",
+          run_failed: "Task or goal failed",
+          human_input_requested: "Needs your input",
+        },
+        eventToggleLabel: (event: string) => `${event} notifications`,
+        loading: "Loading notification preferences…",
+        saving: "Saving…",
+        loadFailed:
+          "Could not load notification preferences. Please try again.",
+        saveFailed:
+          "Could not save this change. The previous setting is still shown; please try again.",
+        unavailable:
+          "This service does not support notification preferences yet.",
+        empty:
+          "Connect an app that supports scheduled task notifications in Settings → Channels.",
+        retry: "Retry",
+      },
     },
     account: {
       profileTitle: "Profile",
@@ -828,6 +2848,9 @@ export const enUS: Translations = {
     emailPlaceholder: "you@example.com",
     password: "Password",
     passwordPlaceholder: "•••••••",
+    rememberMe: "Keep me signed in",
+    rememberMeDescription:
+      "Keep this browser session when possible. DeerFlow stores only your email, never your password.",
     pleaseWait: "Please wait...",
     signIn: "Sign In",
     createAccount: "Create Account",
@@ -843,6 +2866,10 @@ export const enUS: Translations = {
     haveAccountSignIn: "Already have an account? Sign in",
     backToHome: "← Back to home",
     networkError: "Network error. Please try again.",
+    serviceUnavailableTitle: "Service temporarily unavailable",
+    serviceUnavailableDescription:
+      "The Gateway is taking too long to respond. Check that it is running, then try again.",
+    retry: "Try again",
     authFailed: "Authentication failed.",
     errors: {
       sso_failed: "SSO login failed. Please try again or use email login.",
@@ -851,6 +2878,12 @@ export const enUS: Translations = {
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
+      account_disabled:
+        "This account has been disabled. Contact your administrator.",
+      invalid_email: "Please enter a valid email address.",
+      password_too_short: "Password must be at least 6 characters.",
+      registration_password_too_short:
+        "Password must be at least 8 characters.",
     },
   },
 };

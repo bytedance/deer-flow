@@ -79,6 +79,22 @@ def provisioner_module():
 
 
 @pytest.fixture(autouse=True)
+def _reset_sandbox_authz_config_state():
+    """Reset the process-global authorization-config flag between tests.
+
+    Several suites exercise the real ``safe_app_config()`` with an
+    authorization-enabled config, while config-less suites rely on its no-op
+    branch. Reset the flag for every test so collection order and pytest shard
+    ordering cannot leak authorization state across modules.
+    """
+    from deerflow.authz import sandbox_authz
+
+    sandbox_authz._authorization_config_loaded = False
+    yield
+    sandbox_authz._authorization_config_loaded = False
+
+
+@pytest.fixture(autouse=True)
 def _reset_skill_storage_singleton():
     """Reset the SkillStorage singleton between tests to prevent cross-test contamination."""
     try:
@@ -91,6 +107,24 @@ def _reset_skill_storage_singleton():
         yield
     finally:
         reset_skill_storage()
+
+
+@pytest.fixture(autouse=True)
+def _reset_frozen_checkpoint_channel_mode(monkeypatch):
+    """Reset the process-global frozen checkpoint channel mode between tests.
+
+    Production treats ``checkpoint_channel_mode`` (and the delta
+    ``snapshot_frequency`` frozen alongside it) as restart-required: the
+    first client/app freezes it for the process. The test suite builds many
+    clients and apps with different modes in one process, so the freeze must
+    not leak across tests. Mirrors the per-test ``monkeypatch.setattr``
+    resets already used in test_client.py / test_lead_agent_model_resolution.py.
+    """
+    from deerflow.runtime import checkpoint_mode
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +150,25 @@ def _restore_title_config_singleton():
         yield
     finally:
         reset_title_config()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_trace_context():
+    """Give every test an unbound request trace context.
+
+    Entry points bind a trace id unconditionally, and ``ensure_trace_id()``
+    binds one for the remainder of whatever context it is called in. pytest
+    runs the whole session in a single context, so without this reset one
+    test's trace would leak into the next and quietly satisfy assertions
+    about ids the test under exercise never bound.
+    """
+    from deerflow.trace_context import bind_trace_id, reset_trace_id
+
+    token = bind_trace_id(None)
+    try:
+        yield
+    finally:
+        reset_trace_id(token)
 
 
 @pytest.fixture(autouse=True)

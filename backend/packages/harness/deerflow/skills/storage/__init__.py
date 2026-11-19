@@ -29,7 +29,7 @@ _MAX_USER_SCOPED_STORAGES = 64
 # OrderedDict so that LRU eviction can remove the least-recently-used entry
 # via ``move_to_end`` + ``popitem(last=False)`` when the cache exceeds
 # ``_MAX_USER_SCOPED_STORAGES``.
-_user_scoped_storages: OrderedDict[str, UserScopedSkillStorage] = OrderedDict()
+_user_scoped_storages: OrderedDict[str, tuple[object, UserScopedSkillStorage]] = OrderedDict()
 _user_scoped_storage_lock = threading.Lock()
 
 
@@ -55,10 +55,12 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     from deerflow.config import get_app_config
     from deerflow.config.skills_config import SkillsConfig
 
-    def _make_storage(skills_config: SkillsConfig, *, host_path: str | None = None, **kwargs) -> SkillStorage:
+    def _make_storage(skills_config: SkillsConfig, *, app_config=None, host_path: str | None = None, **kwargs) -> SkillStorage:
         from deerflow.reflection import resolve_class
 
         cls = resolve_class(skills_config.use, SkillStorage)
+        if issubclass(cls, LocalSkillStorage):
+            kwargs["app_config"] = app_config
         return cls(
             host_path=host_path if host_path is not None else str(skills_config.get_skills_path()),
             container_path=skills_config.container_path,
@@ -70,7 +72,7 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
 
     if skills_path is not None:
         if app_config is not None:
-            return _make_storage(app_config.skills, host_path=str(skills_path), **kwargs)
+            return _make_storage(app_config.skills, app_config=app_config, host_path=str(skills_path), **kwargs)
         # No app_config: use a default SkillsConfig so we never need to read config.yaml
         # when the caller has already supplied an explicit host path.
         from deerflow.config.skills_config import SkillsConfig
@@ -78,7 +80,7 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
         return _make_storage(SkillsConfig(), host_path=str(skills_path), **kwargs)
 
     if app_config is not None:
-        return _make_storage(app_config.skills, **kwargs)
+        return _make_storage(app_config.skills, app_config=app_config, **kwargs)
 
     # If the singleton was manually injected (e.g. in tests) without a config
     # identity (_default_skill_storage_config is None), skip get_app_config()
@@ -96,7 +98,7 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     # orphaned instance from a losing racer could not be cleaned up.
     with _skill_storage_lock:
         if _default_skill_storage is None or _default_skill_storage_config is not app_config_now:
-            _default_skill_storage = _make_storage(app_config_now.skills, **kwargs)
+            _default_skill_storage = _make_storage(app_config_now.skills, app_config=app_config_now, **kwargs)
             _default_skill_storage_config = app_config_now
         return _default_skill_storage
 
@@ -113,34 +115,43 @@ def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
     are safely bucketed before reaching :class:`UserScopedSkillStorage`, which
     calls :func:`_validate_user_id` internally.
 
-    Instances are cached by the *normalised* ``user_id`` with double-check
-    locking to prevent concurrent creation races. When the cache exceeds
-    ``_MAX_USER_SCOPED_STORAGES``, the least-recently-accessed entry is
-    evicted (true LRU, not FIFO).
+    Instances are cached by the *normalised* ``user_id`` and current
+    ``AppConfig`` identity with double-check locking to prevent concurrent
+    creation races. When the cache exceeds ``_MAX_USER_SCOPED_STORAGES``, the
+    least-recently-accessed entry is evicted (true LRU, not FIFO).
     """
+    from deerflow.config import get_app_config
     from deerflow.config.paths import make_safe_user_id
 
     safe_id = make_safe_user_id(user_id)
+    app_config = kwargs.get("app_config")
+    if app_config is None:
+        app_config = get_app_config()
+    kwargs["app_config"] = app_config
+    # User-scoped storage must mount skills at the same configured root as
+    # public storage; an explicit caller override still wins.
+    kwargs.setdefault("container_path", app_config.skills.container_path)
 
     # Always acquire lock so move_to_end is safe — makes this a true LRU
     # cache instead of FIFO. The overhead is negligible since dict ops are
     # fast and this function is called once per agent-creation cycle.
     with _user_scoped_storage_lock:
         cached = _user_scoped_storages.get(safe_id)
-        if cached is not None:
+        if cached is not None and cached[0] is app_config:
             _user_scoped_storages.move_to_end(safe_id)
-            return cached
+            return cached[1]
 
-        cached = UserScopedSkillStorage(safe_id, **kwargs)
-        _user_scoped_storages[safe_id] = cached
+        storage = UserScopedSkillStorage(safe_id, **kwargs)
+        _user_scoped_storages[safe_id] = (app_config, storage)
+        _user_scoped_storages.move_to_end(safe_id)
         # Evict least-recently-used entry if cache exceeds the ceiling.
         # Since we just moved the current user_id to the end, popitem(last=False)
         # will evict the oldest/least-recently-accessed entry (never the
         # one we just created).
         while len(_user_scoped_storages) > _MAX_USER_SCOPED_STORAGES:
-            evicted_key, evicted_val = _user_scoped_storages.popitem(last=False)
+            evicted_key, _ = _user_scoped_storages.popitem(last=False)
             logger.info("Evicted user-scoped skill storage for safe_id=%s (cache ceiling %d)", evicted_key, _MAX_USER_SCOPED_STORAGES)
-        return cached
+        return storage
 
 
 def user_should_see_legacy_skills(user_id: str, **kwargs) -> bool:
@@ -153,6 +164,14 @@ def user_should_see_legacy_skills(user_id: str, **kwargs) -> bool:
     if kwargs:
         from deerflow.config.paths import make_safe_user_id
 
+        # One-off constructions mount at the configured root too, same as the
+        # factory path; an explicit caller override still wins.
+        app_config = kwargs.get("app_config")
+        if app_config is None:
+            from deerflow.config import get_app_config
+
+            app_config = get_app_config()
+        kwargs.setdefault("container_path", app_config.skills.container_path)
         storage = UserScopedSkillStorage(make_safe_user_id(user_id), **kwargs)
     else:
         storage = get_or_new_user_skill_storage(user_id)

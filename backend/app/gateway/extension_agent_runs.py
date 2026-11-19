@@ -1,0 +1,457 @@
+"""Adapt the normal Gateway run routes to a revocable extension capability."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import json
+import math
+import secrets
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
+from typing import Any
+
+from deerflow_extension_api.agent_runs import AgentRun, AgentRunError, ExecutionFence
+from fastapi import HTTPException, Request
+from pydantic import TypeAdapter, ValidationError
+
+from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
+from app.gateway.authz import AuthContext, resolve_route_permissions
+from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
+from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.utils.thread_id import ThreadId
+
+_THREAD_ID = TypeAdapter(ThreadId)
+
+
+def _configuration_json_default(value):
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=lambda item: json.dumps(item, sort_keys=True, default=_configuration_json_default))
+    return str(value)
+
+
+def _json_object(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    try:
+        raw = json.dumps(dict(value), allow_nan=False)
+        if len(raw.encode()) > 256 * 1024:
+            raise ValueError("payload too large")
+        return json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise AgentRunError(422, "Agent run input must be a JSON object of at most 256 KiB") from exc
+
+
+def _view(response) -> AgentRun:
+    return AgentRun(response.thread_id, response.run_id, response.status, response.assistant_id, response.stop_reason)
+
+
+class GatewayAgentRunsHost:
+    """One app lifetime; never retain an HTTP Request or its credentials."""
+
+    def __init__(self, app, *, load_user: Callable[[str], Awaitable[Any]] | None):
+        self.app = app
+        self.load_user = load_user
+        self.active = True
+        self.revision_key = secrets.token_bytes(32)
+
+    def close(self) -> None:
+        self.active = False
+
+    def bind(self, request: Request):
+        user = getattr(request.state, "user", None)
+        auth = getattr(request.state, "auth", None)
+        if user is None or auth is None or not auth.is_authenticated:
+            return None
+        if str(auth.user.id) != str(user.id):
+            raise PermissionError("Agent run control requires an authenticated user")
+        source = getattr(request.state, "auth_source", None)
+        # PAT revocation and internal-owner delegation need separate durable
+        # grants. Never turn either into an unrestricted session capability.
+        if source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED):
+            return None
+        return _BoundAgentRuns(self, str(user.id), user.token_version, source, frozenset(auth.permissions))
+
+    def capture_batch_authority(self, runs, *, user_id: str) -> dict:
+        """Capture only a native batch's existing host grant; never browser input."""
+        if not isinstance(runs, _BoundAgentRuns) or runs._host is not self or runs._user_id != user_id or not self.active:
+            raise AgentRunError(403, "Batch follow-up requires its originating Agent run authority")
+        return {"token_version": runs._token_version, "source": runs._source, "permissions": sorted(runs._permissions)}
+
+    async def restore_batch_authority(self, *, user_id: str, grant: dict):
+        """Restore a persisted native batch grant with its original permission ceiling."""
+        source, version, permissions = grant.get("source"), grant.get("token_version"), grant.get("permissions")
+        if source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED) or type(version) is not int or not isinstance(permissions, list) or any(not isinstance(value, str) for value in permissions):
+            raise AgentRunError(403, "Invalid batch follow-up authority")
+        user = get_auth_disabled_user() if source == AUTH_SOURCE_AUTH_DISABLED and is_auth_disabled() else await self.load_user(user_id) if source == AUTH_SOURCE_SESSION and self.load_user is not None else None
+        if user is None or str(user.id) != user_id or user.token_version != version or user.needs_setup or getattr(user, "disabled", False):
+            raise AgentRunError(403, "Batch follow-up authorization revoked")
+        return _BoundAgentRuns(self, user_id, version, source, frozenset(permissions), origin=make_origin("subagent_batch"))
+
+    async def restore_delegated_authority(
+        self,
+        *,
+        user_id: str,
+        grant: dict,
+        validator: Callable[[], Awaitable[None]] | None = None,
+        plugin_namespace: str | None = None,
+    ):
+        """Restore a persisted delegated grant (e.g. workflow recovery) with its ceiling.
+
+        The grant is the mapping ``capture_authority`` returned at mint time
+        (token_version, source, permissions); expiry and revocation are the
+        caller's contract, enforced through ``validator`` on every operation
+        this handle performs. Restoring re-loads the user row and fails closed
+        on a changed token_version, needs_setup or a disabled account, exactly
+        like ``restore_batch_authority``; it never creates fresh authority.
+        """
+        source, version, permissions = grant.get("source"), grant.get("token_version"), grant.get("permissions")
+        if source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED) or type(version) is not int or not isinstance(permissions, list) or any(not isinstance(value, str) for value in permissions):
+            raise AgentRunError(403, "Invalid delegated authority")
+        user = get_auth_disabled_user() if source == AUTH_SOURCE_AUTH_DISABLED and is_auth_disabled() else await self.load_user(user_id) if source == AUTH_SOURCE_SESSION and self.load_user is not None else None
+        if user is None or str(user.id) != user_id or user.token_version != version or user.needs_setup or getattr(user, "disabled", False):
+            raise AgentRunError(403, "Delegated authorization revoked")
+        return _BoundAgentRuns(
+            self,
+            user_id,
+            version,
+            source,
+            frozenset(permissions),
+            plugin_namespace=plugin_namespace,
+            origin=make_origin("extension", namespace=plugin_namespace),
+            delegation_validator=validator,
+        )
+
+
+class _BoundAgentRuns:
+    def __init__(self, host, user_id: str, token_version: int, source: str, permissions: frozenset[str], plugin_namespace: str | None = None, origin: dict | None = None, delegation_validator: Callable[[], Awaitable[None]] | None = None):
+        self._host = host
+        self._user_id = user_id
+        self._token_version = token_version
+        self._source = source
+        self._permissions = permissions
+        self._plugin_namespace = plugin_namespace
+        self._origin = origin
+        self._delegation_validator = delegation_validator
+
+    def capture_authority(self) -> dict | None:
+        """Persistable restorable snapshot of this handle's existing authority.
+
+        Returns the mint-time ceiling (token_version, source, permissions) for
+        a host-originated session handle, or None when this handle's authority
+        is not restorable. The host never validates the caller here: capture
+        only reflects authority the live handle already holds.
+        """
+        if not self._host.active or self._source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED):
+            return None
+        return {"token_version": self._token_version, "source": self._source, "permissions": sorted(self._permissions)}
+
+    def for_plugin(self, namespace: str):
+        if not isinstance(namespace, str) or not namespace or len(namespace) > 96 or ":" in namespace:
+            raise AgentRunError(422, "Invalid plugin namespace")
+        if self._plugin_namespace is not None:
+            if namespace != self._plugin_namespace:
+                raise AgentRunError(422, "Agent run handle is already bound to a plugin")
+            return self
+        return _BoundAgentRuns(self._host, self._user_id, self._token_version, self._source, self._permissions, namespace, self._origin, self._delegation_validator)
+
+    @asynccontextmanager
+    async def _request(self, permission: str, thread_id: str | None = None):
+        if not self._host.active:
+            raise AgentRunError(503, "Agent run host unavailable")
+        if self._source == AUTH_SOURCE_AUTH_DISABLED:
+            user = get_auth_disabled_user() if is_auth_disabled() else None
+        else:
+            user = await self._host.load_user(self._user_id) if self._host.load_user is not None else None
+        if user is None or str(user.id) != self._user_id or user.token_version != self._token_version or user.needs_setup or getattr(user, "disabled", False):
+            raise AgentRunError(403, "Agent run authorization revoked")
+        if self._delegation_validator is not None:
+            try:
+                await self._delegation_validator()
+            except AgentRunError:
+                raise
+            except Exception as exc:
+                raise AgentRunError(403, "Delegated authorization revoked") from exc
+        permissions = self._permissions.intersection(await resolve_route_permissions(user, is_internal=False))
+        if permission not in permissions:
+            raise AgentRunError(403, f"Permission denied: {permission}")
+        if not self._host.active:
+            raise AgentRunError(503, "Agent run host unavailable")
+        request = Request({"type": "http", "app": self._host.app, "method": "POST", "path": "/api/threads", "headers": [], "query_string": b"", "state": {}})
+        request.state.user = user
+        request.state.auth_source = self._source
+        request.state.auth = AuthContext(user, list(permissions))
+        # Host-set, never HTTP input: threads and runs created through this
+        # handle are marked as extension work (activity feed, unread state).
+        request.state.run_origin = self._origin or make_origin("extension", namespace=self._plugin_namespace)
+        token = set_current_user(user)
+        try:
+            if thread_id is not None:
+                _THREAD_ID.validate_python(thread_id)
+                # Read routes historically accept untracked legacy threads.
+                # The delegated handle requires a live owned/shared row too.
+                store = self._host.app.state.thread_store
+                if not await store.check_access(thread_id, self._user_id, require_existing=True):
+                    raise AgentRunError(404, "Thread not found")
+            yield request
+        except HTTPException as exc:
+            raise AgentRunError(exc.status_code, str(exc.detail)) from exc
+        except ValidationError as exc:
+            raise AgentRunError(422, "Invalid Agent run request") from exc
+        finally:
+            reset_current_user(token)
+
+    async def configuration_evidence(self, *, thread_id, run_id):
+        import copy
+
+        from app.gateway.deps import get_run_manager
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+        async with self._request("runs:read", thread_id) as request:
+            record = await get_run_manager(request).get(run_id, user_id=self._user_id)
+            if record is None or record.thread_id != thread_id:
+                raise AgentRunError(404, "Run unavailable")
+            evidence = (record.metadata or {}).get(EVIDENCE_KEY)
+            if not isinstance(evidence, dict) or evidence.get("run_id") != run_id or evidence.get("thread_id") != thread_id:
+                raise AgentRunError(409, "Host assembly evidence unavailable")
+            return copy.deepcopy(evidence)
+
+    async def validate_artifact_source(self, *, thread_id, run_id, idempotency_key):
+        from app.gateway.deps import get_run_manager
+        from app.gateway.extension_artifacts import validate_capture_support
+        from app.gateway.routers.thread_runs import _scope_http_run_idempotency_key
+        from deerflow.utils.file_io import await_drained
+
+        if self._plugin_namespace is None or not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200:
+            raise AgentRunError(422, "Artifact registration requires a plugin-scoped execution key")
+        async with self._request("runs:read", thread_id) as request:
+            run = await get_run_manager(request).get(run_id, user_id=self._user_id)
+            key = _scope_http_run_idempotency_key(request, thread_id, f"extension:{self._plugin_namespace}:{idempotency_key}")
+            origin = (run.metadata or {}).get(DEERFLOW_ORIGIN_KEY) if run is not None else None
+            if run is None or run.thread_id != thread_id or run.status != "running" or run.idempotency_key != key or origin != make_origin("extension", namespace=self._plugin_namespace):
+                raise AgentRunError(422, "Register files during the executing team run")
+        async with self._request("threads:read", thread_id) as request:
+            await await_drained(validate_capture_support(request, self._user_id, thread_id))
+
+    async def read_artifact(self, *, thread_id, path, expected_checkpoint_id=None):
+        from app.gateway.extension_artifacts import read_snapshot
+        from app.gateway.routers.artifacts import reserve_artifact_write
+        from deerflow.runtime.runs.manager import ConflictError
+        from deerflow.utils.file_io import await_drained
+
+        async with self._request("threads:read", thread_id) as request:
+            try:
+                async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
+                    if expected_checkpoint_id is not None:
+                        if not isinstance(expected_checkpoint_id, str) or not expected_checkpoint_id:
+                            raise AgentRunError(422, "Invalid producing checkpoint")
+                        state = await self.get_state(thread_id=thread_id)
+                        if state.get("checkpoint_id") != expected_checkpoint_id:
+                            raise AgentRunError(412, "Producing conversation changed before artifact capture")
+                    return await await_drained(read_snapshot(request, self._user_id, thread_id, path))
+            except ConflictError as exc:
+                raise AgentRunError(409, "Producing conversation is busy") from exc
+
+    async def import_artifact(self, *, thread_id, filename, content):
+        from app.gateway.extension_artifacts import import_snapshot
+        from app.gateway.routers.artifacts import reserve_artifact_write
+        from deerflow.runtime.runs.manager import ConflictError
+        from deerflow.utils.file_io import await_drained
+
+        if self._plugin_namespace is None:
+            raise AgentRunError(422, "Artifact import requires a plugin-scoped capability")
+        async with self._request("threads:write", thread_id) as request:
+            try:
+                async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
+                    return await await_drained(import_snapshot(request, self._user_id, thread_id, self._plugin_namespace, filename, content))
+            except ConflictError as exc:
+                raise AgentRunError(409, "Recipient conversation is busy") from exc
+
+    async def configuration_revision(self, *, assistant_ids: list[str], durable: bool = False) -> str:
+        from deerflow.config.agents_config import load_agent_config, load_agent_soul
+        from deerflow.config.app_config import get_app_config
+        from deerflow.config.extensions_config import get_extensions_config
+
+        if not isinstance(assistant_ids, list) or len(assistant_ids) > 32 or any(not isinstance(name, str) or not name or len(name) > 80 for name in assistant_ids):
+            raise AgentRunError(422, "Invalid Agent references")
+        names = sorted(set(assistant_ids))
+        async with self._request("runs:create"):
+
+            def snapshot():
+                agents = {}
+                for name in names:
+                    if name == "lead_agent":
+                        continue
+                    try:
+                        config = load_agent_config(name, user_id=self._user_id)
+                    except FileNotFoundError:
+                        config = None
+                    if config is None:
+                        agents[name] = None
+                        continue
+                    agents[name] = [config.model_dump(mode="python"), load_agent_soul(name, user_id=self._user_id)]
+                value = [get_app_config().model_dump(mode="python"), get_extensions_config().model_dump(mode="python"), names, agents]
+                # JSON-mode Pydantic dumps turn sets into arbitrarily ordered lists.
+                # Keep set identity until encoding so independent hash seeds agree,
+                # while ordered model/tool lists still detect precedence changes.
+                raw = json.dumps(value, sort_keys=True, ensure_ascii=True, default=_configuration_json_default).encode()
+                key = self._host.revision_key
+                if durable:
+                    from app.gateway.auth.config import get_auth_config
+
+                    key = hmac.new(get_auth_config().jwt_secret.encode(), b"deerflow:configuration-revision:v1", hashlib.sha256).digest()
+                return hmac.new(key, raw, hashlib.sha256).hexdigest()
+
+            return await asyncio.to_thread(snapshot)
+
+    async def create_thread(self, *, assistant_id="lead_agent", thread_id=None, metadata=None) -> str:
+        from app.gateway.routers.threads import ThreadCreateRequest, create_thread
+
+        async with self._request("threads:write") as request:
+            response = await create_thread(ThreadCreateRequest(assistant_id=assistant_id, thread_id=thread_id, metadata=_json_object(metadata) or {}), request)
+            return response.thread_id
+
+    async def _start(self, *, thread_id, input=None, resume=None, context=None, idempotency_key=None, execution_fence=None, artifact_imports=None):
+        from app.gateway.extension_artifacts import validate_import_receipts
+        from app.gateway.routers.thread_runs import create_run
+        from app.gateway.run_models import RunCreateRequest
+        from app.gateway.services import resolve_thread_assistant_id
+
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 200):
+            raise AgentRunError(422, "Idempotency key must contain 1 to 200 characters")
+        # Copy inputs before the first await; plugin tasks cannot mutate admitted data.
+        run_input = _json_object(input)
+        run_context = _json_object(context)
+        command = _json_object({"resume": resume}) if resume is not None else None
+        imports = _json_object({"items": artifact_imports})["items"] if artifact_imports is not None else None
+        if imports is not None:
+            if self._plugin_namespace is None or resume is not None:
+                raise AgentRunError(422, "Artifact admission requires a plugin-scoped new run")
+            validate_import_receipts(imports)
+        if run_context is not None and any(key in run_context for key in ("agent_name", "is_bootstrap")):
+            raise AgentRunError(422, "Agent identity is bound to the thread")
+        async with self._request("runs:create", thread_id) as request:
+            if imports:
+                request.state.extension_artifact_imports = imports
+            if execution_fence is not None:
+                if not isinstance(execution_fence, ExecutionFence) or self._plugin_namespace is None or execution_fence.namespace != self._plugin_namespace:
+                    raise AgentRunError(422, "Execution fence must belong to this plugin")
+                from app.gateway.deps import get_run_manager, get_stream_bridge
+
+                if not get_run_manager(request).heartbeat_enabled or getattr(get_stream_bridge(request), "supports_cross_process", False) is not True:
+                    raise AgentRunError(503, "Fenced Agent admission requires run heartbeats and a cross-process stream bridge")
+                request.state.extension_execution_fence = execution_fence
+            assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
+            body = RunCreateRequest(assistant_id=assistant_id, input=run_input, command=command, context=run_context, on_disconnect="continue")
+            response = await create_run(thread_id, body, request, idempotency_key=f"extension:{self._plugin_namespace or ''}:{idempotency_key}" if idempotency_key is not None else None)
+            return _view(response)
+
+    async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None, artifact_imports=None) -> AgentRun:
+        return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence, artifact_imports=artifact_imports)
+
+    async def start_batch_followup(self, *, thread_id, batch_id, input, context, config, execution_fence, goal_wakeup=None):
+        """Native single follow-up; the existing SQL admission fences cancellation."""
+        from app.gateway.run_models import RunCreateRequest
+        from app.gateway.services import resolve_thread_assistant_id, start_run
+        from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, batch_continuation_key
+
+        if self._origin != make_origin("subagent_batch") or execution_fence.namespace != BATCH_CONTINUATION_NAMESPACE or execution_fence.resource_id != batch_id:
+            raise AgentRunError(403, "Invalid native batch continuation")
+        async with self._request("runs:create", thread_id) as request:
+            request.state.extension_execution_fence = execution_fence
+            assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
+            body = RunCreateRequest(
+                assistant_id=assistant_id,
+                input=_json_object(input),
+                context=_json_object(context),
+                config=_json_object(config),
+                metadata={"batch_goal_wakeup": _json_object(goal_wakeup)} if goal_wakeup is not None else None,
+                on_disconnect="continue",
+            )
+            record = await start_run(body, thread_id, request, idempotency_key=batch_continuation_key(batch_id), require_existing_thread=True)
+            return _view(record)
+
+    async def resume(self, *, thread_id, resume, idempotency_key=None) -> AgentRun:
+        if resume is None:
+            raise AgentRunError(422, "An explicit interrupt response is required")
+        return await self._start(thread_id=thread_id, resume=resume, idempotency_key=idempotency_key)
+
+    async def get(self, *, thread_id, run_id) -> AgentRun:
+        from app.gateway.routers.thread_runs import get_run
+
+        async with self._request("runs:read", thread_id) as request:
+            return _view(await get_run(thread_id, run_id, request))
+
+    async def get_state(self, *, thread_id) -> dict[str, Any]:
+        from app.gateway.routers.threads import get_thread_state
+
+        async with self._request("threads:read", thread_id) as request:
+            return (await get_thread_state(thread_id, request)).model_dump(mode="json")
+
+    async def send_input(self, *, thread_id, run_id, text, mode, request_id, context=None):
+        from app.gateway.routers.thread_runs import create_run_input
+        from app.gateway.run_inputs import RunInputRequest
+
+        async with self._request("runs:create", thread_id) as request:
+            body = RunInputRequest(request_id=request_id, text=text, mode=mode, context=_json_object(context) or {})
+            body = body.model_copy(update={"request_id": hashlib.sha256(f"{self._plugin_namespace or 'host'}:{body.request_id}".encode()).hexdigest()})
+            return await create_run_input(thread_id, run_id, body, request)
+
+    async def dispatch_input(self, *, thread_id, run_id, input_id):
+        from app.gateway.run_inputs import dispatch_one_input
+
+        async with self._request("runs:create", thread_id) as request:
+            return await dispatch_one_input(thread_id, run_id, input_id, request)
+
+    async def list_inputs(self, *, thread_id):
+        from app.gateway.routers.thread_runs import get_thread_inputs
+
+        async with self._request("threads:read", thread_id) as request:
+            return await get_thread_inputs(thread_id, request)
+
+    async def authorize_control(self, *, thread_id, run_id, clear_goal=False):
+        from app.gateway.deps import get_run_manager
+
+        async with self._request("runs:cancel", thread_id) as request:
+            run = await get_run_manager(request).get(run_id, user_id=self._user_id)
+            if run is None or run.thread_id != thread_id:
+                raise AgentRunError(404, "Run unavailable")
+            if run.status not in ("pending", "running"):
+                raise AgentRunError(409, "Run already stopped")
+        if clear_goal:
+            async with self._request("threads:write", thread_id):
+                pass
+
+    async def cancel(self, *, thread_id, run_id, execution_fence=None) -> None:
+        from app.gateway.routers.thread_runs import cancel_run
+
+        async with self._request("runs:cancel", thread_id) as request:
+            if execution_fence is not None:
+                from app.gateway.deps import get_run_manager
+                from deerflow.runtime.runs.manager import ConflictError, RunIdempotencyUnsupported
+
+                if not isinstance(execution_fence, ExecutionFence) or self._plugin_namespace is None or execution_fence.namespace != self._plugin_namespace:
+                    raise AgentRunError(422, "Execution fence must belong to this plugin")
+                manager = get_run_manager(request)
+                run = await manager.get(run_id, user_id=self._user_id)
+                if run is None or run.thread_id != thread_id:
+                    raise AgentRunError(404, "Run unavailable")
+                try:
+                    await manager.request_fenced_cancel(run_id, execution_fence=execution_fence, user_id=self._user_id)
+                except (ConflictError, RunIdempotencyUnsupported) as exc:
+                    raise AgentRunError(409, str(exc)) from exc
+            else:
+                await cancel_run(thread_id, run_id, request, wait=False, action="interrupt")
+
+    async def wait(self, *, thread_id, run_id, timeout=60) -> AgentRun:
+        if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 3600:
+            raise AgentRunError(422, "Wait timeout must be between 0 and 3600 seconds")
+        async with asyncio.timeout(timeout):
+            delay = 0.25
+            while True:
+                run = await self.get(thread_id=thread_id, run_id=run_id)
+                if run.status not in ("pending", "running"):
+                    return run
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 4)

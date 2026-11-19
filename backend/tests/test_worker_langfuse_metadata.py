@@ -11,10 +11,13 @@ import asyncio
 
 import pytest
 
-from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, request_trace_context
+from deerflow.trace_context import (
+    DEERFLOW_TRACE_METADATA_KEY,
+    request_trace_context,
+)
 
 
 class _FakeAgent:
@@ -37,6 +40,13 @@ class _FakeAgent:
 
 
 class _FakeRunManager:
+    async def record_assembly_evidence(self, run_id: str, evidence: dict) -> None:
+        assert evidence["run_id"] == run_id
+        self.assembly_evidence = evidence
+
+    async def try_start(self, _run_id: str) -> RunStartOutcome:
+        return RunStartOutcome.started
+
     async def wait_for_prior_finalizing(self, *_args, **_kwargs) -> None:
         return None
 
@@ -49,10 +59,17 @@ class _FakeRunManager:
     async def set_status(self, *_args, **_kwargs) -> None:
         return None
 
+    async def set_status_if_not_cancelled(self, *_args, **_kwargs) -> None:
+        await self.set_status(*_args, **_kwargs)
+        return None
+
     async def update_model_name(self, *_args, **_kwargs) -> None:
         return None
 
     async def update_run_completion(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def cleanup(self, *_args, **_kwargs) -> None:
         return None
 
 
@@ -129,6 +146,128 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "gateway-trace-1"
     tags = metadata.get("langfuse_tags") or []
     assert "model:gpt-4o" in tags
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_model", [None, "missing-model", "actual-model"])
+async def test_run_agent_tags_the_effective_model(monkeypatch, requested_model):
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+    fake_agent = _FakeAgent()
+    app_config = AppConfig(
+        models=[ModelConfig(name="actual-model", model="actual-model", use="langchain_openai:ChatOpenAI")],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+    )
+    selected_models = []
+    callback = BaseCallbackHandler()
+
+    def create_model(**kwargs):
+        selected_models.append(kwargs["name"])
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", create_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: fake_agent)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [callback])
+
+    def agent_factory(config):
+        return lead_agent_module.assemble_lead_agent(config, app_config=app_config)
+
+    record = RunRecord(
+        run_id="run-effective-model",
+        thread_id="thread-effective-model",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name=requested_model,
+    )
+    record.abort_event = asyncio.Event()
+
+    await run_agent(
+        _FakeBridge(),
+        _FakeRunManager(),
+        record,
+        ctx=RunContext(checkpointer=None, app_config=app_config),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id, "model_name": requested_model}},
+    )
+
+    assert selected_models == ["actual-model"]
+    assert callback in fake_agent.captured_config["callbacks"]
+    tags = fake_agent.captured_config["metadata"].get("langfuse_tags", [])
+    assert "model:actual-model" in tags
+    assert "model:missing-model" not in tags
+
+
+class _ModelNameRecordingRunManager(_FakeRunManager):
+    def __init__(self) -> None:
+        self.model_name_updates: list[tuple[str, str | None]] = []
+
+    async def update_model_name(self, run_id: str, model_name: str | None) -> None:
+        self.model_name_updates.append((run_id, model_name))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested_model", "expected_updates"),
+    [
+        (None, [("run-persist-model", "actual-model")]),
+        ("missing-model", [("run-persist-model", "actual-model")]),
+        ("actual-model", []),
+    ],
+)
+async def test_run_agent_persists_the_effective_model(monkeypatch, requested_model, expected_updates):
+    """The run record stores the model that ran, including when none was requested (#3109)."""
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    fake_agent = _FakeAgent()
+    app_config = AppConfig(
+        models=[ModelConfig(name="actual-model", model="actual-model", use="langchain_openai:ChatOpenAI")],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+    )
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: fake_agent)
+
+    def agent_factory(config):
+        return lead_agent_module.assemble_lead_agent(config, app_config=app_config)
+
+    record = RunRecord(
+        run_id="run-persist-model",
+        thread_id="thread-persist-model",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name=requested_model,
+    )
+    record.abort_event = asyncio.Event()
+    run_manager = _ModelNameRecordingRunManager()
+
+    await run_agent(
+        _FakeBridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, app_config=app_config),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id, "model_name": requested_model}},
+    )
+
+    assert fake_agent.captured_config is not None, "astream was not invoked"
+    assert run_manager.model_name_updates == expected_updates
 
 
 @pytest.mark.asyncio
@@ -281,10 +420,61 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
     # Caller-supplied keys win.
     assert metadata["langfuse_session_id"] == "custom-session-id"
     assert metadata["langfuse_user_id"] == "explicit-user"
-    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == "explicit-deerflow-trace"
-    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "explicit-deerflow-trace"
+    # ...except deerflow_trace_id, which the server issues. Honouring the
+    # caller here would let the persisted run point at an id that matches
+    # neither the response header nor the log lines for the same request.
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] != "explicit-deerflow-trace"
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == fake_agent.captured_config["context"][DEERFLOW_TRACE_METADATA_KEY]
     # Worker still fills in keys that the caller didn't set.
     assert metadata["langfuse_trace_name"] == "lead-agent"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_overwrites_caller_supplied_trace_id(monkeypatch):
+    """The bound request trace is the only source. A ``deerflow_trace_id`` in
+    the caller's metadata is replaced, not honoured, so the persisted run
+    cannot disagree with the header and the logs from the same request."""
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+
+    fake_agent = _FakeAgent()
+
+    def agent_factory(config):
+        return fake_agent
+
+    record = RunRecord(
+        run_id="run-header-override",
+        thread_id="thread-header",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    ctx = RunContext(checkpointer=None)
+
+    with request_trace_context("header-trace-1"):
+        await run_agent(
+            _FakeBridge(),
+            _FakeRunManager(),
+            record,
+            ctx=ctx,
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={
+                "configurable": {"thread_id": "thread-header"},
+                "metadata": {
+                    DEERFLOW_TRACE_METADATA_KEY: "metadata-trace-ignored",
+                },
+            },
+        )
+
+    metadata = fake_agent.captured_config.get("metadata") or {}
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == "header-trace-1"
+    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "header-trace-1"
 
 
 @pytest.mark.asyncio

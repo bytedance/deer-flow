@@ -127,6 +127,29 @@ test("uses generic todo labels when backend attribution is absent", () => {
   ]);
 });
 
+test("labels Anthropic thinking-only blocks as thinking", () => {
+  const messages = [
+    {
+      id: "ai-thinking",
+      type: "ai",
+      content: [{ type: "thinking", thinking: "Still checking." }],
+      usage_metadata: {
+        input_tokens: 20,
+        output_tokens: 5,
+        total_tokens: 25,
+      },
+    },
+  ] as unknown as Message[];
+
+  expect(buildTokenDebugSteps(messages, enUS)).toEqual([
+    expect.objectContaining({
+      messageId: "ai-thinking",
+      label: "Thinking",
+      sharedAttribution: false,
+    }),
+  ]);
+});
+
 test("marks multi-action AI steps as shared attribution", () => {
   const messages = [
     {

@@ -4,6 +4,9 @@ Uses the in-memory ThreadMetaStore so no SQL engine is required, but exercises
 the real async store + background-loop wiring used by the TUI.
 """
 
+import asyncio
+import threading
+
 import pytest
 from langgraph.store.memory import InMemoryStore
 
@@ -61,3 +64,94 @@ def test_disabled_writer_is_a_silent_noop():
         writer.set_title("x", "title")
     finally:
         loop.close()
+
+
+def test_loop_timeout_cancels_pending_coroutine():
+    loop = _LoopThread()
+    release = asyncio.Event()
+    started = threading.Event()
+    cancelled = threading.Event()
+    finished = threading.Event()
+
+    async def pending_write():
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            finished.set()
+
+    try:
+        with pytest.raises(TimeoutError):
+            loop.run(pending_write(), timeout=0.1)
+        assert started.wait(2)
+        assert cancelled.wait(2), "the timed-out coroutine is still running"
+    finally:
+        loop._loop.call_soon_threadsafe(release.set)
+        assert finished.wait(2)
+        loop.run(asyncio.sleep(0))
+        loop.close()
+        loop._thread.join(timeout=2)
+        assert not loop._thread.is_alive()
+        loop._loop.close()
+
+
+def test_timed_out_title_write_cannot_resume_after_newer_title(writer_store_loop, monkeypatch):
+    writer, store, loop = writer_store_loop
+    writer.ensure_created("th-timeout")
+    release = asyncio.Event()
+    started = threading.Event()
+    finished = threading.Event()
+    original_update = store.update_display_name
+    original_run = loop.run
+
+    async def delayed_update(thread_id, title, **kwargs):
+        if title == "old title":
+            started.set()
+            try:
+                await release.wait()
+                return await original_update(thread_id, title, **kwargs)
+            finally:
+                finished.set()
+        return await original_update(thread_id, title, **kwargs)
+
+    def short_run(coro):
+        return original_run(coro, timeout=0.1)
+
+    monkeypatch.setattr(store, "update_display_name", delayed_update)
+    monkeypatch.setattr(loop, "run", short_run)
+    try:
+        # ThreadMetaWriter intentionally swallows the bridge timeout.
+        writer.set_title("th-timeout", "old title")
+        assert started.wait(2)
+        writer.set_title("th-timeout", "new title")
+        loop._loop.call_soon_threadsafe(release.set)
+        assert finished.wait(2)
+        row = original_run(store.get("th-timeout", user_id="default"))
+        assert row["display_name"] == "new title"
+    finally:
+        loop._loop.call_soon_threadsafe(release.set)
+        assert finished.wait(2)
+        original_run(asyncio.sleep(0))
+
+
+@pytest.mark.parametrize("error_type", [TimeoutError, ValueError])
+def test_loop_preserves_coroutine_errors(error_type):
+    loop = _LoopThread()
+    error = error_type("operation failed")
+
+    async def fail():
+        raise error
+
+    try:
+        with pytest.raises(error_type) as exc:
+            loop.run(fail())
+        assert str(exc.value) == "operation failed"
+        assert loop.run(asyncio.sleep(0, result="still usable")) == "still usable"
+    finally:
+        loop.close()
+        loop._thread.join(timeout=2)
+        assert not loop._thread.is_alive()
+        loop._loop.close()

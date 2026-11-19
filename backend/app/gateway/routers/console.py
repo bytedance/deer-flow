@@ -13,6 +13,7 @@ which persists no run history to report on.
 
 import asyncio
 import logging
+import math
 from datetime import UTC, datetime, time, timedelta
 from typing import NamedTuple
 
@@ -52,7 +53,7 @@ class ConsoleStatsResponse(BaseModel):
     total_threads: int = Field(..., description="Conversation threads owned by the current user")
     total_agents: int = Field(..., description="Custom agents owned by the current user")
     total_tokens: int = Field(..., description="Tokens consumed across all recorded runs")
-    total_cost: float | None = Field(default=None, description="Estimated spend across priced runs; null when no models[*].pricing is configured")
+    total_cost: float | None = Field(default=None, description="Estimated spend across priced runs; null when pricing is unavailable or any call explicitly lacks usage")
     currency: str | None = Field(default=None, description="Display currency taken from the first configured pricing entry")
 
 
@@ -70,7 +71,7 @@ class ConsoleRunItem(BaseModel):
     duration_seconds: float | None = Field(default=None, description="Wall-clock duration; live elapsed time for active runs")
     total_tokens: int = 0
     message_count: int = 0
-    cost: float | None = Field(default=None, description="Estimated spend for this run; null when its models are unpriced")
+    cost: float | None = Field(default=None, description="Estimated spend for this run; null when unpriced or any call explicitly lacks usage")
     error: str | None = Field(default=None, description="Error excerpt for failed runs")
 
 
@@ -89,7 +90,7 @@ class ConsoleUsageDay(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     runs: int = 0
-    cost: float = Field(default=0.0, description="Estimated spend for the day across priced runs")
+    cost: float | None = Field(default=0.0, description="Estimated spend for the day across priced runs; null when any call explicitly lacks usage")
 
 
 class ConsoleUsageModelBreakdown(BaseModel):
@@ -97,7 +98,7 @@ class ConsoleUsageModelBreakdown(BaseModel):
 
     tokens: int = 0
     runs: int = Field(default=0, description="Runs that used this model (non-exclusive)")
-    cost: float | None = Field(default=None, description="Estimated spend for this model; null when unpriced")
+    cost: float | None = Field(default=None, description="Estimated spend for this model; null when unpriced or any call explicitly lacks usage")
     input_tokens: int = Field(default=0, description="Input tokens attributed to this model")
     cache_read_tokens: int = Field(default=0, description="Prompt-cache-hit input tokens attributed to this model")
 
@@ -109,7 +110,7 @@ class ConsoleUsageResponse(BaseModel):
     by_model: dict[str, ConsoleUsageModelBreakdown]
     total_tokens: int
     total_runs: int
-    total_cost: float | None = Field(default=None, description="Estimated spend for the window; null when no pricing is configured")
+    total_cost: float | None = Field(default=None, description="Estimated spend for the window; null when pricing is unavailable or any call explicitly lacks usage")
     currency: str | None = Field(default=None, description="Display currency taken from the first configured pricing entry")
 
 
@@ -159,6 +160,8 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
     schema change. Entries are keyed by both the config ``name`` and the
     provider ``model`` id (plus lowercase variants), because
     ``token_usage_by_model`` buckets carry the provider-reported model name.
+    It reads the live config, so async routes call it through
+    ``asyncio.to_thread``.
     """
     try:
         models = get_app_config().models
@@ -167,6 +170,8 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
         return {}
 
     pricing: dict[str, _ModelPricing] = {}
+    pricing_currency: str | None = None
+    pricing_currency_model: str | None = None
     for model_cfg in models or []:
         raw = getattr(model_cfg, "pricing", None)
         if not isinstance(raw, dict):
@@ -179,10 +184,30 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
         except (TypeError, ValueError):
             logger.warning("console: ignoring malformed pricing on model %s", model_cfg.name)
             continue
+        # ``float("nan")`` / ``float(".inf")`` parse successfully, and NaN then
+        # survives every ``<=`` comparison below and every ``round()``, ending up
+        # in the JSON body where Starlette rejects it (allow_nan=False) -- a 500
+        # for the whole usage report. Treat non-finite prices as malformed, the
+        # same way the rest of the config layer does (allow_inf_nan=False).
+        if any(not math.isfinite(price) for price in (input_price, output_price, cache_hit_price) if price is not None):
+            logger.warning("console: ignoring non-finite pricing on model %s", model_cfg.name)
+            continue
         if input_price <= 0 and output_price <= 0:
             continue
-        currency = str(raw.get("currency") or "USD").upper()
-        entry = _ModelPricing(input_price, output_price, currency, cache_hit_price)
+        model_currency = str(raw.get("currency") or "USD").strip().upper() or "USD"
+        if pricing_currency is None:
+            pricing_currency = model_currency
+            pricing_currency_model = model_cfg.name
+        elif model_currency != pricing_currency:
+            logger.warning(
+                "console: disabling cost reporting because model pricing mixes currencies (%s on %s, %s on %s)",
+                pricing_currency,
+                pricing_currency_model,
+                model_currency,
+                model_cfg.name,
+            )
+            return {}
+        entry = _ModelPricing(input_price, output_price, model_currency, cache_hit_price)
         for key in (model_cfg.name, getattr(model_cfg, "model", None)):
             if key:
                 pricing.setdefault(key, entry)
@@ -214,6 +239,42 @@ def _token_cost(input_tokens: int, output_tokens: int, price: _ModelPricing, cac
     return (uncached / 1_000_000) * price.input_per_million + (cache_read / 1_000_000) * hit_price + (output_tokens / 1_000_000) * price.output_per_million
 
 
+def _token_count(value: object) -> int:
+    """Coerce one stored token counter to a non-negative ``int``.
+
+    ``token_usage_by_model`` is a JSON column written from provider-reported
+    usage, so a bucket value is not guaranteed to be a number: providers have
+    shipped counters as strings ("n/a", "1.0"), and rows written by older
+    build/import paths may hold anything JSON can express. The console already
+    skips buckets that are not dicts and pricing that is not numeric; coercing
+    counters the same way keeps one junk bucket from failing the whole report
+    with a 500. Booleans are rejected because ``int(True) == 1`` would invent a
+    token, and negatives cannot be spend.
+
+    A JSON integer is not bounded by the float range: ``10**400`` parses as an
+    exact ``int``, and ``_token_cost`` then divides it by a million, which
+    raises ``OverflowError`` on the way back to a float. Such a value is junk
+    in exactly the same way as ``"n/a"``, so it is rejected here too.
+    """
+    if isinstance(value, bool):
+        return 0
+    try:
+        count = int(value)  # type: ignore[arg-type]
+        if count < 0 or not math.isfinite(float(count)):
+            return 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return count
+
+
+def _usage_is_missing(usage: dict) -> bool:
+    return _token_count(usage.get("missing_usage_calls")) > 0
+
+
+def _has_missing_usage(token_usage_by_model: object) -> bool:
+    return isinstance(token_usage_by_model, dict) and any(isinstance(usage, dict) and _usage_is_missing(usage) for usage in token_usage_by_model.values())
+
+
 def _run_cost(
     pricing: dict[str, _ModelPricing],
     *,
@@ -227,8 +288,11 @@ def _run_cost(
     Prefers the per-model breakdown (accurate for multi-model runs, e.g.
     subagents on a different model); falls back to run-level totals priced at
     ``model_name`` for legacy rows. Buckets without an input/output split are
-    skipped rather than guessed.
+    skipped rather than guessed. An explicit missing-usage call makes the
+    whole run unpriceable: neither partial buckets nor legacy totals repair it.
     """
+    if _has_missing_usage(token_usage_by_model):
+        return None
     cost = 0.0
     priced = False
     if isinstance(token_usage_by_model, dict):
@@ -238,11 +302,11 @@ def _run_cost(
             price = _lookup_pricing(pricing, model)
             if price is None:
                 continue
-            input_tokens = int(usage.get("input_tokens") or 0)
-            output_tokens = int(usage.get("output_tokens") or 0)
+            input_tokens = _token_count(usage.get("input_tokens"))
+            output_tokens = _token_count(usage.get("output_tokens"))
             if input_tokens == 0 and output_tokens == 0:
                 continue
-            cost += _token_cost(input_tokens, output_tokens, price, int(usage.get("cache_read_tokens") or 0))
+            cost += _token_cost(input_tokens, output_tokens, price, _token_count(usage.get("cache_read_tokens")))
             priced = True
     if priced:
         return cost
@@ -272,10 +336,12 @@ async def console_stats(request: Request) -> ConsoleStatsResponse:
     """Return the dashboard's headline counters."""
     sf = _session_factory_or_503()
     user_id = await get_current_user(request)
-    run_where = (RunRow.user_id == user_id,) if user_id else ()
+    run_where = (RunRow.operation_kind == "run",)
+    if user_id:
+        run_where += (RunRow.user_id == user_id,)
     thread_where = (ThreadMetaRow.user_id == user_id,) if user_id else ()
 
-    pricing = _build_pricing_map()
+    pricing = await asyncio.to_thread(_build_pricing_map)
 
     async with sf() as session:
         total_runs = await session.scalar(select(func.count()).select_from(RunRow).where(*run_where)) or 0
@@ -298,6 +364,9 @@ async def console_stats(request: Request) -> ConsoleStatsResponse:
             ).all()
             cost_sum = 0.0
             for model_name, input_tokens, output_tokens, usage_map in cost_rows:
+                if _has_missing_usage(usage_map):
+                    cost_sum = None
+                    break
                 cost = _run_cost(
                     pricing,
                     model_name=model_name,
@@ -307,7 +376,7 @@ async def console_stats(request: Request) -> ConsoleStatsResponse:
                 )
                 if cost is not None:
                     cost_sum += cost
-            total_cost = round(cost_sum, 6)
+            total_cost = round(cost_sum, 6) if cost_sum is not None else None
 
     try:
         # Filesystem scan; resolves the effective user internally (AuthMiddleware
@@ -347,7 +416,14 @@ async def console_runs(
     sf = _session_factory_or_503()
     user_id = await get_current_user(request)
 
-    stmt = select(RunRow, ThreadMetaRow.display_name).join(ThreadMetaRow, ThreadMetaRow.thread_id == RunRow.thread_id, isouter=True).order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit + 1).offset(offset)
+    stmt = (
+        select(RunRow, ThreadMetaRow.display_name)
+        .join(ThreadMetaRow, ThreadMetaRow.thread_id == RunRow.thread_id, isouter=True)
+        .where(RunRow.operation_kind == "run")
+        .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
+        .limit(limit + 1)
+        .offset(offset)
+    )
     if user_id:
         stmt = stmt.where(RunRow.user_id == user_id)
     if status:
@@ -356,7 +432,7 @@ async def console_runs(
     async with sf() as session:
         rows = (await session.execute(stmt)).all()
 
-    pricing = _build_pricing_map()
+    pricing = await asyncio.to_thread(_build_pricing_map)
     has_more = len(rows) > limit
     now = datetime.now(UTC)
     items: list[ConsoleRunItem] = []
@@ -415,7 +491,7 @@ async def console_usage(
     start_local = today_local - timedelta(days=days - 1)
     window_start_utc = datetime.combine(start_local, time.min, tzinfo=UTC) - tz_delta
 
-    stmt = select(RunRow).where(RunRow.created_at >= window_start_utc)
+    stmt = select(RunRow).where(RunRow.operation_kind == "run", RunRow.created_at >= window_start_utc)
     if user_id:
         stmt = stmt.where(RunRow.user_id == user_id)
 
@@ -427,11 +503,13 @@ async def console_usage(
         d = (start_local + timedelta(days=i)).isoformat()
         day_buckets[d] = ConsoleUsageDay(date=d)
 
-    pricing = _build_pricing_map()
+    pricing = await asyncio.to_thread(_build_pricing_map)
     by_model: dict[str, ConsoleUsageModelBreakdown] = {}
     total_tokens = 0
     total_runs = 0
     total_cost = 0.0 if pricing else None
+    missing_models: set[str] = set()
+    missing_model_prices: set[int] = set()
     for row in rows:
         created = _as_utc(row.created_at)
         if created is None:
@@ -456,9 +534,14 @@ async def console_usage(
             total_output_tokens=row.total_output_tokens,
             token_usage_by_model=row.token_usage_by_model,
         )
-        if run_cost is not None and total_cost is not None:
-            bucket.cost = round(bucket.cost + run_cost, 6)
-            total_cost = round(total_cost + run_cost, 6)
+        if _has_missing_usage(row.token_usage_by_model):
+            bucket.cost = None
+            total_cost = None
+        elif run_cost is not None:
+            if bucket.cost is not None:
+                bucket.cost = round(bucket.cost + run_cost, 6)
+            if total_cost is not None:
+                total_cost = round(total_cost + run_cost, 6)
 
         usage_map = row.token_usage_by_model or {}
         if isinstance(usage_map, dict) and usage_map:
@@ -467,20 +550,34 @@ async def console_usage(
                 entry.runs += 1
                 if not isinstance(usage, dict):
                     continue
-                entry.tokens += int(usage.get("total_tokens", 0) or 0)
-                entry.input_tokens += int(usage.get("input_tokens") or 0)
-                entry.cache_read_tokens += int(usage.get("cache_read_tokens") or 0)
+                entry.tokens += _token_count(usage.get("total_tokens"))
+                entry.input_tokens += _token_count(usage.get("input_tokens"))
+                entry.cache_read_tokens += _token_count(usage.get("cache_read_tokens"))
                 price = _lookup_pricing(pricing, model)
+                if _usage_is_missing(usage):
+                    missing_models.add(model.lower())
+                    if price is not None:
+                        # Configured name/provider-ID aliases share this entry;
+                        # equal rates on an unrelated model are not aliases.
+                        missing_model_prices.add(id(price))
                 if price is not None:
-                    model_cost = _token_cost(int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0), price, int(usage.get("cache_read_tokens") or 0))
+                    model_cost = _token_cost(_token_count(usage.get("input_tokens")), _token_count(usage.get("output_tokens")), price, _token_count(usage.get("cache_read_tokens")))
                     entry.cost = round((entry.cost or 0.0) + model_cost, 6)
         elif row.model_name and run_tokens > 0:
             # Legacy rows predating token_usage_by_model: fall back to the run's model.
             entry = by_model.setdefault(row.model_name, ConsoleUsageModelBreakdown())
             entry.tokens += run_tokens
+            entry.input_tokens += row.total_input_tokens or 0
             entry.runs += 1
             if run_cost is not None:
                 entry.cost = round((entry.cost or 0.0) + run_cost, 6)
+
+    # Missing usage stays unknown even if a later known bucket or legacy row
+    # shares this model. Do not restore its quote by treating None as zero.
+    for model, entry in by_model.items():
+        price = _lookup_pricing(pricing, model)
+        if model.lower() in missing_models or (price is not None and id(price) in missing_model_prices):
+            entry.cost = None
 
     return ConsoleUsageResponse(
         days=list(day_buckets.values()),

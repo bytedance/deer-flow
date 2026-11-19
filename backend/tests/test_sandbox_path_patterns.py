@@ -10,18 +10,24 @@ The move itself was cleared by a differential against the *real* pre-extraction
 expressions, run once on the parent commit. That run cannot be committed: after
 this lands there is no old inline expression left to diff against, only the
 frozen copies below. So the committed guard is the weaker snapshot, and its
-red-ness rests on those literals — not on the length of ``_BASES``.
+red-ness rests on those literals — not on the length of ``_BASES``. The tail has
+changed twice since then (it now stops at ``:`` and ``,``), and the base gained
+a left-hand path-start boundary; the snapshot names those deltas instead of
+re-freezing the literals, so any other drift still goes red.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 import pytest
 
+from deerflow.sandbox import path_patterns as path_patterns_module
+from deerflow.sandbox.local import local_sandbox as local_sandbox_module
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail
 from deerflow.sandbox.tools import _compiled_mask_patterns
 
 
@@ -34,6 +40,28 @@ def _legacy_tools_pattern(base: str) -> re.Pattern[str]:
 def _legacy_local_pattern(base: str) -> re.Pattern[str]:
     """The expression ``_reverse_output_patterns`` inlined before the extraction."""
     return re.compile(re.escape(base) + r"(?=/|$|[^\w./-])" + r"(?:[/\\][^\s\"';&|<>()]*)?")
+
+
+# The intentional tail changes since the extraction: it also stops at ``:``,
+# so a ``:``-joined path list ($PATH, $PYTHONPATH) cannot swallow a second
+# host path into the first match's tail, and at ``,``, so a comma-separated
+# argument listing cannot either.
+_LEGACY_TAIL = r"(?:[/\\][^\s\"';&|<>()]*)?"
+_CURRENT_TAIL = r"(?:[/\\][^\s\"';&|<>():,]*)?"
+
+
+def _with_current_tail(legacy: str) -> str:
+    assert legacy.endswith(_LEGACY_TAIL)
+    return legacy.removesuffix(_LEGACY_TAIL) + _CURRENT_TAIL
+
+
+# The second intentional change: a base must start a path, so it no longer
+# matches inside a longer path or URL (``.../artifacts/mnt/user-data/...``).
+_CURRENT_START = r"(?<![\w.~-])"
+
+
+def _with_current_rules(legacy: str) -> str:
+    return _CURRENT_START + _with_current_tail(legacy)
 
 
 _BASES = [
@@ -53,13 +81,14 @@ _BASES = [
 
 @pytest.mark.parametrize("base", _BASES)
 def test_helper_reproduces_the_pre_extraction_expressions(base: str) -> None:
-    """Byte-identical to what each call site built inline, for both separator modes.
+    """Byte-identical to what each call site built inline, for both separator modes,
+    apart from the named tail and path-start changes.
 
     This is the anchor for the move itself: edit the helper in a way that changes
     either site's regex and this goes red.
     """
-    assert build_output_mask_pattern(base, separator_agnostic=True).pattern == _legacy_tools_pattern(base).pattern
-    assert build_output_mask_pattern(base).pattern == _legacy_local_pattern(base).pattern
+    assert build_output_mask_pattern(base, separator_agnostic=True).pattern == _with_current_rules(_legacy_tools_pattern(base).pattern)
+    assert build_output_mask_pattern(base).pattern == _with_current_rules(_legacy_local_pattern(base).pattern)
 
 
 def test_separator_agnostic_is_the_only_difference_between_the_two_modes() -> None:
@@ -98,13 +127,170 @@ def test_boundary_still_rejects_prefix_siblings_and_accepts_real_segments() -> N
     assert pattern.search("/host/skills2/file.md") is None
 
 
-def test_local_sandbox_reverse_patterns_route_through_the_helper(tmp_path: Path) -> None:
-    """Call-site wiring: a re-inlined copy that *diverges* from the shared rule goes red.
+def test_direct_replacer_matches_the_shared_boundary_and_tail_contract() -> None:
+    replacer = getattr(path_patterns_module, "replace_output_path_matches", None)
+    assert replacer is not None
 
-    It does not (and cannot) catch a byte-identical re-inline — that is not yet a
-    defect. What it catches is the shape of the actual regression: #4035 changed
-    one copy of the rule and left the other behind.
+    assert replacer("see /host/skills/a.md", "/host/skills", "/mnt/skills", separator_agnostic=True) == "see /mnt/skills/a.md"
+    assert replacer("see \\host\\skills\\a.md", "/host/skills", "/mnt/skills", separator_agnostic=True) == "see /mnt/skills/a.md"
+    assert replacer("see /host/skills-extra/a.md", "/host/skills", "/mnt/skills", separator_agnostic=True) == "see /host/skills-extra/a.md"
+    assert replacer("root /host/skills, done", "/host/skills", "/mnt/skills", separator_agnostic=True) == "root /mnt/skills, done"
+
+
+def test_direct_replacer_normalizes_nested_tail_to_virtual_posix_style() -> None:
+    # The tail is sliced from the original output, so a Windows-spelled nested
+    # path kept its backslashes and was spliced into the POSIX-style virtual
+    # path as e.g. /mnt/skills/pkg\\a.md. Virtual paths are always POSIX, so
+    # nested tails must be normalized the same way depth-1 tails already are.
+    assert (
+        path_patterns_module.replace_output_path_matches(
+            "see \\host\\skills\\pkg\\a.md",
+            "/host/skills",
+            "/mnt/skills",
+            separator_agnostic=True,
+        )
+        == "see /mnt/skills/pkg/a.md"
+    )
+    assert (
+        path_patterns_module.replace_output_path_matches(
+            "see C:\\host\\skills\\pkg\\a.md",
+            "C:\\host\\skills",
+            "/mnt/skills",
+            separator_agnostic=True,
+        )
+        == "see /mnt/skills/pkg/a.md"
+    )
+
+
+def _regex_mask(output: str, base: str, virtual: str) -> str:
+    """The static-source splice ``mask_local_paths_in_output`` applies per pattern."""
+
+    def replace(match: re.Match[str]) -> str:
+        relative = normalize_mask_tail(match.group(0)[len(base) :])
+        return f"{virtual}/{relative}" if relative else virtual
+
+    return build_output_mask_pattern(base, separator_agnostic=True).sub(replace, output)
+
+
+def _scanner_mask(output: str, base: str, virtual: str) -> str:
+    return path_patterns_module.replace_output_path_matches(output, base, virtual, separator_agnostic=True)
+
+
+_MASKERS = [pytest.param(_regex_mask, id="regex"), pytest.param(_scanner_mask, id="scanner")]
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (
+            "PATH=/host/ws/.venv/bin:/host/ws/node_modules/.bin:/host/ws/bin:/usr/bin",
+            "PATH=/mnt/ws/.venv/bin:/mnt/ws/node_modules/.bin:/mnt/ws/bin:/usr/bin",
+        ),
+        ("PYTHONPATH=/host/ws/a:/host/ws/b", "PYTHONPATH=/mnt/ws/a:/mnt/ws/b"),
+        ("/host/ws:/host/ws/lib", "/mnt/ws:/mnt/ws/lib"),
+    ],
+)
+def test_tail_stops_at_colon_so_a_path_list_masks_every_entry(mask, output: str, expected: str) -> None:
+    """A ``:``-joined list must not hide a second host path inside the first tail.
+
+    Once a match consumes the rest of the list, scanning resumes after it, so
+    every later entry under the same base reaches the model as a raw host path.
+    (``;``, the Windows list separator, already ended the tail.)
     """
+    assert mask(output, "/host/ws", "/mnt/ws") == expected
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    "tail",
+    ["/pkg/app.py:12:def main():", "/logs/10:00:00.log", "/a.py:3: /b.py:4:"],
+)
+def test_colon_inside_a_single_path_leaves_the_rendered_output_unchanged(mask, tail: str) -> None:
+    """``grep -n`` lines and ``:`` in file names only shorten the match: the rest
+    of the text is copied through verbatim right after the virtual prefix."""
+    assert mask(f"/host/ws{tail}", "/host/ws", "/mnt/ws") == f"/mnt/ws{tail}"
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("files=/host/ws/a.py,/host/ws/b.py", "files=/mnt/ws/a.py,/mnt/ws/b.py"),
+        ("copy /host/ws/src,/host/ws/tests /dst", "copy /mnt/ws/src,/mnt/ws/tests /dst"),
+        (
+            "extra=/host/ws/x,other=/host/ws/y",
+            "extra=/mnt/ws/x,other=/mnt/ws/y",
+        ),
+    ],
+)
+def test_tail_stops_at_comma_so_a_list_masks_every_entry(mask, output: str, expected: str) -> None:
+    """A ``,``-joined list must not hide a second host path inside the first tail.
+
+    The same failure mode the ``:`` fix covered for PATH-style lists: once a
+    match consumes the rest of the list, scanning resumes after it, so every
+    later entry under the same base reaches the model as a raw host path.
+    """
+    assert mask(output, "/host/ws", "/mnt/ws") == expected
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    "tail",
+    ["/report,final.py", "/notes,a.txt:2024.csv"],
+)
+def test_comma_inside_a_single_path_leaves_the_rendered_output_unchanged(mask, tail: str) -> None:
+    """A ``,`` in a real file name only shortens the match: the rest of the text
+    is copied through verbatim right after the virtual prefix, so the whole
+    path still reads back as the same virtual file."""
+    assert mask(f"/host/ws{tail}", "/host/ws", "/mnt/ws") == f"/mnt/ws{tail}"
+
+
+def test_local_sandbox_reverse_mask_handles_a_colon_joined_path_list(tmp_path: Path) -> None:
+    """The callable replacement path: ``_reverse_resolve_path`` receives each
+    entry separately instead of the whole list as one fake path."""
+    local = tmp_path / "workspace"
+    local.mkdir()
+    sandbox = LocalSandbox(
+        id="local",
+        path_mappings=[PathMapping(container_path="/mnt/user-data/workspace", local_path=str(local))],
+    )
+    resolved = str(local.resolve())
+
+    output = sandbox._reverse_resolve_paths_in_output(f"{resolved}/.venv/bin:{resolved}/bin")
+
+    assert output == "/mnt/user-data/workspace/.venv/bin:/mnt/user-data/workspace/bin"
+
+
+def test_separator_agnostic_replacer_avoids_normalization_without_backslashes() -> None:
+    class ReplaceTrackingString(str):
+        def __init__(self, value: str) -> None:
+            del value
+            self.replace_calls = 0
+
+        def replace(self, old: str, new: str, count: int = -1) -> str:
+            self.replace_calls += 1
+            return super().replace(old, new, count)
+
+    output = ReplaceTrackingString("see /host/skills/a.md")
+    base = ReplaceTrackingString("/host/skills")
+
+    result = path_patterns_module.replace_output_path_matches(
+        output,
+        base,
+        "/mnt/skills",
+        separator_agnostic=True,
+    )
+
+    assert result == "see /mnt/skills/a.md"
+    assert output.replace_calls == 0
+    assert base.replace_calls == 0
+
+
+def test_local_sandbox_reverse_mask_routes_through_the_direct_helper(tmp_path: Path, monkeypatch) -> None:
+    """And it must stay separator-agnostic: forward resolution spells Windows
+    host paths with forward slashes, so a revert to separator-exact matching
+    would reintroduce the host-path leak with no POSIX-visible signal."""
     local = tmp_path / "skills"
     local.mkdir()
     sandbox = LocalSandbox(
@@ -113,7 +299,17 @@ def test_local_sandbox_reverse_patterns_route_through_the_helper(tmp_path: Path)
     )
 
     resolved = str(Path(local).resolve())
-    assert [p.pattern for p in sandbox._reverse_output_patterns] == [build_output_mask_pattern(resolved).pattern]
+    calls: list[tuple[str, str, dict]] = []
+    original = path_patterns_module.replace_output_path_matches
+
+    def recording_replacer(output, base, replacement, **kwargs):
+        calls.append((output, base, kwargs))
+        return original(output, base, replacement, **kwargs)
+
+    monkeypatch.setattr(local_sandbox_module, "replace_output_path_matches", recording_replacer)
+
+    assert sandbox._reverse_resolve_paths_in_output(f"read {resolved}/SKILL.md") == "read /mnt/skills/SKILL.md"
+    assert calls == [(f"read {resolved}/SKILL.md", resolved, {"separator_agnostic": True})]
 
 
 def test_tools_mask_patterns_route_through_the_helper(tmp_path: Path) -> None:
@@ -127,3 +323,42 @@ def test_tools_mask_patterns_route_through_the_helper(tmp_path: Path) -> None:
     for pattern, variant, virtual_base in compiled:
         assert virtual_base == "/mnt/skills"
         assert pattern.pattern == build_output_mask_pattern(variant, separator_agnostic=True).pattern
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        # A base inside a longer path is not that path.
+        ("log at /var/data/app.log", "log at /var/data/app.log"),
+        ("backup/data/x and ./data/y and ~/data/z", "backup/data/x and ./data/y and ~/data/z"),
+        ("see https://example.com/data/report.csv", "see https://example.com/data/report.csv"),
+        # A base that starts a path still maps, including after ``/`` and punctuation.
+        ("file:///data/report.html", "file:///mnt/data/report.html"),
+        ("--out=/data/x, PATH=/data/bin:/data/lib", "--out=/mnt/data/x, PATH=/mnt/data/bin:/mnt/data/lib"),
+        ("/data/a (/data/b)", "/mnt/data/a (/mnt/data/b)"),
+    ],
+)
+def test_base_must_start_a_path(mask, output: str, expected: str) -> None:
+    """The left-hand mirror of the #4035/#4053 segment boundary.
+
+    Without it a mount at ``/data`` rewrites the unrelated ``/var/data/app.log``
+    into ``/var/mnt/data/app.log`` before the model sees it.
+    """
+    assert mask(output, "/data", "/mnt/data") == expected
+
+
+def test_local_sandbox_forward_patterns_require_a_path_start() -> None:
+    sandbox = LocalSandbox("t", [PathMapping(container_path="/mnt/user-data", local_path="/srv/t/user-data")])
+    resolved = os.path.realpath("/srv/t/user-data").replace("\\", "/")
+    url = "http://localhost:2026/api/threads/abc/artifacts/mnt/user-data/outputs/report.html"
+
+    command = sandbox._resolve_paths_in_command(f"curl -s {url} -o /mnt/user-data/outputs/copy.html; cat backup/mnt/user-data/b")
+    assert url in command
+    assert "backup/mnt/user-data/b" in command
+    assert command.count("/mnt/user-data") == 2
+
+    content = sandbox._resolve_paths_in_content(f'URL = "{url}"\nOUT = "/mnt/user-data/outputs/x"\n')
+    assert url in content
+    assert "/mnt/user-data/outputs/x" not in content
+    assert resolved.split(":", 1)[-1] in content

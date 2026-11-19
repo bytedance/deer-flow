@@ -6,7 +6,6 @@ import asyncio
 import errno
 import json
 import logging
-import os
 import shutil
 import tempfile
 from collections.abc import Iterable
@@ -16,10 +15,19 @@ from pathlib import Path
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
-from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
+from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
+
+
+def _publication_path_limit(root: Path) -> int:
+    """Host path limit for the staged publication directory (indirection for tests)."""
+    from deerflow.skills.installer import _host_path_limit
+
+    return _host_path_limit(root)
+
 
 # Bound for the best-effort temp-dir cleanup so a stalled filesystem (e.g. NFS)
 # cannot hold back the install outcome propagating out of the finally block.
@@ -79,7 +87,7 @@ class LocalSkillStorage(SkillStorage):
             category_path = self._host_root / category.value
             if not category_path.exists() or not category_path.is_dir():
                 continue
-            for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
+            for current_root, dir_names, file_names in walk_skill_directories(category_path):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
@@ -92,23 +100,39 @@ class LocalSkillStorage(SkillStorage):
                 yield category, category_path, Path(current_root) / SKILL_MD_FILE
 
     def read_custom_skill(self, name: str) -> str:
-        if not self.custom_skill_exists(name):
-            raise FileNotFoundError(f"Custom skill '{name}' not found.")
-        return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8")
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(self):
+            if not self.custom_skill_exists(name):
+                raise FileNotFoundError(f"Custom skill '{name}' not found.")
+            # Read BOM-tolerantly so a SKILL.md saved by a Windows editor does not
+            # return its BOM as the first character of the content this API hands
+            # back. The frontmatter path tolerates the BOM via ``_FRONTMATTER_RE``
+            # instead, which only covers the front matter, not this whole-file read.
+            return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8-sig")
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
-        target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(target.parent),
-        ) as tmp_file:
-            tmp_file.write(content)
-            tmp_path = Path(tmp_file.name)
-        tmp_path.replace(target)
-        make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+        with self._skill_projection_mutation(names=(name,)):
+            target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = None
+            try:
+                # newline="" publishes the caller's bytes: a default text write
+                # turns LF into os.linesep, so a SKILL.md written on Windows
+                # reached disk with CRLF that the API never returned.
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
+                    tmp_path = Path(tmp_file.name)
+                    tmp_file.write(content)
+                tmp_path.replace(target)
+                make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+            finally:
+                if tmp_path is not None:
+                    cleanup_failed_atomic_write(tmp_path)
+
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
+        removal = ((SkillCategory.CUSTOM, Path(name)),)
+        with self._skill_projection_mutation(remove=removal, names=(name,)):
+            return super().remove_custom_skill_file(name, relative_path)
 
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
         from deerflow.skills.installer import _scan_skill_archive_contents_or_raise
@@ -189,6 +213,10 @@ class LocalSkillStorage(SkillStorage):
             raise ValueError(f"Invalid skill: {message}")
         if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
             raise ValueError(f"Invalid skill name: {skill_name}")
+        # The skill name becomes ``custom/<name>``; refuse names that cannot be
+        # created as a host path component (Windows reserved device names) so
+        # the install fails here instead of mid-write on the target host.
+        self.validate_skill_name(skill_name, for_creation=True)
 
         target = custom_dir / skill_name
         if target.exists():
@@ -198,13 +226,31 @@ class LocalSkillStorage(SkillStorage):
 
     def _commit_skill_install(self, skill_dir: Path, skill_name: str, custom_dir: Path, target: Path) -> None:
         """Stage and move the validated skill into place (blocking; runs off the event loop)."""
-        from deerflow.skills.installer import _move_staged_skill_into_reserved_target
+        from deerflow.skills.installer import _host_path_length, _move_staged_skill_into_reserved_target
 
-        with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
-            staging_target = Path(staging_root) / skill_name
-            shutil.copytree(skill_dir, staging_target)
-            _move_staged_skill_into_reserved_target(staging_target, target)
-        make_skill_written_path_sandbox_readable(custom_dir, target)
+        with self._skill_projection_mutation(names=(skill_name,)):
+            with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
+                staging_target = Path(staging_root) / skill_name
+                publication_limit = _publication_path_limit(custom_dir)
+                if _host_path_length(staging_target) >= publication_limit:
+                    raise ValueError(f"Skill '{skill_name}' cannot be published: the temporary publication path is too long for this filesystem")
+                # The staging root's temp-dir name lengthens every member path, so
+                # a nested member can outgrow the limit while the skill root fits.
+                # Check members before copying: copytree wraps a child's
+                # ENAMETOOLONG in shutil.Error, which carries no errno/winerror for
+                # the translation below to recognize.
+                for member in skill_dir.rglob("*"):
+                    relative = member.relative_to(skill_dir)
+                    if _host_path_length(staging_target / relative) >= publication_limit:
+                        raise ValueError(f"Skill '{skill_name}' cannot be published: the temporary publication path for '{relative.as_posix()}' is too long for this filesystem")
+                try:
+                    shutil.copytree(skill_dir, staging_target)
+                    _move_staged_skill_into_reserved_target(staging_target, target)
+                except OSError as exc:
+                    if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
+                        raise ValueError(f"Skill '{skill_name}' cannot be published: the path is too long for this filesystem") from exc
+                    raise
+            make_skill_written_path_sandbox_readable(custom_dir, target)
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
         self.validate_skill_name(name)
@@ -222,15 +268,41 @@ class LocalSkillStorage(SkillStorage):
                     name,
                     e,
                 )
-        if target.exists():
-            shutil.rmtree(target)
+        removal = ((SkillCategory.CUSTOM, Path(name)),)
+        with self._skill_projection_mutation(remove=removal, names=(name,)):
+            if target.is_symlink():
+                # An operator-linked package (see
+                # ``_is_external_skill_directory_symlink``): the skill is the
+                # link, and the external tree is not ours to delete.
+                # ``shutil.rmtree`` refuses symlinks, so unlink instead.
+                target.unlink()
+            elif target.exists():
+                shutil.rmtree(target)
+
+    def _skill_projection_mutation(
+        self,
+        *,
+        remove: tuple[tuple[SkillCategory, Path], ...] = (),
+        remove_names: tuple[str, ...] = (),
+        names: tuple[str, ...] = (),
+    ):
+        if getattr(self, "user_id", None) is None:
+            from deerflow.skills.projection import _projection_lock
+
+            return _projection_lock(self.get_skills_root_path() / "custom")
+        from deerflow.skills.projection import skill_projection_mutation
+
+        return skill_projection_mutation(self, "user", remove=remove, remove_names=remove_names, mutation_names=names)
 
     def append_history(self, name: str, record: dict) -> None:
         self.validate_skill_name(name)
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
-        with history_path.open("a", encoding="utf-8") as f:
+        # JSONL records are LF-delimited on every host: a translated record
+        # boundary made read_history and any raw-byte reader describe different
+        # revisions of the same entry.
+        with history_path.open("a", encoding="utf-8", newline="") as f:
             f.write(json.dumps(payload, ensure_ascii=False))
             f.write("\n")
 
@@ -240,7 +312,8 @@ class LocalSkillStorage(SkillStorage):
         if not history_path.exists():
             return []
         records: list[dict] = []
-        for line in history_path.read_text(encoding="utf-8").splitlines():
+        # JSONL boundaries are newlines, not Unicode separators inside JSON strings.
+        for line in history_path.read_text(encoding="utf-8").split("\n"):
             if not line.strip():
                 continue
             records.append(json.loads(line))

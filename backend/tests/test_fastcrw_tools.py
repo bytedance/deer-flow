@@ -2,7 +2,20 @@
 
 import ipaddress
 import json
+import logging
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.fixture
+def public_dns():
+    """Keep mocked tool calls offline while exercising the real URL safety check."""
+    with patch(
+        "deerflow.community.url_safety.resolve_host_addresses",
+        return_value=[ipaddress.ip_address("93.184.216.34")],
+    ):
+        yield
 
 
 class TestWebSearchTool:
@@ -66,9 +79,20 @@ class TestWebSearchTool:
 
 
 class TestWebFetchTool:
+    @pytest.fixture(autouse=True)
+    def _backend_isolation_confirmed(self):
+        """Assume the delegated backend's egress is isolated for these tests.
+
+        These tests exercise fetch behavior, not backend isolation; the
+        fail-closed backend guard is covered in TestFastcrwBackendIsolation.
+        """
+        with patch("deerflow.community.fastcrw.tools._validate_backend_base_url", return_value=None):
+            yield
+
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     def test_fetch_uses_web_fetch_config(self, mock_get_app_config, mock_fastcrw_cls):
         fetch_config = MagicMock()
         fetch_config.model_extra = {"api_key": "fastcrw-fetch-key", "base_url": "http://localhost:3000"}
@@ -100,6 +124,7 @@ class TestWebFetchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     def test_fetch_returns_error_when_no_content(self, mock_get_app_config, mock_fastcrw_cls):
         mock_get_app_config.return_value.get_tool_config.return_value = None
 
@@ -115,6 +140,7 @@ class TestWebFetchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     def test_fetch_returns_error_string_on_exception(self, mock_get_app_config, mock_fastcrw_cls):
         mock_get_app_config.return_value.get_tool_config.return_value = None
         mock_fastcrw_cls.return_value.scrape.side_effect = RuntimeError("scrape failed")
@@ -175,3 +201,151 @@ class TestWebFetchTool:
             "http://10.0.0.5/dashboard",
             formats=["markdown"],
         )
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    def test_fetch_builds_client_from_the_validated_config_snapshot(self, mock_get_app_config, mock_fastcrw_cls):
+        # The endpoint screen reads the config once; a later read returning a
+        # different revision must not leak its key into the screened client.
+        config_a = MagicMock()
+        config_a.model_extra = {
+            "base_url": "http://192.168.0.47:3002",
+            "api_key": "key-a",
+        }
+        config_b = MagicMock()
+        config_b.model_extra = {
+            "base_url": "http://192.168.0.99:3002",
+            "api_key": "key-b",
+        }
+        mock_get_app_config.return_value.get_tool_config.side_effect = [config_a, config_b]
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "Fetched markdown"
+        mock_scrape_result.metadata = MagicMock(title="Fetched Page")
+        mock_fastcrw_cls.return_value.scrape.return_value = mock_scrape_result
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# Fetched Page\n\nFetched markdown"
+        mock_fastcrw_cls.assert_called_once_with(api_key="key-a", api_url="http://192.168.0.47:3002")
+
+
+class TestFastcrwBackendIsolation:
+    """Fail-closed delegated-backend SSRF guard (issue #5970)."""
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    def test_fetch_fails_closed_on_self_hosted_backend(self, mock_get_app_config, mock_fastcrw_cls):
+        fetch_config = MagicMock()
+        fetch_config.model_extra = {"base_url": "http://localhost:3000"}
+        mock_get_app_config.return_value.get_tool_config.return_value = fetch_config
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert "network_isolation_confirmed" in result
+        mock_fastcrw_cls.assert_not_called()
+
+    @patch.dict("os.environ", {"CRW_API_URL": "http://localhost:3000"}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    def test_fetch_fails_closed_on_env_backend(self, mock_get_app_config, mock_fastcrw_cls):
+        mock_get_app_config.return_value.get_tool_config.return_value = None
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert "network_isolation_confirmed" in result
+        mock_fastcrw_cls.assert_not_called()
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    def test_fetch_allows_self_hosted_backend_when_confirmed(self, mock_get_app_config, mock_fastcrw_cls):
+        fetch_config = MagicMock()
+        fetch_config.model_extra = {"base_url": "http://localhost:3000", "network_isolation_confirmed": True}
+        mock_get_app_config.return_value.get_tool_config.return_value = fetch_config
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "ok"
+        mock_scrape_result.metadata = MagicMock(title="T")
+        mock_fastcrw_cls.return_value.scrape.return_value = mock_scrape_result
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# T\n\nok"
+        mock_fastcrw_cls.return_value.scrape.assert_called_once_with("https://example.com", formats=["markdown"])
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    def test_fetch_allows_public_backend(self, mock_get_app_config, mock_fastcrw_cls):
+        mock_get_app_config.return_value.get_tool_config.return_value = None
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "ok"
+        mock_scrape_result.metadata = MagicMock(title="T")
+        mock_fastcrw_cls.return_value.scrape.return_value = mock_scrape_result
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# T\n\nok"
+
+
+# `None` is itself a configured value (`max_results:` with nothing after it in YAML), so an absent key
+# needs its own sentinel — otherwise the key-present case is never built and never tested.
+_OMITTED = object()
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_limit", "warns"),
+    [
+        pytest.param(True, 5, True, id="bool"),
+        pytest.param(0, 5, True, id="zero"),
+        pytest.param(-3, 5, True, id="negative"),
+        pytest.param(3.5, 5, True, id="fractional"),
+        pytest.param("many", 5, True, id="non-numeric-string"),
+        pytest.param("8", 8, False, id="integer-string"),
+        pytest.param(7, 7, False, id="plain-int"),
+        pytest.param(None, 5, True, id="explicit-null"),
+        pytest.param(_OMITTED, 5, False, id="omitted"),
+    ],
+)
+@patch.dict("os.environ", {}, clear=True)
+@patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+@patch("deerflow.community.fastcrw.tools.get_app_config")
+def test_search_normalizes_max_results_before_calling_the_client(mock_get_app_config, mock_fastcrw_cls, caplog, configured, expected_limit, warns):
+    search_config = MagicMock()
+    extra: dict[str, object] = {"api_key": "fastcrw-search-key"}
+    if configured is not _OMITTED:
+        extra["max_results"] = configured
+    search_config.model_extra = extra
+    mock_get_app_config.return_value.get_tool_config.return_value = search_config
+
+    mock_result = MagicMock()
+    mock_result.web = []
+    mock_fastcrw_cls.return_value.search.return_value = mock_result
+
+    from deerflow.community.fastcrw.tools import web_search_tool
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.fastcrw.tools"):
+        result = web_search_tool.invoke({"query": "q"})
+
+    assert result == "[]"
+    mock_fastcrw_cls.return_value.search.assert_called_once_with("q", limit=expected_limit)
+    assert ("Invalid fastCRW max_results" in caplog.text) is warns

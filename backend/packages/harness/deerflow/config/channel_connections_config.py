@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+# Languages of DeerFlow's own IM texts (scheduled-task notices, /connect and
+# /goal replies): the web UI's languages.
+NotificationLocale = Literal["en-US", "zh-CN"]
 
 
 class SlackChannelConnectionConfig(BaseModel):
@@ -43,6 +49,12 @@ class ChannelConnectionsConfig(BaseModel):
 
     enabled: bool = False
     require_bound_identity: bool = True
+    # Language of scheduled-task IM notices and the /connect and /goal replies
+    # for an owner who has no UI language preference (auth disabled, or never
+    # signed in to the web app), and for replies with no known owner (an invalid
+    # connect code). The owner's own preference, which the web app keeps in sync
+    # with its UI language, wins.
+    notification_locale: NotificationLocale = "en-US"
     slack: SlackChannelConnectionConfig = Field(default_factory=SlackChannelConnectionConfig)
     telegram: TelegramChannelConnectionConfig = Field(default_factory=TelegramChannelConnectionConfig)
     discord: DiscordChannelConnectionConfig = Field(default_factory=DiscordChannelConnectionConfig)
@@ -50,6 +62,8 @@ class ChannelConnectionsConfig(BaseModel):
     dingtalk: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
     wechat: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
     wecom: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
+    buzz: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
+    qq: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
 
     def provider_status(self, provider: str) -> dict[str, bool]:
         config = getattr(self, provider, None)

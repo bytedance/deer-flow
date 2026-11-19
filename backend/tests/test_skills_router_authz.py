@@ -19,6 +19,7 @@ These tests pin the access-control boundary: a normal authenticated
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -29,6 +30,7 @@ from fastapi.testclient import TestClient
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
+from deerflow.config.authorization_config import AuthorizationConfig
 
 
 def _make_user(system_role: str) -> User:
@@ -56,6 +58,7 @@ def _make_app(*, system_role: str) -> FastAPI:
 # tenant's injected skill set.
 _GUARDED_ENDPOINTS = [
     ("post", "/api/skills/install", {"thread_id": "t1", "path": "mnt/user-data/outputs/x.skill"}),
+    ("post", "/api/skills/reload", None),
     ("get", "/api/skills/custom/demo", None),
     ("put", "/api/skills/custom/demo", {"content": "---\nname: demo\ndescription: hijacked\n---\n"}),
     ("delete", "/api/skills/custom/demo", None),
@@ -77,6 +80,27 @@ def test_non_admin_is_forbidden_on_all_mutating_skills_endpoints():
         for method, path, body in _GUARDED_ENDPOINTS:
             resp = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
             assert resp.status_code == 403, f"{method.upper()} {path} expected 403 for non-admin, got {resp.status_code}"
+
+
+def test_non_admin_upload_is_rejected_before_multipart_parsing(monkeypatch):
+    parse_called = False
+
+    async def _unexpected_parse(request):
+        nonlocal parse_called
+        parse_called = True
+        raise AssertionError("multipart parsing ran before the admin guard")
+
+    monkeypatch.setattr(skills_router, "_parse_skill_archive_form", _unexpected_parse)
+    app = _make_app(system_role="user")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"archive": ("demo.skill", b"archive bytes", "application/octet-stream")},
+        )
+
+    assert response.status_code == 403
+    assert parse_called is False
 
 
 def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
@@ -106,7 +130,10 @@ def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
         ]
 
     app = _make_app(system_role="user")
-    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    # list_skills reads config.authorization.fail_closed even when
+    # authorization is disabled (mirroring list_models); give the fake the
+    # real disabled shape so the open-to-normal-users path stays exercised.
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace(authorization=AuthorizationConfig(enabled=False))
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
     with TestClient(app) as client:
         assert client.get("/api/skills").status_code == 200
@@ -123,6 +150,17 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
     from deerflow.skills.types import Skill
 
     config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {},
+                "skills": {},
+                "middlewares": ["pkg:Middleware"],
+                "mcpInterceptors": ["pkg.interceptor:build"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     def _load_skills(*, enabled_only: bool):
         return [
@@ -139,10 +177,12 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
         ]
 
     app = _make_app(system_role="admin")
+    # Not a real LocalSkillStorage instance, so _write_extensions_skill_state's
+    # projection-mutation branch is skipped (nullcontext) and it reads the
+    # config_path fresh via ExtensionsConfig.from_file.
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
-    monkeypatch.setattr(skills_router, "get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda _config_path=None: config_path))
 
     async def _refresh(_user_id: str):
         return None
@@ -151,3 +191,6 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
     with TestClient(app) as client:
         resp = client.put("/api/skills/demo", json={"enabled": False})
         assert resp.status_code == 200, f"admin toggle should succeed, got {resp.status_code}"
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["middlewares"] == ["pkg:Middleware"]
+    assert written["mcpInterceptors"] == ["pkg.interceptor:build"]

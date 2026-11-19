@@ -7,6 +7,8 @@ class AllowlistProvider:
     """Simple allowlist/denylist provider. No external dependencies."""
 
     name = "allowlist"
+    policy_id = "deerflow.guardrails.allowlist"
+    policy_version = "1.0.0"
 
     def __init__(self, *, allowed_tools: list[str] | None = None, denied_tools: list[str] | None = None):
         # Distinguish "no allowlist configured" (None -> allow all) from an
@@ -15,6 +17,12 @@ class AllowlistProvider:
         # when the operator intended to permit none.
         self._allowed = set(allowed_tools) if allowed_tools is not None else None
         self._denied = set(denied_tools) if denied_tools else set()
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {
+            "allowed_tools": None if self._allowed is None else sorted(self._allowed),
+            "denied_tools": sorted(self._denied),
+        }
 
     def evaluate(self, request: GuardrailRequest) -> GuardrailDecision:
         if self._allowed is not None and request.tool_name not in self._allowed:

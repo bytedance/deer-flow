@@ -1,16 +1,23 @@
 """Tests for TUI launch-mode planning + arg parsing (pure, no Textual)."""
 
-from deerflow.tui.cli import LaunchPlan, plan_launch
+import pytest
+
+from deerflow.tui.cli import LaunchPlan, build_parser, plan_launch
 
 
 def plan(argv, *, stdin_tty=True, stdout_tty=True, env=None):
     return plan_launch(argv, stdin_isatty=stdin_tty, stdout_isatty=stdout_tty, env=env or {})
 
 
+def test_top_level_help_points_to_extension_management():
+    assert "deerflow extensions --help" in build_parser().format_help()
+
+
 def test_bare_command_on_tty_launches_tui():
     p = plan([])
     assert p.mode == "tui"
     assert p.forced_tui is False
+    assert p.transparent is False
 
 
 def test_non_tty_with_no_message_falls_back_to_headless_help():
@@ -26,6 +33,28 @@ def test_print_with_message():
     assert p.read_stdin is False
 
 
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_recursion_limit(mode):
+    p = plan(["--recursion-limit", "250", mode, "hello"])
+    assert p.recursion_limit == 250
+
+
+def test_headless_recursion_limit_is_optional():
+    p = plan(["--print", "hello"])
+    assert p.recursion_limit is None
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
+def test_headless_recursion_limit_must_be_positive(value):
+    with pytest.raises(SystemExit):
+        plan(["--recursion-limit", value, "--print", "hello"])
+
+
+def test_recursion_limit_is_rejected_for_tui_mode():
+    with pytest.raises(SystemExit):
+        plan(["--recursion-limit", "250"])
+
+
 def test_print_without_value_reads_stdin_when_piped():
     p = plan(["--print"], stdin_tty=False)
     assert p.mode == "print"
@@ -38,6 +67,74 @@ def test_json_mode():
     assert p.message == "hello"
 
 
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_unquoted_message_keeps_every_word(mode):
+    """An unquoted message must not be truncated to its first word."""
+    p = plan([mode, "summarize", "this", "repo"])
+    assert p.mode == mode.removeprefix("--")
+    assert p.message == "summarize this repo"
+    assert p.read_stdin is False
+
+
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_message_before_the_flag_is_used(mode):
+    """Words before a bare --print/--json are the message, as with --cli."""
+    p = plan(["summarize", "this", "repo", mode])
+    assert p.mode == mode.removeprefix("--")
+    assert p.message == "summarize this repo"
+    assert p.read_stdin is False
+
+
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_message_wins_over_piped_stdin(mode):
+    p = plan(["hello", mode], stdin_tty=False)
+    assert p.message == "hello"
+    assert p.read_stdin is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hello", "--print", "there"],
+        ["--print", "hello", "--continue", "there"],
+        ["hello", "--json", "there"],
+    ],
+)
+def test_headless_message_split_around_the_flag_is_rejected(argv, capsys):
+    """Word order across the flag is lost by argparse, so refuse rather than guess."""
+    with pytest.raises(SystemExit) as exc:
+        plan(argv)
+    assert exc.value.code == 2
+    assert "pass the message in one place" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--print", "hello", "--json", "world"],
+        ["--print", "--json", "hello"],
+        ["--json", "hello", "--print"],
+        ["hello", "--print", "--json"],
+    ],
+)
+def test_print_and_json_together_are_rejected(argv, capsys):
+    """Only one headless mode runs, so the other flag's message must not vanish."""
+    with pytest.raises(SystemExit) as exc:
+        plan(argv, stdin_tty=False)
+    assert exc.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_blank_message_is_treated_as_missing(mode):
+    p = plan([mode, "  "])
+    assert p.mode == "headless-help"
+
+
+def test_headless_help_documents_multi_word_messages():
+    assert "--print [MESSAGE ...]" in build_parser().format_help()
+
+
 def test_force_tui_even_without_tty():
     p = plan(["--tui"], stdin_tty=False, stdout_tty=False)
     assert p.mode == "tui"
@@ -47,6 +144,18 @@ def test_force_tui_even_without_tty():
 def test_env_var_forces_tui():
     p = plan([], stdin_tty=False, stdout_tty=False, env={"DEER_FLOW_TUI": "1"})
     assert p.mode == "tui"
+
+
+def test_transparent_flag_is_carried_to_tui_plan():
+    p = plan(["--tui-transparent"])
+    assert p.mode == "tui"
+    assert p.transparent is True
+
+
+def test_transparent_env_is_carried_to_tui_plan():
+    p = plan([], env={"DEER_FLOW_TUI_TRANSPARENT": "yes"})
+    assert p.mode == "tui"
+    assert p.transparent is True
 
 
 def test_cli_flag_with_message_runs_print():

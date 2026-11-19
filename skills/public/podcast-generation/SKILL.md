@@ -163,6 +163,10 @@ The generated podcast follows the "Hello Deer" format:
 
 ## Output Handling
 
+The command exits with status 1 and writes diagnostics to stderr if generation
+fails. Only present the MP3 after a successful command; an existing audio file
+or a newly written transcript does not establish that audio generation succeeded.
+
 After generation:
 
 - Podcasts and transcripts are saved in `/mnt/user-data/outputs/`
@@ -176,6 +180,10 @@ The following environment variables must be set:
 - For Volcengine: `VOLCENGINE_TTS_APPID` and `VOLCENGINE_TTS_ACCESS_TOKEN`
 - For MiniMax: `MINIMAX_API_KEY`
 - `VOLCENGINE_TTS_CLUSTER`: Volcengine TTS cluster (optional, defaults to "volcano_tts")
+- `VOLCENGINE_TTS_VOICE_TYPE_MALE`: Volcengine male voice type (optional, defaults to `zh_male_yangguangqingnian_moon_bigtts`)
+- `VOLCENGINE_TTS_VOICE_TYPE_FEMALE`: Volcengine female voice type (optional, defaults to `zh_female_sajiaonvyou_moon_bigtts`)
+
+Voice type overrides are trimmed; unset or blank values use the listed defaults.
 
 ## Notes
 

@@ -22,6 +22,8 @@ on:
       - ".github/workflows/chart.yaml"
       - "scripts/check_config_version.sh"
       - "scripts/check_chart_sandbox_service.sh"
+      - "scripts/check_chart_sandbox_storage.sh"
+      - "scripts/check_chart_skill_upload_size.sh"
 
 jobs:
   validate-chart:
@@ -49,6 +51,18 @@ jobs:
       - name: Validate sandbox Service-type gating
         run: bash scripts/check_chart_sandbox_service.sh
 
+      # Gateway-generated skill projections are sent to the provisioner as
+      # paths under DEER_FLOW_HOST_BASE_DIR. With the shared home PVC enabled,
+      # both components must use the same logical root so those paths can be
+      # translated into PVC subPaths instead of being rejected as out-of-base.
+      - name: Validate sandbox storage path contract
+        run: bash scripts/check_chart_sandbox_storage.sh
+
+      # Keep the rendered Ingress aligned with the Gateway's .skill upload
+      # size, streaming, and long-running validation requirements.
+      - name: Validate skill upload ingress policy
+        run: bash scripts/check_chart_skill_upload_size.sh
+
       # The chart's `config:` block embeds a config_version that must not fall
       # behind config.example.yaml. A stale version is silent in-cluster (the
       # image ships no example to compare against, so _check_config_version
@@ -62,8 +76,9 @@ jobs:
 
   verify-versions:
     # Gate the release: every version source must match the v* tag. A forgotten
-    # bump in Chart.yaml, pyproject.toml, or package.json fails here and skips
-    # the publish. See scripts/verify_versions.sh.
+    # bump in Chart.yaml, pyproject.toml, or package.json, or a stale
+    # backend/uv.lock, fails here and skips the publish. See
+    # scripts/verify_versions.sh.
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/verify-versions.yml
 

@@ -13,12 +13,13 @@ giving structured results, authenticated quota, and a documented SLA.
 import json
 import logging
 import os
-from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
-from urllib.parse import urlparse
 
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
+from deerflow.community.search_time_range import BRAVE_FRESHNESS_BY_TIME_RANGE, SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -30,21 +31,13 @@ _DEFAULT_MAX_RESULTS = 5
 _BRAVE_WEB_MAX_COUNT = 20
 # Brave Image Search supports larger batches than web search.
 _BRAVE_IMAGE_MAX_COUNT = 200
-# NAT64 well-known prefix (RFC 6052): IPv6 literals embedding an IPv4 address.
-_NAT64_PREFIX = ip_network("64:ff9b::/96")
 _api_key_warned: set[str] = set()
 
 
 def _get_api_key(tool_name: str = "web_search") -> str | None:
     config = get_app_config().get_tool_config(tool_name)
-    if config is not None:
-        api_key = (config.model_extra or {}).get("api_key")
-        if isinstance(api_key, str) and api_key.strip():
-            return api_key.strip()
-    env_key = os.getenv("BRAVE_SEARCH_API_KEY")
-    if isinstance(env_key, str) and env_key.strip():
-        return env_key.strip()
-    return None
+    configured = resolve_api_key((config.model_extra or {}).get("api_key")) if config is not None else None
+    return configured or resolve_api_key(os.getenv("BRAVE_SEARCH_API_KEY"))
 
 
 def _coerce_max_results(
@@ -55,7 +48,7 @@ def _coerce_max_results(
 ) -> int:
     try:
         coerced = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.warning(
             "Invalid Brave Search max_results=%r; using default %s",
             value,
@@ -93,108 +86,8 @@ def _unexpected_format_error(query: str, *, service_name: str = "Brave Search") 
     )
 
 
-def _decode_ipv4(host: str) -> IPv4Address | None:
-    """Decode obfuscated IPv4 literals that ``ip_address`` rejects.
-
-    Mirrors the permissive ``inet_aton`` parsing many HTTP clients use, so that
-    integer (``2130706433``), hex (``0x7f000001``) and octal (``0177.0.0.1``)
-    encodings of an address are recognized.
-    """
-    parts = host.split(".")
-    if not 1 <= len(parts) <= 4:
-        return None
-
-    values: list[int] = []
-    for part in parts:
-        if not part:
-            return None
-        try:
-            if part.startswith(("0x", "0X")):
-                values.append(int(part, 16))
-            elif part.startswith("0") and len(part) > 1:
-                values.append(int(part, 8))
-            else:
-                values.append(int(part, 10))
-        except ValueError:
-            return None
-
-    *leading, last = values
-    for value in leading:
-        if not 0 <= value <= 0xFF:
-            return None
-    max_last = (1 << (8 * (4 - len(leading)))) - 1
-    if not 0 <= last <= max_last:
-        return None
-
-    result = 0
-    for value in leading:
-        result = (result << 8) | value
-    result = (result << (8 * (4 - len(leading)))) | last
-    return IPv4Address(result)
-
-
 def _is_url_present(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
-
-
-def _embedded_ipv4(ip: IPv6Address) -> IPv4Address | None:
-    """Extract an IPv4 address embedded in an IPv6 literal, if any.
-
-    Covers IPv4-mapped (``::ffff:a.b.c.d``), 6to4 (``2002::/16``), NAT64
-    (``64:ff9b::/96``), and IPv4-compatible (``::a.b.c.d``) forms. These all
-    smuggle a v4 destination through the IPv6 path, where ``is_global`` on the
-    v6 literal alone would otherwise report a loopback/private target as safe.
-    """
-    if ip.ipv4_mapped is not None:
-        return ip.ipv4_mapped
-    if ip.sixtofour is not None:
-        return ip.sixtofour
-    if ip in _NAT64_PREFIX:
-        return IPv4Address(int(ip) & 0xFFFFFFFF)
-    # IPv4-compatible ``::a.b.c.d`` (high 96 bits zero, excluding ::/:: 1).
-    packed = int(ip)
-    if packed >> 32 == 0 and packed > 1:
-        return IPv4Address(packed & 0xFFFFFFFF)
-    return None
-
-
-def _safe_public_url(value: object) -> str:
-    """Return ``value`` only if it is a safe, public http(s) URL, else "".
-
-    This is a best-effort SSRF guard that rejects non-http(s) schemes,
-    ``localhost``, and private/non-global IP literals (including obfuscated
-    decimal/hex/octal encodings and IPv6 literals embedding a non-global IPv4).
-    It only inspects the URL string and cannot catch public hostnames that
-    resolve to internal IPs; any consumer that actually downloads these URLs
-    must re-validate the resolved IP at fetch time.
-    """
-    if not isinstance(value, str):
-        return ""
-    url = value.strip()
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return ""
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
-        return ""
-
-    host = parsed.hostname.lower().rstrip(".")
-    if not host:
-        return ""
-    if host == "localhost" or host.endswith(".localhost"):
-        return ""
-
-    try:
-        ip = ip_address(host)
-    except ValueError:
-        ip = _decode_ipv4(host)
-        if ip is None:
-            return url
-    if isinstance(ip, IPv6Address):
-        embedded = _embedded_ipv4(ip)
-        if embedded is not None and not embedded.is_global:
-            return ""
-    return url if ip.is_global else ""
 
 
 def _brave_get(
@@ -230,12 +123,13 @@ def _brave_get(
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int = 5) -> str:
+def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
     """Search the web for information using Brave Search.
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of search results to return. Default is 5.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
     if config is not None and "max_results" in (config.model_extra or {}):
@@ -249,23 +143,40 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
         return _missing_key_error(query, "web_search")
 
     params = {"q": query, "count": count, "text_decorations": False}
+    if time_range is not None:
+        params["freshness"] = BRAVE_FRESHNESS_BY_TIME_RANGE[time_range]
 
     data, error_json = _brave_get(_BRAVE_WEB_ENDPOINT, api_key, query, params, service_name="Brave Search")
     if error_json is not None:
         return error_json
 
-    web_results = (data.get("web") or {}).get("results", [])
+    web = data.get("web")
+    if web is None:
+        web = {}
+    if not isinstance(web, dict):
+        logger.error("Brave Search returned unexpected 'web' payload type: %s", type(web).__name__)
+        return _unexpected_format_error(query)
+    web_results = web.get("results")
+    if web_results is None:
+        web_results = []
+    if not isinstance(web_results, list):
+        logger.error("Brave Search returned unexpected 'web.results' payload type: %s", type(web_results).__name__)
+        return _unexpected_format_error(query)
     if not web_results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("url", ""),
+            "url": _safe_public_url(r.get("url")),
             "content": r.get("description", ""),
         }
         for r in web_results
+        if isinstance(r, dict)
     ]
+    if not normalized_results:
+        logger.error("Brave Search returned 'web.results' with no usable result objects")
+        return _unexpected_format_error(query)
 
     output = {
         "query": query,

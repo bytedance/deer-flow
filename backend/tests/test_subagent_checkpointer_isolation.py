@@ -6,11 +6,12 @@ DeerFlowClient), the subagent's ``agent.astream()`` inherits it through
 at compile time, LangGraph's resolution prioritizes the inherited value
 and calls the sync checkpointer's async methods, raising NotImplementedError.
 
-The subagent is a one-shot delegation — it rebuilds state, calls astream
-once, and extracts the last AIMessage. It never resumes, so persistence
-is unnecessary and inheriting the parent checkpointer is harmful.
+The default subagent is a one-shot delegation and remains checkpoint-disabled.
+Opt-in Gateway history replaces the inherited saver with a loop-owned peer;
+that separate path is covered by test_subagent_checkpoint_persistence.py.
 """
 
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -82,14 +83,14 @@ def _setup_executor_module():
 
 
 class TestSubagentCheckpointerIsolation:
-    """Verify _create_agent() unconditionally passes checkpointer=False to create_agent()."""
+    """Verify _create_agent() passes checkpointer=False without an opted-in scope."""
 
     def test_create_agent_receives_checkpointer_false(
         self,
         _setup_executor_module,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        """Assert checkpointer=False is always passed to create_agent()."""
+        """Assert checkpointer=False is passed by default to create_agent()."""
         SubagentConfig = _setup_executor_module["SubagentConfig"]
         SubagentExecutor = _setup_executor_module["SubagentExecutor"]
         executor_module = _setup_executor_module["executor_module"]
@@ -133,7 +134,7 @@ class TestSubagentCheckpointerIsolation:
         monkeypatch.setattr(executor_module, "create_chat_model", fake_create_chat_model)
         monkeypatch.setattr(executor_module, "resolve_subagent_model_name", lambda config, parent, app_config=None: "test-model")
 
-        result = executor._create_agent()
+        result = asyncio.run(executor._create_agent())
 
         assert captured_kwargs.get("checkpointer") is False, f"Expected checkpointer=False in create_agent() kwargs, got: {captured_kwargs.get('checkpointer')!r}"
         assert result.checkpointer is False

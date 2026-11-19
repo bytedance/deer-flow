@@ -104,8 +104,9 @@ def register_policy() -> None:
         # GitHub webhooks have no synchronous human — ask_clarification
         # would dead-end the run.
         is_interactive=False,
+        interaction_mode="webhook",
         # Autonomous coder runs (clone -> edit -> test -> push -> PR)
-        # routinely need more than the 100 super-step interactive ceiling.
+        # routinely need more than 100 super-steps.
         # Per-agent overrides via GitHubAgentConfig.recursion_limit still
         # win (read in ChannelManager._resolve_run_params from msg.metadata).
         default_recursion_limit=250,
@@ -129,6 +130,15 @@ def register_policy() -> None:
         # still raised synchronously by ``start_run`` before the run is
         # accepted, so the busy-thread path is preserved.
         fire_and_forget=True,
+        # GitHub's ``send`` is log-only (agents post via ``gh`` themselves),
+        # so a busy-thread ``THREAD_BUSY_MESSAGE`` is otherwise invisible to
+        # the commenter — a concurrent comment is silently dropped from
+        # their point of view (issue #4121). Buffering + draining follow-ups
+        # once the busy run ends directly fixes that for the one channel
+        # where it is a real, routinely-triggered problem; other
+        # fire_and_forget channels keep the dataclass default (False) until
+        # they have the same log-only-send shape and opt in explicitly.
+        buffer_followups_on_busy=True,
     )
 
 

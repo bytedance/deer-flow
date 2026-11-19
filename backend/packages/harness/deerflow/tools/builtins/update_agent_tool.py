@@ -5,29 +5,40 @@ Bound to the lead agent only when ``runtime.context['agent_name']`` is set
 this tool, and the bootstrap flow continues to use ``setup_agent`` for the
 initial creation handshake.
 
-The tool writes back to ``{base_dir}/users/{user_id}/agents/{agent_name}/{config.yaml,SOUL.md}``
-so an agent created by one user is never visible to (or mutable by) another.
-Writes are staged into temp files first; both files are renamed into place only
-after both temp files are successfully written, so a partial failure cannot leave
-config.yaml updated while SOUL.md still holds stale content.
+The tool writes back through the configured agent store (file: per-user
+``config.yaml``/``SOUL.md``; db: the shared ``agents`` table) so an agent created
+by one user is never visible to (or mutable by) another.
+
+Cross-field write atomicity depends on the backend: the ``db`` store commits
+config and soul in a single transaction, so a partial failure never leaves one
+updated and the other stale. The ``file`` store stages both to temp files and
+commits them with two sequential ``os.replace`` calls (see
+``FileAgentStore._write``): each file is all-or-nothing, but a crash *between*
+the two replaces can leave a freshly-written config.yaml beside a stale SOUL.md
+(single-node, sub-millisecond window). The pre-store tool reported that partial
+window explicitly ("Partial update for agent 'X': ..."); routing through the
+store drops the *reporting* (a mid-replace crash now surfaces as the generic
+"Failed to update agent"). That is an intentional tradeoff — the stage-then-
+replace *safety* is preserved (no corruption, no leftover temp files), only the
+diagnostic is gone. If cross-file atomicity ever matters on ``file``, restore
+that reporting in ``FileAgentStore._write``.
 """
 
 from __future__ import annotations
 
 import logging
-import tempfile
-from pathlib import Path
 from typing import Annotated, Any
 
-import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
-from pydantic import BeforeValidator
+from pydantic import BaseModel, BeforeValidator
 
 from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
+from deerflow.persistence.agents import get_agent_store
+from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -43,39 +54,12 @@ _NULLISH_STRINGS = frozenset({"null", "none", "undefined"})
 # expose self-mutation over a webhook.
 _UNTRUSTED_CHANNELS: frozenset[str] = frozenset({"github"})
 
-
-def _stage_temp(path: Path, text: str) -> Path:
-    """Write ``text`` into a sibling temp file and return its path.
-
-    The caller is responsible for ``Path.replace``-ing the temp into the target
-    once every staged file is ready, or for unlinking it on failure.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = tempfile.NamedTemporaryFile(
-        mode="w",
-        dir=path.parent,
-        suffix=".tmp",
-        delete=False,
-        encoding="utf-8",
-    )
-    try:
-        fd.write(text)
-        fd.flush()
-        fd.close()
-        return Path(fd.name)
-    except BaseException:
-        fd.close()
-        Path(fd.name).unlink(missing_ok=True)
-        raise
-
-
-def _cleanup_temps(temps: list[Path]) -> None:
-    """Best-effort removal of staged temp files."""
-    for tmp in temps:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("Failed to clean up temp file %s", tmp, exc_info=True)
+_UI_OWNED_CONFIG_FIELDS: tuple[str, ...] = (
+    "model_settings",
+    "thinking_enabled",
+    "reasoning_effort",
+    "allowed_subagents",
+)
 
 
 def _is_nullish_string(value: object) -> bool:
@@ -112,6 +96,9 @@ def update_agent(
     entirely to keep the existing whitelist. Do not pass literal strings like
     ``"null"`` / ``"none"`` / ``"undefined"`` for unchanged fields; omit those
     fields instead.
+
+    Changing ``tool_groups`` to a list without ``knowledge`` also clears the
+    saved default knowledge selection, so subsequent turns remain usable.
 
     Args:
         soul: Optional full replacement SOUL.md content.
@@ -175,19 +162,16 @@ def update_agent(
     if model is not None and get_app_config().get_model_config(model) is None:
         return _err(f"Unknown model '{model}'. Pass a model name that exists in config.yaml's models section.")
 
-    paths = get_paths()
-    agent_dir = paths.user_agent_dir(user_id, agent_name)
-    legacy_dir = paths.agent_dir(agent_name)
-    # Require config.yaml, not bare directory existence — a per-user agent
-    # directory can exist containing only memory.json (written the first
-    # time this user chats with a legacy shared agent, before update_agent
-    # is ever called). Bare .exists() would miss that case and let this
-    # fall through to load_agent_config, which correctly resolves through
-    # to the legacy shared config via resolve_agent_dir, silently forking
-    # a brand-new config.yaml/SOUL.md into the memory-only directory
-    # instead of blocking (mirrors resolve_agent_dir's guard, see #3390).
-    if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
-        return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
+    # SQL definitions are already owner-scoped; the importer leaves their
+    # file-backed sources in place for rollback (#6743).
+    if isinstance(get_agent_store(), FileAgentStore):
+        paths = get_paths()
+        agent_dir = paths.user_agent_dir(user_id, agent_name)
+        legacy_dir = paths.agent_dir(agent_name)
+        # A memory-only user directory must not shadow the shared definition
+        # or allow a silent per-user fork (see #3390).
+        if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
+            return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
 
     try:
         existing_cfg = load_agent_config(agent_name, user_id=user_id)
@@ -227,70 +211,51 @@ def update_agent(
     if skills is not None and skills != existing_cfg.skills:
         updated_fields.append("skills")
 
+    # This tool intentionally does not expose these UI/API-owned fields as
+    # LLM-callable arguments, but it still rewrites config.yaml when any of its
+    # supported fields changes. Carry them forward explicitly so an agent
+    # refining its description/model/skills cannot erase model defaults or its
+    # server-enforced subagent policy.
+    for key in _UI_OWNED_CONFIG_FIELDS:
+        value = getattr(existing_cfg, key, None)
+        if value is None:
+            continue
+        if isinstance(value, BaseModel):
+            dumped = value.model_dump(exclude_none=True)
+            if dumped:
+                config_data[key] = dumped
+        else:
+            config_data[key] = value
+
     # Preserve every top-level AgentConfig field that this tool does not
     # expose as an argument (currently ``github:``, plus any future field
     # added to :class:`AgentConfig`). The same helper is used by the HTTP
-    # ``PATCH /api/agents/{name}`` route so the two surfaces stay in lockstep.
+    # ``PUT /api/agents/{name}`` route so the two surfaces stay in lockstep.
     # Without this, operators who hand-author a ``github:`` block on a custom
     # agent would silently lose it the next time the agent self-updates via
     # ``update_agent``.
-    preserved = preserve_non_managed_fields(existing_cfg)
+    preserved = preserve_non_managed_fields(existing_cfg, new_tool_groups=new_tool_groups)
     for key, value in preserved.items():
         config_data.setdefault(key, value)
 
+    if existing_cfg.knowledge_scope is not None and preserved.get("knowledge_scope") is None:
+        updated_fields.append("knowledge_scope")
+
     config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
+    if soul is not None:
+        updated_fields.append("soul")
 
-    # Stage every file we intend to rewrite into a temp sibling. Only after
-    # *all* temp files exist do we rename them into place — so a failure on
-    # SOUL.md cannot leave config.yaml already replaced.
-    pending: list[tuple[Path, Path]] = []
-    staged_temps: list[Path] = []
-
-    try:
-        agent_dir.mkdir(parents=True, exist_ok=True)
-
-        if config_changed:
-            yaml_text = yaml.dump(config_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            config_target = agent_dir / "config.yaml"
-            config_tmp = _stage_temp(config_target, yaml_text)
-            staged_temps.append(config_tmp)
-            pending.append((config_tmp, config_target))
-
-        if soul is not None:
-            soul_target = agent_dir / "SOUL.md"
-            soul_tmp = _stage_temp(soul_target, soul)
-            staged_temps.append(soul_tmp)
-            pending.append((soul_tmp, soul_target))
-            updated_fields.append("soul")
-
-        # Commit phase. ``Path.replace`` is atomic per file on POSIX/NTFS and
-        # the staging step above means any earlier failure has already been
-        # reported. The remaining failure mode is a crash *between* two
-        # ``replace`` calls, which is reported via the partial-write error
-        # branch below so the caller knows which files are now on disk.
-        committed: list[Path] = []
+    # Persist config (when a managed field changed) and/or soul through the
+    # store. The db backend commits both in one transaction; the file backend
+    # commits each atomically but sequentially (see this module's docstring).
+    # Nothing to write if the provided values all matched the existing config
+    # and no soul was supplied.
+    if config_changed or soul is not None:
         try:
-            for tmp, target in pending:
-                tmp.replace(target)
-                committed.append(target)
+            get_agent_store().update(agent_name, config_data if config_changed else None, soul, user_id=user_id)
         except Exception as e:
-            _cleanup_temps([t for t, _ in pending if t not in committed])
-            if committed:
-                logger.error(
-                    "[update_agent] Partial write for agent '%s' (user=%s): committed=%s, failed during rename: %s",
-                    agent_name,
-                    user_id,
-                    [p.name for p in committed],
-                    e,
-                    exc_info=True,
-                )
-                return _err(f"Partial update for agent '{agent_name}': {[p.name for p in committed]} were updated, but the rest failed ({e}). Re-run update_agent to retry the remaining fields.")
-            raise
-
-    except Exception as e:
-        _cleanup_temps(staged_temps)
-        logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
-        return _err(f"Failed to update agent '{agent_name}': {e}")
+            logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
+            return _err(f"Failed to update agent '{agent_name}': {e}")
 
     if not updated_fields:
         return Command(update={"messages": [ToolMessage(content=f"No changes applied to agent '{agent_name}'. The provided values matched the existing config.", tool_call_id=tool_call_id)]})

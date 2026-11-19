@@ -1,9 +1,11 @@
 """Unit tests for SafetyFinishReasonMiddleware."""
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.safety_termination_detectors import (
@@ -99,15 +101,117 @@ class TestTriggerCriteria:
         patched = result["messages"][0]
         assert patched.tool_calls == []
 
-    def test_content_filter_without_tool_calls_passes_through(self):
-        """issue scope: when there are no tool calls the partial text is a
-        legitimate final response and should not be rewritten."""
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("content", ["partial response", [{"type": "text", "text": "partial response"}]])
+    def test_content_filter_without_tool_calls_preserves_text_and_stamps_stop(self, invoke_async, content):
+        """Partial text stays visible, but downstream hooks must see the stop."""
+        mw = SafetyFinishReasonMiddleware()
+        message = _ai(content=content, response_metadata={"finish_reason": "content_filter"}, additional_kwargs={"reasoning": "original"})
+        message.id = "partial-safety-response"
+        runtime = _runtime()
+        state = {"messages": [message]}
+
+        result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        assert result is not None
+        patched = result["messages"][0]
+        assert patched.content == content
+        assert patched.id == message.id
+        assert patched.response_metadata == message.response_metadata
+        assert patched.additional_kwargs["reasoning"] == "original"
+        assert patched.additional_kwargs["safety_termination"]["suppressed_tool_call_count"] == 0
+        assert runtime.context["stop_reason"] == "safety_capped"
+        assert "safety_termination" not in message.additional_kwargs
+        assert message.content == content
+
+        next_runtime = _runtime()
+        second_state = {"messages": [patched]}
+        second = asyncio.run(mw.aafter_model(second_state, next_runtime)) if invoke_async else mw.after_model(second_state, next_runtime)
+        assert second is None
+        assert next_runtime.context["stop_reason"] == "safety_capped"
+
+    def test_content_filter_blank_content_no_tool_calls_backfills(self):
+        """#4393: an empty content_filter response with no tool calls would be
+        persisted empty and rejected by strict providers on the next request.
+        Backfill an explanation so the persisted message is non-empty."""
         mw = SafetyFinishReasonMiddleware()
         state = {
             "messages": [
                 _ai(
-                    content="partial response",
+                    content="",
                     response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+        result = mw._apply(state, _runtime())
+        assert result is not None
+        patched = result["messages"][0]
+        assert patched.tool_calls == []
+        assert isinstance(patched.content, str)
+        assert patched.content.strip()  # never persisted empty
+        assert "safety-related signal" in patched.content
+        assert "returned no content" in patched.content
+        # It must not claim tool calls were suppressed — none existed.
+        assert "were suppressed" not in patched.content
+        record = patched.additional_kwargs["safety_termination"]
+        assert record["suppressed_tool_call_count"] == 0
+        assert record["suppressed_tool_call_names"] == []
+
+    def test_content_filter_whitespace_content_no_tool_calls_backfills(self):
+        """Whitespace-only content is still blank to a strict provider."""
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    content="   \n  ",
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+        result = mw._apply(state, _runtime())
+        assert result is not None
+        patched = result["messages"][0]
+        assert patched.tool_calls == []
+        assert "returned no content" in patched.content
+
+    def test_content_filter_none_content_no_tool_calls_backfills(self):
+        """content=None is reachable via model_copy rewrites (which skip
+        validation) and must be treated as blank, not stringified to 'None'."""
+        mw = SafetyFinishReasonMiddleware()
+        none_content = _ai(response_metadata={"finish_reason": "content_filter"}).model_copy(update={"content": None})
+        assert none_content.content is None  # precondition for the regression
+        result = mw._apply({"messages": [none_content]}, _runtime())
+        assert result is not None
+        patched = result["messages"][0]
+        assert patched.tool_calls == []
+        assert isinstance(patched.content, str)
+        assert patched.content.strip()
+        assert "returned no content" in patched.content
+
+    def test_anthropic_refusal_blank_content_no_tool_calls_backfills(self):
+        """The empty-content backfill is detector-agnostic (#4393)."""
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    content="",
+                    response_metadata={"stop_reason": "refusal"},
+                )
+            ]
+        }
+        result = mw._apply(state, _runtime())
+        assert result is not None
+        assert result["messages"][0].content.strip()
+
+    def test_blank_content_no_tool_calls_without_safety_signal_passes_through(self):
+        """A blank response with no safety signal is out of scope: only a
+        detected safety termination triggers the backfill."""
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    content="",
+                    response_metadata={"finish_reason": "stop"},
                 )
             ]
         }
@@ -334,9 +438,30 @@ class TestMessageRewrite:
         assert patched.content[-1]["type"] == "text"
         assert "safety-related signal" in patched.content[-1]["text"]
 
+    def test_drops_suppressed_calls_provider_tool_use_blocks(self):
+        mw = SafetyFinishReasonMiddleware()
+        call = _write_call()
+        state = {
+            "messages": [
+                _ai(
+                    content=[
+                        {"type": "text", "text": "partial answer"},
+                        {"type": "tool_use", "id": call["id"], "name": call["name"], "input": call["args"]},
+                    ],
+                    tool_calls=[call],
+                    response_metadata={"stop_reason": "refusal"},
+                )
+            ]
+        }
+
+        patched = mw.after_model(state, _runtime())["messages"][0]
+
+        assert [block["type"] for block in patched.content] == ["text", "text"]
+        assert "safety-related signal" in patched.content[-1]["text"]
+
     def test_idempotent_on_already_cleared_message(self):
         # Re-running the middleware on a message we already cleared must not
-        # re-trigger (tool_calls is now empty → fast passthrough).
+        # re-trigger or replace the original suppression record.
         mw = SafetyFinishReasonMiddleware()
         state = {
             "messages": [
@@ -416,9 +541,9 @@ class TestDetectorWiring:
 class TestFromConfig:
     def test_default_config_uses_builtin_detectors(self):
         mw = SafetyFinishReasonMiddleware.from_config(SafetyFinishReasonConfig())
-        assert len(mw._detectors) == 3
+        assert len(mw._detectors) == 4
         names = {d.name for d in mw._detectors}
-        assert names == {"openai_compatible_content_filter", "anthropic_refusal", "gemini_safety"}
+        assert names == {"openai_compatible_content_filter", "openai_responses_content_filter", "anthropic_refusal", "gemini_safety"}
 
     def test_custom_detectors_loaded_via_reflection(self):
         cfg = SafetyFinishReasonConfig(
@@ -562,7 +687,7 @@ class TestAuditEvent:
         assert result is not None
         assert result["messages"][0].tool_calls == []
 
-    def test_journal_record_exception_does_not_break_run(self):
+    def test_journal_record_exception_warns_without_breaking_run(self, caplog):
         """Buggy journal must never propagate an exception into the agent loop."""
         journal = MagicMock()
         journal.record_middleware.side_effect = RuntimeError("db down")
@@ -576,9 +701,12 @@ class TestAuditEvent:
             ]
         }
         # Must not raise.
-        result = mw._apply(state, self._runtime_with_journal(journal))
+        with caplog.at_level("WARNING"):
+            result = mw._apply(state, self._runtime_with_journal(journal))
+
         assert result is not None
         assert result["messages"][0].tool_calls == []
+        assert "Failed to record middleware:safety_termination event" in caplog.text
 
     def test_no_record_when_passthrough(self):
         """When the middleware does NOT intervene, no audit event is written."""
@@ -599,14 +727,23 @@ class TestAuditEvent:
 class TestStreamEvent:
     def test_emits_event_when_writer_available(self, monkeypatch):
         captured: list = []
+        dispatched: list = []
 
         def fake_writer(payload):
             captured.append(payload)
+
+        def fake_emit_custom_event(payload, *, writer):
+            writer(payload)
+            dispatched.append(payload)
 
         # Patch get_stream_writer at the symbol-resolution site.
         import langgraph.config
 
         monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: fake_writer)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.safety_finish_reason_middleware.emit_custom_event",
+            fake_emit_custom_event,
+        )
 
         mw = SafetyFinishReasonMiddleware()
         state = {
@@ -628,6 +765,83 @@ class TestStreamEvent:
         assert payload["suppressed_tool_call_count"] == 1
         assert payload["suppressed_tool_call_names"] == ["write_file"]
         assert payload["thread_id"] == "t-stream"
+        assert dispatched == captured
+
+    @pytest.mark.anyio
+    async def test_async_hook_uses_async_event_dispatch(self, monkeypatch):
+        captured: list = []
+        dispatched: list = []
+
+        async def fake_emit_custom_event(payload, *, writer):
+            writer(payload)
+            dispatched.append(payload)
+
+        import langgraph.config
+
+        monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: captured.append)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.safety_finish_reason_middleware.aemit_custom_event",
+            fake_emit_custom_event,
+        )
+
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    tool_calls=[_write_call()],
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+
+        result = await mw.aafter_model(state, _runtime("t-async-stream"))
+
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+        assert dispatched == captured
+        assert [payload["type"] for payload in captured] == ["safety_termination"]
+        assert captured[0]["thread_id"] == "t-async-stream"
+
+    def test_sync_event_preserves_langgraph_control_flow(self, monkeypatch):
+        import langgraph.config
+
+        def interrupt_dispatch(*_args, **_kwargs):
+            raise GraphBubbleUp
+
+        monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: lambda _payload: None)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.safety_finish_reason_middleware.emit_custom_event",
+            interrupt_dispatch,
+        )
+
+        termination = SafetyTermination(
+            detector="test",
+            reason_field="finish_reason",
+            reason_value="content_filter",
+        )
+        with pytest.raises(GraphBubbleUp):
+            SafetyFinishReasonMiddleware()._emit_event(termination, ["write_file"], _runtime())
+
+    @pytest.mark.anyio
+    async def test_async_event_preserves_langgraph_control_flow(self, monkeypatch):
+        import langgraph.config
+
+        async def interrupt_dispatch(*_args, **_kwargs):
+            raise GraphBubbleUp
+
+        monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: lambda _payload: None)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.safety_finish_reason_middleware.aemit_custom_event",
+            interrupt_dispatch,
+        )
+
+        termination = SafetyTermination(
+            detector="test",
+            reason_field="finish_reason",
+            reason_value="content_filter",
+        )
+        with pytest.raises(GraphBubbleUp):
+            await SafetyFinishReasonMiddleware()._aemit_event(termination, ["write_file"], _runtime())
 
     def test_writer_unavailable_does_not_break(self, monkeypatch):
         import langgraph.config

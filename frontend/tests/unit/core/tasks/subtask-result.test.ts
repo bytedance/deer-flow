@@ -276,6 +276,19 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.status).toBe("in_progress");
   });
 
+  it.each(["constructor", "toString", "__proto__"])(
+    "keeps prototype-named unknown status %s in progress",
+    (status) => {
+      expect(
+        parseSubtaskResult("Task Succeeded. Result: misleading text", {
+          [SUBAGENT_STATUS_KEY]: status,
+          [SUBAGENT_RESULT_BRIEF_KEY]: "not a valid completed result",
+          [SUBAGENT_ERROR_KEY]: "not a valid failure",
+        }),
+      ).toEqual({ status: "in_progress" });
+    },
+  );
+
   it("structured status overrides misleading content", () => {
     const parsed = parseSubtaskResult("Task Succeeded. Result: this is a lie", {
       [SUBAGENT_STATUS_KEY]: "failed",
@@ -346,13 +359,16 @@ describe("parseSubtaskResult — shared contract fixture", () => {
   }
 
   for (const stopReason of CONTRACT.valid_stop_reason_values) {
-    it(`carries stop_reason through unchanged: ${stopReason}`, () => {
-      const parsed = parseSubtaskResult("ignored content", {
-        [SUBAGENT_STATUS_KEY]: "completed",
-        [SUBAGENT_RESULT_BRIEF_KEY]: "partial work",
-        [SUBAGENT_STOP_REASON_KEY]: stopReason,
-      });
-      expect(parsed.stopReason).toBe(stopReason);
-    });
+    it.each(["completed", "failed"])(
+      `carries stop_reason ${stopReason} through unchanged for %s`,
+      (status) => {
+        const parsed = parseSubtaskResult("ignored content", {
+          [SUBAGENT_STATUS_KEY]: status,
+          [SUBAGENT_RESULT_BRIEF_KEY]: "partial work",
+          [SUBAGENT_STOP_REASON_KEY]: stopReason,
+        });
+        expect(parsed).toMatchObject({ status, stopReason });
+      },
+    );
   }
 });

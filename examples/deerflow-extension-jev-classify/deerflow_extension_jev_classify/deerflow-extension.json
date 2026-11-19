@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "community.jev-classify",
+  "locales": {
+    "zh-CN": {
+      "title": "文本分类",
+      "description": "按给定类别为文本列表打标签，使用部署方配置的分类服务。",
+      "usage": [
+        {
+          "title": "提供文本和分类标准",
+          "description": "在对话中提供待分类的文本列表，说明各类别的含义和边界；也可上传表格并指出文本列。"
+        },
+        {
+          "title": "让 Agent 执行分类",
+          "description": "要求使用文本分类工具，检查返回标签；如需表格，让 Agent 将标签写回输出文件。"
+        }
+      ],
+      "requirements": [
+        "管理员已配置 Jev 或兼容聊天接口的分类服务；待分类文本会发送给该服务。"
+      ]
+    },
+    "en-US": {
+      "title": "Text classification",
+      "description": "Label a list of texts with supplied categories using the deployment-configured classification service.",
+      "usage": [
+        {
+          "title": "Provide texts and categories",
+          "description": "Give the Agent a list of texts and explain the categories, or upload a table and identify its text column."
+        },
+        {
+          "title": "Ask the Agent to classify",
+          "description": "Ask it to use the text classification tool and inspect the labels. For a table, ask it to write labels into an output file."
+        }
+      ],
+      "requirements": [
+        "An administrator must configure Jev or a compatible chat endpoint. Texts to classify are sent to that service."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-jev-classify#readme"
+}

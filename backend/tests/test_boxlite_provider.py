@@ -7,16 +7,28 @@ which need a live box.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
 import types
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.trace_context import get_current_trace_id, request_trace_context
+
+_LEGACY_COLLIDING_IDENTITIES = (
+    ("user-9721", "thread-9721"),
+    ("user-94361", "thread-94361"),
+)
 
 # ── Fake BoxLite SDK ──────────────────────────────────────────────────
 
@@ -41,6 +53,9 @@ class _FakeBox:
         # Health check: box.execute_command("echo ok") → exec("sh", "-lc", "echo ok")
         if len(argv) >= 3 and argv[0] == "sh" and argv[1] == "-lc" and argv[2] == "echo ok":
             return type("_FakeResult", (), {"stdout": "ok\n", "stderr": "", "exit_code": 0})()
+        if len(argv) >= 3 and argv[0] == "sh" and argv[1] == "-lc" and "__DF_SEARCH_STATUS__:" in argv[2]:
+            # A search that ran and found nothing (see sandbox/remote_search.py).
+            return type("_FakeResult", (), {"stdout": "\n__DF_SEARCH_STATUS__:1\n", "stderr": "", "exit_code": 0})()
         return _FakeResult()
 
     async def stop(self):
@@ -72,13 +87,7 @@ def _no_existing_boxlite_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep provider startup reconciliation isolated from the real SDK state."""
 
     class _EmptyRuntime:
-        def start(self):
-            return self
-
-        def stop(self):
-            pass
-
-        def list_info(self):
+        async def list_info(self):
             return []
 
     class _EmptyBoxlite:
@@ -86,7 +95,7 @@ def _no_existing_boxlite_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
         def default():
             return _EmptyRuntime()
 
-    monkeypatch.setattr("deerflow.community.boxlite.provider._import_sync_boxlite_runtime", lambda: _EmptyBoxlite)
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_boxlite_runtime", lambda: _EmptyBoxlite)
 
 
 def test_import_simplebox_missing_raises_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,6 +166,95 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert "ok" in output
     assert fake._exec_history[-1] == (("sh", "-lc", "echo ok"), None, 5)
     assert run_timeouts == [5]
+
+
+def test_execute_command_appends_exit_marker_when_failure_has_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LocalSandbox parity: a nonzero exit survives in the output text even
+    when the command produced output (acceptance-checklist evidence)."""
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+    monkeypatch.setattr(
+        box,
+        "_exec",
+        lambda *argv, **kwargs: types.SimpleNamespace(exit_code=1, stdout="5 passed, 1 error\n", stderr=""),
+    )
+
+    assert box.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
+def test_execute_command_bridge_timeout_appends_exit_marker() -> None:
+    """The real loop-bridge deadline produces exit code 124 (#6847)."""
+    from deerflow.community.boxlite.provider import _EventLoopThread
+
+    started, cancelled = threading.Event(), threading.Event()
+    terminal_failures = []
+
+    class SlowBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    loop_thread = _EventLoopThread()
+    box = BoxliteBox("box-id", box=SlowBox(), run=loop_thread.run, on_terminal_failure=lambda *args: terminal_failures.append(args))
+    try:
+        assert box.execute_command("sleep 9999", timeout=0.05) == "Error: command timed out\nExit Code: 124"
+        assert started.wait(1)
+        assert cancelled.wait(1), "bridge timeout must cancel its submitted coroutine"
+        assert terminal_failures == []
+    finally:
+        loop_thread.close()
+
+
+@pytest.mark.parametrize("error_message", [None, "execution timed out"])
+def test_execute_command_preserves_sdk_wait_failure_exit_code(error_message: str | None) -> None:
+    """SDK-returned failure results are distinct from bridge TimeoutError."""
+
+    class FailedBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(exit_code=-1, stdout="partial output", stderr="", error_message=error_message)
+
+    box = BoxliteBox("box-id", box=FailedBox(), run=_fake_run)
+    assert box.execute_command("sleep 9999", timeout=5) == "partial output\nExit Code: -1"
+
+
+def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+
+    def _fake_exec(*argv: str):
+        calls.append(argv)
+        return types.SimpleNamespace(
+            exit_code=0,
+            stdout="line 1\nline 2\nline 3\nline 4\nline 5",
+            stderr="",
+        )
+
+    monkeypatch.setattr(box, "_exec", _fake_exec)
+
+    assert box.read_file("/mnt/user-data/workspace/range.txt") == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
+    assert all(call == ("cat", "--", "/mnt/user-data/workspace/range.txt") for call in calls)
+
+
+def test_grep_always_prints_filename_for_single_file_paths() -> None:
+    fake = _FakeBox(name="box-id")
+    box = BoxliteBox("box-id", box=fake, run=_fake_run)
+
+    box.grep("/mnt/user-data/uploads/report.md", "needle")
+
+    grep_commands = [argv[0][2] for argv in fake._exec_history if argv[0][:2] == ("sh", "-lc") and "grep -r " in argv[0][2]]
+    assert grep_commands
+    assert "-H" in grep_commands[-1].split()
 
 
 def test_execute_command_invalidates_box_on_terminal_transport_error() -> None:
@@ -262,7 +360,7 @@ def test_sandbox_id_deterministic(monkeypatch):
     id1 = provider._sandbox_id("thread-1", "user-a")
     id2 = provider._sandbox_id("thread-1", "user-a")
     assert id1 == id2
-    assert len(id1) == 8
+    assert len(id1) == 16
 
 
 def test_sandbox_id_different_users(monkeypatch):
@@ -339,26 +437,34 @@ def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
         lambda: _stub_config(),
     )
     stopped: list[str] = []
+    commands = []
+    monkeypatch.setitem(sys.modules, "boxlite", types.SimpleNamespace(ExecResult=types.SimpleNamespace))
 
     class _NativeBox:
-        def stop(self):
+        async def exec(self, command, args=None, env=None, tty=False, user=None, timeout_secs=None, cwd=None):
+            commands.append((command, args, env, timeout_secs, threading.get_ident()))
+
+            async def stream(*values):
+                for value in values:
+                    yield value
+
+            async def wait():
+                return types.SimpleNamespace(exit_code=0, error_message=None)
+
+            return types.SimpleNamespace(stdout=lambda: stream("ok\n" if args[-1] == "echo ok" else "restored\n"), stderr=lambda: stream(), wait=wait)
+
+        async def stop(self):
             stopped.append("adopted")
 
     class _Runtime:
-        def start(self):
-            return self
-
-        def stop(self):
-            pass
-
-        def list_info(self):
+        async def list_info(self):
             return [
                 types.SimpleNamespace(name="deer-flow-boxlite-adopted"),
                 types.SimpleNamespace(name="unrelated-box"),
                 types.SimpleNamespace(name=None),
             ]
 
-        def get(self, name):
+        async def get(self, name):
             if name == "deer-flow-boxlite-adopted":
                 return _NativeBox()
             raise AssertionError(f"unexpected box lookup: {name}")
@@ -368,13 +474,19 @@ def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
         def default():
             return _Runtime()
 
-    monkeypatch.setattr("deerflow.community.boxlite.provider._import_sync_boxlite_runtime", lambda: _Boxlite)
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_boxlite_runtime", lambda: _Boxlite)
 
     provider = BoxliteProvider()
 
     assert list(provider._warm_pool) == ["adopted"]
     adopted_box = provider._warm_pool["adopted"][0]
     assert adopted_box.id == "adopted"
+    assert provider._reclaim_warm_pool("adopted", ("user", "thread")) == "adopted"
+    assert adopted_box.execute_command("echo restored", env={"KEY": "value"}, timeout=2) == "restored\n"
+    assert commands == [
+        ("sh", ["-lc", "echo ok"], None, 5, provider._loop._thread.ident),
+        ("sh", ["-lc", "echo restored"], [("KEY", "value")], 2, provider._loop._thread.ident),
+    ]
 
     provider.shutdown()
     assert stopped == ["adopted"]
@@ -437,6 +549,67 @@ def test_acquire_reclaims_from_warm_pool(monkeypatch):
     assert sid2 not in provider._warm_pool
 
 
+@pytest.mark.asyncio
+async def test_acquire_async_propagates_request_trace_context(monkeypatch):
+    """acquire_async must carry request ContextVars into the worker thread.
+
+    Regression test (#5089): the dedicated-executor bridge replaced the
+    inherited ``to_thread`` acquire (which copies contextvars). Without an
+    explicit ``copy_context`` the worker thread reads the trace id bound by
+    ``request_trace_context()`` as unset and logs ``trace_id=-``.
+    """
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    seen: list[str | None] = []
+    original = BoxliteProvider._acquire_scope_locked
+
+    def spy(self, key, sandbox_id):
+        # Runs inside the executor worker thread, under the copied context.
+        seen.append(get_current_trace_id())
+        return original(self, key, sandbox_id)
+
+    monkeypatch.setattr(BoxliteProvider, "_acquire_scope_locked", spy)
+
+    try:
+        with request_trace_context("trace-boxlite-5089"):
+            sid = await provider.acquire_async("thread-1", user_id="u1")
+        assert sid
+        assert seen == ["trace-boxlite-5089"]
+    finally:
+        # _fake_run uses asyncio.run, which cannot run inside this test's event
+        # loop thread; shut down on a worker thread so box close() completes.
+        await asyncio.to_thread(provider.shutdown)
+
+
+@pytest.mark.parametrize("value", [float("inf"), "1e999"])
+def test_sandbox_config_rejects_non_finite_health_check_skip_seconds(value):
+    """`ge=0` alone lets a non-finite skip window through.
+
+    `health_check_skip_seconds: 1e999` in config.yaml loads as the string
+    "1e999" and pydantic's float coercion turns it into inf; `ge=0` accepts
+    inf (inf >= 0). At the warm-reuse site the check `skip_seconds > 0 and
+    (now - released_at) < skip_seconds` then holds forever, so recently
+    released boxes are promoted without the health check permanently instead
+    of failing fast at config load. `allow_inf_nan=False` (as already set on
+    the sibling sandbox float fields) makes the config layer reject it.
+    """
+    with pytest.raises(ValidationError):
+        SandboxConfig(
+            use="deerflow.community.boxlite.provider:BoxliteProvider",
+            health_check_skip_seconds=value,
+        )
+
+
 def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
     """A configured skip window can reclaim recently released boxes without a ping."""
     monkeypatch.setattr(
@@ -460,7 +633,7 @@ def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
 
     monkeypatch.setattr(box, "execute_command", _fail_if_called)
 
-    reclaimed = provider._reclaim_warm_pool(sid)
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
     assert reclaimed == sid
     assert sid in provider._boxes
     assert sid not in provider._warm_pool
@@ -494,7 +667,7 @@ def test_recent_reclaim_validates_by_default(monkeypatch):
 
     monkeypatch.setattr(box, "execute_command", _record_health_check)
 
-    reclaimed = provider._reclaim_warm_pool(sid)
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
     assert reclaimed == sid
     assert calls == 1
     assert sid in provider._boxes
@@ -526,7 +699,7 @@ def test_default_recent_reclaim_drops_dead_warm_box(monkeypatch):
 
     monkeypatch.setattr(box, "execute_command", _dead_health_check)
 
-    reclaimed = provider._reclaim_warm_pool(sid)
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
     assert reclaimed is None
     assert sid not in provider._boxes
     assert sid not in provider._warm_pool
@@ -581,7 +754,7 @@ def test_adopted_warm_pool_box_still_health_checks(monkeypatch):
         _fake_run,
         default_env={},
     )
-    provider._warm_pool["adopted"] = (adopted, time.time())
+    provider._warm_pool["adopted"] = (adopted, time.monotonic())
     calls = 0
     original_execute = adopted.execute_command
 
@@ -592,7 +765,10 @@ def test_adopted_warm_pool_box_still_health_checks(monkeypatch):
 
     monkeypatch.setattr(adopted, "execute_command", _record_health_check)
 
-    reclaimed = provider._reclaim_warm_pool("adopted")
+    reclaimed = provider._reclaim_warm_pool(
+        "adopted",
+        ("some-user", "some-thread"),
+    )
     assert reclaimed == "adopted"
     assert calls == 1
     assert "adopted" in provider._boxes
@@ -831,7 +1007,9 @@ def test_reset_parks_running_resources_for_later_cleanup(monkeypatch):
     assert provider._warm_pool[sid_active][0] is active_box
     assert provider._warm_pool[sid_warm][0] is warm_box
     assert provider._thread_boxes == {}
-    assert provider._acquire_locks == {}
+    with pytest.raises(RuntimeError, match="closed"):
+        with provider._acquire_serializer.hold("k"):
+            pass
     assert not active_box._closed
     assert not warm_box._closed
     assert not provider._shutdown_called
@@ -869,8 +1047,8 @@ def test_reset_parked_resources_are_reaped_after_idle_timeout(monkeypatch):
 
     provider.reset()
 
-    provider._warm_pool[sid_active] = (active_box, time.time() - 9999)
-    provider._warm_pool[sid_warm] = (warm_box, time.time() - 9999)
+    provider._warm_pool[sid_active] = (active_box, time.monotonic() - 9999)
+    provider._warm_pool[sid_warm] = (warm_box, time.monotonic() - 9999)
     provider._reap_expired_warm(idle_timeout=1)
 
     assert provider._warm_pool == {}
@@ -906,7 +1084,7 @@ def test_idle_reaper_destroys_expired_warm_boxes(monkeypatch):
 
     # Backdate the warm-pool timestamp so it appears long-expired
     warm_box = provider._warm_pool[sid][0]
-    provider._warm_pool[sid] = (warm_box, time.time() - 9999)
+    provider._warm_pool[sid] = (warm_box, time.monotonic() - 9999)
 
     # Wait long enough for the reaper to detect and destroy it
     time.sleep(0.3)
@@ -948,10 +1126,10 @@ def test_replica_enforcement_evicts_oldest_warm(monkeypatch):
 
     # Make sid_a definitely older by backdating its timestamp
     box_a = provider._warm_pool[sid_a][0]
-    provider._warm_pool[sid_a] = (box_a, time.time() - 100)
+    provider._warm_pool[sid_a] = (box_a, time.monotonic() - 100)
     # Refresh sid_b's timestamp so it's newer
     box_b = provider._warm_pool[sid_b][0]
-    provider._warm_pool[sid_b] = (box_b, time.time())
+    provider._warm_pool[sid_b] = (box_b, time.monotonic())
 
     # Acquiring a third thread triggers replica enforcement:
     # warm pool count (2) >= replicas (2) → evict oldest (sid_a)
@@ -1000,6 +1178,185 @@ def test_replica_enforcement_counts_active_and_warm(monkeypatch):
 # ── Task 8: Shutdown and reset including warm pool ────────────────────
 
 
+@pytest.mark.parametrize("thread_id", [None, "thread-late"])
+def test_shutdown_rejects_and_closes_box_created_by_inflight_acquire(monkeypatch, thread_id):
+    monkeypatch.setattr("deerflow.community.boxlite.provider.get_app_config", lambda: _stub_config({"idle_timeout": 0}))
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_simplebox", lambda: _FakeBox)
+    provider = BoxliteProvider()
+    created = threading.Event()
+    resume_create = threading.Event()
+    shutdown_started = threading.Event()
+    boxes = []
+    acquired = []
+    acquire_errors = []
+    shutdown_errors = []
+    closed_before_loop = []
+    original_create = provider._create_box
+    original_stop = provider._stop_idle_checker
+    original_close_loop = provider._loop.close
+
+    def paused_create(sandbox_id):
+        box = original_create(sandbox_id)
+        boxes.append(box)
+        created.set()
+        assert resume_create.wait(10)
+        return box
+
+    def signal_shutdown():
+        original_stop()
+        shutdown_started.set()
+
+    def close_loop():
+        closed_before_loop.append(boxes[0]._box._stopped)
+        original_close_loop()
+
+    def acquire():
+        try:
+            acquired.append(provider.acquire(thread_id, user_id="u1"))
+        except Exception as error:
+            acquire_errors.append(error)
+
+    def shutdown():
+        try:
+            provider.shutdown()
+        except Exception as error:
+            shutdown_errors.append(error)
+
+    monkeypatch.setattr(provider, "_create_box", paused_create)
+    monkeypatch.setattr(provider, "_stop_idle_checker", signal_shutdown)
+    monkeypatch.setattr(provider._loop, "close", close_loop)
+    acquirer = threading.Thread(target=acquire)
+    closer = threading.Thread(target=shutdown)
+    try:
+        acquirer.start()
+        assert created.wait(5)
+        closer.start()
+        assert shutdown_started.wait(5)
+        resume_create.set()
+        acquirer.join(5)
+        closer.join(5)
+        assert not acquirer.is_alive()
+        assert not closer.is_alive()
+        assert acquired == []
+        assert len(acquire_errors) == 1
+        assert isinstance(acquire_errors[0], RuntimeError)
+        assert "shutting down" in str(acquire_errors[0])
+        assert shutdown_errors == []
+        assert boxes[0].is_closed
+        assert boxes[0]._box._stopped
+        assert closed_before_loop == [True]
+        assert provider._boxes == {}
+        assert provider._thread_boxes == {}
+        assert provider._active_box_identity == {}
+        assert provider._warm_pool == {}
+        assert provider._loop._loop.is_closed()
+        provider.shutdown()
+        assert closed_before_loop == [True]
+    finally:
+        resume_create.set()
+        acquirer.join(5)
+        if closer.ident is not None:
+            closer.join(5)
+        provider.shutdown()
+
+
+def test_shutdown_acquire_drain_timeout_keeps_resources_owned_for_retry(monkeypatch):
+    monkeypatch.setattr("deerflow.community.boxlite.provider.get_app_config", lambda: _stub_config({"idle_timeout": 0}))
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_simplebox", lambda: _FakeBox)
+    provider = BoxliteProvider()
+    existing_id = provider.acquire("thread-existing", user_id="u1")
+    existing_box = provider.get(existing_id)
+    created = threading.Event()
+    resume_create = threading.Event()
+    acquired = []
+    errors = []
+    original_create = provider._create_box
+
+    def paused_create(sandbox_id):
+        box = original_create(sandbox_id)
+        created.set()
+        assert resume_create.wait(10)
+        return box
+
+    def acquire():
+        try:
+            acquired.append(provider.acquire("thread-late", user_id="u1"))
+        except Exception as error:
+            errors.append(error)
+
+    monkeypatch.setattr(provider, "_create_box", paused_create)
+    acquirer = threading.Thread(target=acquire)
+    try:
+        acquirer.start()
+        assert created.wait(5)
+        with monkeypatch.context() as timeout:
+            timeout.setattr(threading.Condition, "wait_for", lambda self, predicate, timeout=None: False)
+            with pytest.raises(RuntimeError, match="in-flight acquisitions"):
+                provider.shutdown()
+        assert not provider._shutdown_called
+        assert provider.get(existing_id) is existing_box
+        assert not existing_box.is_closed
+        assert provider._loop._loop.is_running()
+        resume_create.set()
+        acquirer.join(5)
+        assert not acquirer.is_alive()
+        assert errors == []
+        assert len(acquired) == 1
+        late_box = provider.get(acquired[0])
+        assert late_box is not None
+        provider.shutdown()
+        assert existing_box._box._stopped
+        assert late_box._box._stopped
+        assert provider._boxes == {}
+        assert provider._loop._loop.is_closed()
+    finally:
+        resume_create.set()
+        acquirer.join(5)
+        provider.shutdown()
+
+
+def test_shutdown_retries_only_private_loop_cleanup_after_join_timeout(monkeypatch):
+    from deerflow.community.boxlite.provider import _BoxliteLoopShutdownTimeout
+
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"idle_timeout": 0}),
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.close()
+
+    class RetryLoop:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise _BoxliteLoopShutdownTimeout("BoxLite event-loop thread is still running after stop timeout")
+
+    retry_loop = RetryLoop()
+    provider._loop = retry_loop
+
+    with pytest.raises(_BoxliteLoopShutdownTimeout, match="still running"):
+        provider.shutdown()
+
+    assert provider._shutdown_called is True
+    assert provider._loop_cleanup_pending is True
+    assert retry_loop.close_calls == 1
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        provider.acquire()
+
+    provider.shutdown()
+
+    assert provider._loop_cleanup_pending is False
+    assert retry_loop.close_calls == 2
+
+    provider.shutdown()
+    assert retry_loop.close_calls == 2
+
+
 def test_shutdown_stops_idle_reaper_and_destroys_all_boxes(monkeypatch):
     """shutdown stops the idle reaper thread and destroys all active + warm boxes."""
     monkeypatch.setattr(
@@ -1044,3 +1401,457 @@ def test_shutdown_stops_idle_reaper_and_destroys_all_boxes(monkeypatch):
     assert len(provider._boxes) == 0
     assert len(provider._warm_pool) == 0
     assert len(provider._thread_boxes) == 0
+
+
+def test_wider_id_separates_known_legacy_collision():
+    identity_a, identity_b = _LEGACY_COLLIDING_IDENTITIES
+    user_a, thread_a = identity_a
+    user_b, thread_b = identity_b
+
+    old_a = hashlib.sha256(f"{user_a}:{thread_a}".encode()).hexdigest()[:8]
+    old_b = hashlib.sha256(f"{user_b}:{thread_b}".encode()).hexdigest()[:8]
+
+    assert old_a == old_b
+    assert BoxliteProvider._sandbox_id(thread_a, user_a) != BoxliteProvider._sandbox_id(
+        thread_b,
+        user_b,
+    )
+
+
+def test_forced_collision_never_overwrites_active_tenant(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+    monkeypatch.setattr(
+        BoxliteProvider,
+        "_sandbox_id",
+        staticmethod(lambda thread_id, user_id: "deadbeefdeadbeef"),
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sandbox_id = provider.acquire("thread-a", user_id="user-a")
+    box_a = provider.get(sandbox_id)
+    provider.release(sandbox_id)
+
+    assert box_a is not None
+    assert sandbox_id in provider._warm_pool
+
+    with pytest.raises(RuntimeError, match="Sandbox ID collision"):
+        provider.acquire("thread-b", user_id="user-b")
+
+    assert provider._warm_pool[sandbox_id][0] is box_a
+    assert not box_a.is_closed
+    assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
+    assert provider.get(sandbox_id) is box_a
+    provider.shutdown()
+
+
+def test_late_same_tenant_collision_reuses_active_box(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+
+    provider = BoxliteProvider()
+    sandbox_id = "deadbeefdeadbeef"
+    key = ("user-a", "thread-a")
+    active = BoxliteBox(
+        sandbox_id,
+        _FakeBox(name=f"deer-flow-boxlite-{sandbox_id}"),
+        _fake_run,
+        default_env={},
+    )
+    duplicate = BoxliteBox(
+        sandbox_id,
+        _FakeBox(name=f"deer-flow-boxlite-{sandbox_id}"),
+        _fake_run,
+        default_env={},
+    )
+
+    monkeypatch.setattr(
+        BoxliteProvider,
+        "_sandbox_id",
+        staticmethod(lambda thread_id, user_id: sandbox_id),
+    )
+
+    def _create_box_with_late_registration(_sandbox_id):
+        with provider._lock:
+            provider._boxes[sandbox_id] = active
+            provider._active_box_identity[sandbox_id] = key
+        return duplicate
+
+    monkeypatch.setattr(provider, "_create_box", _create_box_with_late_registration)
+
+    assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
+    assert duplicate.is_closed
+    assert provider.get(sandbox_id) is active
+    assert provider._thread_boxes[key] == sandbox_id
+    provider.shutdown()
+
+
+def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+
+    provider = BoxliteProvider()
+    stale = BoxliteBox(
+        "shared-id",
+        _FakeBox(name="deer-flow-boxlite-shared-id"),
+        _fake_run,
+        default_env={},
+    )
+    replacement = BoxliteBox(
+        "shared-id",
+        _FakeBox(name="deer-flow-boxlite-shared-id"),
+        _fake_run,
+        default_env={},
+    )
+    provider._warm_pool["shared-id"] = (stale, time.monotonic())
+    provider._warm_pool_identity["shared-id"] = ("user-a", "thread-a")
+
+    def _swap_during_health_check(*args, **kwargs):
+        with provider._lock:
+            provider._warm_pool["shared-id"] = (replacement, time.monotonic())
+            provider._warm_pool_identity["shared-id"] = (
+                "user-b",
+                "thread-b",
+            )
+        return "not healthy"
+
+    monkeypatch.setattr(stale, "execute_command", _swap_during_health_check)
+
+    with pytest.raises(RuntimeError, match="Sandbox ID collision"):
+        provider._reclaim_warm_pool(
+            "shared-id",
+            ("user-a", "thread-a"),
+        )
+    assert provider._warm_pool["shared-id"][0] is replacement
+    assert provider._warm_pool_identity["shared-id"] == (
+        "user-b",
+        "thread-b",
+    )
+    assert not replacement.is_closed
+    provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+
+
+def test_sandbox_id_none_user_quirk_pinned():
+    """BoxLite passes user_id through raw; None renders as the literal "None".
+
+    Quirk pinned per RFC #4741 §2.2 (its _thread_key uses "" instead, so the
+    two disagree). NOT fixed here — unifying the resolution is a separate
+    behavior-changing decision with its own follow-up issue.
+    """
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", None) == derive_sandbox_scope_token(user_id="None", thread_id="t-1")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            marker = "__DF_SEARCH_STATUS__" if "__DF_SEARCH_STATUS__:" in argv[2] else "__DF_FIND_STATUS__"
+            return types.SimpleNamespace(stdout=f"/mnt/user-data/workspace/notes.txt \n\n{marker}:0\n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace/notes.txt "]
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False
+
+
+@pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
+def test_list_dir_classifies_empty_failure(marker, error) -> None:
+    class _EmptyBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
+
+    box = BoxliteBox("box-id", box=_EmptyBox(), run=_fake_run)
+
+    with pytest.raises(error) as exc:
+        box.list_dir("/mnt/user-data/workspace")
+    assert type(exc.value) is error
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # 127 (no binary) must not look like a missing path.
+    class _MissingBinaryBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="", stderr="", exit_code=127)
+
+    box = BoxliteBox("box-id", box=_MissingBinaryBox(), run=_fake_run)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_uses_find_H_to_dereference_start_point() -> None:
+    captured: list[tuple] = []
+
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            captured.append(argv)
+            return types.SimpleNamespace(stdout="/mnt/user-data/workspace\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace"]
+    assert any(len(argv) >= 3 and "find -H " in str(argv[2]) for argv in captured)
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _rs_box(tmp_path, monkeypatch, failing: str | None = None) -> BoxliteBox:
+    box = BoxliteBox("box-id", box=_FakeBox(name="box-id"), run=_fake_run)
+    shell_env = _rs_env(tmp_path, failing)
+
+    def sh(script: str, env=None, timeout=None):
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=shell_env, check=False)
+        return types.SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+
+    monkeypatch.setattr(box, "_sh", sh)
+    return box
+
+
+def _rs_search(box, op: str, root: str):
+    return box.grep(root, "needle") if op == "grep" else box.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, monkeypatch, op) -> None:
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_box(tmp_path, monkeypatch), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, monkeypatch, op, binary) -> None:
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_box(tmp_path, monkeypatch, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeypatch) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, _ = box.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert box.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = box.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        matches, reported = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated
+
+
+@_RS_POSIX
+def test_grep_glob_keeps_its_directory_prefix(tmp_path, monkeypatch) -> None:
+    # grep has no portable --include, so the glob is applied in Python. Matching
+    # only its basename broadened "src/*.js" to every *.js in the tree; the scope
+    # must follow the same relative-to-root semantics as glob() (Tenki, E2B).
+    for rel in ("src/a.js", "src/deep/b.js", "vendor/c.js"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("const needle = 1;\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    def grep_scope(glob: str) -> list[str]:
+        matches, _ = box.grep(str(tmp_path), "needle", glob=glob)
+        return sorted(os.path.relpath(m.path, tmp_path) for m in matches)
+
+    def glob_scope(glob: str) -> list[str]:
+        found, _ = box.glob(str(tmp_path), glob)
+        return sorted(os.path.relpath(path, tmp_path) for path in found)
+
+    assert grep_scope("src/*.js") == ["src/a.js"]
+    for glob in ("src/*.js", "src/**/*.js", "**/*.js", "*.js"):
+        assert grep_scope(glob) == glob_scope(glob), glob
+
+
+@_RS_POSIX
+def test_grep_single_file_path_with_matching_glob(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("needle here\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, truncated = box.grep(str(target), "needle", glob="*.txt")
+
+    assert [m.path for m in matches] == [str(target)]
+    assert truncated is False
+    assert box.grep(str(target), "needle", glob="*.md") == ([], False)
+
+
+def test_event_loop_thread_close_rejects_live_thread_after_timeout() -> None:
+    from deerflow.community.boxlite.provider import (
+        _BoxliteLoopShutdownTimeout,
+        _EventLoopThread,
+    )
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.running = True
+            self.closed = False
+            self.stop_calls = 0
+            self.close_calls = 0
+
+        def is_closed(self) -> bool:
+            return self.closed
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def call_soon_threadsafe(self, callback) -> None:
+            callback()
+
+        def _write_to_self(self) -> None:
+            return None
+
+        def is_running(self) -> bool:
+            return self.running
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self.closed = True
+
+    class JoinControlledThread:
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_timeout: float | None = None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeout = timeout
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    loop_thread = _EventLoopThread.__new__(_EventLoopThread)
+    loop_thread._loop = FakeLoop()
+    loop_thread._thread = JoinControlledThread()
+
+    with pytest.raises(_BoxliteLoopShutdownTimeout, match="still running"):
+        loop_thread.close()
+
+    assert loop_thread._thread.join_timeout == 5
+    assert loop_thread._loop.close_calls == 0
+
+    loop_thread._thread.alive = False
+    loop_thread._loop.running = False
+    loop_thread.close()
+
+    assert loop_thread._loop.closed is True
+    assert loop_thread._loop.close_calls == 1
+
+
+def test_event_loop_thread_timeout_cancels_submitted_coroutine() -> None:
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    from deerflow.community.boxlite.provider import _EventLoopThread
+
+    loop_thread = _EventLoopThread()
+    started = threading.Event()
+    cancelled = threading.Event()
+    finished = threading.Event()
+    release_holder: dict[str, asyncio.Event] = {}
+
+    async def blocking_operation() -> None:
+        release = asyncio.Event()
+        release_holder["event"] = release
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            finished.set()
+
+    try:
+        with pytest.raises(FutureTimeoutError):
+            loop_thread.run(blocking_operation(), timeout=0.05)
+
+        assert started.wait(1.0)
+        assert cancelled.wait(1.0), "timed-out BoxLite coroutine kept running on the private loop"
+    finally:
+        release = release_holder.get("event")
+        if release is not None and loop_thread._loop is not None:
+            loop_thread._loop.call_soon_threadsafe(release.set)
+        finished.wait(1.0)
+        loop_thread.close()

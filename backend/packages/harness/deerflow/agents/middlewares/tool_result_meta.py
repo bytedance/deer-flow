@@ -8,84 +8,109 @@ Every tool result that passes through ToolErrorHandlingMiddleware gets a
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform, read_tool_transforms
+from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
+
 TOOL_META_KEY = "deerflow_tool_meta"
+PROGRESS_GUARD_ERROR_TYPE = "blocked_by_progress_guard"
+
+ToolResultStatus = Literal["success", "error", "partial_success"]
+RecommendedNextAction = Literal["continue", "rewrite_query", "try_alternative", "summarize", "stop"]
+TOOL_RESULT_STATUSES = frozenset(get_args(ToolResultStatus)) | {"unknown"}
+TOOL_RESULT_NEXT_ACTIONS = frozenset(get_args(RecommendedNextAction)) | {"unknown"}
 
 _ERROR_PREFIX = "Error:"
-_PARTIAL_MARKERS = (
-    "partial results",
-    "limited results",
-    "truncated",
-    "results may be incomplete",
-    # Tools that return status="success" with a no-results body (instead of status="error")
-    # must still be caught by stagnation detection so the model is prompted to try a different query.
-    "no results found",
-    "no content found",
-    "no images found",
-)
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResultMeta:
-    status: Literal["success", "error", "partial_success"]
+    status: ToolResultStatus
     error_type: str | None
     recoverable_by_model: bool
-    recommended_next_action: Literal["continue", "rewrite_query", "try_alternative", "summarize", "stop"]
+    recommended_next_action: RecommendedNextAction
     source: Literal["exception", "tool_return", "content_analysis", "progress_middleware"]
 
-
-_ERROR_RULES: list[tuple[list[str], dict[str, object]]] = [
-    (
-        ["401", "403", "unauthorized", "authentication", "invalid api key"],
-        {"error_type": "auth", "recoverable_by_model": False, "recommended_next_action": "stop"},
-    ),
-    (
-        ["rate limit", "rate limited", "rate_limit"],
-        {"error_type": "rate_limited", "recoverable_by_model": False, "recommended_next_action": "summarize"},
-    ),
-    (
-        ["timeout", "timed out", "connection", "network error", "temporarily unavailable"],
-        {"error_type": "transient", "recoverable_by_model": False, "recommended_next_action": "try_alternative"},
-    ),
-    (
-        ["not configured", "not installed", "missing required", "disabled", "no api key"],
-        {"error_type": "config", "recoverable_by_model": False, "recommended_next_action": "stop"},
-    ),
-    (
-        ["permission denied", "access denied", "path traversal", "forbidden"],
-        {"error_type": "permission", "recoverable_by_model": True, "recommended_next_action": "try_alternative"},
-    ),
-    (
-        ["no results found", "no content found", "no images found", "no results"],
-        {"error_type": "no_results", "recoverable_by_model": True, "recommended_next_action": "rewrite_query"},
-    ),
-    (
-        ["not found", "no such file", "does not exist", "404"],
-        {"error_type": "not_found", "recoverable_by_model": True, "recommended_next_action": "rewrite_query"},
-    ),
-    (
-        ["unexpected error", "internal error", "500"],
-        {"error_type": "internal", "recoverable_by_model": False, "recommended_next_action": "stop"},
-    ),
-]
 
 _UNKNOWN_ERROR: dict[str, object] = {
     "error_type": "unknown",
     "recoverable_by_model": True,
     "recommended_next_action": "try_alternative",
 }
+TOOL_RESULT_ERROR_TYPES = frozenset({"auth", "rate_limited", "transient", "config", "permission", "no_results", "not_found", "internal", "unknown", PROGRESS_GUARD_ERROR_TYPE})
 
-# Pre-compiled at module load from _ERROR_RULES. Anchoring bare numeric codes (401, 403, 404,
-# 500) to word boundaries prevents substring hits on unrelated numbers like "took 500ms".
-# Computed here (after _ERROR_RULES) so the set is authoritative and thread-safe — no lazy
-# writes on the hot classification path.
-_NUMERIC_KW_RE: dict[str, re.Pattern[str]] = {kw: re.compile(rf"\b{kw}\b") for rule_keywords, _ in _ERROR_RULES for kw in rule_keywords if kw.isdigit()}
+
+class _ModelToolResultText(str):
+    """Request-local encoding marker; copied or persisted text is never trusted."""
+
+
+def tool_result_for_model(message: ToolMessage) -> ToolMessage:
+    """Expose reported execution status separately from textual result data.
+
+    Provider serializers drop additional_kwargs (and often ToolMessage.status).
+    Project only validated status/source fields, never arbitrary metadata or
+    artifacts. Keep the original message for checkpoints, UI and receipt hashes.
+    Legacy content-analysis stamps and native multimodal blocks pass through.
+    """
+    if not isinstance(message.content, str) or isinstance(message.content, _ModelToolResultText):
+        return message
+    meta = (message.additional_kwargs or {}).get(TOOL_META_KEY)
+    if not isinstance(meta, dict):
+        return message
+    status, source = meta.get("status"), meta.get("source")
+    if not isinstance(status, str) or status not in get_args(ToolResultStatus):
+        return message
+    if not isinstance(source, str) or source not in {"tool_return", "exception", "progress_middleware"}:
+        return message
+    envelope = {TOOL_META_KEY: {"status": status, "source": source}, "content": message.content}
+    # A successful invocation can subsequently have its visible text shortened
+    # by a budget wrapper. Expose that fact separately from execution status.
+    transforms = [entry["kind"] for entry in read_tool_transforms(message) if entry["kind"] in {"truncated", "externalized"}]
+    if transforms:
+        envelope["content_transforms"] = list(dict.fromkeys(transforms))
+    content = _ModelToolResultText(json.dumps(envelope, ensure_ascii=False))
+    kwargs = dict(message.additional_kwargs or {})
+    append_tool_transform(kwargs, "structured_tool_result", by="ToolErrorHandlingMiddleware")
+    return message.model_copy(update={"content": content, "additional_kwargs": kwargs})
+
+
+def _http_error_category(status: object) -> str | None:
+    if not isinstance(status, int) or isinstance(status, bool) or not 400 <= status <= 599:
+        return None
+    if status in (401, 403):
+        return "auth"
+    if status == 429:
+        return "rate_limited"
+    if status in (408, 502, 503, 504):
+        return "transient"
+    if status == 404:
+        return "not_found"
+    if status >= 500:
+        return "internal"
+    return "unknown"
+
+
+def classify_exception(exc: BaseException | str) -> dict[str, object]:
+    """Classify actual exception types and HTTP status attributes, never prose."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    category = _http_error_category(status)
+    if category is None:
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            category = "transient"
+        elif isinstance(exc, PermissionError):
+            category = "permission"
+        elif isinstance(exc, FileNotFoundError):
+            category = "not_found"
+    # A failed request does not establish permanent tool unavailability.
+    return {**_UNKNOWN_ERROR, "error_type": category or "unknown"}
+
 
 _SEMANTIC_ZERO_ERROR_STRINGS: frozenset[str] = frozenset({"none", "null", "false", "no", "ok", "success", "n/a", ""})
 
@@ -101,32 +126,16 @@ def _extract_json_error_text(content: str) -> str | None:
     """
     try:
         data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return None
     error = data.get("error") if isinstance(data, dict) else None
     if not error:
         return None
     if isinstance(error, str) and error.lower().strip() in _SEMANTIC_ZERO_ERROR_STRINGS:
         return None
-    # Serialize non-string values to JSON so _classify_error_text sees a predictable
-    # format (e.g. {"error": 404} → "404", {"error": [...]} → "[...]") instead of
-    # Python repr which can spuriously match keyword rules like "missing required".
+    # Preserve the error payload in a predictable JSON representation. Its prose
+    # is diagnostic context, not evidence for a category or recovery decision.
     return error if isinstance(error, str) else json.dumps(error)
-
-
-def _match_keyword(kw: str, lower: str) -> bool:
-    """Match a keyword against lowercased text, using word boundaries for numeric codes."""
-    if kw.isdigit():
-        return bool(_NUMERIC_KW_RE[kw].search(lower))
-    return kw in lower
-
-
-def _classify_error_text(text: str) -> dict[str, object]:
-    lower = text.lower()
-    for keywords, attrs in _ERROR_RULES:
-        if any(_match_keyword(kw, lower) for kw in keywords):
-            return {**attrs}
-    return {**_UNKNOWN_ERROR}
 
 
 def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue") -> dict[str, object]:
@@ -139,65 +148,65 @@ def _make_meta(*, status: str, source: str, error_type: str | None = None, recov
     }
 
 
-def stamp_exception_meta(msg: ToolMessage, exc_info: str) -> ToolMessage:
+def stamp_exception_meta(msg: ToolMessage, exc_info: BaseException | str) -> ToolMessage:
     """Stamp deerflow_tool_meta with source='exception' onto an exception-derived ToolMessage.
 
     Unlike normalize_tool_message (which preserves existing stamps), this function always
     overwrites any pre-existing TOOL_META_KEY entry.  Exception-derived classification is
     more authoritative than a tool's own return-time stamp.
     """
-    attrs = _classify_error_text(exc_info)
+    attrs = classify_exception(exc_info)
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **attrs)
     msg.additional_kwargs = updated_kwargs
     return msg
 
 
+# Structured task/subagent failures (see subagents/status_contract.py). These
+# producers put authoritative status in additional_kwargs["subagent_status"] while
+# leaving ToolMessage.status at LangChain's default "success" and using display
+# text that does not start with "Error:" — so content heuristics alone mis-label
+# them as success. Honor the structured field before any content analysis.
+_SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "cancelled", "timed_out", "polling_timed_out"})
+
+
 def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
-    """Attach deerflow_tool_meta to a ToolMessage if not already present."""
+    """Attach tool status, correcting legacy bash analysis that missed an exit."""
+    content = msg.content if isinstance(msg.content, str) else ""
+    bash_status = bash_exit_status(content) if msg.name in BASH_TOOL_NAMES else None
+    failed_bash = bash_status is not None and bash_status[0] == "error"
     existing = (msg.additional_kwargs or {}).get(TOOL_META_KEY)
     if existing is not None:
-        return msg
+        # Explicit producer stamps remain authoritative. Older checkpoints can
+        # contain generic analysis success for a provider-reported failed exit.
+        if not (failed_bash and isinstance(existing, dict) and existing.get("source") == "content_analysis" and existing.get("status") == "success"):
+            return msg
 
-    content = msg.content if isinstance(msg.content, str) else ""
-    # Pre-compute once; reused by the partial-success marker check below to avoid calling
-    # content.lower() once per _PARTIAL_MARKERS entry inside the generator.
-    content_lower = content.lower()
-
-    # Non-standard error: tool returned status="error" without the "Error:" prefix convention.
-    # (Actual exceptions from ToolErrorHandlingMiddleware are pre-stamped by stamp_exception_meta
-    # and exit early above — they never reach this branch.)
-    # Try JSON extraction first so classification uses only the "error" field value, not
-    # keywords that appear incidentally in other JSON fields (e.g. "query").
-    if msg.status == "error" and not content.startswith(_ERROR_PREFIX):
-        json_error = _extract_json_error_text(content)
-        if json_error is not None:
-            attrs = _classify_error_text(json_error)
-        else:
-            # Determine whether content is a JSON object that simply has no 'error' key.
-            # If so, do NOT classify from the raw JSON string — incidental field values
-            # (e.g. {"user_id": 401}) would spuriously match keyword rules and hard-block
-            # the tool.  Classify raw text only when the content is not valid JSON.
-            try:
-                is_json_dict = isinstance(json.loads(content), dict)
-            except (json.JSONDecodeError, ValueError):
-                is_json_dict = False
-            attrs = {**_UNKNOWN_ERROR} if is_json_dict else _classify_error_text(content)
+    kwargs = msg.additional_kwargs or {}
+    subagent_status = kwargs.get("subagent_status")
+    artifact = msg.artifact if isinstance(msg.artifact, dict) else {}
+    response = artifact.get("deerflow_http_response")
+    category = _http_error_category(response.get("status_code")) if isinstance(response, dict) else None
+    # Producer status and native exit markers describe execution. Documents do not.
+    if isinstance(subagent_status, str) and subagent_status in _SUBAGENT_FAILURE_STATUSES:
+        attrs = {**_UNKNOWN_ERROR}
+        if subagent_status in {"timed_out", "polling_timed_out"}:
+            attrs["error_type"] = "transient"
         meta = _make_meta(status="error", source="tool_return", **attrs)
+    elif category is not None:
+        meta = _make_meta(status="error", source="tool_return", **{**_UNKNOWN_ERROR, "error_type": category})
+    elif msg.status == "error":
+        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
     elif content.startswith(_ERROR_PREFIX):
-        attrs = _classify_error_text(content[len(_ERROR_PREFIX) :])
-        meta = _make_meta(status="error", source="tool_return", **attrs)
-    elif (json_error := _extract_json_error_text(content)) is not None:
-        attrs = _classify_error_text(json_error)
-        meta = _make_meta(status="error", source="tool_return", **attrs)
-    elif any(m in content_lower for m in _PARTIAL_MARKERS):
-        meta = _make_meta(
-            status="partial_success",
-            source="content_analysis",
-            recommended_next_action="rewrite_query",
-        )
+        # Legacy tool envelopes, including unstamped read_file checkpoints, use
+        # this prefix. Producer-stamped successful file contents return above.
+        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
+    elif msg.name != "read_file" and _extract_json_error_text(content) is not None:
+        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
+    elif failed_bash:
+        meta = _make_meta(status="error", source="content_analysis", **_UNKNOWN_ERROR)
     else:
-        meta = _make_meta(status="success", source="content_analysis")
+        meta = _make_meta(status="success", source="tool_return")
 
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = meta
@@ -205,8 +214,34 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
     return msg
 
 
-def normalize_tool_result(result: ToolMessage | Command) -> ToolMessage | Command:
-    """Normalize a tool result, handling Command wrappers transparently."""
+def _command_messages(result: Command) -> list | tuple | None:
+    update = result.update
+    if not isinstance(update, dict):
+        return None
+    messages = update.get("messages")
+    if isinstance(messages, ToolMessage):
+        return [messages]
+    if isinstance(messages, (list, tuple)):
+        return messages
+    return None
+
+
+def normalize_tool_result(result: ToolMessage | Command, *, tool_call_id: str = "") -> ToolMessage | Command:
+    """Normalize a tool result, handling Command wrappers transparently.
+
+    When ``tool_call_id`` is provided, only the matching ``ToolMessage`` inside a
+    Command is stamped. Other Command fields and unrelated messages are left intact.
+    Producer-supplied ``deerflow_tool_meta`` is preserved by ``normalize_tool_message``.
+    """
     if isinstance(result, ToolMessage):
         return normalize_tool_message(result)
+    messages = _command_messages(result)
+    if messages is None:
+        return result
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        if tool_call_id and str(message.tool_call_id) != tool_call_id:
+            continue
+        normalize_tool_message(message)
     return result

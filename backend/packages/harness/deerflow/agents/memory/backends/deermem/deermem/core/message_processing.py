@@ -2,45 +2,108 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from copy import copy
+from pathlib import Path
 from typing import Any
 
-_UPLOAD_BLOCK_RE = re.compile(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", re.IGNORECASE)
-_CORRECTION_PATTERNS = (
-    re.compile(r"\bthat(?:'s| is) (?:wrong|incorrect)\b", re.IGNORECASE),
-    re.compile(r"\byou misunderstood\b", re.IGNORECASE),
-    re.compile(r"\btry again\b", re.IGNORECASE),
-    re.compile(r"\bredo\b", re.IGNORECASE),
-    re.compile(r"不对"),
-    re.compile(r"你理解错了"),
-    re.compile(r"你理解有误"),
-    re.compile(r"重试"),
-    re.compile(r"重新来"),
-    re.compile(r"换一种"),
-    re.compile(r"改用"),
-)
-_REINFORCEMENT_PATTERNS = (
-    re.compile(r"\byes[,.]?\s+(?:exactly|perfect|that(?:'s| is) (?:right|correct|it))\b", re.IGNORECASE),
-    re.compile(r"\bperfect(?:[.!?]|$)", re.IGNORECASE),
-    re.compile(r"\bexactly\s+(?:right|correct)\b", re.IGNORECASE),
-    re.compile(r"\bthat(?:'s| is)\s+(?:exactly\s+)?(?:right|correct|what i (?:wanted|needed|meant))\b", re.IGNORECASE),
-    re.compile(r"\bkeep\s+(?:doing\s+)?that\b", re.IGNORECASE),
-    re.compile(r"\bjust\s+(?:like\s+)?(?:that|this)\b", re.IGNORECASE),
-    re.compile(r"\bthis is (?:great|helpful)\b(?:[.!?]|$)", re.IGNORECASE),
-    re.compile(r"\bthis is what i wanted\b(?:[.!?]|$)", re.IGNORECASE),
-    re.compile(r"对[，,]?\s*就是这样(?:[。！？!?.]|$)"),
-    re.compile(r"完全正确(?:[。！？!?.]|$)"),
-    re.compile(r"(?:对[，,]?\s*)?就是这个意思(?:[。！？!?.]|$)"),
-    re.compile(r"正是我想要的(?:[。！？!?.]|$)"),
-    re.compile(r"继续保持(?:[。！？!?.]|$)"),
-)
+import yaml
+
+logger = logging.getLogger(__name__)
+
+_UPLOAD_BLOCK_RE = re.compile(r"<current_uploads>[\s\S]*?</current_uploads>\n*", re.IGNORECASE)
+
+_PATTERN_CACHE: dict[tuple[str, str | None], list[re.Pattern[str]]] = {}
+
+
+def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Pattern[str]]:
+    """Load and compile signal patterns from a YAML file.
+
+    ``name`` is a signal name. ``patterns_dir``
+    overrides the bundled ``core/message_patterns/`` directory; ``None`` (the
+    default) loads the bundled defaults, which mirror the pre-externalization
+    hardcoded patterns so zero-config behavior is unchanged. Compiled patterns
+    are cached per ``(name, patterns_dir)``.
+
+    Each YAML list entry is either a string (compiled with no flags) or a
+    mapping ``{pattern: <regex>, flags: [...]}`` where ``flags`` may contain
+    ``"ignorecase"``. Raises ``ValueError`` for invalid YAML, a non-list
+    top-level value, or an invalid regex (all with the file path in the message).
+    For explicit *patterns_dir*: missing files raise ``FileNotFoundError``;
+    unreadable files (OSError) are re-raised. Malformed entries and unknown flag
+    names are skipped with a WARNING. For bundled defaults (*patterns_dir* is
+    ``None``): missing/unreadable files log a WARNING and return ``[]``
+    (packaging bug, not a configuration error).
+    """
+    cache_key = (name, patterns_dir)
+    cached = _PATTERN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    base = Path(patterns_dir) if patterns_dir else Path(__file__).parent / "message_patterns"
+    path = base / f"{name}.yaml"
+    if not path.exists():
+        if patterns_dir is not None:
+            raise FileNotFoundError(f"Signal patterns file not found: {path}")
+        logger.warning("Signal patterns file not found (%s); %s detection disabled.", path, name)
+        _PATTERN_CACHE[cache_key] = []
+        return []
+
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f) or []
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML in {path}: {e}") from e
+    except OSError as e:
+        if patterns_dir is not None:
+            raise OSError(f"Failed to read signal patterns file {path}: {e}") from e
+        logger.warning("Failed to read signal patterns %s: %s; %s detection disabled.", path, e, name)
+        _PATTERN_CACHE[cache_key] = []
+        return []
+
+    if not isinstance(data, list):
+        raise ValueError(f"Signal patterns file {path} must contain a list, not {type(data).__name__}")
+
+    compiled: list[re.Pattern[str]] = []
+    for i, entry in enumerate(data):
+        if isinstance(entry, str):
+            pattern_text, flag_names = entry, []
+        elif isinstance(entry, Mapping):
+            pattern_text = entry.get("pattern")
+            flag_names = entry.get("flags", []) or []
+        else:
+            logger.warning("Skipping non-string/non-mapping entry %d in %s (type %s)", i, path, type(entry).__name__)
+            continue
+        if not isinstance(pattern_text, str) or not pattern_text:
+            logger.warning("Skipping entry %d in %s: missing or empty 'pattern'", i, path)
+            continue
+        flags = 0
+        for flag_name in flag_names:
+            if flag_name == "ignorecase":
+                flags |= re.IGNORECASE
+            else:
+                logger.warning("Ignoring unknown flag %r in entry %d of %s", flag_name, i, path)
+        try:
+            compiled.append(re.compile(pattern_text, flags))
+        except re.error as e:
+            raise ValueError(f"Invalid regex in {path} entry {i}: {e} (pattern={pattern_text!r})") from e
+
+    _PATTERN_CACHE[cache_key] = compiled
+    return compiled
 
 
 def extract_message_text(message: Any) -> str:
     """Extract plain text from message content for filtering and signal detection."""
     content = getattr(message, "content", "")
+    if content is None:
+        # ``str(None)`` is the truthy literal ``"None"``, so a content-less
+        # message would survive every downstream ``text if text else ...``
+        # fallback and be reported as real user text. Keep this in step with
+        # ``deerflow/utils/messages.py:message_content_to_text`` and the mem0
+        # copy of this helper, which both return "" here.
+        return ""
     if isinstance(content, list):
         text_parts: list[str] = []
         for part in content:
@@ -130,7 +193,7 @@ def filter_messages_for_memory(messages: list[Any], *, should_keep_hidden_messag
                 if not keep:
                     continue
             content_str = extract_message_text(msg)
-            if "<uploaded_files>" in content_str:
+            if "<current_uploads>" in content_str.lower():
                 stripped = _UPLOAD_BLOCK_RE.sub("", content_str).strip()
                 if not stripped:
                     skip_next_ai = True
@@ -143,35 +206,108 @@ def filter_messages_for_memory(messages: list[Any], *, should_keep_hidden_messag
                 filtered.append(msg)
                 skip_next_ai = False
         elif msg_type == "ai":
-            tool_calls = getattr(msg, "tool_calls", None)
-            if not tool_calls:
-                if skip_next_ai:
-                    skip_next_ai = False
-                    continue
-                filtered.append(msg)
+            # Invalid/provider-raw calls are still tool turns, not final replies.
+            additional_kwargs = getattr(msg, "additional_kwargs", {}) or {}
+            if getattr(msg, "tool_calls", None) or getattr(msg, "invalid_tool_calls", None) or additional_kwargs.get("tool_calls") or additional_kwargs.get("function_call"):
+                continue
+            if skip_next_ai:
+                skip_next_ai = False
+                continue
+            filtered.append(msg)
 
     return filtered
 
 
-def detect_correction(messages: list[Any]) -> bool:
-    """Detect explicit user corrections in recent conversation turns."""
+def detect_correction(messages: list[Any], *, patterns: list[re.Pattern[str]] | None = None) -> bool:
+    """Detect explicit user corrections in recent conversation turns.
+
+    ``patterns`` overrides the loaded patterns (useful when the caller has
+    already resolved ``DeerMemConfig.patterns_dir``); ``None`` loads the bundled
+    defaults via :func:`load_patterns`. The scan window stays ``messages[-6:]``
+    (the most recent human turns).
+    """
+    if patterns is None:
+        patterns = load_patterns("correction")
     recent_user_msgs = [msg for msg in messages[-6:] if getattr(msg, "type", None) == "human"]
 
     for msg in recent_user_msgs:
         content = extract_message_text(msg).strip()
-        if content and any(pattern.search(content) for pattern in _CORRECTION_PATTERNS):
+        if content and any(pattern.search(content) for pattern in patterns):
             return True
 
     return False
 
 
-def detect_reinforcement(messages: list[Any]) -> bool:
-    """Detect explicit positive reinforcement signals in recent conversation turns."""
+def detect_reinforcement(messages: list[Any], *, patterns: list[re.Pattern[str]] | None = None) -> bool:
+    """Detect explicit positive reinforcement signals in recent conversation turns.
+
+    ``patterns`` overrides the loaded patterns (useful when the caller has
+    already resolved ``DeerMemConfig.patterns_dir``); ``None`` loads the bundled
+    defaults via :func:`load_patterns`. The scan window stays ``messages[-6:]``.
+    """
+    if patterns is None:
+        patterns = load_patterns("reinforcement")
     recent_user_msgs = [msg for msg in messages[-6:] if getattr(msg, "type", None) == "human"]
 
     for msg in recent_user_msgs:
         content = extract_message_text(msg).strip()
-        if content and any(pattern.search(content) for pattern in _REINFORCEMENT_PATTERNS):
+        if content and any(pattern.search(content) for pattern in patterns):
             return True
 
     return False
+
+
+# Signal classes detected by :func:`detect_signals`. Names align with the fact
+# ``category`` enum (CORE_CATEGORIES) so a signal can drive an extraction
+# category hint directly, except ``reinforcement`` (no same-named category; it
+# maps to preference/behavior in the extraction hint). Keep new signal names in
+# sync with CORE_CATEGORIES before adding them here.
+SIGNAL_NAMES: tuple[str, ...] = (
+    "correction",
+    "reinforcement",
+    "preference",
+    "identity",
+    "goal",
+    "decision",
+)
+
+#: Trailing messages :func:`detect_signals` scans by default. This is the "recent
+#: turns" window the extraction diagnostics use; a caller
+#: with a different question -- the pre-screen's L3 veto, which has to answer for a
+#: whole batch -- passes ``window=None``.
+_SIGNAL_WINDOW = 6
+
+
+def detect_signals(
+    messages: list[Any],
+    *,
+    patterns_dir: str | None = None,
+    window: int | None = _SIGNAL_WINDOW,
+) -> set[str]:
+    """Detect signal classes in the recent conversation turns.
+
+    Returns the set of signal names whose patterns match a human message among the
+    last ``window`` messages (the default 6, the "recent turns" window the
+    extraction diagnostics use). ``window=None`` scans
+    every message instead: the pre-screen's L3 veto needs that, because a skip
+    consumes the whole post-watermark batch, so an explicit signal anywhere in that
+    batch must keep it out of judging -- not only one inside the trailing window.
+    This generalizes :func:`detect_correction` / :func:`detect_reinforcement` (which
+    remain for backward compatibility) to the full signal set.
+    """
+    candidates = messages if window is None else messages[-window:]
+    recent_user_msgs = [msg for msg in candidates if getattr(msg, "type", None) == "human"]
+    if not recent_user_msgs:
+        return set()
+
+    hits: set[str] = set()
+    for name in SIGNAL_NAMES:
+        patterns = load_patterns(name, patterns_dir=patterns_dir)
+        if not patterns:
+            continue
+        for msg in recent_user_msgs:
+            content = extract_message_text(msg).strip()
+            if content and any(pattern.search(content) for pattern in patterns):
+                hits.add(name)
+                break
+    return hits
