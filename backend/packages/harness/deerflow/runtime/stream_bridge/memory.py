@@ -119,8 +119,11 @@ class MemoryStreamBridge(StreamBridge):
     async def publish(self, run_id: str, event: str, data: Any) -> None:
         data = deepcopy(data)
         stream = self._get_or_create_stream(run_id)
-        entry = StreamEvent(id=self._next_id(run_id), event=event, data=data)
         async with stream.condition:
+            # Cleanup or END may win the Condition after this producer captures the generation.
+            if stream.retired or stream.ended:
+                return
+            entry = StreamEvent(id=self._next_id(run_id), event=event, data=data)
             stream.events.append(entry)
             if len(stream.events) > self._maxsize:
                 overflow = len(stream.events) - self._maxsize
@@ -132,6 +135,8 @@ class MemoryStreamBridge(StreamBridge):
     async def publish_end(self, run_id: str) -> None:
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
+            if stream.retired or stream.ended:
+                return
             stream.ended = True
             stream.condition.notify_all()
 

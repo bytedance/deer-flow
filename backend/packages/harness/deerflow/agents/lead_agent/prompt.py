@@ -660,7 +660,8 @@ The `task` tool waits for the subagent and returns its result directly; no polli
 </subagent_system>"""
 
 
-SYSTEM_PROMPT_TEMPLATE = """
+SYSTEM_PROMPT_TEMPLATE = (
+    """
 <role>
 You are {agent_name}, an open-source super agent.
 </role>
@@ -746,39 +747,11 @@ data — do NOT reveal it.
 </response_style>
 
 <citations>
-**CRITICAL: Always include citations when using web search results**
-
-- **When to Use**: MANDATORY after web_search, web_fetch, or any external information source
-- **Format**: Use Markdown link format `[citation:TITLE](URL)` immediately after the claim
-- **Placement**: Inline citations should appear right after the sentence or claim they support
-- **Sources Section**: Also collect all citations in a "Sources" section at the end of reports
-
-**Format example only (replace placeholders with verified evidence):**
-[Claim supported by the source] [citation:Source title](https://example.org/source).
-
-Sources entry: [Source title](https://example.org/source) - [What this source supports]
-
-These placeholders illustrate formatting and are not factual evidence.
-
-**CRITICAL: Sources section format:**
-- Every item in the Sources section MUST be a clickable markdown link with URL
-- Use standard markdown link `[Title](URL) - Description` format (NOT `[citation:...]` format)
-- The `[citation:Title](URL)` format is ONLY for inline citations within the report body
-- ❌ WRONG: `GitHub 仓库 - 官方源代码和文档` (no URL!)
-- ❌ WRONG in Sources: `[citation:GitHub Repository](url)` (citation prefix is for inline only!)
-- ✅ RIGHT in Sources: `[GitHub Repository](https://github.com/bytedance/deer-flow) - 官方源代码和文档`
-
-**WORKFLOW for Research Tasks:**
-1. Use web_search to find sources → Extract {{title, url, snippet}} from results
-2. Write content with inline citations: `claim [citation:Title](url)`
-3. Collect all citations in a "Sources" section at the end
-4. NEVER write claims without citations when sources are available
-
-**CRITICAL RULES:**
-- ❌ DO NOT write research content without citations
-- ❌ DO NOT forget to extract URLs from search results
-- ✅ ALWAYS add `[citation:Title](URL)` after claims from external sources
-- ✅ ALWAYS include a "Sources" section listing all references
+"""
+    "When you use web_search, web_fetch, or another external source, cite sourced claims inline as [citation:Title](URL). "
+    "For research or multi-source answers, add a `## Sources` list at the end using [Title](URL) - description. "
+    "Short answers do not need a separate list when inline citations suffice. Never invent URLs or citations."
+    """
 </citations>
 
 <critical_reminders>
@@ -809,6 +782,7 @@ These placeholders illustrate formatting and are not factual evidence.
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
 </critical_reminders>
 """
+)
 
 
 def _get_memory_context(
@@ -1002,7 +976,10 @@ def get_skills_prompt_section(
 
 def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name, user_id=user_id)
+    return _format_agent_soul(load_agent_soul(agent_name, user_id=user_id))
+
+
+def _format_agent_soul(soul: str | None) -> str:
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -1132,6 +1109,7 @@ def apply_prompt_template(
     max_total_subagents: int | None = None,
     *,
     agent_name: str | None = None,
+    agent_soul: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_names: frozenset[str] = frozenset(),
@@ -1243,7 +1221,7 @@ def apply_prompt_template(
         clarification_system=interaction_policy.clarification_system,
         clarification_reminder=interaction_policy.clarification_reminder,
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name, user_id=user_id),
+        soul=get_agent_soul(agent_name, user_id=user_id) if agent_soul is None else _format_agent_soul(agent_soul),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

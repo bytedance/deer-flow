@@ -185,7 +185,7 @@ def test_bundled_documentation_snapshot_is_current():
     script = runpy.run_path(str(root / "scripts/sync_extension_documentation.py"))
     assert script["DESTINATION"].read_text(encoding="utf-8") == script["render"]()
     pages = json.loads(script["render"]())
-    assert len(pages) == 16
+    assert len(pages) == 17
     assert pages["deerflow-extension-office-preview"]["id"] == "office-preview"
 
 

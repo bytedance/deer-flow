@@ -2037,7 +2037,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # boundary above admits PATH-style concatenation, but a tail that ran
         # through the ``:`` swallowed every later entry of the list, leaving
         # those virtual paths unresolved in the command.
-        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
+        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():,]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
             resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
@@ -3232,7 +3232,8 @@ def grep_tool(
 
     Args:
         pattern: The string or regex pattern to search for.
-        path: The **absolute** file or root directory to search.
+        path: The **absolute** file or root directory to search. Naming a file
+            searches it at any size; a directory walk skips files over 1 MB.
         description: Optional short explanation of this search shown in the UI.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.

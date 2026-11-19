@@ -178,6 +178,7 @@ def _get_user_id(request: Request) -> str:
 
 
 def _get_app_config():
+    """The live app config. It stats and hashes the config files, so async callers run it through ``asyncio.to_thread``."""
     from deerflow.config.app_config import get_app_config
 
     return get_app_config()
@@ -188,9 +189,10 @@ async def _get_runtime_config_store(request: Request) -> RuntimeConfigStore:
     store = getattr(request.app.state, "channel_runtime_config_store", None)
     if store is not None:
         return store
-    # Resolving reads paths (and the JSON store's file) from disk; keep it off
-    # the event loop. The database store holds no state of its own.
-    store = await asyncio.to_thread(resolve_runtime_config_store, _get_app_config(), cipher=getattr(request.app.state, "credentials_cipher", None))
+    # Resolving reads the config, paths and the JSON store's file from disk;
+    # keep it off the event loop. The database store holds no state of its own.
+    app_config = await asyncio.to_thread(_get_app_config)
+    store = await asyncio.to_thread(resolve_runtime_config_store, app_config, cipher=getattr(request.app.state, "credentials_cipher", None))
     request.app.state.channel_runtime_config_store = store
     return store
 
@@ -201,7 +203,7 @@ async def _get_channel_connections_config(request: Request) -> ChannelConnection
     # since the last one.
     config = getattr(request.app.state, "channel_connections_config", None)
     if not isinstance(config, ChannelConnectionsConfig):
-        config = _get_app_config().channel_connections
+        config = (await asyncio.to_thread(_get_app_config)).channel_connections
     if not (config.enabled and config.telegram.enabled):
         # Only the Telegram deep-link username comes from the runtime store.
         return config
@@ -214,7 +216,7 @@ async def _get_channels_config(request: Request) -> dict[str, Any]:
 
 
 async def _load_channels_config(request: Request, config: ChannelConnectionsConfig) -> dict[str, Any]:
-    app_config = _get_app_config()
+    app_config = await asyncio.to_thread(_get_app_config)
     extra = app_config.model_extra or {}
     channels_config = extra.get("channels")
     result = dict(channels_config) if isinstance(channels_config, dict) else {}
@@ -799,7 +801,7 @@ async def _require_wechat_qr_login(request: Request) -> ChannelConnectionsConfig
     except ValueError:
         workers = 0
     # Kubernetes replicas run one worker each; they declare their peers instead.
-    if workers != 1 or multi_instance_declaration(_get_app_config()) is not None:
+    if workers != 1 or multi_instance_declaration(await asyncio.to_thread(_get_app_config)) is not None:
         raise HTTPException(
             status_code=503,
             detail=(

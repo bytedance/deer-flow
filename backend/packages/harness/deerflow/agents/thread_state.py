@@ -171,8 +171,15 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
     - same scope -> union names, dedupe, preserve order.
     - a missing new turn_id inherits the existing scope. ``tool_search`` writes
       this shape after the filter establishes the current turn before the model.
+    - a non-object value from either side is unusable and carries nothing to
+      merge: an Overwrite-poisoned checkpoint stores one, and without this the
+      thread's later genuine promotion writes would keep failing on it.
     """
+    if not isinstance(existing, Mapping):
+        existing = None
     if not new:
+        return existing
+    if not isinstance(new, Mapping):
         return existing
     new_turn_id = new.get("turn_id")
     replace = existing is None or existing.get("catalog_hash") != new["catalog_hash"] or (new_turn_id is not None and existing.get("turn_id") != new_turn_id)
@@ -255,6 +262,25 @@ def find_delegation_key(keys: Sequence[DelegationKey], key: DelegationKey) -> De
     return None
 
 
+_DELEGATION_LEDGER_STATUSES = frozenset({"in_progress", *SUBAGENT_STATUS_VALUES})
+
+
+def _usable_delegation_entries(entries: Any) -> list[DelegationEntry]:
+    """Drop channel values the ledger reducer cannot read.
+
+    The gateway validates the full ledger shape at both caller-writable
+    boundaries, but a checkpoint written before that validation, or by an
+    older caller path, can still hold a non-list value, a non-object entry or
+    an entry without the identity key and status the reducer needs. Treating
+    those as absent keeps later genuine ledger writes working instead of
+    failing on the stored value; the reducer itself does not require the
+    renderer-only text fields.
+    """
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, Mapping) and isinstance(entry.get("id"), str) and bool(entry.get("id")) and entry.get("status") in _DELEGATION_LEDGER_STATUSES]
+
+
 def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
     """Reducer for the delegation ledger.
 
@@ -265,12 +291,14 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
       the same run.
     - terminal status is never overwritten by a non-terminal status.
     """
-    if not new:
-        return existing or []
+    existing_entries = _usable_delegation_entries(existing)
+    new_entries = _usable_delegation_entries(new)
+    if not new_entries:
+        return existing_entries
 
     by_key: dict[DelegationKey, DelegationEntry] = {}
     order: list[DelegationKey] = []
-    for entry in [*(existing or []), *new]:
+    for entry in [*existing_entries, *new_entries]:
         target = find_delegation_key(order, delegation_key(entry))
         previous = by_key.get(target) if target is not None else None
         if previous is None:
