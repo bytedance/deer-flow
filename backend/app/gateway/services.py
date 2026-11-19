@@ -48,6 +48,7 @@ from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
 from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
@@ -110,7 +111,7 @@ from deerflow.runtime.user_context import get_current_user, reset_current_user, 
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
-from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_STATUS_VALUES, SUBAGENT_STOP_REASON_VALUES, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
@@ -643,10 +644,12 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs"})
+#: Older checkpoints can contain loop detection's record of frequency-capped
+#: tools. Reserve its channel for server-owned state.
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY})
 
 #: The ``write_todos`` status contract the todo middleware renders.
-_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
+_TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
 
 
 def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, Any]] | None:
@@ -671,7 +674,7 @@ def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, An
             raise HTTPException(status_code=400, detail=f"{location}[{index}].content must be a string")
         status = entry.get("status", "pending")
         if not isinstance(status, str) or status not in _TODO_STATUSES:
-            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, or completed")
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, completed, blocked, or waiting")
         normalized.append({**entry, "content": content, "status": status})
     return normalized
 
@@ -788,6 +791,61 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
     return {**{key: item for key, item in value.items() if key != "last_batch_wakeup_run_id"}, "objective": objective}
 
 
+#: Statuses the ledger reducer and renderer understand: the runtime's terminal
+#: values plus the in-progress marker a live delegation carries.
+_DELEGATION_STATUSES = frozenset({"in_progress", *SUBAGENT_STATUS_VALUES})
+
+
+def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject ledger entries the reducer and renderer cannot read.
+
+    ``delegations`` is a reducer channel a caller may Overwrite. ``merge_delegations``
+    keys on ``id`` and indexes ``status``, and the ledger renderer reads
+    ``description``/``subagent_type`` on every model call. A non-list value, a
+    non-object entry or a missing field raises while the state update merges —
+    failing the run with an unhandled ``TypeError``/``KeyError`` instead of a
+    400 at this boundary. On the thread-state route the bad shape would also be
+    persisted, so every later genuine ledger write would keep failing on it.
+
+    The id must be non-empty because it is the reducer's identity key (an empty
+    id can never be matched by the runtime's write-back), and the status must be
+    one the runtime produces so a caller cannot inject its own steering line into
+    the model-visible ledger. Optional fields the reducer and renderer read as
+    text are validated when present: an unhashable ``run_id`` breaks the
+    reducer's identity key, a non-string ``result_brief`` breaks the renderer's
+    length bound, and an unknown ``stop_reason`` renders guardrail-cap guidance
+    the runtime never stamped.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        _reject_overwrite_marker(value, location=location)
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of delegation objects")
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of delegation objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        for field in ("id", "description", "subagent_type"):
+            if not isinstance(entry.get(field), str):
+                raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string")
+        if not entry["id"]:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].id must be non-empty")
+        status = entry.get("status")
+        if not isinstance(status, str) or status not in _DELEGATION_STATUSES:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be one of {', '.join(sorted(_DELEGATION_STATUSES))}")
+        for field in ("run_id", "result_brief"):
+            optional_text = entry.get(field)
+            if optional_text is not None and not isinstance(optional_text, str):
+                raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string or null")
+        stop_reason = entry.get("stop_reason")
+        if stop_reason is not None and (not isinstance(stop_reason, str) or stop_reason not in SUBAGENT_STOP_REASON_VALUES):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].stop_reason must be one of {', '.join(SUBAGENT_STOP_REASON_VALUES)}")
+        normalized.append(dict(entry))
+    return normalized
+
+
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and sanitize caller-supplied state values before checkpointing.
 
@@ -822,8 +880,9 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
             stripped[channel] = None if normalized_todos is None else [_strip_external_metadata_from_message_like(item) for item in normalized_todos]
         elif channel == "messages" and value is not None:
             stripped[channel] = _normalize_input_messages(value, location="values.messages")
-        elif channel == "delegations" and isinstance(value, list):
-            stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
+        elif channel == "delegations":
+            normalized_delegations = _normalize_external_delegations(value, location="values.delegations")
+            stripped[channel] = None if normalized_delegations is None else [_strip_external_delegation_verdict(item) for item in normalized_delegations]
         elif channel == "skill_context":
             normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
             stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
@@ -900,11 +959,12 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
         converted = _normalize_input_messages(messages, location="input.messages", trusted_internal=trusted_internal)
         result = {**raw_input, "messages": converted}
     if not trusted_internal:
-        delegations = result.get("delegations")
-        if isinstance(delegations, list):
-            cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
-            if cleaned != delegations:
-                result = {**result, "delegations": cleaned}
+        if "delegations" in result:
+            normalized_delegations = _normalize_external_delegations(result["delegations"], location="input.delegations")
+            result = {
+                **result,
+                "delegations": None if normalized_delegations is None else [_strip_external_delegation_verdict(entry) for entry in normalized_delegations],
+            }
         if "skill_context" in result:
             result = {**result, "skill_context": _normalize_external_skill_context(result["skill_context"], location="input.skill_context")}
         if "promoted" in result:

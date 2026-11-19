@@ -8,7 +8,7 @@ data. What a single test file covers is stated in that file, not here.
 
 ```bash
 cd backend
-make test                 # four offline shards; TEST_JOBS=1 runs serially
+make test                 # six offline shards (matches CI); TEST_JOBS=1 runs serially
 make test-blocking-io     # strict gate over tests/blocking_io/
 python -m pytest tests/test_<feature>.py::test_<name> -q
 ```
@@ -29,7 +29,11 @@ with a reason when the binary is missing.
   the fix. Do not encode a known bug as expected behaviour, and do not hide it
   behind a permanent `xfail`.
 - **Assert on structure.** Check decoded payloads, stored rows and metadata.
-  User-facing wording is asserted only where the wording is the contract.
+  User-facing wording is asserted only where the wording is the contract. Do not
+  assert on `inspect.getsource` or prose; enforce import boundaries statically.
+- **Grow module suites, not one-fix files.** Fold regression cases into the
+  owning module's behavioral suite and delete or update obsolete tests when
+  behavior changes.
 - **Scripts run as copies in a temporary checkout.** Never swap sources in the
   working tree during a test, and never let a test read the developer's own
   `config.yaml`, `.env` or runtime home.

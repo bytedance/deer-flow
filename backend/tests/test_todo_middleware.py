@@ -24,6 +24,7 @@ from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFi
 from deerflow.agents.middlewares.todo_middleware import (
     TODO_REMINDER_MESSAGE_NAME,
     TodoMiddleware,
+    _format_completion_reminder,
     _format_todos,
     _has_tool_call_intent_or_error,
     _reminder_in_messages,
@@ -138,10 +139,10 @@ class TestFormatTodos:
         assert _format_todos([]) == ""
 
     def test_missing_fields_use_defaults(self):
-        todos = [{"content": "No status"}, {"status": "done"}]
+        todos = [{"content": "No status"}, {"status": "completed"}]
         result = _format_todos(todos)
         assert "- [pending] No status" in result
-        assert "- [done] " in result
+        assert "- [completed] " in result
 
 
 class TestBeforeModel:
@@ -448,6 +449,39 @@ class TestAfterModel:
             "todos": _all_completed_todos(),
         }
         assert mw.after_model(state, _make_runtime()) is None
+
+    @pytest.mark.parametrize("status", ["blocked", "waiting"])
+    def test_returns_none_when_todos_are_terminal_for_this_run(self, status):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [_ai_no_tool_calls()],
+            "todos": [{"status": status, "content": "Cannot continue here"}],
+        }
+        assert mw.after_model(state, _make_runtime()) is None
+
+    def test_reminder_skips_blocked_and_waiting_items(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {
+            "messages": [_ai_no_tool_calls()],
+            "todos": [
+                {"status": "blocked", "content": "Blocked dependency"},
+                {"status": "waiting", "content": "User approval"},
+                {"status": "pending", "content": "Continue implementation"},
+            ],
+        }
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+        seen: list[ModelRequest] = []
+        mw.wrap_model_call(
+            _make_model_request(state["messages"], runtime=runtime),
+            lambda request: seen.append(request) or "response",
+        )
+
+        reminder = seen[0].messages[-1].content
+        assert "Blocked dependency" not in reminder
+        assert "User approval" not in reminder
+        assert "Continue implementation" in reminder
 
     def test_returns_none_when_no_messages(self):
         mw = TodoMiddleware()
@@ -1276,6 +1310,16 @@ class TestMalformedStoredTodos:
         mw = TodoMiddleware()
         state = {"messages": [AIMessage(content="final")], "todos": [{"content": "Done", "status": "completed"}, "junk"]}
         assert mw.after_model(state, _make_runtime()) is None
+
+    @pytest.mark.parametrize("status", [[], {}, None, "unknown"])
+    def test_invalid_stored_status_remains_pending(self, status):
+        todos = [{"content": "Recover me", "status": status}, {"content": "Finished", "status": "completed"}]
+        mw = TodoMiddleware()
+        assert mw.after_model({"messages": [AIMessage(content="final")], "todos": todos}, _make_runtime()) == {"jump_to": "model"}
+        assert "- [pending] Recover me" in _format_todos(todos)
+        reminder = _format_completion_reminder(todos)
+        assert "- [pending] Recover me" in reminder
+        assert "Finished" not in reminder
 
     @pytest.mark.parametrize("todos", [{"content": "x"}, "oops", 5])
     def test_todos_that_are_not_a_list_allow_a_clean_exit(self, todos):

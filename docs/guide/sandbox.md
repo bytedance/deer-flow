@@ -84,6 +84,12 @@ Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
 
+The optional [boxd provider](../../backend/packages/harness/deerflow/community/boxd_sandbox/README.md)
+runs each user/thread scope in an isolated boxd machine. A new machine receives
+the thread's files and skills before it is handed out, and release copies
+generated outputs back to thread storage with the same alias and path checks.
+See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
+
 The [sandbox benchmark](../../backend/scripts/benchmark/sandbox/README.md#opensandbox)
 also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,
 using the configured service connection and reporting unconfirmed cleanup as a

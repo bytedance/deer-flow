@@ -86,6 +86,30 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="NUL"):
             normalize_filename("report\x00.pdf")
 
+    @pytest.mark.parametrize(
+        "filename",
+        ["notes.txt:hidden", "doc:hidden", "folder/doc.txt:hidden", "a:b:c.txt"],
+    )
+    def test_rejects_colon_ads_names(self, filename):
+        """A colon in a basename addresses an NTFS Alternate Data Stream on
+        Windows (invisible to directory listings) instead of a new file,
+        matching the skill-archive installer's own rule."""
+        with pytest.raises(ValueError, match="colon"):
+            normalize_filename(filename)
+
+    def test_colon_name_rejected_before_writing_upload(self, tmp_path):
+        with pytest.raises(ValueError, match="colon"):
+            write_upload_file_no_symlink(tmp_path, "notes.txt:hidden", b"secret")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_drive_reference_platform_behavior(self):
+        assert normalize_filename("C:/reports/report.txt") == "report.txt"
+        if os.name == "nt":
+            assert normalize_filename("C:report.txt") == "report.txt"
+        else:
+            with pytest.raises(ValueError, match="colon"):
+                normalize_filename("C:report.txt")
+
     @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
     def test_rejects_reserved_staging_names(self, filename):
         with pytest.raises(ValueError, match="reserved upload staging"):
