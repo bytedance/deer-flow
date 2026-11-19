@@ -3252,4 +3252,3 @@ async def test_session_pool_disconnect_cleanup_timeout_preserves_error_and_track
                     timeout=0.5,
                 )
     assert not pool._teardown_tasks
-
