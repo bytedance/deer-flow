@@ -140,18 +140,27 @@ async def test_cancel_snapshot_discard_is_logged_without_changing_peer_or_retry_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase,expected", [("poll", "completed"), ("cancel", "cancelled")])
-async def test_slow_control_call_keeps_claim_and_persists_terminal_result(task_repo, phase, expected):
+async def test_slow_control_call_keeps_claim_and_persists_terminal_result(task_repo, monkeypatch, phase, expected):
     repo = task_repo
     if phase == "cancel":
         await repo.request_cancel("task-1", user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=Clock.current)
     driver = SlowDriver()
+    heartbeat_committed = asyncio.Event()
+    real_renew = repo.renew_control_claim
+
+    async def observe_heartbeat_renewal(*args, **kwargs):
+        renewed = await real_renew(*args, **kwargs)
+        if driver.started.is_set() and renewed:
+            heartbeat_committed.set()
+        return renewed
+
+    monkeypatch.setattr(repo, "renew_control_claim", observe_heartbeat_renewal)
     service = make_service(repo, driver, lease_seconds=2)
     cycle = asyncio.create_task(service.run_once(now=Clock.current))
     try:
         await asyncio.wait_for(driver.started.wait(), timeout=3)
         Clock.current += timedelta(seconds=1.5)
-        # One real heartbeat interval (2/3s), with a controlled durable clock.
-        await asyncio.sleep(0.85)
+        await asyncio.wait_for(heartbeat_committed.wait(), timeout=3)
         Clock.current += timedelta(seconds=1)
         claim = repo.claim_due_tasks if phase == "poll" else repo.claim_cancel_requests
         peer = await claim(now=Clock.current, lease_owner="peer", lease_seconds=2, limit=1)
@@ -319,21 +328,30 @@ async def test_heartbeat_covers_snapshot_persistence_after_remote_completion(tas
     repo = task_repo
     applying = asyncio.Event()
     commit = asyncio.Event()
+    heartbeat_committed = asyncio.Event()
     apply = repo.apply_snapshot
+    real_renew = repo.renew_control_claim
 
     async def delayed_write(*args, **kwargs):
         applying.set()
         await commit.wait()
         return await apply(*args, **kwargs)
 
+    async def observe_heartbeat_renewal(*args, **kwargs):
+        renewed = await real_renew(*args, **kwargs)
+        if applying.is_set() and renewed:
+            heartbeat_committed.set()
+        return renewed
+
     monkeypatch.setattr(repo, "apply_snapshot", delayed_write)
+    monkeypatch.setattr(repo, "renew_control_claim", observe_heartbeat_renewal)
     driver = SlowDriver()
     driver.finish.set()
     cycle = asyncio.create_task(make_service(repo, driver, lease_seconds=2).run_once(now=Clock.current))
     try:
         await asyncio.wait_for(applying.wait(), timeout=3)
         Clock.current += timedelta(seconds=1.5)
-        await asyncio.sleep(0.85)
+        await asyncio.wait_for(heartbeat_committed.wait(), timeout=3)
         Clock.current += timedelta(seconds=1)
         assert await repo.claim_due_tasks(now=Clock.current, lease_owner="peer", lease_seconds=2, limit=1) == []
         commit.set()

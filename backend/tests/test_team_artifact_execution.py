@@ -259,11 +259,14 @@ async def test_artifact_transfer_can_exceed_the_poll_deadline(plugin, monkeypatc
         method = "read_artifact"
     transfer = getattr(runs, method)
     real_timeout = asyncio.timeout
-    monkeypatch.setattr(
-        asyncio,
-        "timeout",
-        lambda delay: real_timeout(0.15 if delay == 10 else delay),
-    )
+    shortened_deadlines = 0
+
+    def short_poll_timeout(_delay):
+        nonlocal shortened_deadlines
+        shortened_deadlines += 1
+        return real_timeout(0.15)
+
+    monkeypatch.setattr(asyncio, "timeout", short_poll_timeout)
     calls = 0
 
     async def slow_transfer(**kwargs):
@@ -274,6 +277,7 @@ async def test_artifact_transfer_can_exceed_the_poll_deadline(plugin, monkeypatc
 
     monkeypatch.setattr(runs, method, slow_transfer)
     await service.tick()
+    assert shortened_deadlines >= 1
     saved = await service.db("get", "alice", team["id"])
     job = next(j for j in saved["jobs"] if j["id"] == target["id"])
     if operation == "import":
