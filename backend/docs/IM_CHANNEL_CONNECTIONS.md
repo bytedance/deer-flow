@@ -203,6 +203,11 @@ the last card is clipped and marked `... (truncated)`. A retry of a partially
 delivered answer resumes after the cards already sent, and a reply to any of the
 cards continues the conversation.
 
+Discord caps a message at 2,000 characters, so a longer answer is sent as
+several messages, split at line breaks where possible. When a split falls inside
+a fenced code block, the message ends with a closing fence and the next one
+starts with the block's opening line again, so both parts render as code.
+
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
 
 ## Attachment delivery feedback

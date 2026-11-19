@@ -7902,6 +7902,10 @@ class TestDiscordChannel:
             pytest.param("x" * 2000 + "\n" + "y" * 2000, id="newline-mid-message"),
             pytest.param(("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3, id="multibyte-paragraphs"),
             pytest.param("x" * 4500, id="unbroken-run"),
+            pytest.param("```py\nprint(1)\n```\n" + "x" * 1990 + "\n" + "y" * 30, id="code-block-closed-before-split"),
+            pytest.param("use ```inline``` here " * 200, id="inline-backticks"),
+            pytest.param("```inline``` opens no block\n" * 150, id="backticks-in-info-string"),
+            pytest.param("```" + "i" * 600 + "\n" + "code line\n" * 400 + "```", id="fence-line-too-long-to-carry"),
         ],
     )
     def test_split_text_preserves_content_within_discord_limit(self, text: str):
@@ -7917,6 +7921,115 @@ class TestDiscordChannel:
 
         assert DiscordChannel._split_text("") == [""]
         assert DiscordChannel._split_text("hello\n\nworld") == ["hello\n\nworld"]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param(
+                "intro\n```py\n" + "".join(f"line {i:02d} of code\n" for i in range(8)) + "```\nafter\n",
+                [
+                    "intro\n```py\nline 00 of code\nline 01 of code\nline 02 of code\nline 03 of code\n```",
+                    "```py\nline 04 of code\nline 05 of code\nline 06 of code\nline 07 of code\n```\nafter\n",
+                ],
+                id="closed-and-reopened",
+            ),
+            pytest.param(
+                "````md\n```py\ninner\n```\n" + "".join(f"md line {i:02d} here\n" for i in range(6)) + "````\nend",
+                [
+                    "````md\n```py\ninner\n```\nmd line 00 here\nmd line 01 here\nmd line 02 here\n````",
+                    "````md\nmd line 03 here\nmd line 04 here\nmd line 05 here\n````\nend",
+                ],
+                id="shorter-inner-fence-does-not-close",
+            ),
+            pytest.param(
+                "  ~~~js\n" + "  let a = 1;\n" * 10 + "  ~~~\n",
+                [
+                    "  ~~~js\n" + "  let a = 1;\n" * 5 + "~~~",
+                    "  ~~~js\n" + "  let a = 1;\n" * 5 + "  ~~~\n",
+                ],
+                id="indented-tilde-fence-keeps-its-indent",
+            ),
+            pytest.param(
+                "x" * 66 + "\n```py\n" + "code\n" * 3 + "```",
+                ["x" * 66 + "\n", "```py\n" + "code\n" * 3 + "```"],
+                id="block-opening-on-the-last-line-moves-to-the-next-message",
+            ),
+            pytest.param(
+                "```\n" + "z" * 170 + "\n```",
+                ["```\n" + "z" * 72 + "\n```", "```\n" + "z" * 72 + "\n```", "```\n" + "z" * 26 + "\n```"],
+                id="unbroken-code-line",
+            ),
+            pytest.param(
+                "```py\n" + "line of code\n" * 10,
+                ["```py\n" + "line of code\n" * 5 + "```", "```py\n" + "line of code\n" * 5],
+                id="unterminated-block-stays-unterminated",
+            ),
+        ],
+    )
+    def test_split_text_closes_and_reopens_a_cut_code_block(self, monkeypatch, text: str, expected: list[str]):
+        """A split inside a fenced code block must leave both messages rendering it as code.
+
+        Without this the first message ends in an unclosed fence and the second
+        starts with bare code, so neither renders a code block and the code is
+        read as markdown.
+        """
+        from app.channels import discord as discord_module
+
+        monkeypatch.setattr(discord_module, "_DISCORD_MAX_MESSAGE_LEN", 80)
+
+        chunks = discord_module.DiscordChannel._split_text(text)
+
+        assert chunks == expected
+        assert all(len(chunk) <= 80 for chunk in chunks)
+
+    def test_split_text_keeps_a_long_code_block_rendering_at_discord_limit(self):
+        from app.channels.discord import _DISCORD_MAX_MESSAGE_LEN, DiscordChannel
+
+        code = "".join(f"    result_{i} = compute_value({i}, factor=2)\n" for i in range(150))
+        text = "Here is the script:\n\n```python\n" + code + "```\n\nRun it with python."
+
+        chunks = DiscordChannel._split_text(text)
+
+        assert len(chunks) > 2
+        assert all(len(chunk) <= _DISCORD_MAX_MESSAGE_LEN for chunk in chunks)
+        # Every message closes the block it opens.
+        assert all(sum(line.startswith("```") for line in chunk.split("\n")) == 2 for chunk in chunks)
+        assert chunks[0].startswith("Here is the script:\n\n```python\n")
+        assert all(chunk.endswith("\n```") for chunk in chunks[:-1])
+        assert all(chunk.startswith("```python\n    result_") for chunk in chunks[1:])
+        assert chunks[-1].endswith("```\n\nRun it with python.")
+
+    def test_split_text_with_code_blocks_keeps_every_line_and_balances_each_message(self, monkeypatch):
+        """Random replies mixing prose and code blocks: only fence lines are added."""
+        import random
+
+        from app.channels import discord as discord_module
+
+        limit = 120
+        monkeypatch.setattr(discord_module, "_DISCORD_MAX_MESSAGE_LEN", limit)
+        fence_re = discord_module._FENCE_LINE_RE
+        rng = random.Random(8086)
+
+        def without_fence_lines(text: str) -> list[str]:
+            return [line for line in text.split("\n") if not fence_re.fullmatch(line)]
+
+        for _ in range(300):
+            lines: list[str] = []
+            for _ in range(rng.randint(1, 40)):
+                if rng.random() < 0.15:
+                    lines.append(rng.choice(["```", "```py", "~~~", "````md", "  ```js"]))
+                else:
+                    lines.append("w" * rng.randint(0, 60))
+            text = "\n".join(lines)
+            if not text:
+                continue
+
+            chunks = discord_module.DiscordChannel._split_text(text)
+
+            assert all(0 < len(chunk) <= limit for chunk in chunks), text
+            assert without_fence_lines("".join(chunks)) == without_fence_lines(text), text
+            if discord_module._fence_after(text + "\n", None) is None:
+                assert all(discord_module._fence_after(chunk + "\n", None) is None for chunk in chunks), text
 
     def test_stop_prevents_queued_typing_starter_from_creating_task(self):
         from app.channels.discord import DiscordChannel

@@ -6,10 +6,11 @@ import asyncio
 import io
 import json
 import logging
+import re
 import threading
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -34,6 +35,85 @@ from deerflow.utils.file_io import await_drained
 logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
+
+# A fence line of a fenced code block: up to three spaces of indent, a run of
+# at least three backticks or tildes, then an optional info string.
+_FENCE_LINE_RE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+
+
+class _OpenFence(NamedTuple):
+    """A fenced code block still open at a split."""
+
+    marker: str  # the opening run, e.g. "```" or "~~~~"
+    line: str  # the opening line, indent included, repeated to reopen the block
+
+
+def _fence_after(text: str, fence: _OpenFence | None) -> _OpenFence | None:
+    """The fence still open after the complete lines of *text*, starting inside *fence*.
+
+    Follows CommonMark: a block closes on a line holding only a run of its
+    character at least as long as the opening run, and a backtick fence's info
+    string cannot contain a backtick. A trailing partial line is not read.
+    """
+    for line in text.split("\n")[:-1]:
+        match = _FENCE_LINE_RE.fullmatch(line)
+        if match is None:
+            continue
+        run, info = match.groups()
+        if fence is None:
+            if run[0] == "~" or "`" not in info:
+                fence = _OpenFence(run, line)
+        elif run[0] == fence.marker[0] and len(run) >= len(fence.marker) and not info.strip():
+            fence = None
+    return fence
+
+
+def _fence_is_carried(fence: _OpenFence | None) -> bool:
+    """Whether a split closes *fence* and reopens it in the next message.
+
+    The added lines must leave most of the next message for content; a longer
+    fence line is split like plain text.
+    """
+    return fence is not None and len(fence.line) + len(fence.marker) + 2 <= _DISCORD_MAX_MESSAGE_LEN // 4
+
+
+def _line_split_point(text: str, budget: int) -> int:
+    """Where to end a message of at most *budget* characters, preferring a line break."""
+    split_at = text.rfind("\n", 0, budget)
+    if split_at <= 0:
+        return budget
+    # Keep the delimiter on this chunk's tail so consecutive Discord messages
+    # reconstruct the original text exactly.
+    return split_at + 1
+
+
+def _next_split(text: str, budget: int, fence: _OpenFence | None) -> tuple[int, _OpenFence | None]:
+    """Where to end the next message of *text*, and the fence still open there.
+
+    *fence* is open at the start of *text*, and *budget* is the room left after
+    any reopened fence line. When the split falls inside a carried fence, room
+    is kept for its closing line.
+    """
+    split_at = _line_split_point(text, budget)
+    fence_after = _fence_after(text[:split_at], fence)
+    if not _fence_is_carried(fence_after):
+        return split_at, fence_after
+    content_budget = budget - len(fence_after.marker) - 1
+    split_at = _line_split_point(text, content_budget)
+    fence_after = _fence_after(text[:split_at], fence)
+    if not _fence_is_carried(fence_after):
+        return split_at, fence_after
+    piece = text[:split_at]
+    last_line = piece[:-1].rpartition("\n")[2] if piece.endswith("\n") else None
+    if fence_after is not fence and last_line == fence_after.line:
+        # The block opens on the message's last line: start it in the next
+        # message instead of sending an empty block, or cut its first line
+        # when the block opens the message.
+        opener_start = split_at - len(last_line) - 1
+        split_at = opener_start if opener_start > 0 else content_budget
+        return split_at, _fence_after(text[:split_at], fence)
+    return split_at, fence_after
+
 
 # Bound for outbound work scheduled onto the Discord client's event loop.
 # Discord API calls normally return in well under a second; anything still
@@ -1320,23 +1400,30 @@ class DiscordChannel(Channel):
 
     @staticmethod
     def _split_text(text: str) -> list[str]:
+        """Split *text* into messages within Discord's length limit.
+
+        Splits prefer line breaks. A fenced code block that a split cuts is
+        closed at the end of the message and reopened with its opening line at
+        the start of the next, so both halves render as code. Apart from those
+        added fence lines, the messages join back to *text*.
+        """
         if not text:
             return [""]
 
         chunks: list[str] = []
         remaining = text
-        while len(remaining) > _DISCORD_MAX_MESSAGE_LEN:
-            split_at = remaining.rfind("\n", 0, _DISCORD_MAX_MESSAGE_LEN)
-            if split_at <= 0:
-                split_at = _DISCORD_MAX_MESSAGE_LEN
-            else:
-                # Keep the delimiter on this chunk's tail so consecutive
-                # Discord messages reconstruct the original text exactly.
-                split_at += 1
-            chunks.append(remaining[:split_at])
+        fence: _OpenFence | None = None  # open at the start of ``remaining``
+        while remaining:
+            reopen = f"{fence.line}\n" if _fence_is_carried(fence) else ""
+            if len(reopen) + len(remaining) <= _DISCORD_MAX_MESSAGE_LEN:
+                chunks.append(reopen + remaining)
+                break
+            split_at, fence_after = _next_split(remaining, _DISCORD_MAX_MESSAGE_LEN - len(reopen), fence)
+            chunk = remaining[:split_at]
+            if _fence_is_carried(fence_after):
+                chunk += ("" if chunk.endswith("\n") else "\n") + fence_after.marker
+            chunks.append(reopen + chunk)
             remaining = remaining[split_at:]
-
-        if remaining:
-            chunks.append(remaining)
+            fence = fence_after
 
         return chunks
