@@ -386,7 +386,7 @@ test("clearing the target quote cancels the pending rewrite", async ({
     panel.getByRole("button", { name: "Rewrite selection" }),
   ).toBeHidden();
   await expect(
-    panel.getByRole("button", { name: "Submit", exact: true }),
+    panel.getByRole("button", { name: "Send", exact: true }),
   ).toBeDisabled();
   expect(submitted).toBeUndefined();
 });
@@ -407,7 +407,7 @@ for (const discard of ["close draft", "delete thread"] as const) {
       .getByRole("button", { name: "Rewrite selection" })
       .click();
     const composer = page.getByPlaceholder(/deeper follow-up/i);
-    const submit = async (text: string, button = "Submit") => {
+    const submit = async (text: string, button = "Send") => {
       await composer.fill(text);
       await composer
         .locator("xpath=ancestor::form")
