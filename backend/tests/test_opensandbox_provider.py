@@ -1248,6 +1248,18 @@ def test_execute_command_signal_kill_before_the_deadline_keeps_its_exit_code(mon
     assert box.execute_command("exit-or-signal", timeout=5) == "partial output\nCommandExecError: -1\nExit Code: -1"
 
 
+def test_execute_command_command_timeout_error_reports_a_command_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    # execd release 1.3.0-rc.2 names the deadline: CommandTimeout with -1.
+    # The name is the cause, so a call that lasted well under the limit still
+    # reports 124 (the SDK's own rounding must not turn it into a signal).
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value="-1", exit_code=-1, error_name="CommandTimeout", stdout=("partial output",))  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+    monkeypatch.setattr("deerflow.community.opensandbox.sandbox.time", types.SimpleNamespace(monotonic=iter([0.0, 0.2]).__next__))
+
+    assert box.execute_command("sleep 400", timeout=5) == "partial output\nError: command timed out\nExit Code: 124"
+
+
 @pytest.mark.parametrize("exit_code", [None, 7])
 def test_execute_command_deadline_text_on_other_errors_is_not_a_command_timeout(exit_code: int | None) -> None:
     remote = _FakeRemote("remote")

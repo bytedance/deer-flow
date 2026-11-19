@@ -15,9 +15,10 @@ for the SDK default.
 
 ## Command deadlines
 
-- **A `CommandExecError` becomes exit code 124 only when it proves a deadline.**
-  That is the `context deadline exceeded` value with no numeric exit code, or a
-  signal-only `-1` whose call lasted at least the timeout DeerFlow passed (execd
+- **A command deadline becomes exit code 124 only when execd proves one.** A
+  `CommandTimeout` names it outright (execd 1.3.0-rc.2 and later). Otherwise the
+  evidence is the `context deadline exceeded` value with no numeric exit code, or
+  a signal-only `-1` whose call lasted at least the timeout DeerFlow passed (execd
   `release-1.2.1` reports deadlines that way, see #8367). Partial output is kept.
   Transport errors and earlier signal exits stay unchanged.
 - **Deadline tests use execution results.** A `TimeoutError` that only a fake

@@ -112,11 +112,12 @@ def _is_timeout_execution(
 ) -> bool:
     """Recognize a command deadline, not an ambiguous signal kill.
 
-    Two execd behaviours report the same deadline. Older releases raise the
-    error value ``context deadline exceeded``, which the SDK cannot read as an
-    integer, so ``exit_code`` stays unset. execd ``release-1.2.1`` kills the
-    process group when the command context ends and reports only the signal
-    status: ``CommandExecError`` with ``-1`` and no cause (#8367).
+    execd states the cause in two ways. ``CommandTimeout`` names it outright,
+    so it needs no corroboration. The other two forms need evidence: older
+    releases raise the value ``context deadline exceeded``, which the SDK cannot
+    read as an integer, so ``exit_code`` stays unset; execd ``release-1.2.1``
+    kills the process group when the command context ends and reports only the
+    signal status, ``CommandExecError`` with ``-1`` and no cause (#8367).
 
     A bare ``-1`` on its own is still just a signal. It becomes the deadline
     only when the call lasted as long as the timeout DeerFlow passed, which the
@@ -125,7 +126,10 @@ def _is_timeout_execution(
     the deadline.
     """
     error = getattr(execution, "error", None)
-    if getattr(error, "name", None) != "CommandExecError":
+    name = getattr(error, "name", None)
+    if name == "CommandTimeout":
+        return True
+    if name != "CommandExecError":
         return False
     value = getattr(error, "value", None)
     if value == "context deadline exceeded":
