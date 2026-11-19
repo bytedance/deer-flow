@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Install a skill and link it to the project's skills/custom directory
-# Usage: ./skills/install-skill.sh <owner/repo@skill-name>
-# Example: ./skills/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
+# Usage: bash skills/public/find-skills/scripts/install-skill.sh <owner/repo@skill-name>
+# Example: bash skills/public/find-skills/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
 
 set -e
 
