@@ -161,7 +161,9 @@ async def runtime(host, monkeypatch, tmp_path):
         prompt = state["messages"][-1].content
         if prompt == "wait":
             entered.set()
-            await asyncio.Event().wait()
+            await getattr(request.app.state, "release_worker", asyncio.Event()).wait()
+        if present := getattr(request.app.state, "present_worker_report", None):
+            await present(prompt, runtime)
         if prompt == "approve":
             prompt = interrupt({"question": "Continue?"})
         return {"messages": [AIMessage(content=f"answer:{prompt}")]}
@@ -776,3 +778,136 @@ async def test_restored_delegated_handle_is_plugin_scoped_with_extension_origin(
     assert runs._origin == {"kind": "extension", "namespace": "workflows"}
     with pytest.raises(AgentRunError, match="already bound"):
         runs.for_plugin("other")
+
+
+@pytest_asyncio.fixture
+async def worker_gateway(runtime, tmp_path):
+    import asyncio
+
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.gateway.coordination_workers import CoordinationWorkers
+    from app.gateway.routers import coordination, thread_runs
+    from deerflow.persistence.bootstrap import bootstrap_schema
+    from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    runs, state, request, entered, _ = runtime
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'workers.db'}")
+    await bootstrap_schema(engine, backend="sqlite")
+    factory = async_sessionmaker(engine)
+    state.run_store = RunRepository(factory)
+    await state.run_manager.shutdown()
+    state.run_manager = RunManager(store=state.run_store)
+    workers = state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(factory))
+    state.release_worker = asyncio.Event()
+    request.app.include_router(coordination.router)
+    request.app.include_router(thread_runs.router)
+
+    async def authenticated(scope, receive, send):
+        token = set_current_user(request.state.user)
+        try:
+            await request.app({**scope, "state": dict(request.scope["state"])}, receive, send)
+        finally:
+            reset_current_user(token)
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=authenticated), base_url="http://gateway") as client:
+            yield client, runs, state, entered, str(request.state.user.id)
+    finally:
+        await workers.close()
+        await state.run_manager.shutdown()
+        await engine.dispose()
+
+
+async def _wait_for_worker(client, task_id, section, field, value):
+    import asyncio
+
+    async with asyncio.timeout(12):
+        while True:
+            response = await client.get(f"/api/coordination/tasks/{task_id}")
+            response.raise_for_status()
+            view = response.json()
+            if view[section][field] == value:
+                return view
+            await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_routes_followups_and_retains_the_producing_runs_file(worker_gateway):
+    import asyncio
+    from uuid import uuid4
+
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langgraph.types import Command
+
+    from deerflow.config.paths import get_paths
+    from deerflow.persistence.coordination.sql import TaskNotFound
+
+    client, runs, state, entered, owner = worker_gateway
+
+    async def present_report(prompt, runtime):
+        assert runtime.context["subagent_enabled"] is True
+        if prompt == "final instruction":
+            outputs = get_paths().sandbox_outputs_dir(runtime.context["thread_id"], user_id=owner)
+            await asyncio.to_thread(outputs.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread((outputs / "report.txt").write_bytes, b"original report")
+            journal = runtime.context["__run_journal"]
+            journal._remember_current_run_tool_calls(AIMessage(content="", tool_calls=[{"id": "present", "name": "present_files", "args": {}}]), caller="lead_agent")
+            journal.on_tool_end(Command(update={"artifacts": ["/mnt/user-data/outputs/report.txt"], "messages": [ToolMessage("Presented", tool_call_id="present")]}), run_id=uuid4())
+
+    state.present_worker_report = present_report
+    url = "/api/coordination/tasks"
+    body = {"request_id": "dispatch", "objective": "wait"}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    task_id, thread, run = first["task"]["id"], first["assignment"]["thread_id"], first["execution"]["run_id"]
+    assert first["task"]["project_id"] is None and (await client.post(url, json=body)).json()["execution"]["run_id"] == run
+    await asyncio.wait_for(entered.wait(), 10)
+    thread_url = f"/api/threads/{thread}"
+    followup = {"request_id": "fix", "mode": "queue", "text": "new requirement"}
+    receipt = (await client.post(f"{thread_url}/runs/{run}/inputs", json=followup)).raise_for_status().json()
+    assert receipt["status"] == "pending"
+    assert (await client.post(f"{thread_url}/runs/{run}/inputs", json=followup)).json() == receipt
+    direct = asyncio.create_task(client.post(f"{thread_url}/runs", json={"input": {"messages": [{"type": "human", "content": [{"type": "text", "text": "final instruction"}]}]}}))
+    await _wait_for_worker(client, task_id, "task", "latest_input_seq", 2)
+    state.release_worker.set()
+    result = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    final_run = result["execution"]["run_id"]
+    assert final_run != run and result["task"]["result_ref"] == f"{thread_url}/runs/{final_run}/messages"
+    assert (await direct).raise_for_status().json()["run_id"] == final_run
+    assert (await runs.get_state(thread_id=thread))["values"]["messages"][-1]["content"] == "answer:final instruction"
+    assert (await client.get(f"{thread_url}/inputs")).json()["items"][0]["run_id"] == final_run
+    (artifact,) = result["execution"]["artifacts"]
+    assert artifact["run_id"] == final_run
+    await asyncio.to_thread((get_paths().sandbox_outputs_dir(thread, user_id=owner) / "report.txt").unlink)
+    assert (await client.get(artifact["url"])).raise_for_status().content == b"original report"
+    with pytest.raises(TaskNotFound):
+        await state.coordination_workers.repo.read_artifact("another-user", task_id, artifact["url"].rsplit("/", 1)[-1])
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_requires_explicit_resume_and_fences_cancellation(worker_gateway):
+    import asyncio
+
+    client, runs, _, entered, _ = worker_gateway
+    url = "/api/coordination/tasks"
+    paused = (await client.post(url, json={"request_id": "pause", "objective": "approve"})).raise_for_status().json()
+    task_id = paused["task"]["id"]
+    await _wait_for_worker(client, task_id, "execution", "status", "waiting_for_input")
+    target = f"/api/threads/{paused['assignment']['thread_id']}/runs"
+    reply = {"json": {"command": {"resume": "confirmed"}}, "headers": {"Idempotency-Key": "reply"}}
+    answered = (await client.post(target, **reply)).raise_for_status().json()
+    result = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert result["task"]["result_ref"].endswith(f"/{answered['run_id']}/messages")
+    assert (await client.post(target, **reply)).raise_for_status().json()["run_id"] == answered["run_id"]
+
+    other = (await client.post(url, json={"request_id": "cancel", "objective": "wait"})).raise_for_status().json()
+    await asyncio.wait_for(entered.wait(), 10)
+    task_id, thread = other["task"]["id"], other["assignment"]["thread_id"]
+    cancelled = (await client.post(f"{url}/{task_id}/cancel", json={"expected_revision": other["task"]["revision"]})).raise_for_status().json()
+    assert cancelled["status"] == "cancelled"
+    assert (await runs.get(thread_id=thread, run_id=other["execution"]["run_id"])).status == "interrupted"
+    assert (await client.post(f"/api/threads/{thread}/runs", json={"input": {"messages": [{"role": "user", "content": "too late"}]}})).status_code == 409

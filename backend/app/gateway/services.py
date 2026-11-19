@@ -2505,6 +2505,13 @@ async def start_run(
     if not await thread_access_allowed():
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    from app.gateway.coordination_workers import direct_worker_run, managed_task
+    from deerflow.persistence.coordination.workers import THREAD_PREFIX
+
+    if thread_id.startswith(THREAD_PREFIX) and not getattr(request.state, "coordination_execution_id", None):
+        if task_id := await managed_task(request, thread_id):
+            return await direct_worker_run(request, task_id, body, idempotency_key)
+
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL

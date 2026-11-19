@@ -29,3 +29,49 @@ prerequisites keep their state. A running caller can record cancellation
 once it has confirmed that the subtree's executions have stopped. The
 repository handles work state. Host admission, run control, and artifact
 authorization belong to the execution integration.
+
+## Managed workers
+
+A signed-in caller can dispatch a task through the Gateway on a SQL-backed
+installation. The following request starts a worker without a project. Pass
+an optional `project_id` to create its thread in an existing project.
+
+```http
+POST /api/coordination/tasks
+Content-Type: application/json
+
+{"request_id":"review-27","objective":"Review the report","assistant_id":"lead_agent"}
+```
+
+The response includes the task, its assignment (agent and thread), and the
+latest execution. Replaying the request reuses the worker. Read the same
+view with `GET /api/coordination/tasks/{task_id}`. Add a follow-up with
+`POST /api/coordination/tasks/{task_id}/inputs` and a JSON object containing
+`request_id` and `content`. A text message sent to the worker thread uses
+the same queue. Streaming and wait callers observe the run that consumes
+their message. An interrupted graph requires an explicit resume command.
+
+The Gateway freezes each turn before admission. The SQL transaction that
+creates the native run locks the task tree, verifies the execution epoch,
+and records the run ID. A follow-up that arrives during a turn advances
+the input sequence. When that run stops, the worker continues on its own
+thread with the outstanding inputs. Each task has one assignee per epoch.
+Workers can use the agent's allowed subagents for local delegation. Background
+batches can run local work. A batch cannot schedule an independent follow-up
+run on a managed thread; the task owns the next turn.
+
+`POST /api/coordination/tasks/{task_id}/cancel` accepts `expected_revision`.
+It fences the owned subtree, stops its active runs and requests cancellation
+of its native background batches before confirming the task cancellation.
+
+A completed task links to the producing run's messages. For presented output
+files, the Gateway stores the captured bytes with their SHA-256 hashes and
+producing execution. The owner's task artifact URL continues to serve those
+bytes after the source file changes. Capture uses the existing archive budgets
+of 50 files, 50 MiB per file and 100 MiB per execution. The execution reports
+`delivery_failed` if a presented file cannot be captured.
+
+Worker observation uses the initiating session's process-local run handle.
+The task, frozen inputs, native run IDs and artifact contents survive a Gateway
+restart. Automatic reauthorization and restart reconciliation are tracked in
+the next stage of [RFC #8345](https://github.com/bytedance/deer-flow/issues/8345).
