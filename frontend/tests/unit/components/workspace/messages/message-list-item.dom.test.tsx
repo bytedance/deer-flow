@@ -23,6 +23,18 @@ rs.mock("@/components/workspace/messages/markdown-content", () => ({
   MarkdownContent: () => null,
 }));
 
+// RichFileCard only needs the artifact panel's open/select actions; the
+// card itself is what the file-label cases below exercise.
+rs.mock("@/components/workspace/artifacts/context", () => ({
+  useArtifacts: () => ({
+    artifacts: [],
+    autoOpen: false,
+    autoSelect: false,
+    select: () => undefined,
+    setOpen: () => undefined,
+  }),
+}));
+
 // Count calls to the copy-data derivation itself. The render path reads the
 // message content for the body (markdown, reasoning, tasks), so content
 // getters cannot distinguish rendering reads from copy derivation — the spy
@@ -293,5 +305,53 @@ describe("MessageListItem edit lock while a goal is set", () => {
   it("renders no pencil when neither flag is set", () => {
     renderHumanRow({});
     expect(screen.queryByRole("button", { name: "Edit and rerun" })).toBeNull();
+  });
+});
+
+describe("MessageListItem file card type label", () => {
+  // getFileTypeLabel reads FILE_TYPE_MAP, a plain object, so a prototype
+  // key like `__proto__` or `constructor` must not leak an inherited value
+  // into the rendered card (#8380). The upload endpoint accepts both
+  // filenames, so a user can attach either one.
+  function renderRowWithFile(filename: string) {
+    const message = {
+      id: "human-files",
+      type: "human",
+      content: "here is a file",
+      additional_kwargs: {
+        files: [
+          {
+            filename,
+            size: 2048,
+            path: `/uploads/${filename}`,
+            status: "uploaded",
+          },
+        ],
+      },
+    } as unknown as Message;
+    return renderRow(message, { showCopyButton: false });
+  }
+
+  it("labels a file named `__proto__` with the upper-cased extension", () => {
+    const view = renderRowWithFile("__proto__");
+    expect(
+      view.getByRole("button", { name: "__proto__ __PROTO__ · 2.0 KB" }),
+    ).not.toBeNull();
+  });
+
+  it("labels a file named `notes.constructor` with the upper-cased extension", () => {
+    const view = renderRowWithFile("notes.constructor");
+    expect(
+      view.getByRole("button", {
+        name: "notes.constructor CONSTRUCTOR · 2.0 KB",
+      }),
+    ).not.toBeNull();
+  });
+
+  it("keeps the mapped label for a known extension next to the guard", () => {
+    const view = renderRowWithFile("report.pdf");
+    expect(
+      view.getByRole("button", { name: "report.pdf PDF · 2.0 KB" }),
+    ).not.toBeNull();
   });
 });
