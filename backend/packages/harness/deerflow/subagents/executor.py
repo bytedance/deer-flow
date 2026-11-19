@@ -2376,7 +2376,13 @@ class SubagentExecutor:
                 return execution_task.result(), False
         finally:
             if not admission_waiter.done():
-                admission_waiter.cancel()
+                try:
+                    admission_waiter.cancel()
+                except RuntimeError:
+                    # The isolated loop can close while a detached sync
+                    # wrapper is still being reclaimed; there is no loop left
+                    # to schedule the waiter's cancellation on.
+                    pass
 
         done, _ = await asyncio.wait(
             {execution_task},
