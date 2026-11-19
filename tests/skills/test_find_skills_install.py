@@ -49,6 +49,13 @@ def _run_installer(
 def test_missing_checkout_reports_actionable_error_without_calling_npx(
     tmp_path: Path,
 ) -> None:
+    if any(
+        (parent / "deer-flow.code-workspace").is_file()
+        for parent in (tmp_path, *tmp_path.parents)
+    ):
+        pytest.skip(
+            "This regression requires a temporary directory outside a DeerFlow checkout"
+        )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     bin_dir = _install_fake_npx(tmp_path, 'printf called > "$NPX_TEST_LOG"\nexit 99')
@@ -75,11 +82,12 @@ def test_npx_failure_preserves_status_and_output(tmp_path: Path) -> None:
         tmp_path, tmp_path / "home", bin_dir, tmp_path / "npx-called"
     )
 
-    assert result.returncode == 23
-    assert "npx skills add failed" in result.stderr
-    assert "exit 23" in result.stderr
-    assert "registry unavailable" in result.stderr
-    assert "upstream timed out" in result.stderr
+    assert result.stdout == ""
+    assert result.stderr.splitlines() == [
+        f"Error: npx skills add failed for {SKILL_REFERENCE} (exit 23).",
+        "registry unavailable",
+        "upstream timed out",
+    ]
     assert not (tmp_path / "skills/custom/example-skill").exists()
 
 

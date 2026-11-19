@@ -77,7 +77,7 @@ Example response:
 I found a skill that might help! The "vercel-react-best-practices" skill provides
 React and Next.js performance optimization guidelines from Vercel Engineering.
 
-To install it in a host DeerFlow checkout:
+To install it in a host DeerFlow checkout, run this command from the repository root:
 bash skills/public/find-skills/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
 
 In a DeerFlow sandbox or Web session, use the administrator .skill import flow described in Step 4.
@@ -101,7 +101,7 @@ For example:
 bash skills/public/find-skills/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
 ```
 
-**Inside an isolated DeerFlow sandbox or Web session**, do not run this helper. The host checkout and its writable `skills/custom/` directory are unavailable, and `/mnt/skills` is a read-only projection. Instead, provide the skill as a `.skill` archive and ask an administrator to install it through **Capability Center → Skills → My skills → Install .skill**. This uses the administrator's per-user skill storage and makes the skill available through the normal skill projection. Do not copy skill files into `/mnt/skills` or claim that writing files into the thread workspace installs a skill.
+**Inside an isolated DeerFlow sandbox or Web session**, do not run this helper. The host checkout and its writable `skills/custom/` directory are unavailable, and `/mnt/skills` is a read-only projection. Instead, provide the skill as a `.skill` archive and ask an administrator to install it through **Capability Center → Skills → My skills → Install .skill**. If the source does not provide an archive, package the downloaded skill directory first with `python /mnt/skills/public/skill-creator/scripts/package_skill.py <skill-directory> <output-directory>` or an equivalent ZIP tool. Installation uses the administrator's per-user skill storage and makes the skill available through the normal skill projection. Do not copy skill files into `/mnt/skills` or claim that writing files into the thread workspace installs a skill.
 
 ## Common Skill Categories
 
