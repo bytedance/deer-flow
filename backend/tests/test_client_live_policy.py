@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
@@ -110,6 +111,7 @@ def _assert_collection_skipped(result: subprocess.CompletedProcess[str], reason:
     assert all(node_id not in output for node_id in REPRESENTATIVE_LIVE_NODE_IDS)
 
 
+@functools.cache
 def _dry_run_make_target(target: str, *extra: str) -> str:
     result = subprocess.run(
         ["make", "-n", target, *extra],
