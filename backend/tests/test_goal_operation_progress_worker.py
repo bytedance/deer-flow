@@ -73,14 +73,29 @@ def _operations(indices, *, prefix="call", text="Work remains", status="success"
 
 @pytest.fixture(autouse=True)
 def _no_models_or_network(monkeypatch):
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def _is_loopback(address):
+        return isinstance(address, tuple) and bool(address) and address[0].lower() in {"127.0.0.1", "::1", "localhost"}
+
     def denied(*_args, **_kwargs):
+        address = _args[1] if len(_args) > 1 else _kwargs.get("address")
+        if _is_loopback(address):
+            return real_connect(*_args, **_kwargs)
+        raise AssertionError("Goal worker regression attempted a provider/network call")
+
+    def denied_ex(*_args, **_kwargs):
+        address = _args[1] if len(_args) > 1 else _kwargs.get("address")
+        if _is_loopback(address):
+            return real_connect_ex(*_args, **_kwargs)
         raise AssertionError("Goal worker regression attempted a provider/network call")
 
     from deerflow import models
     from deerflow.runtime import goal
 
     monkeypatch.setattr(socket.socket, "connect", denied)
-    monkeypatch.setattr(socket.socket, "connect_ex", denied)
+    monkeypatch.setattr(socket.socket, "connect_ex", denied_ex)
     monkeypatch.setattr(models, "create_chat_model", denied)
     monkeypatch.setattr(goal, "create_chat_model", denied)
 

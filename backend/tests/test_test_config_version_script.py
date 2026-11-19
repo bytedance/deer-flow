@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from support.shell import require_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "test-config-version.sh"
@@ -40,7 +41,7 @@ def _posix(path: Path) -> str:
     if os.name != "nt":
         return str(path)
     converted = subprocess.run(
-        [BASH or "bash", "-c", 'cygpath -u "$1"', "cygpath", str(path)],
+        [require_script_bash(), "-c", 'cygpath -u "$1"', "cygpath", str(path)],
         capture_output=True,
         text=True,
         check=True,
@@ -64,7 +65,7 @@ def _run_wrapper(tmp_path: Path, extra_env: dict[str, str]) -> dict[str, str]:
     env["PATH"] = f"{_posix(bin_dir)}{os.pathsep}{env.get('PATH', '')}"
 
     result = subprocess.run(
-        [BASH or "bash", str(SCRIPT), "--deselect", "sentinel"],
+        [require_script_bash(), str(SCRIPT), "--deselect", "sentinel"],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,

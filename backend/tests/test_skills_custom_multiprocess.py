@@ -84,7 +84,7 @@ def test_custom_skill_history_serializes_independent_processes(tmp_path, action,
     history_file = custom_root / ".history" / "demo-skill.jsonl"
     history_file.parent.mkdir()
     prior = [{"action": "human_edit", "prev_content": restored, "new_content": initial}] if action == "rollback" else []
-    history_file.write_text("".join(json.dumps(entry) + "\n" for entry in prior), encoding="utf-8")
+    history_file.write_text("".join(json.dumps(entry) + "\n" for entry in prior), encoding="utf-8", newline="\n")
 
     context = multiprocessing.get_context("spawn")
     parked, release = context.Event(), context.Event()
