@@ -3223,32 +3223,41 @@ async def test_session_pool_disconnect_cleanup_timeout_preserves_error_and_track
     connection = {"transport": "stdio", "command": "x", "args": []}
     with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
         pooled = await pool.get_session("srv", "scope", connection)
+        call = asyncio.create_task(
+            call_pooled_session_tool(
+                pooled,
+                pool,
+                server_name="srv",
+                scope_key="scope",
+                tool_name="act",
+                arguments={},
+                call_kwargs={},
+            )
+        )
         try:
-            with pytest.raises(anyio.EndOfStream):
-                await asyncio.wait_for(
-                    call_pooled_session_tool(
-                        pooled,
-                        pool,
-                        server_name="srv",
-                        scope_key="scope",
-                        tool_name="act",
-                        arguments={},
-                        call_kwargs={},
-                    ),
-                    timeout=1.0,
-                )
-
             await asyncio.wait_for(exit_started.wait(), timeout=0.5)
+
+            # asyncio.wait() observes the deadline without cancelling the caller.
+            # wait_for(call) would wait for cancellation to propagate and could
+            # hang here if the cleanup path regressed to an unbounded wait.
+            done, _pending = await asyncio.wait({call}, timeout=1.0)
+            assert call in done, "disconnected tool call exceeded the cleanup deadline"
+            with pytest.raises(anyio.EndOfStream):
+                await call
+
+            # The caller has returned, but __aexit__ is deliberately still blocked.
+            # Assert that the pool retains a reaper for this exact owner task,
+            # not merely some unrelated cleanup/reaper task.
             assert cm.owner is not None and not cm.owner.done()
-            assert pool._teardown_tasks
+            owner_reaper = f"mcp-session-owner-reap:{cm.owner.get_name()}"
+            assert any(task.get_name() == owner_reaper for task in pool._teardown_tasks)
         finally:
+            # Always release the owner, including when the deadline assertion fails.
             release_exit.set()
-            for _ in range(100):
-                tasks = list(pool._teardown_tasks)
-                if not tasks:
-                    break
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=0.5,
-                )
+            await asyncio.gather(call, return_exceptions=True)
+            if cm.owner is not None:
+                await asyncio.gather(cm.owner, return_exceptions=True)
+            while pool._teardown_tasks:
+                await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
+
     assert not pool._teardown_tasks
