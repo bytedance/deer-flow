@@ -33,6 +33,10 @@ make test-blocking-io
   sees the result that error handling produced.
 - **Progress tracking fences late results and hint retries by graph entry**, also
   within one run.
+- **A progress reporter nests inside the error handler.** Tool streaming emits
+  lifecycle events and re-raises, so the handler that wraps it still classifies
+  the failure, and a control-flow signal passes through without an error event.
+  The nesting is pinned by `test_tool_streaming_is_inner_of_tool_error_handling`.
 
 ## Rules for a middleware that changes messages
 
