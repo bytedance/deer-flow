@@ -218,6 +218,31 @@ async def test_fork_is_owned_by_visitor_and_survives_revocation(share_app):
     assert (await accessor.aget(config)).values["messages"][-1].content == "Follow up"
 
 
+async def test_fork_history_is_not_captured_into_recipient_memory(share_app, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from langgraph.runtime import Runtime
+
+    from deerflow.agents.middlewares import memory_middleware
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.utils.messages import IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    share = await make_share(ctx)
+    response = await ctx.client.post(f"/api/shares/{share['token']}/fork", json={"request_id": str(uuid4())}, headers=headers("bob"))
+    assert response.status_code == 200, response.text
+    accessor, config = build_checkpoint_state_mutation_accessor(ctx.request, thread_id=response.json()["thread_id"], as_node="branch")
+    copied = (await accessor.aget(config)).values["messages"]
+    assert copied and all(message.additional_kwargs.get(IMPORTED_HISTORY_KEY) == "share" for message in copied)
+    # The recipient's first turn in the copy is the first memory capture for this thread.
+    own = [HumanMessage(content="Bob's own question", id="bob-q"), AIMessage(content="Bob's answer", id="bob-a")]
+    manager = MagicMock()
+    monkeypatch.setattr(memory_middleware, "get_memory_manager", lambda: manager)
+    middleware = memory_middleware.MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
+    middleware.after_agent({"messages": [*copied, *own]}, Runtime(context={"thread_id": "copy", "user_id": str(BOB.id)}))
+    assert [message.id for message in manager.add.call_args.args[1]] == ["bob-q", "bob-a"]
+
+
 async def test_fork_rechecks_completion_after_durable_admission(share_app, monkeypatch):
     ctx = share_app
     if not isinstance(ctx.app.state.run_event_store, DbRunEventStore):

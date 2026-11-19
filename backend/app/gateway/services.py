@@ -116,7 +116,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -205,6 +205,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
             UNTRUSTED_INPUT_KEY,
+            # Only a share import marks history as someone else's; what a
+            # caller sends is its own and stays eligible for memory.
+            IMPORTED_HISTORY_KEY,
             "run_input_id",
             "run_input_source",
             "origin_task_id",

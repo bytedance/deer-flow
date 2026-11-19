@@ -33,6 +33,11 @@ source's agent, project, sandbox, uploads, tool calls or credentials. Tool resul
 are imported as historical assistant text. The copied conversation remains
 usable after the source link is revoked.
 
+The copied messages are context for the model, not something the visitor said,
+so memory extraction skips them, also when compaction removes them. New turns in
+the copy are remembered as in any other conversation, including assistant replies
+that repeat copied content.
+
 ## Deployment and limits
 
 Sharing requires SQLite or PostgreSQL persistence. The Gateway's startup

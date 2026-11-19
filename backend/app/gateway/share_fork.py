@@ -23,6 +23,7 @@ from deerflow.runtime.journal import build_branch_history_seed_events
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.artifact_snapshot import publish_snapshot
 from deerflow.utils.file_io import run_file_io
+from deerflow.utils.messages import IMPORTED_HISTORY_KEY
 
 
 def _write_fork_files(owner: str, thread_id: str, artifacts: list[dict]) -> None:
@@ -91,13 +92,14 @@ async def fork_share(request: Request, repo: ThreadShareRepository, token: str, 
             artifacts.append(artifact)
         # Tool results become ordinary historical assistant text. The new thread
         # inherits no tool execution, system prompt, Agent, project or auth grants.
+        # The import mark keeps the copied turns out of the visitor's memory.
         messages = []
         for item in share["snapshot"]["messages"]:
             content = item["content"]
             if item["type"] == "tool":
                 content = f"{item['name']}:\n{content}"
             cls = HumanMessage if item["type"] == "human" else AIMessage
-            messages.append(cls(content=content, id=str(uuid.uuid4())))
+            messages.append(cls(content=content, id=str(uuid.uuid4()), additional_kwargs={IMPORTED_HISTORY_KEY: "share"}))
         title = str(share["snapshot"]["title"])[:256]
         # Recheck after loading all bytes, before creating any new workspace state.
         if await repo.get_public(token) is None:
