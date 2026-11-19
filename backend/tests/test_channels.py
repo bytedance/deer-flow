@@ -1684,6 +1684,12 @@ class TestChannelManager:
             body={"message": "Thread is already running a task."},
         )
 
+    @staticmethod
+    def _failed_run_inbound(method: str, channel_name: str) -> InboundMessage:
+        if method == "create":
+            return InboundMessage(channel_name=channel_name, chat_id="owner/repo", user_id="dev", owner_user_id="agent-owner-1", workspace_id="owner/repo", text="hi", metadata={"message_id": "delivery-1:dev:agent"})
+        return InboundMessage(channel_name=channel_name, chat_id="wx_user_1", user_id="wx_user_1", text="hi", metadata={"message_id": "m-1"})
+
     _HANDLED_RUN_ERRORS = {
         # case id: (client method, exception factory, stale /model pin recovery, reply text)
         "wait-generic-error": ("wait", lambda: RuntimeError("boom"), False, "An internal error occurred. Please try again."),
@@ -1719,9 +1725,7 @@ class TestChannelManager:
             )
 
         def _inbound() -> InboundMessage:
-            if method == "create":
-                return InboundMessage(channel_name=channel_name, chat_id="owner/repo", user_id="dev", owner_user_id="agent-owner-1", workspace_id="owner/repo", text="hi", metadata={"message_id": "delivery-1:dev:agent"})
-            return InboundMessage(channel_name=channel_name, chat_id="wx_user_1", user_id="wx_user_1", text="hi", metadata={"message_id": "m-1"})
+            return self._failed_run_inbound(method, channel_name)
 
         async def go():
             bus = MessageBus()
@@ -1739,16 +1743,79 @@ class TestChannelManager:
             if stale_pin:
                 monkeypatch.setattr(manager, "_stale_pin_recovery", AsyncMock(return_value=SimpleNamespace(text="pin reset")))
             await manager.start()
+            try:
+                await bus.publish_inbound(_inbound())
+                await asyncio.wait_for(bus.join_inbound(), timeout=5)
+                assert replies == [(reply, True)]
 
-            await bus.publish_inbound(_inbound())
-            await _wait_for(lambda: len(replies) == 1)
-            await asyncio.sleep(0.05)
-            assert replies == [(reply, True)]
+                # The key was released after the reply: the redelivery runs again.
+                await bus.publish_inbound(_inbound())
+                await asyncio.wait_for(bus.join_inbound(), timeout=5)
+                assert run_call.call_count == 2
+            finally:
+                await manager.stop()
 
-            # The key was released after the reply: the redelivery runs again.
-            await bus.publish_inbound(_inbound())
-            await _wait_for(lambda: run_call.call_count == 2)
-            await manager.stop()
+        _run(go())
+
+    @pytest.mark.parametrize(
+        ("case", "key_kept"),
+        [(case, False) for case in _HANDLED_RUN_ERRORS] + [("wait-connect-error", False), ("wait-read-timeout", True)],
+    )
+    def test_shutdown_during_failed_run_reply_keeps_the_release_decision(self, tmp_path, monkeypatch, case, key_kept):
+        """Shutdown cancelling the failure reply must not change whether the key is released.
+
+        A run the Gateway rejected or that ended still releases its key, so the
+        redelivery retries. A ``/wait`` read timeout keeps it, because the run
+        may have been admitted and may still be running.
+        """
+        from app.channels.manager import ChannelManager
+        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+        request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs/wait")
+        transport_errors = {
+            "wait-connect-error": ("wait", lambda: httpx.ConnectError("refused", request=request), False),
+            "wait-read-timeout": ("wait", lambda: httpx.ReadTimeout("timed out", request=request), False),
+        }
+        if case in transport_errors:
+            method, make_exc, stale_pin = transport_errors[case]
+        else:
+            method, make_exc, stale_pin, _ = self._HANDLED_RUN_ERRORS[case]
+        if make_exc == "busy":
+            make_exc = self._thread_busy_conflict
+        channel_name = "wechat"
+        if method == "create":
+            channel_name = "test-fire-and-forget-reply-cancel"
+            monkeypatch.setitem(
+                CHANNEL_RUN_POLICY,
+                channel_name,
+                ChannelRunPolicy(is_interactive=False, fire_and_forget=True, requires_bound_identity=False, buffer_followups_on_busy=False),
+            )
+        msg = self._failed_run_inbound(method, channel_name)
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "store.json"), shutdown_grace_period_seconds=0.05)
+            key = manager._inbound_dedupe_key(msg)
+            assert key is not None
+            reply_started = asyncio.Event()
+
+            async def block_outbound(_: OutboundMessage) -> None:
+                reply_started.set()
+                await asyncio.Event().wait()
+
+            bus.subscribe_outbound(block_outbound)
+            manager._client = _make_mock_langgraph_client()
+            setattr(manager._client.runs, method, AsyncMock(side_effect=make_exc()))
+            if stale_pin:
+                monkeypatch.setattr(manager, "_stale_pin_recovery", AsyncMock(return_value=SimpleNamespace(text="pin reset")))
+            await manager.start()
+            try:
+                await bus.publish_inbound(msg)
+                await asyncio.wait_for(reply_started.wait(), timeout=5)
+            finally:
+                await manager.stop()
+
+            assert (key in manager._inbound_dedupe_store._store) is key_kept
 
         _run(go())
 
@@ -1769,14 +1836,16 @@ class TestChannelManager:
             manager._client.runs.wait = AsyncMock(side_effect=make_exc())
             monkeypatch.setattr(manager, "_send_error", AsyncMock(side_effect=RuntimeError("channel store unavailable")))
             await manager.start()
+            try:
+                await bus.publish_inbound(_inbound())
+                await asyncio.wait_for(bus.join_inbound(), timeout=5)
+                assert manager._inbound_dedupe_key(_inbound()) not in manager._inbound_dedupe_store._store
 
-            await bus.publish_inbound(_inbound())
-            await asyncio.wait_for(bus.join_inbound(), timeout=5)
-            assert manager._inbound_dedupe_key(_inbound()) not in manager._inbound_dedupe_store._store
-
-            await bus.publish_inbound(_inbound())
-            await _wait_for(lambda: manager._client.runs.wait.call_count == 2)
-            await manager.stop()
+                await bus.publish_inbound(_inbound())
+                await asyncio.wait_for(bus.join_inbound(), timeout=5)
+                assert manager._client.runs.wait.call_count == 2
+            finally:
+                await manager.stop()
 
         _run(go())
 
