@@ -194,6 +194,88 @@ def test_get_context_injects_facts_only_in_middleware_mode(deermem_data_dir):
     assert "Facts:" not in tool_context
 
 
+@pytest.mark.parametrize(("mode", "eligible", "selected"), [("middleware", 2, 1), ("tool", 0, 0)])
+def test_context_result_counts_one_scoped_snapshot(deermem_data_dir, monkeypatch, mode, eligible, selected):
+    from deerflow.agents.memory import MemoryContextResult
+
+    dm = DeerMem(
+        backend_config={"storage_path": str(deermem_data_dir), "token_counting": "char", "max_injection_tokens": 100},
+        mode=mode,
+    )
+    dm.import_memory({"facts": [{"id": "f1", "content": "first " + "x" * 40, "confidence": 0.9}, {"id": "f2", "content": "second " + "x" * 40, "confidence": 0.8}]}, user_id="u", agent_name="lead")
+    dm.import_memory({"facts": [{"id": "other", "content": "another agent", "confidence": 0.9}]}, user_id="u", agent_name="other")
+    dm.import_memory({"facts": [{"id": "private", "content": "another user", "confidence": 0.9}]}, user_id="someone-else", agent_name="lead")
+    from deerflow.agents.memory.backends.deermem.deermem.core import prompt
+
+    monkeypatch.setattr(prompt, "_count_tokens", lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text))
+    reads = []
+    load = dm._updater.get_memory_data
+
+    def observe_snapshot(*, agent_name=None, user_id=None):
+        reads.append((agent_name, user_id))
+        snapshot = load(agent_name=agent_name, user_id=user_id)
+        if len(reads) > 1:
+            raise AssertionError("Injection statistics must use the formatted snapshot")
+        return snapshot
+
+    monkeypatch.setattr(dm._updater, "get_memory_data", observe_snapshot)
+    result = dm.get_context_result("u", agent_name="LEAD")
+
+    assert isinstance(result, MemoryContextResult)
+    assert result.eligible_fact_count == eligible
+    assert result.selected_fact_count == selected
+    assert reads == [("lead" if mode == "middleware" else None, "u")]
+    if mode == "middleware":
+        assert "first" in result.text
+        assert "second" not in result.text
+        assert "another agent" not in result.text
+        assert "another user" not in result.text
+    else:
+        assert result.text == ""
+
+
+def test_context_result_empty_snapshot_has_known_zero_counts(deermem_data_dir):
+    dm = DeerMem(backend_config={"token_counting": "char"})
+
+    result = dm.get_context_result("new-user")
+
+    assert result.text == ""
+    assert (result.eligible_fact_count, result.selected_fact_count) == (0, 0)
+
+
+@pytest.mark.parametrize("use_super", [False, True])
+def test_context_result_preserves_legacy_deermem_subclass_restrictions(deermem_data_dir, monkeypatch, use_super):
+    calls = []
+
+    class _RestrictedDeerMem(DeerMem):
+        def get_context(self, *, user_id, agent_name=None, thread_id=None, query=None):
+            calls.append((user_id, agent_name, thread_id, query))
+            if not use_super:
+                return ""
+            return super().get_context(user_id=user_id, agent_name=agent_name, thread_id=thread_id, query=query).replace("private detail", "filtered detail")
+
+    manager = _RestrictedDeerMem(backend_config={"token_counting": "char"})
+    manager.create_fact("private detail", confidence=0.9, user_id="u", agent_name="lead")
+    reads = []
+    load = manager._updater.get_memory_data
+
+    def observe_snapshot(*, agent_name=None, user_id=None):
+        reads.append((agent_name, user_id))
+        return load(agent_name=agent_name, user_id=user_id)
+
+    monkeypatch.setattr(manager._updater, "get_memory_data", observe_snapshot)
+    result = manager.get_context_result(user_id="u", agent_name="lead", thread_id="thread", query="current question")
+
+    assert calls == [("u", "lead", "thread", "current question")]
+    assert reads == ([("lead", "u")] if use_super else [])
+    assert (result.eligible_fact_count, result.selected_fact_count) == (None, None)
+    assert "private detail" not in result.text
+    if use_super:
+        assert "filtered detail" in result.text
+    else:
+        assert result.text == ""
+
+
 def test_import_without_agent_name_persists_facts_in_default_markdown_bucket(deermem_data_dir):
     dm = DeerMem(backend_config=None)
     dm.import_memory(
@@ -369,9 +451,17 @@ def test_portability_only_abc_contract_imports_deerflow():
 _VENDORED_MANAGER_PY = '''
 """Vendored host contract (pydantic BaseModel + three-tier ABC) for the portability demo."""
 from abc import abstractmethod
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+@dataclass(frozen=True)
+class MemoryContextResult:
+    text: str
+    eligible_fact_count: int | None = None
+    selected_fact_count: int | None = None
 
 
 class MemoryManager(BaseModel):

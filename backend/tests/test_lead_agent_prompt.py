@@ -447,6 +447,64 @@ def test_build_acp_section_uses_explicit_app_config_without_global_config(monkey
     assert "/mnt/acp-workspace/" in section
 
 
+@pytest.mark.parametrize(
+    ("text", "eligible", "selected", "status"),
+    [
+        ("remember", 3, 2, "known"),
+        ("", 0, 0, "known"),
+        ("", 4, 0, "known"),
+        ("remember", None, None, "unknown"),
+        ("remember", True, 1, "unknown"),
+        ("remember", 2, 3, "unknown"),
+        ("remember", -1, 0, "unknown"),
+        ("remember", 2, None, "unknown"),
+    ],
+)
+def test_memory_context_transports_statistics_from_the_same_read(monkeypatch, text, eligible, selected, status):
+    from deerflow.agents.memory import MemoryContextResult
+
+    calls = []
+
+    def read(user_id, *, agent_name=None, query=None):
+        calls.append((user_id, agent_name, query))
+        return MemoryContextResult(text, eligible, selected)
+
+    manager = SimpleNamespace(get_context_result=read)
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    config = SimpleNamespace(memory=SimpleNamespace(enabled=True, injection_enabled=True))
+    stats = {"stale": 99}
+    content = prompt_module._get_memory_context("agent-a", app_config=config, user_id="user-a", query="needle", injection_stats=stats)
+
+    assert calls == [("user-a", "agent-a", "needle")]
+    assert content == (f"<memory>\n{text}\n</memory>\n" if text else "")
+    assert stats == {"schema_version": 1, "status": status, "eligible_fact_count": eligible if status == "known" else None, "selected_fact_count": selected if status == "known" else None}
+
+
+@pytest.mark.parametrize(("enabled", "injection_enabled"), [(False, True), (True, False)])
+def test_disabled_memory_observation_does_not_read_store(monkeypatch, enabled, injection_enabled):
+    def unexpected_manager():
+        raise AssertionError("disabled memory must not resolve a backend")
+
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", unexpected_manager)
+    config = SimpleNamespace(memory=SimpleNamespace(enabled=enabled, injection_enabled=injection_enabled))
+    stats = {}
+    assert prompt_module._get_memory_context(app_config=config, injection_stats=stats) == ""
+    assert stats == {"schema_version": 1, "status": "disabled", "eligible_fact_count": None, "selected_fact_count": 0}
+
+
+def test_failed_memory_read_records_unknown_instead_of_empty_counts(monkeypatch):
+    from deerflow.agents.memory import MemoryManagerError
+
+    def failed_read(*args, **kwargs):
+        raise MemoryManagerError("unavailable")
+
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: SimpleNamespace(get_context_result=failed_read))
+    config = SimpleNamespace(memory=SimpleNamespace(enabled=True, injection_enabled=True, backend_config={}))
+    stats = {}
+    assert prompt_module._get_memory_context(app_config=config, user_id="user-a", injection_stats=stats) == ""
+    assert stats == {"schema_version": 1, "status": "unknown", "eligible_fact_count": None, "selected_fact_count": None}
+
+
 def test_get_memory_context_uses_explicit_app_config_without_global_config(monkeypatch):
     explicit_config = SimpleNamespace(
         memory=SimpleNamespace(enabled=True, injection_enabled=True, max_injection_tokens=1234, token_counting="tiktoken"),

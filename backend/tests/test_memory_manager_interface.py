@@ -110,6 +110,70 @@ def test_minimal_backend_onboards_via_factory_with_only_add_get_context():
         manager.update_fact("x", user_id="u")
 
 
+@pytest.mark.parametrize("text", ["provider-defined context", ""])
+def test_context_result_preserves_legacy_backend_text_with_unknown_counts(text):
+    class _LegacyBackend(_MinimalBackend):
+        _calls: list = PrivateAttr(default_factory=list)
+
+        def get_context(self, user_id, *, agent_name=None):
+            self._calls.append((user_id, agent_name))
+            return text
+
+    manager = _LegacyBackend()
+    result = manager.get_context_result("u", agent_name="lead", query="legacy ignores hints")
+
+    assert result.text == text
+    assert result.eligible_fact_count is None
+    assert result.selected_fact_count is None
+    assert manager._calls == [("u", "lead")]
+
+
+def test_context_result_passes_query_and_thread_to_capable_backend_once():
+    class _QueryBackend(_MinimalBackend):
+        _calls: list = PrivateAttr(default_factory=list)
+
+        def get_context(self, user_id, *, agent_name=None, thread_id=None, query=None):
+            self._calls.append((user_id, agent_name, thread_id, query))
+            return "provider context"
+
+    manager = _QueryBackend()
+    result = manager.get_context_result("u", agent_name="lead", thread_id="thread", query="current question")
+
+    assert result.text == "provider context"
+    assert (result.eligible_fact_count, result.selected_fact_count) == (None, None)
+    assert manager._calls == [("u", "lead", "thread", "current question")]
+
+
+def test_context_result_does_not_retry_backend_type_errors():
+    class _BrokenBackend(_MinimalBackend):
+        _calls: list = PrivateAttr(default_factory=list)
+
+        def get_context(self, user_id, *, agent_name=None, query=None):
+            self._calls.append((user_id, query))
+            raise TypeError("provider failed while formatting")
+
+    manager = _BrokenBackend()
+    with pytest.raises(TypeError, match="provider failed while formatting"):
+        manager.get_context_result("u", query="current question")
+    assert manager._calls == [("u", "current question")]
+
+
+def test_context_result_preserves_keyword_only_user_id():
+    class _KeywordOnlyBackend(_MinimalBackend):
+        _calls: list = PrivateAttr(default_factory=list)
+
+        def get_context(self, *, user_id, agent_name=None):
+            self._calls.append((user_id, agent_name))
+            return "keyword-only context"
+
+    manager = _KeywordOnlyBackend()
+    result = manager.get_context_result(user_id="u", agent_name="lead")
+
+    assert result.text == "keyword-only context"
+    assert (result.eligible_fact_count, result.selected_fact_count) == (None, None)
+    assert manager._calls == [("u", "lead")]
+
+
 def test_tier1_abstract_enforcement():
     """A backend missing add or get_context cannot instantiate (TypeError at
     construction -- memory is persistent state, missing write/read is a severe

@@ -258,7 +258,19 @@
         "properties": {
           "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
           "project_context_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-          "project_shelf_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+          "project_shelf_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "memory_injection": {
+            "type": "object",
+            "required": ["status", "eligible", "selected", "injected", "withheld"],
+            "properties": {
+              "status": {"enum": ["fresh", "reused", "empty", "disabled", "unknown"]},
+              "eligible": {"type": ["integer", "null"], "minimum": 0},
+              "selected": {"type": ["integer", "null"], "minimum": 0},
+              "injected": {"type": ["integer", "null"], "minimum": 0},
+              "withheld": {"type": ["integer", "null"], "minimum": 0}
+            },
+            "additionalProperties": false
+          }
         },
         "additionalProperties": true
       },

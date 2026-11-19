@@ -53,6 +53,29 @@ def test_summary_truncation_handles_nonmonotone_bpe_counts(monkeypatch):
     assert len(encoding.encode(result)) <= 100
 
 
+@pytest.mark.parametrize(
+    ("memory_data", "max_tokens", "eligible", "selected"),
+    [
+        ({}, 2000, 0, 0),
+        ({"user": {"workContext": {"summary": "Facts:\n- a summary is not a fact"}}}, 2000, 0, 0),
+        ({"facts": "not a fact list"}, 2000, 0, 0),
+        ({"facts": [None, "bad", {}, {"content": None}, {"content": 42}, {"content": ""}, {"content": "  "}]}, 2000, 0, 0),
+        ({"facts": [{"content": "first", "confidence": 0.9}, {"content": "second", "confidence": 0.8}]}, 0, 2, 0),
+        ({"facts": [{"content": "first", "confidence": 0.9}, {"content": "second", "confidence": 0.8}]}, 40, 2, 1),
+        ({"facts": [{"content": "first", "confidence": 0.9}, {"content": "second", "confidence": 0.8}]}, 2000, 2, 2),
+        ({"facts": [{"content": "one fact\n- with another line", "confidence": 0.9}, {"content": None}]}, 2000, 1, 1),
+    ],
+)
+def test_injection_stats_count_valid_facts_and_final_selection(monkeypatch, memory_data, max_tokens, eligible, selected):
+    monkeypatch.setattr(prompt, "_count_tokens", lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text))
+    stats = {"eligible_fact_count": 99, "selected_fact_count": 99}
+
+    result = format_memory_for_injection(memory_data, max_tokens=max_tokens, use_tiktoken=False, injection_stats=stats)
+
+    assert stats == {"eligible_fact_count": eligible, "selected_fact_count": selected}
+    assert result == format_memory_for_injection(memory_data, max_tokens=max_tokens, use_tiktoken=False)
+
+
 def test_format_memory_includes_facts_section() -> None:
     memory_data = {
         "user": {},
@@ -376,13 +399,17 @@ def test_fallback_on_ranking_error(monkeypatch) -> None:
         flaky_select,
     )
 
+    stats = {}
     result = format_memory_for_injection(
         memory_data,
         max_tokens=2000,
         guaranteed_categories=["correction"],
         guaranteed_token_budget=500,
+        injection_stats=stats,
     )
 
+    assert stats == {"eligible_fact_count": 2, "selected_fact_count": 2}
+    assert call_count["n"] == 2
     # Both facts should still appear via the fallback path.
     assert "Fact A" in result
     assert "Fact B" in result
@@ -539,14 +566,17 @@ def test_structure_aware_truncation_preserves_guaranteed_on_overflow(monkeypatch
         ],
     }
 
+    stats = {}
     result = format_memory_for_injection(
         memory_data,
         max_tokens=200,
         guaranteed_categories=["correction"],
         guaranteed_token_budget=500,
         use_tiktoken=False,
+        injection_stats=stats,
     )
 
+    assert stats == {"eligible_fact_count": 2, "selected_fact_count": 1}
     # Guaranteed correction must survive even when preceding sections are huge.
     assert "never use pip" in result, f"Guaranteed correction was silently truncated away:\n{result[-200:]}"
     assert "pip is deprecated" in result
