@@ -3284,8 +3284,6 @@ async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
             if cm.owner is not None:
                 await asyncio.gather(cm.owner, return_exceptions=True)
             while pool._teardown_tasks:
-                await asyncio.gather(
-                    *list(pool._teardown_tasks), return_exceptions=True
-                )
+                await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
 
     assert not pool._teardown_tasks
