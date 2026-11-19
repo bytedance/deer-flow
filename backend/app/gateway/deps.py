@@ -53,6 +53,30 @@ logger = logging.getLogger(__name__)
 # timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 
+# Upper bound (seconds) a delegated-restore call may wait for the AgentRuns
+# host to be installed during Gateway startup. Startup normally signals within
+# its first seconds; the bound only fails a stuck startup instead of leaving
+# unattended recovery hanging, and per-record failures keep manual recovery.
+_EXTENSION_RESTORE_READY_TIMEOUT_SECONDS = 60.0
+
+
+async def _agent_runs_host_after_install(app, installed: asyncio.Event):
+    """Resolve the AgentRuns host once startup has installed it.
+
+    Extension services start before the run-admission stack (thread store, run
+    manager, AgentRuns host) exists, and unattended restoration can run during
+    that window, so wait for the explicit installation signal instead of
+    failing the whole recovery scan.
+    """
+    try:
+        await asyncio.wait_for(installed.wait(), _EXTENSION_RESTORE_READY_TIMEOUT_SECONDS)
+    except TimeoutError:
+        pass
+    host = getattr(app.state, "agent_runs_host", None)
+    if host is None:
+        raise RuntimeError("Agent run host unavailable")
+    return host
+
 
 def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
     """Return whether process-local agentic browser sessions are configured."""
@@ -526,8 +550,35 @@ async def _retry_recovered_run_stream_end(
     *,
     retry_delay: float,
     cleanup_delay: float,
+    stream_was_present: bool | None = None,
 ) -> None:
     await asyncio.sleep(max(0.0, retry_delay))
+    if stream_was_present is True:
+        stream_exists = getattr(bridge, "stream_exists", None)
+        if callable(stream_exists):
+            try:
+                if not await stream_exists(run_id):
+                    cleanup_expired_producer = getattr(bridge, "cleanup_expired_producer", None)
+                    if callable(cleanup_expired_producer):
+                        try:
+                            await cleanup_expired_producer(run_id)
+                        except Exception:
+                            logger.warning(
+                                "Failed to clean expired stream producer marker after retry for %s",
+                                run_id,
+                                exc_info=True,
+                            )
+                    logger.debug(
+                        "Skipping recovered stream end retry for %s: stream expired during retry delay",
+                        run_id,
+                    )
+                    return
+            except Exception:
+                logger.debug(
+                    "Failed to recheck recovered stream existence for %s",
+                    run_id,
+                    exc_info=True,
+                )
     await bridge.publish_end(run_id)
     await bridge.cleanup(run_id, delay=cleanup_delay)
 
@@ -542,7 +593,7 @@ async def _publish_recovered_run_stream_end(
     """Terminate retained streams for runs recovered as orphaned."""
     cleanup_tasks: list[tuple[str, asyncio.Task[None]]] = []
 
-    def schedule_retry(record: RunRecord) -> bool:
+    def schedule_retry(record: RunRecord, *, stream_was_present: bool | None = None) -> bool:
         retry_delay = getattr(
             bridge,
             "producer_lease_retry_delay_seconds",
@@ -556,6 +607,7 @@ async def _publish_recovered_run_stream_end(
                 record.run_id,
                 retry_delay=float(retry_delay),
                 cleanup_delay=cleanup_delay,
+                stream_was_present=stream_was_present,
             )
         )
         task.add_done_callback(
@@ -571,9 +623,11 @@ async def _publish_recovered_run_stream_end(
 
     for record in recovered_runs:
         stream_exists = getattr(bridge, "stream_exists", None)
+        stream_was_present: bool | None = None
         if stream_exists is not None:
             try:
-                if not await stream_exists(record.run_id):
+                stream_was_present = bool(await stream_exists(record.run_id))
+                if not stream_was_present:
                     logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
                     cleanup_expired_producer = getattr(
                         bridge,
@@ -591,10 +645,12 @@ async def _publish_recovered_run_stream_end(
                             )
                             cleaned = False
                         if not cleaned:
-                            schedule_retry(record)
+                            schedule_retry(record, stream_was_present=False)
                     continue
             except Exception:
                 logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
+                schedule_retry(record, stream_was_present=stream_was_present)
+                continue
         try:
             await bridge.publish_end(record.run_id)
         except Exception:
@@ -603,7 +659,7 @@ async def _publish_recovered_run_stream_end(
                 record.run_id,
                 exc_info=True,
             )
-            schedule_retry(record)
+            schedule_retry(record, stream_was_present=stream_was_present)
             continue
         task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
         task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
@@ -988,6 +1044,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Register cleanup before starting: start() can partially acquire
         # resources and then fail or be cancelled.
         stack.push_async_callback(stop_extension_services)
+
+        agent_runs_host_installed = asyncio.Event()
+
+        async def restore_agent_runs_authority(*, user_id: str, grant: dict, validator=None, plugin_namespace: str | None = None):
+            host = await _agent_runs_host_after_install(app, agent_runs_host_installed)
+            return await host.restore_delegated_authority(user_id=user_id, grant=grant, validator=validator, plugin_namespace=plugin_namespace)
+
         record_runtime_diagnostics(
             await start_services(
                 extensions,
@@ -996,6 +1059,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 run_evidence_reader=app.state.run_evidence_reader,
                 host_capabilities=host_capabilities.bindings,
                 attempted_services=attempted_services,
+                agent_runs_restore=restore_agent_runs_authority,
             )
         )
 
@@ -1093,6 +1157,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.agent_runs_host = GatewayAgentRunsHost(app, load_user=SQLiteUserRepository(sf).get_user_by_id if sf is not None else None)
         stack.callback(app.state.agent_runs_host.close)
+        # Extension unattended recovery waits on this before restoring grants;
+        # past it, the whole run-admission stack above is ready.
+        agent_runs_host_installed.set()
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()

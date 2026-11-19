@@ -7621,22 +7621,26 @@ class TestSubagentFinalizationCancellation:
 class TestSubagentCancellationLifecycle:
     @pytest.fixture
     def lifecycle(self):
+        from dataclasses import replace
+
         from deerflow.extensions.registry import ExtensionRegistry
 
-        starts, stops = [], []
+        starts, stops, stop_details = [], [], []
         stopped = threading.Event()
 
         async def on_start(app_store, task_store, info):
             starts.append(info)
 
         async def on_stop(app_store, task_store, info, outcome):
-            stops.append((info, outcome))
+            # Identity as at start; the final state is recorded separately.
+            stops.append((replace(info, stop=None), outcome))
+            stop_details.append(info.stop)
             stopped.set()
 
         registry = ExtensionRegistry()
         with registry.attributed_to("test:lifecycle"):
             registry.task_lifecycle(SimpleNamespace(on_task_start=on_start, on_task_stop=on_stop))
-        return SimpleNamespace(extensions=registry.build(), starts=starts, stops=stops, stopped=stopped)
+        return SimpleNamespace(extensions=registry.build(), starts=starts, stops=stops, stop_details=stop_details, stopped=stopped)
 
     @pytest.mark.parametrize("shared_holder", [False, True])
     @pytest.mark.parametrize("stage", ["setup", "stream"])
@@ -7819,6 +7823,7 @@ class TestSubagentCancellationLifecycle:
             assert mode == "setup_cancel" or closed.is_set()
             assert len(lifecycle.starts) == 1
             assert lifecycle.stops == [(lifecycle.starts[0], expected_outcome)]
+            assert [detail.status for detail in lifecycle.stop_details] == [expected_status.value]
         finally:
             cooperative_cancel.set()
             module.request_cancel_background_task(execution_id)
