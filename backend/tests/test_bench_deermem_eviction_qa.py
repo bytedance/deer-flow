@@ -7,9 +7,11 @@ from pathlib import Path
 import httpx
 import pytest
 
+from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_memory_for_injection
 from scripts.benchmark.deermem_eviction.config import load_evaluation_config
-from scripts.benchmark.deermem_eviction.policy import PolicyResult
-from scripts.benchmark.deermem_eviction.pool import PreparedCase
+from scripts.benchmark.deermem_eviction.dataset import EvidenceRecord
+from scripts.benchmark.deermem_eviction.policy import PolicyResult, evaluate_case
+from scripts.benchmark.deermem_eviction.pool import PreparedCase, build_case
 from scripts.benchmark.deermem_eviction.provider import ProviderCallError, ProviderConfigurationError, ProviderSettings, build_client, request_answer, resolve_provider_settings
 from scripts.benchmark.deermem_eviction.qa import build_answer_task, render_answer_messages
 from scripts.benchmark.deermem_eviction.runner import ensure_run_config_identity, response_path, run_answer_calls, verify_run_identity
@@ -101,6 +103,65 @@ def test_build_answer_task_renders_only_kept_facts() -> None:
     assert "fact-b" not in user
     with pytest.raises(ValueError):
         build_answer_task(_case(case_id="other"), _policy_result(case, kept=("fact-a",)), _template())
+
+
+def _injection_evidence(record_id: str, marker: str, question_type: str) -> EvidenceRecord:
+    return EvidenceRecord(
+        question_id=record_id,
+        question_type=question_type,
+        question="Where is the notebook?",
+        answer="study shelf",
+        question_date=None,
+        content=f"{marker}: " + "The user stores a blue notebook on the study shelf. " * 3,
+    )
+
+
+@pytest.mark.parametrize(
+    ("capacity", "expected_retained"),
+    [
+        (7, {"SUPPORT_ANCHOR", "DISTRACTOR_0", "DISTRACTOR_1", "DISTRACTOR_2", "DISTRACTOR_3", "DISTRACTOR_4", "DISTRACTOR_5"}),
+        (9, {"SUPPORT_ANCHOR", "DISTRACTOR_0", "DISTRACTOR_1", "DISTRACTOR_2", "DISTRACTOR_3", "DISTRACTOR_4", "DISTRACTOR_5", "DISTRACTOR_6", "DISTRACTOR_7"}),
+    ],
+)
+@pytest.mark.parametrize("injection_budget", [120, 2000])
+def test_injection_budget_is_separate_from_capacity_retention(capacity: int, expected_retained: set[str], injection_budget: int) -> None:
+    config = _load_config()
+    case = build_case(
+        support=_injection_evidence("support", "SUPPORT_ANCHOR", "knowledge-update"),
+        distractors=[_injection_evidence(f"d{index}", f"DISTRACTOR_{index}", "single-session-user") for index in range(9)],
+        scenario="confirmation_help",
+        loss_rank=8,
+        evaluation_time=config.evaluation_time,
+        source="synthetic",
+    )
+    result = evaluate_case(case, policy_name="hybrid-v1", capacity=capacity, hybrid_config=config.policies.hybrid_v1)
+    assert result.support_all_retained
+    assert len(result.kept_fact_ids) == capacity
+    retained = [fact for fact in case.facts if fact["id"] in result.kept_fact_ids]
+    task = build_answer_task(case, result, _template())
+    rendered = format_memory_for_injection(
+        {"facts": retained},
+        max_tokens=injection_budget,
+        use_tiktoken=False,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=500,
+    )
+
+    # These short, unique markers identify only this controlled synthetic pool.
+    markers = {"SUPPORT_ANCHOR", *(f"DISTRACTOR_{index}" for index in range(9))}
+    assert {marker for marker in markers if marker in task.messages[1]["content"]} == expected_retained
+    assert all(fact["content"] in task.messages[1]["content"] for fact in retained)
+    expected_injected = expected_retained if injection_budget == 2000 else {"DISTRACTOR_0", "DISTRACTOR_1"}
+    assert {marker for marker in markers if marker in rendered} == expected_injected
+
+
+def test_injection_budget_includes_formatting_overhead() -> None:
+    contents = {f"CHECK_{index}": f"CHECK_{index}: " + "x" * 47 for index in range(7)}
+    facts = [{"id": marker, "content": content, "category": "context", "confidence": 0.7} for marker, content in contents.items()]
+    assert sum(map(len, contents.values())) == 392
+    rendered = format_memory_for_injection({"facts": facts}, max_tokens=100, use_tiktoken=False)
+    assert len(rendered) <= 400
+    assert {marker for marker in contents if marker in rendered} == {"CHECK_0", "CHECK_1", "CHECK_2", "CHECK_3", "CHECK_4"}
 
 
 def test_provider_settings_errors_name_the_missing_variables(monkeypatch: pytest.MonkeyPatch) -> None:

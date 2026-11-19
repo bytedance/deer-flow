@@ -17,6 +17,33 @@ The first stage is entirely offline:
 
 The deterministic grader (`grading.py`), the resumable live QA runner (`qa.py`, `provider.py`, `runner.py`), and the blind grading/statistics report (`report.py`, `stats.py`) are implemented; all are documented below. Both policies receive fresh calls with the same `max_tokens=2048`; the historical optimization that reused a 1024-token confidence baseline is not reproduced.
 
+## Capacity selection and production injection
+
+The QA results below describe the capacity-eviction comparison: the pinned
+answer prompt includes every retained fact. Production memory injection has a
+separate token budget and can omit facts that survived capacity selection.
+Capacity retention therefore does not establish which facts reach a production
+model request, or whether that model answers correctly.
+
+Run the independent, offline synthetic boundary diagnostics from `backend/`:
+
+```bash
+PYTHONPATH=. uv run pytest tests/test_bench_deermem_eviction_qa.py -k injection_budget -v
+```
+
+The cases connect the real pool builder, capacity selector, frozen QA renderer,
+and production `format_memory_for_injection()`. They check capacities 7 and 9
+with tight and roomy injection budgets, including a retained support fact that
+the QA prompt contains but the tight production budget omits. A separate case
+shows that content fitting the budget before formatting does not guarantee all
+facts fit after formatting.
+
+These fixtures use unique synthetic content and the formatter's character-based
+counting mode; they need no dataset, credentials or provider calls. They do not
+reproduce LongMemEval/tiktoken counts, parse arbitrary memory fact membership,
+or measure answer accuracy. They leave the historical renderer, request
+fingerprints and published artifacts unchanged.
+
 ## Pinned inputs
 
 | Input | Value |
