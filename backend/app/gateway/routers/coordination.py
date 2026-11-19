@@ -5,7 +5,7 @@ from pathlib import PurePosixPath
 from typing import Annotated
 
 from deerflow_extension_api.agent_runs import AgentRunError
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, StringConstraints
 
@@ -80,6 +80,16 @@ async def cancel_worker_task(task_id: str, body: CancelTask, request: Request):
         return await await_drained(service.cancel(runs, owner, task_id, body.expected_revision))
     except (TaskConflict, TaskNotFound, AgentRunError) as exc:
         raise worker_error(exc) from exc
+
+
+@router.get("/{task_id}/artifacts")
+@require_permission("threads", "read")
+async def list_worker_artifacts(task_id: str, request: Request, limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0)):
+    service, owner, _runs = worker_context(request)
+    try:
+        return await service.repo.list_artifacts(owner, task_id, limit=limit, offset=offset)
+    except TaskNotFound as exc:
+        raise HTTPException(404, "Task not found") from exc
 
 
 @router.get("/{task_id}/artifacts/{artifact_id}")

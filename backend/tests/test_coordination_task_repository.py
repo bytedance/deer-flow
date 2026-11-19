@@ -220,6 +220,9 @@ async def test_worker_admission_is_atomic_with_cancellation_and_replay(database)
         await runs.create_thread_operation_atomic("unmanaged", **kwargs, idempotency_key="client-key")
     with pytest.raises(TaskNotFound):
         await workers.view("bob", task["id"])
+    with pytest.raises(TaskNotFound):
+        await workers.list_artifacts("bob", task["id"], limit=1, offset=0)
+    assert await workers.list_artifacts("alice", task["id"], limit=1, offset=0) == []
     current = await workers.get("alice", task["id"])
     admitted, cancelled = await asyncio.gather(
         runs.create_thread_operation_atomic("native", **kwargs, idempotency_key=key),

@@ -49,6 +49,30 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
     def _latest(task_id):
         return select(Execution).filter_by(task_id=task_id).order_by(Execution.turn.desc()).limit(1)
 
+    @staticmethod
+    async def _artifact_refs(session, task_id, *, execution_id=None, limit=None, offset=0):
+        query = (
+            select(Artifact.id, Artifact.path, Artifact.sha256, Artifact.size, Execution.run_id, Execution.turn)
+            .join(Execution, Execution.id == Artifact.execution_id)
+            .where(Execution.task_id == task_id)
+            .order_by(Execution.turn, Artifact.path, Artifact.id)
+        )
+        if execution_id is not None:
+            query = query.where(Execution.id == execution_id)
+        rows = await session.execute(query.limit(limit).offset(offset))
+        return [
+            {
+                "id": row.id,
+                "source_path": row.path,
+                "sha256": row.sha256,
+                "size": row.size,
+                "run_id": row.run_id,
+                "turn": row.turn,
+                "url": f"/api/coordination/tasks/{task_id}/artifacts/{row.id}",
+            }
+            for row in rows
+        ]
+
     async def view(self, owner, task_id):
         async with self._sessions() as session:
             task = await self._lookup(session, owner, task_id)
@@ -57,8 +81,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             result = None
             if execution is not None:
                 result = execution.to_dict(exclude={"frozen_input", "resume_key"})
-                metadata = await session.execute(select(Artifact.id, Artifact.path, Artifact.sha256, Artifact.size).filter_by(execution_id=execution.id).order_by(Artifact.path))
-                result["artifacts"] = [{"source_path": row.path, "sha256": row.sha256, "size": row.size, "run_id": execution.run_id, "url": f"/api/coordination/tasks/{task_id}/artifacts/{row.id}"} for row in metadata]
+                result["artifacts"] = await self._artifact_refs(session, task_id, execution_id=execution.id)
             return {
                 "task": task.to_dict(),
                 "assignment": assignment.to_dict() if assignment else None,
@@ -73,6 +96,11 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                 raise TaskConflict("Task no longer accepts this execution")
             worker = await session.get(Assignment, (task_id, execution.epoch))
             return worker.to_dict(), execution.frozen_input, task.project_id
+
+    async def list_artifacts(self, owner, task_id, *, limit, offset):
+        async with self._sessions() as session:
+            await self._lookup(session, owner, task_id)
+            return await self._artifact_refs(session, task_id, limit=limit, offset=offset)
 
     async def read_artifact(self, owner, task_id, artifact_id):
         async with self._sessions() as session:

@@ -71,6 +71,15 @@ bytes after the source file changes. Capture uses the existing archive budgets
 of 50 files, 50 MiB per file and 100 MiB per execution. The execution reports
 `delivery_failed` if a presented file cannot be captured.
 
+Use `GET /api/coordination/tasks/{task_id}/artifacts` to list the task's
+deliveries, including files from earlier executions. The response lists
+artifact IDs, source paths, hashes, sizes, producing `run_id` and `turn`,
+and download URLs. Results are ordered by turn, then source path and ID.
+Use `limit` (default and maximum 100) and `offset` (default 0) to page
+through them. Files presented under the same path in different turns
+have separate IDs and URLs. The task detail's `execution.artifacts` lists
+deliveries produced by that execution.
+
 Worker observation uses the initiating session's process-local run handle.
 The task, frozen inputs, native run IDs and artifact contents survive a Gateway
 restart. Automatic reauthorization and restart reconciliation are tracked in

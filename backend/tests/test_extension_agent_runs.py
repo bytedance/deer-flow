@@ -837,7 +837,8 @@ async def _wait_for_worker(client, task_id, section, field, value):
 
 
 @pytest.mark.asyncio
-async def test_managed_worker_routes_followups_and_retains_the_producing_runs_file(worker_gateway):
+@pytest.mark.parametrize("followup_report", [None, b"revised report"], ids=["text-followup", "same-name-file"])
+async def test_managed_worker_routes_followups_and_retains_the_producing_runs_file(worker_gateway, followup_report):
     import asyncio
     from uuid import uuid4
 
@@ -851,10 +852,11 @@ async def test_managed_worker_routes_followups_and_retains_the_producing_runs_fi
 
     async def present_report(prompt, runtime):
         assert runtime.context["subagent_enabled"] is True
-        if prompt == "final instruction":
+        report = b"original report" if prompt == "wait" else followup_report
+        if report is not None:
             outputs = get_paths().sandbox_outputs_dir(runtime.context["thread_id"], user_id=owner)
             await asyncio.to_thread(outputs.mkdir, parents=True, exist_ok=True)
-            await asyncio.to_thread((outputs / "report.txt").write_bytes, b"original report")
+            await asyncio.to_thread((outputs / "report.txt").write_bytes, report)
             journal = runtime.context["__run_journal"]
             journal._remember_current_run_tool_calls(AIMessage(content="", tool_calls=[{"id": "present", "name": "present_files", "args": {}}]), caller="lead_agent")
             journal.on_tool_end(Command(update={"artifacts": ["/mnt/user-data/outputs/report.txt"], "messages": [ToolMessage("Presented", tool_call_id="present")]}), run_id=uuid4())
@@ -880,12 +882,22 @@ async def test_managed_worker_routes_followups_and_retains_the_producing_runs_fi
     assert (await direct).raise_for_status().json()["run_id"] == final_run
     assert (await runs.get_state(thread_id=thread))["values"]["messages"][-1]["content"] == "answer:final instruction"
     assert (await client.get(f"{thread_url}/inputs")).json()["items"][0]["run_id"] == final_run
-    (artifact,) = result["execution"]["artifacts"]
-    assert artifact["run_id"] == final_run
+    artifact_list = f"{url}/{task_id}/artifacts"
+    artifacts = (await client.get(artifact_list)).raise_for_status().json()
+    expected_versions = [(run, 1, b"original report")]
+    if followup_report:
+        expected_versions.append((final_run, 2, followup_report))
+    assert [(item["run_id"], item["turn"]) for item in artifacts] == [(producer, turn) for producer, turn, _ in expected_versions]
+    assert {item["source_path"] for item in artifacts} == {"/mnt/user-data/outputs/report.txt"}
+    assert len({item["url"] for item in artifacts}) == len(expected_versions)
+    assert result["execution"]["artifacts"] == (artifacts[1:] if followup_report else [])
+    assert (await client.get(artifact_list, params={"limit": 1, "offset": 1})).raise_for_status().json() == artifacts[1:]
+    assert (await client.get(f"{url}/missing-task/artifacts")).status_code == 404
     await asyncio.to_thread((get_paths().sandbox_outputs_dir(thread, user_id=owner) / "report.txt").unlink)
-    assert (await client.get(artifact["url"])).raise_for_status().content == b"original report"
+    for artifact, (_, _, content) in zip(artifacts, expected_versions, strict=True):
+        assert (await client.get(artifact["url"])).raise_for_status().content == content
     with pytest.raises(TaskNotFound):
-        await state.coordination_workers.repo.read_artifact("another-user", task_id, artifact["url"].rsplit("/", 1)[-1])
+        await state.coordination_workers.repo.read_artifact("another-user", task_id, artifacts[0]["id"])
 
 
 @pytest.mark.asyncio
