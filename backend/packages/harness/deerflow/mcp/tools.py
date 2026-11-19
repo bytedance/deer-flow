@@ -566,10 +566,18 @@ def _convert_call_tool_result(
     # Convert MCP content blocks to LangChain content blocks.
     lc_content = []
     resource_links: list[dict[str, Any]] = []
+    is_error = bool(call_tool_result.isError)
+    # Empty binary payloads cannot become LangChain blocks (``create_file_block``
+    # rejects an empty base64 string). On an error result that would hide the
+    # server's diagnostics, so name the shape in the fallback message instead.
+    empty_binary_shapes: list[str] = []
     for item in call_tool_result.content:
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
+            if is_error and not item.data:
+                empty_binary_shapes.append(f"image ({item.mimeType})")
+                continue
             lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
         elif isinstance(item, AudioContent):
             raise NotImplementedError(f"AudioContent conversion to LangChain content blocks is not yet supported. Received audio with mime type: {item.mimeType}")
@@ -618,6 +626,10 @@ def _convert_call_tool_result(
                 lc_content.append(create_text_block(text=_resolve_text(res.text)))
             elif isinstance(res, BlobResourceContents):
                 mime = res.mimeType or None
+                if is_error and not res.blob:
+                    kind = "image" if mime and mime.startswith("image/") else "file"
+                    empty_binary_shapes.append(f"{kind} ({mime or 'application/octet-stream'})")
+                    continue
                 if mime and mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
                 else:
@@ -645,6 +657,8 @@ def _convert_call_tool_result(
         # stringifying the blocks, which would put image/file base64 into the
         # model-visible error message.
         described = _describe_non_text_result(lc_content)
+        if empty_binary_shapes:
+            described = ", ".join(filter(None, [described, ", ".join(empty_binary_shapes)]))
         message = "MCP tool returned an error result without text content"
         if described:
             message += f" ({described}); the payload is not shown"

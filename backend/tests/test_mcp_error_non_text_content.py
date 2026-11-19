@@ -68,3 +68,41 @@ def test_error_result_text_blocks_are_reported_unchanged():
     message = str(excinfo.value)
     assert message == "server refused: bad token"
     assert PAYLOAD not in message
+
+
+def _empty_file(mime_type: str | None = "application/pdf") -> EmbeddedResource:
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(uri="file:///tmp/empty.pdf", blob="", mimeType=mime_type),
+    )
+
+
+def test_zero_byte_file_error_result_keeps_the_server_diagnostic():
+    with pytest.raises(ToolException) as excinfo:
+        _convert_call_tool_result(
+            CallToolResult(
+                content=[_empty_file(), TextContent(type="text", text="upload rejected: empty file")],
+                isError=True,
+            )
+        )
+
+    assert str(excinfo.value) == "upload rejected: empty file"
+
+
+def test_zero_byte_file_only_error_result_names_its_shape():
+    with pytest.raises(ToolException) as excinfo:
+        _convert_call_tool_result(CallToolResult(content=[_empty_file()], isError=True))
+
+    message = str(excinfo.value)
+    assert "without text content" in message
+    assert "file (application/pdf)" in message
+
+
+def test_zero_byte_image_error_result_names_its_shape():
+    empty_image = ImageContent(type="image", data="", mimeType="image/png")
+    with pytest.raises(ToolException) as excinfo:
+        _convert_call_tool_result(CallToolResult(content=[empty_image], isError=True))
+
+    message = str(excinfo.value)
+    assert "without text content" in message
+    assert "image (image/png)" in message
