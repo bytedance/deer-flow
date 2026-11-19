@@ -30,6 +30,13 @@ from deerflow.utils.atomic_write import publish_bytes_atomically
 
 logger = logging.getLogger(__name__)
 
+
+def _is_user_data_container(container_path: str) -> bool:
+    """Whether a mount's container path belongs to the user-data tree."""
+    normalized = container_path.rstrip("/")
+    return normalized == VIRTUAL_PATH_PREFIX or normalized.startswith(VIRTUAL_PATH_PREFIX + "/")
+
+
 # Default wall-clock timeout (seconds) for a single host bash command. A
 # blocking foreground command (for example a server started without
 # backgrounding) is terminated after this long so the agent's turn cannot hang
@@ -579,6 +586,25 @@ class LocalSandbox(Sandbox):
             return False
 
         return best_mapping.read_only
+
+    def _is_user_data_path(self, path: str) -> bool:
+        """Whether *path* is the user's own files rather than repository noise.
+
+        The public ls/glob/grep tools resolve ``/mnt/user-data/...`` to host
+        paths before they call a provider, so the virtual prefix alone would miss
+        every real entry point. Ask the mount table instead: a container path
+        under ``/mnt/user-data``, or a host path inside the local root of that
+        mapping.
+        """
+        mapping = self._find_path_mapping(path)
+        if mapping is not None:
+            return _is_user_data_container(mapping[0].container_path)
+        resolved = os.path.realpath(path)
+        for candidate in self._mappings_by_local_specificity:
+            root = self._resolved_local_paths[candidate]
+            if resolved == root or resolved.startswith(root + os.sep):
+                return _is_user_data_container(candidate.container_path)
+        return False
 
     def _find_path_mapping(self, path: str) -> tuple[PathMapping, str] | None:
         path_str = str(path)
@@ -1232,7 +1258,7 @@ class LocalSandbox(Sandbox):
                 pass
 
         try:
-            entries = list_dir(resolved_path, max_depth)
+            entries = list_dir(resolved_path, max_depth, user_data=self._is_user_data_path(path))
         except FileNotFoundError:
             # The requested path may exist only in the container, as the
             # parent of mounted sub-directories (e.g. /mnt/skills with only
@@ -1407,6 +1433,9 @@ class LocalSandbox(Sandbox):
         return mounts
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        # /mnt/user-data is the user's own files: their ``*.log`` upload is
+        # content, not repository noise, even if the host path sits in a checkout.
+        user_data = self._is_user_data_path(path)
         try:
             mounts = self._virtual_search_mounts(path)
             if mounts is not None:
@@ -1418,13 +1447,20 @@ class LocalSandbox(Sandbox):
                     if len(results) <= max_results:
                         # One lookahead match proves whether the combined view
                         # exceeds the cap, without collecting a cap per mount.
-                        matches, _ = find_glob_matches(root, pattern, include_dirs=include_dirs, max_results=max_results - len(results) + 1, relative_prefix=child)
+                        matches, _ = find_glob_matches(
+                            root,
+                            pattern,
+                            include_dirs=include_dirs,
+                            max_results=max_results - len(results) + 1,
+                            relative_prefix=child,
+                            user_data=user_data,
+                        )
                         results.extend(f"{virtual_dir}/{Path(match).relative_to(root).as_posix()}" for match in matches)
                     if len(results) > max_results:
                         return results[:max_results], True
                 return results, False
             resolved_path = Path(self._resolve_path(path))
-            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results, user_data=user_data)
         except OSError as e:
             if e.filename is None:
                 raise
@@ -1444,6 +1480,7 @@ class LocalSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
+        user_data = self._is_user_data_path(path)
         try:
             mounts = self._virtual_search_mounts(path)
             if mounts is not None:
@@ -1457,6 +1494,7 @@ class LocalSandbox(Sandbox):
                         case_sensitive=case_sensitive,
                         max_results=max_results - len(results) + 1,
                         relative_prefix=child,
+                        user_data=user_data,
                     )
                     results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
                     if len(results) > max_results:
@@ -1470,6 +1508,7 @@ class LocalSandbox(Sandbox):
                 literal=literal,
                 case_sensitive=case_sensitive,
                 max_results=max_results,
+                user_data=user_data,
             )
         except OSError as e:
             if e.filename is None:

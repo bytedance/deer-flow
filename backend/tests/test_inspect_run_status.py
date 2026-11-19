@@ -23,7 +23,13 @@ def test_snapshot_counts_only_the_current_run_and_uses_reported_usage():
     state = {
         "messages": [old, current, call, result, final],
         "summary_text": "private summary",
-        "todos": [{"content": "private todo", "status": "pending"}, {"content": "another", "status": "in_progress"}, {"content": "done", "status": "completed"}],
+        "todos": [
+            {"content": "private todo", "status": "pending"},
+            {"content": "another", "status": "in_progress"},
+            {"content": "blocked", "status": "blocked"},
+            {"content": "waiting", "status": "waiting"},
+            {"content": "done", "status": "completed"},
+        ],
     }
     context = {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"old"})}
 
@@ -35,7 +41,7 @@ def test_snapshot_counts_only_the_current_run_and_uses_reported_usage():
     assert snapshot["tool_calls_this_run"] == 1
     assert snapshot["context_fill"] == {"used_input_tokens": 80, "limit_tokens": 200, "fraction": 0.4, "basis": "last_reported_model_input"}
     assert snapshot["has_summary"] is True
-    assert snapshot["todos"] == {"pending": 1, "in_progress": 1}
+    assert snapshot["todos"] == {"pending": 1, "in_progress": 1, "blocked": 1, "waiting": 1}
     serialized = json.dumps(snapshot)
     assert "private" not in serialized
     assert "echo secret" not in serialized
@@ -52,7 +58,7 @@ def test_snapshot_marks_missing_boundary_and_usage_as_unknown():
     assert snapshot["usage_missing_messages"] == 2
     assert snapshot["context_fill"] is None
     assert snapshot["has_summary"] is False
-    assert snapshot["todos"] == {"pending": 0, "in_progress": 0}
+    assert snapshot["todos"] == {"pending": 0, "in_progress": 0, "blocked": 0, "waiting": 0}
 
 
 def test_compaction_that_removes_run_boundary_reports_visible_state():

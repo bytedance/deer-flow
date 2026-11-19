@@ -19,7 +19,7 @@ import { Callout } from "nextra/components";
 | 超时               | `subagents.timeout_seconds`（仅内置）、`subagents.agents.<name>.timeout_seconds` | 内置 1800 秒，自定义与设置页管理 900 秒 | 大于等于 1                           | 状态 `timed_out`                                                                                   |
 | 轮询次数           | 由超时推导：`(timeout_seconds + 60) / 5` 次，每 5 秒一次                 | 随超时                                          |                                      | 状态 `polling_timed_out`，运行时请求取消并安排延迟清理                                             |
 | token 预算         | `subagents.token_budget`，`subagents.agents.<name>.token_budget`         | 开启；`max_tokens` 2,000,000，摘要压缩开启时 1,000,000；`warn_threshold` 0.7 | `max_tokens` 大于等于 1000 | 当前轮被截断并强制收尾，`completed` + `token_capped`                                                |
-| 循环检测           | `loop_detection`（与 Lead Agent 共用）                                   | 开启；`warn_threshold` 3，`hard_limit` 5，`window_size` 20，`tool_freq_warn` 30，`tool_freq_hard_limit` 50 |  | `completed` + `loop_capped`                                                                        |
+| 循环检测 | `loop_detection`（与 Lead Agent 共用） | 开启；`warn_threshold` 3，`hard_limit` 5，`window_size` 20；频次指标阈值为 30 和 50 次 |  | 相同且无进展的调用可产生 `completed` + `loop_capped`；工具频次只记录指标 |
 | 摘要压缩           | `summarization`（与 Lead Agent 共用）                                    | 示例配置开启，按 32,000 token 触发，保留最近 10 条消息 |                          | 压缩后系统提示与最新用户消息保留，摘要写入 `summary_text` 并每次回注                              |
 | 进程级容量         | `subagent_runtime.max_running`                                           | 3                                               | 1 到 64                              | 满时按 `admission_policy` 排队或拒绝                                                               |
 | 排队上限           | `subagent_runtime.max_queued`                                            | 64                                              | 0 到 10,000                          | 队列满时拒绝：`Subagent execution capacity is full (3 running, 64 queued)`                         |
@@ -62,7 +62,7 @@ recursion_limit = max_turns × (每轮节点数) + (每次调用一次性节点�
 
 子 Agent 中间件链镜像了 Lead Agent 的四道防护：
 
-- **循环检测** `LoopDetectionMiddleware`：打断不取得进展却反复调用同一工具的循环。子 Agent 没有 `task`，所以只有工具循环启发式会触发。硬停止把结果标记为 `completed` + `subagent_stop_reason=loop_capped`。由 `loop_detection` 配置控制，可以用 `tool_freq_overrides` 按工具名单独设阈值。
+- **循环检测** `LoopDetectionMiddleware`：对相同且没有进展的工具调用发出警告并在达到硬限制时停止。子 Agent 没有 `task`，所以只有工具循环启发式会触发。基于哈希的硬停止把结果标记为 `completed` + `subagent_stop_reason=loop_capped`。工具名称频次只记录 INFO 指标，用于工作量和成本监测，不会发出警告或停止运行。由 `loop_detection` 配置控制，`tool_freq_overrides` 只调整各工具的指标阈值。
 - **token 预算** `TokenBudgetMiddleware`：按 `subagents.token_budget` 计算单次运行的累计 token。到达硬停止阈值时剥离当前轮的工具调用、强制产出最终答案，结果标记 `completed` + `token_capped`。到达 `warn_threshold` 比例时，会在子 Agent 的下一次模型调用中注入一次预算警告，并记一条 INFO 日志。
 - **输出长度** `ModelLengthFinishReasonMiddleware`：provider 因输出长度上限停止回答时（`finish_reason=length`、`stop_reason=max_tokens`、`MAX_TOKENS` 或 Responses 的 `max_output_tokens`），该回答里的工具调用参数可能不完整，会被丢弃，结果标记 `completed` + `model_length_capped`。
 - **摘要压缩** `DeerFlowSummarizationMiddleware`：用与 Lead Agent 相同的 `summarization.enabled` 开关压缩过长的子 Agent 记录，摘要模型默认就是子 Agent 自己在用的模型。压缩时子 Agent 的系统提示（角色、报告契约、验收说明、技能索引、延迟工具目录）和最新用户消息会被保留；`DurableContextMiddleware` 排在压缩之前，把 `summary_text` 回注到后续请求，避免压缩后出现以助手消息开头的历史。
