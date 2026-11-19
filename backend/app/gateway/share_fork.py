@@ -4,6 +4,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 
+from deerflow_extension_api import AgentRunError
 from fastapi import HTTPException, Request
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Overwrite
@@ -23,6 +24,11 @@ from deerflow.runtime.journal import build_branch_history_seed_events
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.artifact_snapshot import publish_snapshot
 from deerflow.utils.file_io import run_file_io
+
+# The descriptor-confined writer below is POSIX-only. Capture already refuses
+# the same artifacts off POSIX, so import answers with that contract instead of
+# surfacing a 500 from a partial write.
+_ARTIFACT_IMPORT_SUPPORTED = os.name == "posix"
 
 
 def _write_fork_files(owner: str, thread_id: str, artifacts: list[dict]) -> None:
@@ -74,6 +80,8 @@ async def fork_share(request: Request, repo: ThreadShareRepository, token: str, 
     share = await repo.get_public(token)
     if share is None:
         raise HTTPException(404, "Share unavailable")
+    if share["artifacts"] and not _ARTIFACT_IMPORT_SUPPORTED:
+        raise AgentRunError(422, "Importing a share with artifacts requires POSIX")
     owner = get_effective_user_id()
     thread_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"deerflow-share:{owner}:{share['share_id']}:{request_id}"))
     threads = get_thread_store(request)
