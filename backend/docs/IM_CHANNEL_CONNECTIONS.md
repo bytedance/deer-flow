@@ -205,8 +205,11 @@ cards continues the conversation.
 
 Discord caps a message at 2,000 characters, so a longer answer is sent as
 several messages, split at line breaks where possible. When a split falls inside
-a fenced code block, the message ends with a closing fence and the next one
-starts with the block's opening line again, so both parts render as code.
+a code block, the message ends with closing backticks and the next one reopens
+the block with its language tag, so both parts render as code. Blocks are read
+the way Discord's client reads them, not as CommonMark: a block runs from three
+backticks to the next three, also when those follow the last code on its line,
+and `~~~` fences are plain text.
 
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
 
