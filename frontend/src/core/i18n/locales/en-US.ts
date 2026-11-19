@@ -2445,6 +2445,21 @@ export const enUS: Translations = {
       systemPrompt: "System prompt",
       model: "Model",
       inheritModel: "Inherit from caller",
+      modelConfiguration: "Model configuration",
+      reasoningDefaults: "Reasoning defaults",
+      inheritReasoning: "Inherit from caller",
+      modelDefaults: "Use model defaults",
+      reasoningHint:
+        "Unset overrides inherit the caller's effective reasoning settings, or use model defaults. The selected model's capabilities still apply.",
+      thinking: "Thinking override",
+      reasoningEffort: "Effort override",
+      useDefaults: "Use selected defaults",
+      thinkingOn: "On",
+      thinkingOff: "Off",
+      incompatibleThinking:
+        "This saved override conflicts with the model's thinking capability. Choose defaults to clear it.",
+      savedEffortHint:
+        "Saved value; not advertised by the current model. Choose defaults to clear it.",
       tools: "Allowed tools (comma-separated)",
       skills: "Skills (comma-separated)",
       listModeAll: "Inherit all available",

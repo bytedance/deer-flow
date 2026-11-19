@@ -10,7 +10,7 @@ from deerflow.subagents import registry
 @pytest.mark.parametrize("source", ["builtin", "config", "managed"])
 def test_reasoning_settings_flow_through_registry_without_mutating_definitions(monkeypatch, source):
     name = "general-purpose" if source == "builtin" else "researcher"
-    settings = {"thinking_enabled": True, "reasoning_effort": "deep"}
+    settings = {"thinking_enabled": True, "reasoning_effort": "deep", "reasoning_source": "model"}
     app_config = SubagentsAppConfig()
     monkeypatch.setattr(registry, "_managed_definitions", lambda **_: [])
     if source == "builtin":
@@ -25,10 +25,13 @@ def test_reasoning_settings_flow_through_registry_without_mutating_definitions(m
 
     configured = registry.get_subagent_config(name, app_config=app_config)
     assert (configured.thinking_enabled, configured.reasoning_effort) == (True, "deep")
+    assert configured.reasoning_source == "model"
 
-    app_config.agents[name] = SubagentOverrideConfig(thinking_enabled=False, reasoning_effort="lite")
+    app_config.agents[name] = SubagentOverrideConfig(thinking_enabled=False, reasoning_effort="lite", reasoning_source="inherit")
     overridden = registry.get_subagent_config(name, app_config=app_config)
     assert (overridden.thinking_enabled, overridden.reasoning_effort) == (False, "lite")
+    assert overridden.reasoning_source == "inherit"
+    assert configured.reasoning_source == "model"
     assert (configured.thinking_enabled, configured.reasoning_effort) == (True, "deep")
     assert original.thinking_enabled is (None if source == "builtin" else True)
     assert original.reasoning_effort == (None if source == "builtin" else "deep")
@@ -39,3 +42,4 @@ def test_unconfigured_workers_keep_reasoning_defaults(monkeypatch):
     configured = registry.get_subagent_config("general-purpose", app_config=SubagentsAppConfig())
     assert configured.thinking_enabled is None
     assert configured.reasoning_effort is None
+    assert configured.reasoning_source == "inherit"

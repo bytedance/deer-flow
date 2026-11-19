@@ -2080,6 +2080,18 @@ export interface Translations {
       systemPrompt: string;
       model: string;
       inheritModel: string;
+      modelConfiguration: string;
+      reasoningDefaults: string;
+      inheritReasoning: string;
+      modelDefaults: string;
+      reasoningHint: string;
+      thinking: string;
+      reasoningEffort: string;
+      useDefaults: string;
+      thinkingOn: string;
+      thinkingOff: string;
+      incompatibleThinking: string;
+      savedEffortHint: string;
       tools: string;
       skills: string;
       listModeAll: string;

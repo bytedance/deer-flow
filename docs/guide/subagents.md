@@ -342,7 +342,25 @@ Administrators can add, edit, disable, and delete reusable worker definitions fr
 
 When Gateway workers share file storage, concurrent managed-subagent creates for the same name preserve the winning definition and return one HTTP 201 and one HTTP 409. File-backed managed-subagent creation requires a filesystem supporting hard links; see [Agent Storage](../../backend/docs/CONFIGURATION.md#agent-storage).
 
-Native workers support per-subagent `thinking_enabled` and `reasoning_effort` through YAML configuration and the managed-subagent API. Unconfigured workers keep the existing thinking-off request; the selected model's required-thinking policy, supported effort values and aliases still apply. These settings do not inherit the lead agent's thinking preferences.
+### Reasoning defaults
+
+Native workers resolve each reasoning field in this order: explicit subagent override, the caller's effective setting, then the selected model/provider default. This applies to ordinary `task` calls, durable `batch_task` items and nested delegation. Batch items snapshot the caller's settings when submitted, so a later run cannot change their defaults. Older batch snapshots without these fields fall back to model defaults.
+
+Administrators can choose the default source and override thinking or effort under **Settings → Subagents → Edit → Model configuration**. The same fields are available in YAML and the managed-subagent API:
+
+```yaml
+subagents:
+  agents:
+    general-purpose:
+      reasoning_source: inherit  # default: inherit the caller's effective settings
+    bash:
+      reasoning_source: model    # use the selected model's defaults instead
+      thinking_enabled: false    # explicit overrides take precedence
+```
+
+`thinking_enabled: null` and `reasoning_effort: null` leave that field to `reasoning_source`. Explicit `false` remains an override. With `reasoning_source: model`, an unset thinking flag leaves optional provider defaults untouched; required-thinking and unsupported models still follow their capability contract. Existing workers with unset fields now inherit, which can increase latency and cost; configure explicit overrides to retain a lower reasoning budget.
+
+When models differ, inherited thinking adapts to the child model's capabilities. Effort is inherited only when the child accepts the value or it can be translated through an unambiguous generic alias declared by the parent. Otherwise the child uses its own effort default. Delegation using the same legacy model profile preserves provider-specific effort values. Explicit overrides still follow the normal model validation policy, including rejection of an explicit Off request when a required-thinking profile uses `on_disable_request: reject`.
 
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 

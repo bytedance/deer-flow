@@ -11,6 +11,7 @@ export interface Subagent {
   model: string;
   thinking_enabled?: boolean | null;
   reasoning_effort?: string | null;
+  reasoning_source?: "inherit" | "model";
   max_turns: number;
   timeout_seconds: number;
   enabled: boolean;
@@ -31,6 +32,7 @@ export interface CreateManagedSubagentRequest {
   model?: string;
   thinking_enabled?: boolean | null;
   reasoning_effort?: string | null;
+  reasoning_source?: "inherit" | "model";
   max_turns?: number;
   timeout_seconds?: number;
   enabled?: boolean;

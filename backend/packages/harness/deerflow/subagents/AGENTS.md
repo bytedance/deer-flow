@@ -70,8 +70,8 @@ from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
 - **A subagent inherits scope, not state.** It gets the parent's identity, the
   user's skill storage, the knowledge execution scope and a deep copy of the
   uploaded-file list at dispatch. It does not share the parent's message history.
-- **Thinking settings do not inherit.** A subagent's reasoning settings come from
-  its own definition. Unset means off, not "same as the parent".
+- **Subagents inherit reasoning unless overridden.** Both dispatch paths publish
+  child reasoning and preserve caller scope.
 - **Registry overrides copy.** Resolution order is built-in, then
   `config.yaml custom_agents`, then enabled admin-managed definitions, then
   explicit per-agent overrides. An override must not mutate `BUILTIN_SUBAGENTS`.

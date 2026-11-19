@@ -558,6 +558,8 @@ class SubagentBatchService:
                 tools=tools,
                 app_config=app_config,
                 parent_model=spec.get("parent_model"),
+                parent_thinking_enabled=spec.get("parent_thinking_enabled"),
+                parent_reasoning_effort=spec.get("parent_reasoning_effort"),
                 thread_id=batch["thread_id"],
                 user_id=batch["user_id"],
                 user_role=principal.role if principal is not None else spec.get("user_role"),

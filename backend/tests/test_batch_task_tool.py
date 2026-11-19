@@ -37,6 +37,8 @@ def _runtime(thread_incarnation=_MISSING):
         config={
             "metadata": {
                 "model_name": "model-a",
+                "thinking_enabled": False,
+                "reasoning_effort": "high",
                 "allowed_subagents": ["general-purpose"],
                 "tool_groups": ["web"],
                 "mcp_plugins": ["stable-plugin"],
@@ -104,6 +106,8 @@ async def test_batch_task_is_explicit_idempotent_submission(
     request = submitter.submit.await_args.args[0]
     assert request.submission_key == "run-1:call-1"
     assert request.execution_spec["mcp_plugins"] == ["stable-plugin"]
+    assert request.execution_spec["parent_thinking_enabled"] is False
+    assert request.execution_spec["parent_reasoning_effort"] == "high"
     assert request.user_id == "user-1"
     assert [item["key"] for item in request.items] == ["record-1", "record-2"]
     assert request.max_live_items == 20

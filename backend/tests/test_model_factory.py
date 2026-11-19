@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
 
+import httpx
 import pytest
 from langchain.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
@@ -82,6 +84,51 @@ def _patch_factory(monkeypatch, app_config: AppConfig, model_class=FakeChatModel
     monkeypatch.setattr(factory_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: model_class)
     monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+
+@pytest.mark.parametrize("source", ["legacy", "contract"])
+@pytest.mark.parametrize("thinking", [None, True, False])
+def test_unspecified_thinking_preserves_provider_default_on_wire(source, thinking):
+    """Run the factory and real OpenAI SDK; only replace the HTTP transport."""
+    settings = {
+        "supports_thinking": True,
+        "when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}},
+    }
+    if source == "contract":
+        settings["reasoning"] = {"thinking": "optional", "dialect": "openai_extra_body"}
+    profile = ModelConfig(name="worker", model="worker", use="langchain_openai:ChatOpenAI", **settings)
+    payloads = []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "completion",
+                "object": "chat.completion",
+                "model": "worker",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Done"}}],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = factory_module.create_chat_model(
+            name="worker",
+            app_config=_make_app_config([profile]),
+            thinking_enabled=thinking,
+            attach_tracing=False,
+            api_key="test-key",
+            base_url="https://model.invalid/v1",
+            http_client=client,
+            use_responses_api=False,
+        )
+        model.invoke([HumanMessage(content="Work")])
+    assert len(payloads) == 1
+    if thinking is None:
+        assert "thinking" not in payloads[0]
+        assert "reasoning_effort" not in payloads[0]
+    else:
+        assert payloads[0]["thinking"] == {"type": "enabled" if thinking else "disabled"}
 
 
 def _capturing_class(base_cls: type, captured: dict) -> type:

@@ -2111,14 +2111,16 @@ subagent_runtime:
 #       # token_budget:        # per-agent override of the global token_budget above
 #       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
-#       # thinking_enabled: true  # Enable thinking/reasoning for this subagent (default: false)
-#       # reasoning_effort: medium # Use an effort value or alias supported by this model
+#       # reasoning_source: inherit # Unset reasoning fields inherit the caller; use `model` for provider defaults
+#       # thinking_enabled: true  # Explicit thinking override; null leaves reasoning_source in control
+#       # reasoning_effort: medium # Explicit effort value or alias supported by this model
 #       # skills:               # Skill discovery/activation allowlist (default: all enabled)
 #       #   - web-search
 #       #   - data-analysis
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 #       max_turns: 80
+#       # reasoning_source: model # Shell work can opt into the selected model's defaults
 #       # skills: []            # No discoverable/activatable skills for bash agent
 #
 #   # Custom subagent types: define specialized agents with their own prompts,
