@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -25,6 +26,44 @@ def _runtime(thread_id: str = "thread_1"):
 
 def _tool_message(content: str, tool_call_id: str = "call_1", *, artifact: dict | None = None) -> ToolMessage:
     return ToolMessage(content=content, tool_call_id=tool_call_id, artifact=artifact)
+
+
+class TestThreadIdFallback:
+    """A thread ID supplied through config.configurable (the documented SDK path) must work."""
+
+    def test_capture_uses_configurable_thread_id_when_context_is_empty(self):
+        mw = ArtifactCaptureMiddleware()
+        state = {
+            "messages": [_tool_message("saved", artifact={"structured_content": {"path": "/tmp/o.csv"}})],
+            "tool_artifact_processed": [],
+        }
+        with patch("deerflow.agents.middlewares.artifact_capture_middleware.get_config", return_value={"configurable": {"thread_id": "notebook-order"}}):
+            update = mw.before_model(state, SimpleNamespace(context=None))
+        assert update and update["tool_artifacts"], "artifact not captured via config.configurable"
+        assert update["tool_artifacts"][0]["real_ref"] == "/tmp/o.csv"
+
+    def test_capture_prefers_runtime_context_over_configurable(self):
+        mw = ArtifactCaptureMiddleware()
+        state = {
+            "messages": [_tool_message("saved", artifact={"structured_content": {"path": "/tmp/o.csv"}})],
+            "tool_artifact_processed": [],
+        }
+        with patch("deerflow.agents.middlewares.artifact_capture_middleware.get_config", return_value={"configurable": {"thread_id": "from-config"}}) as cfg:
+            update = mw.before_model(state, _runtime("from-context"))
+        cfg.assert_not_called()
+        assert update["tool_artifacts"][0]["real_ref"] == "/tmp/o.csv"
+
+    def test_abefore_model_uses_configurable_thread_id_too(self):
+        import asyncio
+
+        mw = ArtifactCaptureMiddleware()
+        state = {
+            "messages": [_tool_message("saved", artifact={"structured_content": {"path": "/tmp/o.csv"}})],
+            "tool_artifact_processed": [],
+        }
+        with patch("deerflow.agents.middlewares.artifact_capture_middleware.get_config", return_value={"configurable": {"thread_id": "async-order"}}):
+            update = asyncio.run(mw.abefore_model(state, SimpleNamespace(context=None)))
+        assert update and update["tool_artifacts"][0]["real_ref"] == "/tmp/o.csv"
 
 
 class TestCapture:

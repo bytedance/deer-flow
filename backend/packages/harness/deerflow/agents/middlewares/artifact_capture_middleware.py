@@ -17,6 +17,7 @@ from typing import Any, cast, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ArtifactEntry
@@ -82,6 +83,9 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
     def _thread_id(self, runtime: Runtime | None) -> str:
         context = getattr(runtime, "context", None)
         tid = context.get("thread_id") if isinstance(context, dict) else None
+        if not tid:
+            config_data = get_config()
+            tid = config_data.get("configurable", {}).get("thread_id")
         return str(tid) if tid else ""
 
     def _capture(self, state: AgentState, runtime: Runtime | None) -> dict | None:
