@@ -773,14 +773,13 @@ def test_timeout_runs_inside_the_machine(installed) -> None:
     assert call["timeout"] > 3
 
 
-@posix_only
 def test_timed_out_command_keeps_partial_output_and_exit_124(installed) -> None:
     _, fake = installed
-    fake.local_shell = True
+    # Simulate a remote timeout after the command has already produced output.
+    fake.exec_override = lambda *_: _Result(124, "before")
     output = _box(fake).execute_command("echo before; sleep 30; echo after", timeout=1)
-    assert output.startswith("before")
-    assert "after" not in output
-    assert output.endswith("Exit Code: 124")
+    assert fake.execs[-1]["argv"] == ["timeout", "-k", "5", "1", "bash", "-lc", "echo before; sleep 30; echo after"]
+    assert output == "before\nExit Code: 124"
 
 
 @posix_only
