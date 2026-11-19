@@ -353,3 +353,37 @@ def test_local_sandbox_forward_patterns_require_a_path_start() -> None:
     assert url in content
     assert "/mnt/user-data/outputs/x" not in content
     assert resolved.split(":", 1)[-1] in content
+
+
+def test_multi_base_scan_keeps_per_base_cursors(monkeypatch) -> None:
+    """Codex P2 on #8260: rescanning every base from search_from on each
+    iteration makes a path-dense download quadratic in the number of
+    references whenever some mounts are absent. Per-base next-match cursors
+    scan an absent mount once, and a present mount once per match it yields.
+    """
+    present = "/host/present"
+    absent = ["/host/absent-a", "/host/absent-b", "/host/absent-c"]
+    refs = 200
+    output = "header\n" + f"cat {present}/data.csv\n" * refs
+    expected = "header\n" + "cat /mnt/present/data.csv\n" * refs
+
+    calls = 0
+    original = path_patterns_module._next_path_match
+
+    def counting_match(*args):
+        nonlocal calls
+        calls += 1
+        return original(*args)
+
+    monkeypatch.setattr(path_patterns_module, "_next_path_match", counting_match)
+
+    result = path_patterns_module.replace_output_path_matches_all(
+        output,
+        [present, *absent],
+        lambda matched: "/mnt/present" + matched[len(present) :],
+    )
+
+    assert result == expected
+    # One scan per present match plus one first scan per base; the old
+    # rescan-everything loop needed (refs + 1) * 4 scans here.
+    assert calls <= refs + 2 * len(absent) + 2

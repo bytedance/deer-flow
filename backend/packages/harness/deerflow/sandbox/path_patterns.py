@@ -233,7 +233,10 @@ def replace_output_path_matches_all(
     refused payload is never materialized. At the same start the longest
     base wins, matching the longest-local-first pass order of the sequential
     form; scanning resumes after each match, so replacement text is never
-    rewritten a second time.
+    rewritten a second time. Per-base next-match cursors keep the scan
+    linear in the number of references: a base is only rescanned when its
+    cached match was consumed, so mounts absent from the output are scanned
+    once instead of once per reference (Codex P2 on #8260).
     """
     if not output or not bases:
         return output
@@ -244,6 +247,11 @@ def replace_output_path_matches_all(
     copied_until = 0
     search_from = 0
     budgeted_size = 0
+    # A cached match stays the earliest match at-or-after any later
+    # search_from, and None is terminal, so only a consumed match is
+    # recomputed; a base whose match still lies ahead is never rescanned.
+    next_matches: list[tuple[int, int] | None] = [None] * len(searchable_bases)
+    computed: list[bool] = [False] * len(searchable_bases)
 
     def _append(piece: str) -> None:
         nonlocal budgeted_size
@@ -257,11 +265,15 @@ def replace_output_path_matches_all(
         best_start = -1
         best_end = -1
         best_base_len = -1
-        for searchable_base in searchable_bases:
-            found = _next_path_match(output, searchable_output, searchable_base, search_from)
-            if found is None:
+        for i, searchable_base in enumerate(searchable_bases):
+            cached = next_matches[i]
+            if not computed[i] or (cached is not None and cached[0] < search_from):
+                cached = _next_path_match(output, searchable_output, searchable_base, search_from)
+                next_matches[i] = cached
+                computed[i] = True
+            if cached is None:
                 continue
-            start, end = found
+            start, end = cached
             if best_start < 0 or start < best_start or (start == best_start and len(searchable_base) > best_base_len):
                 best_start, best_end, best_base_len = start, end, len(searchable_base)
         if best_start < 0:
