@@ -29,9 +29,9 @@ Expected. A failed subagent is an ordinary tool result; the parent run does not 
 
 ### The result is marked `token_capped` or `loop_capped`
 
-**Cause**: the token budget or loop detection hard stop fired ([#3931](https://github.com/bytedance/deer-flow/pull/3931), [#3980](https://github.com/bytedance/deer-flow/pull/3980)).
+**Cause**: the token budget or the hash-based loop detector stopped the run after repeated identical calls with no progress ([#3931](https://github.com/bytedance/deer-flow/pull/3931), [#3980](https://github.com/bytedance/deer-flow/pull/3980)).
 
-**Fix**: first check the step timeline for the same tool being called over and over. If more budget is genuinely needed, adjust `subagents.token_budget.max_tokens` or `loop_detection.tool_freq_overrides`. Note that the default token ceiling is coupled to `summarization.enabled`; an explicit value is not.
+**Fix**: first check the step timeline for the same call being repeated without progress. If more work is genuinely needed, adjust `subagents.token_budget.max_tokens` or another explicit work budget. Tool-name frequency entries in the logs are observability metrics and do not cause `loop_capped`; `loop_detection.tool_freq_overrides` only tunes those metrics. Note that the default token ceiling is coupled to `summarization.enabled`; an explicit value is not.
 
 ### The result is marked `model_length_capped`
 

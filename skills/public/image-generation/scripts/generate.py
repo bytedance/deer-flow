@@ -240,9 +240,10 @@ def _generate_image_gemini(
     image_parts = [part for part in response_parts if part.get("inlineData", False)]
     if len(image_parts) == 1:
         base64_image = image_parts[0]["inlineData"]["data"]
+        image_bytes = base64.b64decode(base64_image)
         _ensure_output_dir(output_file)
         with open(output_file, "wb") as f:
-            f.write(base64.b64decode(base64_image))
+            f.write(image_bytes)
         return f"Successfully generated image to {output_file}"
     raise Exception("Failed to generate image")
 

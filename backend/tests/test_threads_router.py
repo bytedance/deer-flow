@@ -5549,6 +5549,35 @@ def test_move_thread_does_not_bump_updated_at(tmp_path):
         assert after == before
 
 
+def test_move_thread_deleted_after_the_move_is_404(tmp_path):
+    """A DELETE that lands between the move and its re-read is a 404, not a 500.
+
+    The move takes no thread lock, so a concurrent DELETE can remove the row
+    after ``set_project`` commits and before the route reads the record back.
+    """
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    store = app.state.thread_store
+    set_project = store.set_project
+    moves: list[bool] = []
+
+    async def set_project_then_concurrent_delete(thread_id, project_id, **kwargs):
+        moved = await set_project(thread_id, project_id, **kwargs)
+        moves.append(moved)
+        await store.delete(thread_id)
+        return moved
+
+    store.set_project = set_project_then_concurrent_delete
+    with TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}).json()["thread_id"]
+
+        response = client.post(f"/api/threads/{thread_id}/move", json={"project_id": project["id"]})
+
+        assert moves == [True]
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"] == "Thread or project not found"
+
+
 def _seed_branchable_thread(app: FastAPI, thread_id: str) -> None:
     """Write a three-turn conversation so a middle AI turn can be branched."""
     human_1 = HumanMessage(id="human-1", content="First question")

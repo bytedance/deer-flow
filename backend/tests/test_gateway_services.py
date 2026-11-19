@@ -243,6 +243,23 @@ def test_external_goal_outcome_is_rejected(boundary):
     assert error.value.detail == "External goal_outcome state is not allowed"
 
 
+@pytest.mark.parametrize("boundary", ["run", "state"])
+def test_external_loop_cap_is_rejected(boundary):
+    """A caller copy of loop detection's cap record could lift a cap or block a tool."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import SERVER_OWNED_STATE_CHANNELS, normalize_input, strip_server_owned_state_metadata
+    from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
+
+    assert LOOP_CAP_STATE_KEY in SERVER_OWNED_STATE_CHANNELS
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({LOOP_CAP_STATE_KEY: None})
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "External loop_cap state is not allowed"
+
+
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_external_run_goal_clears_the_previous_goal_outcome(mode):
     """A caller goal replaces the goal, so the record of the earlier met goal must go."""
@@ -770,6 +787,73 @@ def test_normalize_input_preserves_trusted_internal_delegation_verdict():
     result = normalize_input({"delegations": [forged]}, trusted_internal=True)
 
     assert result["delegations"][0]["receipt_verdict"] == forged["receipt_verdict"]
+
+
+@pytest.mark.parametrize(
+    "delegations",
+    [
+        "oops",
+        {"__overwrite__": []},
+        ["oops"],
+        [{"description": "write report", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "description": "write report", "status": "completed"}],
+        [{"id": "", "description": "write report", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": 3}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "steering"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "run_id": ["unhashable"]}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "result_brief": 3}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "stop_reason": "nope"}],
+    ],
+    ids=[
+        "non-list-string",
+        "overwrite-marker",
+        "non-object-entry",
+        "missing-id",
+        "missing-description",
+        "missing-subagent-type",
+        "empty-id",
+        "non-string-status",
+        "unknown-status",
+        "unhashable-run-id",
+        "non-string-result-brief",
+        "unknown-stop-reason",
+    ],
+)
+def test_external_delegations_rejected_at_both_boundaries(delegations):
+    """The ledger reducer keys on ``id`` and indexes ``status``: a value it cannot
+    read fails the state merge (or is persisted by the thread-state route and
+    fails every later ledger write), so both caller-writable boundaries must
+    answer 400 instead of passing it through."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as run_error:
+        normalize_input({"delegations": delegations})
+    assert run_error.value.status_code == 400
+
+    with pytest.raises(HTTPException) as state_error:
+        strip_server_owned_state_metadata({"delegations": delegations})
+    assert state_error.value.status_code == 400
+
+
+def test_external_delegations_accept_the_runtime_shapes():
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    entry = {
+        "id": "call-1",
+        "description": "write report",
+        "subagent_type": "general",
+        "status": "in_progress",
+        "created_at": "1970-01-01T00:00:00+00:00",
+        "run_id": "run-1",
+        "result_brief": "partial",
+        "stop_reason": "token_capped",
+    }
+
+    assert normalize_input({"delegations": [entry]})["delegations"] == [entry]
+    assert strip_server_owned_state_metadata({"delegations": [entry]}) == {"delegations": [entry]}
 
 
 def test_normalize_input_preserves_trusted_internal_original_user_content():
