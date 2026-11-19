@@ -281,6 +281,17 @@ def test_read_free_functions_dispatch_to_db_backend(file_home, monkeypatch):
     assert load_agent_soul("dbonly", user_id="u1") == "db soul"
 
 
+def test_file_create_reports_storage_error_when_parent_is_a_file(file_home):
+    agents_dir = file_home / "users" / "blocked-owner" / "agents"
+    agents_dir.parent.mkdir(parents=True)
+    agents_dir.write_text("existing file", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        FileAgentStore().create("fresh", {"name": "fresh"}, "soul", user_id="blocked-owner")
+
+    assert agents_dir.read_text(encoding="utf-8") == "existing file"
+
+
 def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch):
     # TOCTOU: the existence guard passes (no agent yet), but a concurrent create
     # wins the race so mkdir(exist_ok=False) raises FileExistsError. The store
@@ -295,14 +306,21 @@ def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch
 
     monkeypatch.setattr(paths_module, "_paths", None)
 
+    agent_dir = paths_module.get_paths().user_agent_dir("u1", "racy")
+    mkdir = pathlib.Path.mkdir
+
     def _racing_mkdir(self, *args, **kwargs):
-        raise FileExistsError(str(self))
+        if self == agent_dir:
+            mkdir(self, parents=True, exist_ok=True)
+            (self / "SOUL.md").write_text("concurrent creator", encoding="utf-8")
+        return mkdir(self, *args, **kwargs)
 
     monkeypatch.setattr(pathlib.Path, "mkdir", _racing_mkdir)
 
     fs = FileAgentStore()
     with pytest.raises(AgentExistsError):
         fs.create("racy", {"name": "racy"}, "soul", user_id="u1")
+    assert (agent_dir / "SOUL.md").read_text(encoding="utf-8") == "concurrent creator"
 
 
 # -- graph-subprocess config resolution (db backend's core cross-process invariant) --

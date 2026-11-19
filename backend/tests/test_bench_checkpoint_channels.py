@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -371,8 +372,11 @@ def test_postgres_backend_requires_explicit_connection_uri(monkeypatch: pytest.M
 def test_postgres_failure_does_not_expose_connection_uri(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     uri = "postgresql://benchmark-user:secret@example.invalid/checkpoints"
     monkeypatch.setenv("TEST_POSTGRES_URI", uri)
+    original_policy = asyncio.get_event_loop_policy()
 
     async def fail_case(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if sys.platform == "win32":
+            assert isinstance(asyncio.get_running_loop(), asyncio.SelectorEventLoop)
         raise RuntimeError(f"could not connect to {uri}")
 
     monkeypatch.setattr(bench, "_run_postgres_case", fail_case)
@@ -380,6 +384,7 @@ def test_postgres_failure_does_not_expose_connection_uri(monkeypatch: pytest.Mon
 
     row = bench._run_case(case, work_dir=tmp_path)
 
+    assert asyncio.get_event_loop_policy() is original_policy
     assert row["success"] is False
     assert uri not in row["error"]
     assert "<TEST_POSTGRES_URI>" in row["error"]

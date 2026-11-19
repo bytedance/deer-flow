@@ -3,7 +3,7 @@
 import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -231,7 +231,9 @@ async def test_restore_approval_answer_rejects_stale_committed_version():
     committed = await store.get(paused.run_id)
     assert answer.answered_updated_at == committed["updated_at"]
 
-    await store.put(paused.run_id, thread_id="thread", status="success", metadata={"retained": True})
+    with patch("deerflow.runtime.runs.store.memory.datetime", wraps=datetime) as clock:
+        clock.now.return_value = datetime.fromisoformat(answer.answered_updated_at)
+        await store.put(paused.run_id, thread_id="thread", status="success", metadata={"retained": True})
     assert await manager.restore_approval_answer(answer) is False
     assert (await store.get(paused.run_id))["status"] == "success"
 
