@@ -59,6 +59,17 @@ these live requests. Unattended parent origins cannot open child approval waits.
 A child without this bridge fails closed. The legacy `non_interactive: allow`
 only bypasses Ask on explicitly configured unattended root runs.
 
+Legacy pauses containing null or duplicated tool-call IDs can be cleared only
+with **all-reject**, using one response per stored action in its original order,
+including its original `tool_call_id` (which may be null) and `request_id`.
+Approval or mixed decisions still return 422. The server binds this recovery to
+the exact stored payload and rechecks it during worker attachment; an old reject
+cannot clear a newer valid or invalid pause. If only the checkpoint remains,
+recovery must still target that same payload. Calls with ambiguous IDs are
+removed from the replayed model message, including colliding siblings, with a
+visible rejection note. They never execute. This covers pauses stored before
+the prevention fix in #8070; other malformed approval data remains rejected.
+
 The resume run's journal adopts the paused calls it answers, recovered from the
 durable interrupt payload. Approved calls reach the history feed through their
 tool callback; rejections have none, so the journal reconciles them under the
@@ -74,10 +85,9 @@ rejection note instead of pausing, so the tool is never executed and the thread
 stays usable. The same uniqueness rule applies when a call is denied by result:
 answering a denial `ToolMessage` also answers any other call that shares its id,
 so a shared id is stripped rather than answered, and the next request cannot
-carry the id twice. A pause stored by an older release with a null or duplicated
-id is **not** cleared by this: every resume, including all-reject, is still
-rejected, so continue the work in a new thread. In-place recovery is tracked in
-[#8071](https://github.com/bytedance/deer-flow/issues/8071).
+carry the id twice. Previously stored null/duplicate-ID pauses use the bound
+all-reject recovery described above
+([#8071](https://github.com/bytedance/deer-flow/issues/8071)).
 
 `waiting_for_input` is not terminal success or failure. Goals, delivery checks,
 and batch continuation must preserve a native pause. New runs cannot discard it.

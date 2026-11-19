@@ -15,6 +15,25 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.hitl_approval_config import HitlApprovalConfig
 
 
+@pytest.mark.parametrize("call_ids", [[None], ["shared", "shared"], [None, ""], ["", ""]])
+def test_unusable_id_cleanup_removes_colliding_invalid_calls(call_ids):
+    calls = [{"name": "external_write", "args": {}, "id": call_id} for call_id in call_ids]
+    source = AIMessage(
+        content=[{"type": "tool_use", "id": call["id"], "name": call["name"], "input": {}} for call in calls],
+        tool_calls=calls,
+        invalid_tool_calls=[{"name": "external_write", "args": "{", "id": call_ids[0], "error": "invalid arguments"}],
+        additional_kwargs={"function_call": {"name": "external_write", "arguments": "{}"}},
+    )
+    policy = HitlApprovalConfig(enabled=True, tools=["external_write"])
+    app = AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, hitl_approval=policy)
+    result = ToolApprovalMiddleware(policy, app_config=app).after_model({"messages": [source]}, None)["messages"][0]
+    assert result.invalid_tool_calls == []
+    assert result.tool_calls == []
+    assert "function_call" not in result.additional_kwargs
+    assert all(block["type"] == "text" for block in result.content)
+    assert source.invalid_tool_calls
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("mode", ["ask", "auto", "full"])
