@@ -238,3 +238,26 @@ def test_explicit_call_id_claims_first_then_sentinel_falls_back(spelling):
     explicit_id, null_id = (tc["id"] for tc in patched[0].tool_calls)
     assert explicit_id == spelling
     assert [(message.tool_call_id, message.content) for message in patched[1:]] == [(explicit_id, "EXPLICIT"), (null_id, "NULL")]
+
+
+@pytest.mark.parametrize("spelling", sorted(_ABSENT_TOOL_CALL_ID_SPELLINGS))
+@pytest.mark.parametrize("null_result_first", [True, False])
+def test_explicit_sentinel_reservation_respects_the_tool_name(spelling, null_result_first):
+    """A null-id call's result for another tool is not reserved for the explicit call."""
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "note_lookup", "id": None, "args": {}},
+            {"name": "calendar_lookup", "id": spelling, "args": {}},
+        ],
+    )
+    note = ToolMessage(content="NOTE", tool_call_id=spelling, name="note_lookup")
+    calendar = ToolMessage(content="CALENDAR", tool_call_id=spelling, name="calendar_lookup")
+    results = [note, calendar] if null_result_first else [calendar, note]
+    patched = DanglingToolCallMiddleware()._build_patched_messages([call, *results])
+
+    assert patched is not None
+    null_id, explicit_id = (tc["id"] for tc in patched[0].tool_calls)
+    assert explicit_id == spelling
+    assert [(message.tool_call_id, message.content) for message in patched[1:]] == [(null_id, "NOTE"), (explicit_id, "CALENDAR")]
+    assert all(message.status != "error" for message in patched[1:])
