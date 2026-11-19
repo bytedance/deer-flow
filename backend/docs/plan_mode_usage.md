@@ -63,8 +63,10 @@ The agent will skip using the todo list for:
 ### Task States
 
 - **pending**: Task not yet started
-- **in_progress**: Currently working on (can have multiple parallel tasks)
-- **completed**: Task finished successfully
+- **in_progress**: Currently being worked on
+- **blocked**: Work cannot continue because a dependency or error must be resolved; terminal for the current run
+- **waiting**: Waiting for the user or an external resource; terminal for the current run
+- **completed**: Task fully finished and verified
 
 ## Usage Examples
 
@@ -185,12 +187,12 @@ DeerFlow uses custom `system_prompt` and `tool_description` for the TodoListMidd
 - Uses XML tags (`<todo_list_system>`) for structure consistency with DeerFlow's main prompt
 - Emphasizes CRITICAL rules and best practices
 - Clear "When to Use" vs "When NOT to Use" guidelines
-- Focuses on real-time updates and immediate task completion
+- Updates the list at meaningful milestones and requires verified completion
 
 ### Tool Description Features
 - Detailed usage scenarios with examples
 - Strong emphasis on NOT using for simple tasks
-- Clear task state definitions (pending, in_progress, completed)
+- Clear task state definitions (pending, in_progress, blocked, waiting, completed)
 - Comprehensive best practices section
 - Task completion requirements to prevent premature marking
 
