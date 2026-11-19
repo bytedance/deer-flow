@@ -2076,7 +2076,9 @@ async def run_agent(
 
                 # A rejected resume has not written state; compensating it through
                 # the state-only graph would itself discard the pending Sends.
-                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_resume_rejected:
+                # A native pause has not failed: restoring the pre-run checkpoint
+                # would drop the edit and strand the interrupt behind the new head.
+                if not record.ownership_lost and _is_edit_replay_run(record) and record.status not in (RunStatus.success, RunStatus.waiting_for_input) and not checkpoint_resume_rejected:
                     if not record.finalizing:
                         await run_manager.set_finalizing(run_id, True)
                     try:
