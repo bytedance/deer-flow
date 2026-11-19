@@ -1,0 +1,169 @@
+---
+title: 中间件贡献
+description: 扩展如何向 Lead Agent 和子 Agent 链贡献 AgentMiddleware。涵盖五种语义放置位置及其当前落点、作用域与排序、贡献的中间件能改什么和不能改什么、故障隔离，以及如何读取任务状态。
+---
+
+import { Callout } from "nextra/components";
+
+# 中间件贡献
+
+中间件贡献把你的 `AgentMiddleware` 插入包裹 Agent 每次模型调用和工具调用的链中。需要看到**每一次调用**时就用它：延迟和成本核算、审计轨迹、策略遥测或链路追踪。中间件链本身的介绍见[中间件](/docs/harness/middlewares)。
+
+## 契约
+
+在 `install()` 中注册一个贡献者。宿主每组装一个 Agent 就回调它一次：
+
+```python
+from collections.abc import Sequence
+
+from deerflow_extension_api import (
+    AgentBuildContext,
+    AgentScope,
+    ExtensionData,
+    MiddlewarePlacement,
+    Placement,
+)
+
+
+class AuditContributor:
+    def contribute_middlewares(
+        self,
+        app_store: ExtensionData,
+        ctx: AgentBuildContext,
+    ) -> Sequence[MiddlewarePlacement]:
+        return (
+            MiddlewarePlacement(
+                AuditMiddleware(),
+                Placement.MODEL_LOGICAL,
+                scope=AgentScope.BOTH,
+                order=0,
+            ),
+        )
+
+
+def install(registry, config):
+    registry.middlewares(AuditContributor())
+```
+
+| 字段         | 类型              | 默认值            | 含义                                                    |
+| ------------ | ----------------- | ----------------- | ------------------------------------------------------- |
+| `middleware` | `AgentMiddleware` | 必填              | 要插入的实例。其他类型会被拒绝                          |
+| `placement`  | `Placement`       | 必填              | 你需要的语义保证。见[放置位置](#放置位置)                |
+| `scope`      | `AgentScope`      | `AgentScope.BOTH` | 哪些链会收到它。见[作用域](#作用域)                      |
+| `order`      | `int`             | `0`               | 落在同一位置的贡献之间的排序依据。见[排序](#排序)        |
+
+`contribute_middlewares()` 收到应用作用域的存储和一个 `AgentBuildContext`：
+
+| 字段         | 含义                                                                        |
+| ------------ | --------------------------------------------------------------------------- |
+| `scope`      | `AgentScope.LEAD` 或 `AgentScope.SUBAGENT`：当前正在构建的链                 |
+| `agent_name` | 自定义 Agent 或子 Agent 的名称（如果有）                                     |
+| `model_name` | 解析后的模型名                                                               |
+| `policy`     | 一个 `HostPolicySnapshot`：token 预算限制，以及 Lead Agent 的 `max_subagents_per_run` |
+
+贡献者可以根据上下文返回不同的中间件，或者什么都不返回。每次组装 Agent 都会调用它，通常是每次运行一次、每个被委派的子 Agent 一次，所以要保持轻量。
+
+## 放置位置
+
+中间件在列表里占一个位置，但这个位置只在它实现的那条钩子链上才有意义。模型轴上的"最外层"和工具轴上的"最外层"是两个不同的地方。所以你不选下标，而是声明轴、端和你需要的保证，由宿主对照当前的栈解析出位置。
+
+| 放置位置         | 轴与端         | 保证                                                                                   | 典型用途                         |
+| ---------------- | -------------- | -------------------------------------------------------------------------------------- | -------------------------------- |
+| `MODEL_LOGICAL`  | 模型轴，外层端 | 位于重试和错误处理之外。**每个逻辑模型决策触发一次**，无论宿主在下面重试多少次          | 审计决策、统计轮次               |
+| `MODEL_PHYSICAL` | 模型轴，内层端 | 位于所有改写请求的中间件之内。**每次调用提供商触发一次**，重试会再次进入                | 提供商延迟、成本、最终的确切请求 |
+| `TOOL_VISIBLE`   | 工具轴，外层端 | 位于截断、清洗和错误包装之外。观察的是**模型最终看到的内容**                             | 端到端工具延迟、模型被告知了什么 |
+| `TOOL_RAW`       | 工具轴，内层端 | 紧贴真实的工具调用边界。观察任何处理之前的**原始返回**                                   | 捕获未截断的工具输出             |
+| `STANDARD`       | 无             | 没有位置要求。与其他 `STANDARD` 贡献之间的相对顺序不保证                                 | `before_model` / `after_model` 状态钩子 |
+
+### 各放置位置当前的落点
+
+上面的保证才是契约。下面的具体锚点是当前宿主兑现这些保证的方式。内置栈变化时锚点可能移动，依赖它们就是依赖实现细节。
+
+| 放置位置         | Lead Agent 链                                                        | 子 Agent 链                                       |
+| ---------------- | -------------------------------------------------------------------- | ------------------------------------------------- |
+| `TOOL_VISIBLE`   | 最外层，在 `InputSanitizationMiddleware` 之前                          | 相同                                              |
+| `MODEL_LOGICAL`  | 紧挨在 `LLMErrorHandlingMiddleware` 外层                               | 相同                                              |
+| `STANDARD`       | 目前与 `MODEL_LOGICAL` 是同一个锚点                                    | 相同                                              |
+| `MODEL_PHYSICAL` | 在 `SafetyFinishReasonMiddleware` 之内、`ClarificationMiddleware` 之外 | 在最后一个中间件 `SystemMessageCoalescingMiddleware` 之内 |
+| `TOOL_RAW`       | 在 `ClarificationMiddleware` 之外                                      | 最内层                                            |
+
+`ClarificationMiddleware` 始终在 Lead 链的最后，因为它负责为 `ask_clarification` 结束工具循环。它从不改写真正执行的工具的结果，所以 `MODEL_PHYSICAL` 和 `TOOL_RAW` 虽然位于它外层，保证依然成立。
+
+当某个放置位置的主锚点不在栈里时，宿主会回退到下一条规则并记录一条警告，因为悄无声息的降级会改变扩展观察到的内容：
+
+```text
+Extension <use>: placement TOOL_RAW fell back to a secondary anchor (primary anchor middleware is absent from this stack); ...
+```
+
+<Callout type="info">
+  子 Agent 链里没有 `ClarificationMiddleware`，所以作用域包含 `SUBAGENT` 的
+  `TOOL_RAW` 贡献总会走回退规则，落在最内层。这个回退位置仍然满足 `TOOL_RAW`
+  的保证，但每次构建子 Agent 都会记录这条警告。
+</Callout>
+
+## 作用域
+
+`AgentScope` 是一个标志位：`LEAD`、`SUBAGENT` 或 `BOTH`（默认）。宿主分别构建每条链，只有作用域与正在构建的链有交集时才纳入该贡献。要按链区分，可以返回两个作用域不同的放置，或者根据 `ctx.scope` 分支。
+
+通过 `create_deerflow_agent(extra_middleware=...)` 或 `DeerFlowClient(middlewares=...)` 配置的中间件不会进入子 Agent；作用域包含 `SUBAGENT` 的扩展中间件会。
+
+## 排序
+
+贡献先按 `order` 排序，再按注册顺序排序：扩展按 `plugins:` 列表顺序加载，贡献保持贡献者返回时的顺序。多个贡献解析到同一位置时，**`order` 较小的在外层**。`order` 只用来排你自己的贡献；拿它去和别的扩展比先后，会把两个包耦合在一起。
+
+插入贡献之后，宿主会在最终的栈上校验自己的排序不变量。违反不变量是这套系统里唯一的硬失败：Agent 构建会失败，错误信息会点名负责的扩展。
+
+## 贡献的中间件能改什么
+
+本版本的所有贡献都是**观察性**的。宿主通过包裹你的中间件的包装器强制执行这一点。
+
+- **`wrap_model_call` / `wrap_tool_call` 及其异步形式。** 你可以查看请求和结果，必须恰好调用一次 `handler`。宿主始终把**原始**请求传给下游，即使你用修改过的请求调用 `handler`；也始终返回**真实**的下游结果，无论你的钩子返回什么。扩展无法改写提示词、否决工具调用或替换工具输出。
+- **`before_agent` / `before_model` / `after_model` / `after_agent` 及其异步形式。** 它们与普通 `AgentMiddleware` 一样运行，返回的 dict 会作为状态更新应用。如果中间件声明了 `state_schema`，包装器会转发它。
+
+只要包装钩子对中的任一侧存在，LangChain 就会同时接好同步和异步两条路径，所以包装器会为你没写的那一侧补一个透传实现。如果两条路径都必须观察，请同时实现 `wrap_tool_call` 和 `awrap_tool_call`（或模型调用的两种形式）。常规 Gateway 运行走异步路径。
+
+## 故障隔离
+
+宿主把每个贡献包在一个 `IsolatedMiddleware` 里。包装器会追踪下游 handler，保证从你的故障中恢复时绝不会多出一次模型请求或工具副作用：
+
+| 出了什么问题                                  | 宿主怎么做                                                          |
+| --------------------------------------------- | ------------------------------------------------------------------- |
+| 包装钩子在调用 `handler` 之前抛异常           | 记录诊断，然后用原始请求调用一次 `handler`                          |
+| 包装钩子始终没有调用 `handler`                | 记录诊断，然后由宿主自己调用 `handler`                              |
+| 包装钩子在 `handler` 返回之后抛异常           | 记录诊断，返回真实结果                                              |
+| 包装钩子第二次调用 `handler`                  | 第二次调用在你的钩子里抛出 `RuntimeError`；宿主返回第一次的结果     |
+| `handler` 本身抛异常                          | 异常原样传播，由宿主自己的错误策略处理                              |
+| 生命周期钩子抛异常                            | 记录诊断，不应用任何状态更新                                        |
+| `contribute_middlewares()` 抛异常             | 记录诊断；这个贡献者本次不向该 Agent 添加任何东西                   |
+| 返回的某一项不是合法的 `MiddlewarePlacement`  | 记录诊断并跳过该项                                                  |
+
+LangGraph 中断（`GraphBubbleUp`）总是会传播。诊断以 `Extension <use>: <Class>.<hook> failed and was skipped: <error>` 的形式写入 Gateway 日志。
+
+## 读取任务状态
+
+中间件实例可能被并发的运行共享，所以不要把单次运行的状态存在 `self` 上。把它放进任务作用域的 `ExtensionData` 存储：宿主为每次 Lead 运行和每次子 Agent 执行创建一个，结束时丢弃。在钩子里从 runtime 取回它：
+
+```python
+from deerflow_extension_api import task_store_from_runtime
+
+
+class CountingMiddleware(AgentMiddleware):
+    async def awrap_tool_call(self, request, handler):
+        store = task_store_from_runtime(getattr(request, "runtime", None))
+        if store is not None:
+            store.get_or_init(ToolCallCount, ToolCallCount).value += 1
+        return await handler(request)
+```
+
+没有活跃任务时 `task_store_from_runtime()` 返回 `None`，例如 harness 在没有 Gateway 运行包裹的情况下执行时。这种情况下直接透传。`ExtensionData` 以类型为键，所以为每个要存的值定义你自己的类：两个扩展不会在键上冲突，你也永远不需要直接写 runtime context。
+
+## 追踪中的标识
+
+LangChain 要求中间件名称唯一，并把它用作追踪标识和图节点 ID。宿主把每个包装器命名为 `extension_<入口点>_<类名>_<n>`，不安全字符替换为下划线。例如快速上手里的中间件显示为 `extension_deerflow_extension_hello_install_ToolTimer_0`。
+
+## 常见误区
+
+- **以为能修改调用。** 本版本的包装钩子只能观察。需要改写请求的行为请用 `extensions.middlewares`（见[自定义与扩展](/docs/harness/customization)），它不套包装器，但要接受它是受信任的配置而不是契约。
+- **只实现 `wrap_tool_call`。** Gateway 运行走异步路径，只有同步实现的中间件在那里什么也看不到。
+- **在 `contribute_middlewares()` 里做重活。** 每次组装 Agent 都会调用它。昂贵的客户端请在 `install()` 中构建一次，或在应用存储里惰性创建。
+- **依赖具体锚点。** 按你需要的保证选择放置位置，而不是按它今天恰好挨着哪个中间件。

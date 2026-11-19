@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
+import pytest
 
 from deerflow.agents.middlewares.skill_review_middleware import SkillReviewMiddleware
 from deerflow.agents.skill_review.reviewer import SkillReviewer
@@ -60,23 +61,20 @@ async def _run_middleware(mw, state, runtime):
 
 
 class _SyncThread:
-    """Patches threading.Thread to run the target synchronously in the calling thread.
+    """Run a real background thread, waiting for it before assertions."""
 
-    This avoids race conditions in tests where assertions run before the daemon
-    thread has executed. Replace ``threading.Thread`` with this class via patch.
-    """
+    _thread_type = threading.Thread
 
     def __init__(self, target=None, args=(), kwargs=None, daemon=False, name=None, **_):
-        self._target = target
-        self._args = args
-        self._kwargs = kwargs or {}
+        self._thread = self._thread_type(target=target, args=args, kwargs=kwargs or {}, daemon=daemon, name=name)
 
     def start(self):
-        if self._target:
-            self._target(*self._args, **self._kwargs)
+        self._thread.start()
+        self._thread.join(timeout=5)
+        assert not self._thread.is_alive()
 
     def join(self, timeout=None):
-        pass  # Already completed in start()
+        self._thread.join(timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +117,8 @@ class TestSkillReviewer:
             # Should not raise
             anyio.run(reviewer.review, "thread-1", [])
 
-    def test_review_invokes_agent(self):
+    @pytest.mark.parametrize("snapshot_type", [list, tuple])
+    def test_review_invokes_agent(self, snapshot_type):
         """review() should invoke the created agent with proper args."""
         config = _make_config()
         reviewer = SkillReviewer(config)
@@ -127,12 +126,17 @@ class TestSkillReviewer:
         mock_agent = AsyncMock()
         mock_agent.ainvoke.return_value = {"messages": []}
 
-        with patch.object(reviewer, "_create_review_agent", return_value=mock_agent):
-            anyio.run(reviewer.review, "thread-1", [MagicMock()])
+        messages = snapshot_type([MagicMock()])
+        with (
+            patch.object(reviewer, "_create_review_agent", return_value=mock_agent),
+            patch.object(reviewer, "_build_existing_skills_section", return_value=""),
+        ):
+            anyio.run(reviewer.review, "thread-1", messages)
 
         mock_agent.ainvoke.assert_awaited_once()
         call_kwargs = mock_agent.ainvoke.call_args
         assert call_kwargs[1]["config"]["configurable"]["thread_id"] == "thread-1"
+        assert call_kwargs[0][0]["messages"][:-1] == list(messages)
 
     def test_review_logs_skill_changes(self):
         config = _make_config()
@@ -150,6 +154,19 @@ class TestSkillReviewer:
                 anyio.run(reviewer.review, "thread-1", [])
                 mock_logger.info.assert_called()
 
+    def test_existing_skills_use_current_user_storage(self):
+        config = _make_config()
+        reviewer = SkillReviewer(config)
+        storage = MagicMock()
+        storage.load_skills.return_value = [SimpleNamespace(name="existing-workflow", category="custom", description="Reusable workflow")]
+        with patch("deerflow.skills.storage.get_or_new_user_skill_storage", return_value=storage) as get_storage:
+            section = reviewer._build_existing_skills_section()
+
+        assert "existing-workflow" in section
+        assert "editable" in section
+        assert "Reusable workflow" in section
+        get_storage.assert_called_once_with("test-user-autouse", app_config=config)
+
 
 # ---------------------------------------------------------------------------
 # SkillReviewMiddleware tests
@@ -157,6 +174,37 @@ class TestSkillReviewer:
 
 
 class TestSkillReviewMiddleware:
+    def test_background_review_preserves_user_context(self):
+        from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
+
+        mw = SkillReviewMiddleware(config=_make_config(interval=1))
+        observed_users = []
+        workers = []
+        real_thread = threading.Thread
+
+        async def capture_user(_thread_id, _messages):
+            observed_users.append(get_effective_user_id())
+
+        mw._reviewer = SimpleNamespace(review=capture_user)
+
+        def capture_thread(**kwargs):
+            worker = real_thread(**kwargs)
+            workers.append(worker)
+            return worker
+
+        token = set_current_user(SimpleNamespace(id="skill-review-owner"))
+        try:
+            with patch("deerflow.agents.middlewares.skill_review_middleware.threading.Thread", side_effect=capture_thread):
+                anyio.run(_run_middleware, mw, _make_state(tool_call_rounds=1), _make_runtime())
+        finally:
+            reset_current_user(token)
+            for worker in workers:
+                worker.join(timeout=5)
+
+        assert len(workers) == 1
+        assert not workers[0].is_alive()
+        assert observed_users == ["skill-review-owner"]
+
     def test_skip_when_skill_evolution_disabled(self):
         """Middleware returns None when skill_evolution is not enabled."""
         config = _make_config(enabled=False)

@@ -4,20 +4,30 @@ import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 
+import { RememberSessionOption } from "@/components/auth/remember-session-option";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { isValidEmail } from "@/core/auth/email";
+import { loadRememberLoginPreference } from "@/core/auth/remember-login";
+import {
+  fetchSetupStatus,
+  isSystemAlreadyInitializedError,
+} from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
+import { useI18n } from "@/core/i18n/hooks";
 
-type SetupMode = "loading" | "init_admin" | "change_password";
+type SetupMode = "loading" | "init_admin" | "change_password" | "unavailable";
 
 export default function SetupPage() {
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
   const { theme, resolvedTheme } = useTheme();
+  const { t } = useI18n();
   const [mode, setMode] = useState<SetupMode>("loading");
+  const [setupStatusAttempt, setSetupStatusAttempt] = useState(0);
 
   // --- Shared state ---
   const [email, setEmail] = useState("");
@@ -25,6 +35,9 @@ export default function SetupPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [rememberMe, setRememberMe] = useState(
+    () => loadRememberLoginPreference().rememberMe,
+  );
 
   // --- Change-password mode only ---
   const [currentPassword, setCurrentPassword] = useState("");
@@ -35,38 +48,51 @@ export default function SetupPage() {
     if (isAuthenticated && user?.needs_setup) {
       setMode("change_password");
     } else if (!isAuthenticated) {
-      // Check if the system has no users yet
-      void fetch("/api/v1/auth/setup-status")
-        .then((r) => r.json())
+      // Check if the system has no users yet. A slow Gateway must not leave the
+      // setup page in an infinite loading state or silently redirect away.
+      setMode("loading");
+      void fetchSetupStatus()
         .then((data: { needs_setup?: boolean }) => {
           if (cancelled) return;
           if (data.needs_setup) {
             setMode("init_admin");
           } else {
             // System already set up and user is not logged in — go to login
-            router.push("/login");
+            router.replace("/login");
           }
         })
         .catch(() => {
-          if (!cancelled) router.push("/login");
+          if (!cancelled) setMode("unavailable");
         });
     } else {
       // Authenticated but needs_setup is false — already set up
-      router.push("/workspace");
+      router.replace("/workspace");
     }
 
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, user, router]);
+  }, [isAuthenticated, user, router, setupStatusAttempt]);
 
   // ── Init-admin handler ─────────────────────────────────────────────
   const handleInitAdmin = async (e: React.SubmitEvent) => {
     e.preventDefault();
     setError("");
 
+    // `noValidate` + JS check: the browser's `type="email"` rule would reject
+    // addresses the backend accepts, e.g. a non-ASCII local part (#7488).
+    const address = email.trim();
+    if (!isValidEmail(address)) {
+      setError("Please enter a valid email address");
+      return;
+    }
+
     if (newPassword !== confirmPassword) {
       setError("Passwords do not match");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setError("Password must be at least 8 characters");
       return;
     }
 
@@ -77,13 +103,18 @@ export default function SetupPage() {
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({
-          email,
+          email: address,
           password: newPassword,
+          remember_me: rememberMe,
         }),
       });
 
       if (!res.ok) {
         const data = await res.json();
+        if (isSystemAlreadyInitializedError(data)) {
+          router.replace("/login");
+          return;
+        }
         const authError = parseAuthError(data);
         setError(authError.message);
         return;
@@ -102,12 +133,24 @@ export default function SetupPage() {
     e.preventDefault();
     setError("");
 
+    // The address field also carries the account's existing email here, so
+    // the same permissive check applies (#7488).
+    const address = email.trim();
+    if (!isValidEmail(address)) {
+      setError("Please enter a valid email address");
+      return;
+    }
     if (newPassword !== confirmPassword) {
       setError("Passwords do not match");
       return;
     }
     if (newPassword.length < 8) {
       setError("Password must be at least 8 characters");
+      return;
+    }
+
+    if (!currentPassword) {
+      setError("Please enter your current password");
       return;
     }
 
@@ -123,7 +166,8 @@ export default function SetupPage() {
         body: JSON.stringify({
           current_password: currentPassword,
           new_password: newPassword,
-          new_email: email || undefined,
+          new_email: address,
+          remember_me: rememberMe,
         }),
       });
 
@@ -152,6 +196,41 @@ export default function SetupPage() {
     );
   }
 
+  if (mode === "unavailable") {
+    return (
+      <div className="flex min-h-screen items-center justify-center px-4">
+        <div className="w-full max-w-md space-y-4 text-center">
+          <div>
+            <h1 className="text-xl font-semibold">
+              {t.login.serviceUnavailableTitle}
+            </h1>
+            <p className="text-muted-foreground mt-2 text-sm">
+              {t.login.serviceUnavailableDescription}
+            </p>
+          </div>
+          <div className="flex justify-center gap-3">
+            <Button
+              type="button"
+              onClick={() => {
+                setMode("loading");
+                setSetupStatusAttempt((attempt) => attempt + 1);
+              }}
+            >
+              {t.login.retry}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => router.replace("/login")}
+            >
+              {t.login.signIn}
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Admin initialization form ──────────────────────────────────────
   if (mode === "init_admin") {
     return (
@@ -172,7 +251,7 @@ export default function SetupPage() {
               Set up the administrator account to get started.
             </p>
           </div>
-          <form onSubmit={handleInitAdmin} className="space-y-2">
+          <form onSubmit={handleInitAdmin} noValidate className="space-y-2">
             <div className="flex flex-col space-y-1">
               <label htmlFor="email" className="text-sm font-medium">
                 Email
@@ -214,6 +293,10 @@ export default function SetupPage() {
                 minLength={8}
               />
             </div>
+            <RememberSessionOption
+              checked={rememberMe}
+              onCheckedChange={setRememberMe}
+            />
             {error && <p className="ms-1 text-sm text-red-500">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Creating account…" : "Create Admin Account"}
@@ -245,7 +328,7 @@ export default function SetupPage() {
             Set your real email and a new password.
           </p>
         </div>
-        <form onSubmit={handleChangePassword} className="space-y-4">
+        <form onSubmit={handleChangePassword} noValidate className="space-y-4">
           <Input
             type="email"
             placeholder="Your email"
@@ -275,6 +358,10 @@ export default function SetupPage() {
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
             minLength={8}
+          />
+          <RememberSessionOption
+            checked={rememberMe}
+            onCheckedChange={setRememberMe}
           />
           {error && <p className="text-sm text-red-500">{error}</p>}
           <Button type="submit" className="w-full" disabled={loading}>

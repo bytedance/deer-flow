@@ -1,0 +1,112 @@
+---
+title: Snapshot Cadence
+description: How database.checkpoint_delta.snapshot_frequency trades checkpoint size against materialization cost, its interaction with LangGraph's system-wide superstep bound, why it is frozen with the mode and never stamped into checkpoint metadata, and the 1000 to 10 default change with its legacy-key warnings.
+---
+
+import { Callout } from "nextra/components";
+
+# Snapshot Cadence
+
+In `delta` mode a checkpoint stores writes, and the message list is reconstructed on read. A full messages snapshot is written out every so often so reconstruction does not have to walk the ancestor chain forever. `database.checkpoint_delta.snapshot_frequency` sets that interval.
+
+<Callout type="info">
+  This knob only applies in `delta` mode. `checkpoint_delta` is ignored when
+  `checkpoint_channel_mode` is `full`; see [Channel Modes](/docs/harness/checkpoints/modes).
+</Callout>
+
+## The knob
+
+| Key                                       | Type  | Default | Range                        | Restart required |
+| ----------------------------------------- | ----- | ------- | ---------------------------- | ---------------- |
+| `database.checkpoint_delta.snapshot_frequency` | `int` | `10`    | `ge=1` (1 or more, no upper bound) | Yes        |
+
+A full messages snapshot is stored every N per-step writes (higher = smaller checkpoints, slower materialization). The value reaches the compiled channel table: the messages field is built as `DeltaChannel(merge_message_writes, snapshot_frequency=…)`, so the cadence is a property of the compiled graph rather than of an individual checkpoint.
+
+```yaml
+database:
+  checkpoint_channel_mode: delta   # snapshot_frequency only means anything here
+  checkpoint_delta:
+    snapshot_frequency: 10         # every 10 per-step writes, one _DeltaSnapshot blob
+```
+
+## The tradeoff
+
+| Cadence        | Checkpoint size                                              | Materialization                                  | Materialized state |
+| -------------- | ------------------------------------------------------------ | ------------------------------------------------ | ------------------ |
+| Low N (for example 1) | A snapshot blob on every step; the storage win shrinks toward `full` mode's size | Short ancestor walk; fastest reads             | Identical          |
+| Default `10`   | One snapshot blob per 10 per-step writes                     | Moderate walk                                    | Identical          |
+| High N         | Fewest blobs, smallest store                                 | Longest walk; slowest reads                      | Identical          |
+
+The knob buys storage against read cost, never a different answer. A low cadence snapshots the message list far more often than the default while materialized state stays identical, and the tests pin both halves: the configured frequency must reach the compiled channel table, and materialization must produce the same values at any cadence.
+
+It is also a first-order capacity knob, because those snapshots are what dominate the retained total: with K = `snapshot_frequency`, N turns retain O(N²/K + N) rather than O(N²), while the per-step write payloads are independent of K. Sizing a store from the per-step cost alone understates it; see [Checkpoints and Delta Channels](/docs/harness/checkpoints) for the derivation.
+
+## Interaction with LangGraph's superstep bound
+
+Snapshot writing is driven by two counters, and whichever trips first wins:
+
+| Counter                              | Scope        | Default    | Set by                          |
+| ------------------------------------ | ------------ | ---------- | ------------------------------- |
+| Per-channel update count             | This channel | `snapshot_frequency` (`10`) | `database.checkpoint_delta.snapshot_frequency` |
+| Supersteps since the last snapshot   | System-wide  | `5000`     | LangGraph's `DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT` (env `LANGGRAPH_DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT`) |
+
+The second counter bounds replay depth even for a channel that stops receiving writes. Raising `snapshot_frequency` therefore cannot make replay depth unbounded: a thread that keeps running without touching messages still snapshots under the 5000-superstep bound. That bound belongs to LangGraph, not to the `database:` section, and applies to every delta channel in the process.
+
+## Frozen with the mode, never stored in a checkpoint
+
+The snapshot cadence is baked into each compiled graph's channel table, not stored in the checkpoint. That has direct operational consequences:
+
+| Fact | Consequence |
+| --- | --- |
+| Resolution order is explicit argument, then process-frozen value, then the config default `10` | Explicit values exist for tests and ephemeral graphs; the assembly paths pass the process value, so a running deployment compiles at the frozen cadence |
+| Frozen on the first graph build, next to the mode | All processes sharing one checkpoint database must use the same value; there is no per-checkpoint cadence to compare against |
+| A later different value raises `CheckpointModeReconfigurationError("checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process")` | Editing `config.yaml` does not take effect until restart; the failure is loud, not silent |
+| A non-positive value raises `ValueError("snapshot frequency must be positive")` | The freeze helper and config validation (`ge=1`) agree |
+| The value is read from the application config, not from a per-request configurable key | A forged or client-supplied value cannot recompile the channel table |
+
+The cadence is deliberately **not** stamped into checkpoint metadata: the mode marker contract (absence = full) and the full to delta migration semantics are unchanged by the frequency value. Because it is absent from every checkpoint, a process running a different cadence applies it silently to the same threads — which is why the value is an operator responsibility documented on the config field, not something the runtime can detect.
+
+Contrast with the mode marker, which *is* written: delta checkpoints carry `deerflow_checkpoint_channel_mode: "delta"` in their metadata, and absence means `full`. Cadence has no equivalent.
+
+## Storage-shape contract
+
+| Checkpoint kind     | `channel_values.messages`                  | Where the step's payload lives                  |
+| ------------------- | ------------------------------------------ | ----------------------------------------------- |
+| Non-snapshot step   | Absent — no `messages` key at all          | In the checkpoint's per-step writes             |
+| Snapshot step       | A `_DeltaSnapshot` blob holding the list   | In the checkpoint itself; the ancestor walk stops here |
+| `full` mode         | The whole message list in every checkpoint | Nowhere to replay                               |
+
+The contract is pinned two ways: non-snapshot checkpoints must not carry `messages` in `channel_values`, every `snapshot_frequency` updates instead carry a `_DeltaSnapshot` blob, and materialization stays correct across both shapes; and the storage-level guard compares the two modes over the same turns: delta carries at most the periodic snapshot blob, while `full` writes one per message-writing step. A snapshot is therefore not an extra copy — in delta mode it is the only full message payload that exists.
+
+## Default change: 1000 to 10
+
+The cadence used to live at the flat key `database.checkpoint_delta_snapshot_frequency` with a default of `1000`. It moved to the nested key `database.checkpoint_delta.snapshot_frequency` with a default of `10` — the same field, but threads now snapshot **100x more often** by default. Upstream `DeltaChannel` still defaults its parameter to 1000; DeerFlow always passes an explicit value, so no DeerFlow thread uses upstream's default. The previous cadence is still available by setting the value explicitly:
+
+```yaml
+database:
+  checkpoint_delta:
+    snapshot_frequency: 1000   # the pre-rename default cadence
+```
+
+Three migration warnings can appear while the old flat key is still present. All three are logged, not errors, and the nested key always wins:
+
+| Condition | Warning (verbatim) |
+| --- | --- |
+| Both keys set | `Both database.checkpoint_delta_snapshot_frequency (deprecated) and database.checkpoint_delta.snapshot_frequency are set; the nested key wins.` |
+| `checkpoint_delta` is already a config object | `Ignoring deprecated database.checkpoint_delta_snapshot_frequency because database.checkpoint_delta is already set.` |
+| Legacy value carried forward | `database.checkpoint_delta_snapshot_frequency is deprecated; use database.checkpoint_delta.snapshot_frequency instead. Carried the legacy value (%r) forward.` |
+
+`DatabaseConfig` ignores unknown keys, so without this shim a `config.yaml` still written against the old flat key would fall back to `10` instead of the operator's chosen value. Deleting the flat key once the nested one is set removes all three warnings.
+
+## Choosing a value
+
+The default is not a rule of thumb: the production benchmark emits `snapshot_write_spike` (delta checkpoint-write p99 over p50) and `cache_effect_ms` (state cold minus warm p50) as the decision inputs for the production snapshot-frequency and accessor-cache defaults. The channel benchmark reports backend-neutral row and byte counts plus warm and cold read times, with ratios always `delta/full`; timing thresholds are not CI gates. See [Operating Checkpoints](/docs/harness/checkpoints/operations) for how to run them.
+
+Because the value is frozen and must match across processes, change it deliberately: pick a cadence, restart every process sharing the database, and verify with the storage-shape check rather than watching a single request.
+
+## Related
+
+- [Channel Modes](/docs/harness/checkpoints/modes) — what the two storage shapes mean for reads and writes.
+- [History Cache](/docs/harness/checkpoints/history-cache) — the read path this cadence feeds.
+- [Operations](/docs/harness/checkpoints/operations) — retention, benchmarks, and backend choice.
+- [Reference](/docs/harness/checkpoints/reference) — the full config-key and error table.

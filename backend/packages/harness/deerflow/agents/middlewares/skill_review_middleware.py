@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 from collections import OrderedDict
+from contextvars import copy_context
 from typing import override
 
 from langchain.agents import AgentState
@@ -141,8 +142,9 @@ class SkillReviewMiddleware(AgentMiddleware[AgentState]):
         if reviewer is not None and messages_snapshot:
             logger.info("Skill review triggered for thread %s (%d tool-call iterations)", thread_id, current)
             try:
+                review_context = copy_context()
                 thread = threading.Thread(
-                    target=lambda: asyncio.run(reviewer.review(thread_id, messages_snapshot)),
+                    target=lambda: review_context.run(asyncio.run, reviewer.review(thread_id, messages_snapshot)),
                     daemon=True,
                     name=f"skill-review-{thread_id}",
                 )

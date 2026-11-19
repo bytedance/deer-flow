@@ -1,0 +1,99 @@
+{
+  "review_id": 5185922053,
+  "reviewed_commit": "bb77c69328ffcb3271e4da76c14d9a2df87a244d",
+  "base_commit": "4501c76b0f44cc55af6332d65ac2e7f5311f71fd",
+  "initial_red": {
+    "failed": 13,
+    "passed": 57,
+    "seconds": 2.39
+  },
+  "focused": {
+    "passed": 270,
+    "seconds": 3.86
+  },
+  "format": "passed",
+  "lint": "passed",
+  "full_branch": {
+    "failed": 15,
+    "passed": 15520,
+    "skipped": 182,
+    "deselected": 3,
+    "seconds": 372.86
+  },
+  "previous_full_base": {
+    "failed": 15,
+    "passed": 15427,
+    "skipped": 182,
+    "deselected": 3,
+    "seconds": 467.39
+  },
+  "fresh_base_failure_rerun": {
+    "failed": 15,
+    "seconds": 2.65
+  },
+  "branch_only_failure_ids": [],
+  "shared_failure_ids": [
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_emits_screenshot_artifact_and_browser_view",
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_returns_snapshot",
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_screenshot_failure_does_not_break_action",
+    "tests/test_browser_router.py::test_validate_browser_url_rejects_private_and_non_http",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_and_web_capture_tools_agree_on_target_error_warning",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_no_warning_for_normal_target_status",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_success",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_warns_on_target_error_status",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_invalid_filter_falls_back_to_fit",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_passes_configured_filter",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_success",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_truncates_to_4096",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_returns_error_string_on_exception",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_returns_error_when_no_content",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_uses_web_fetch_config"
+  ],
+  "scope_control": {
+    "valid_sources_in_malformed_history_remain_readable": true,
+    "foreign_scope_isolated": true
+  },
+  "transaction_negative_control": "Switching capture to autocommit in an isolated process makes the real SQLITE_FULL rollback test fail because the previous sources are lost.",
+  "guidance": {
+    "errors": 0,
+    "warnings": 1,
+    "code": "AG002",
+    "effective_bytes": 97800
+  },
+  "coverage": [
+    "Shared validation at reachability, capture-failure fallback, lookup status and durable-context rendering; raw malformed checkpoints remain safe before compaction and are replaced after successful capture.",
+    "Malformed root values, scope, batches, status and omission counts; empty/absent controls and preserved source/scope isolation.",
+    "Real SQLite with a scaled 1024-page ceiling: repeated replacement, oversize replacement rollback, then successful recovery. Production remains at 32768 pages.",
+    "Duplicate capture while reducing retention, preserving its source and checkpoint reference.",
+    "Two synchronized writer threads, with distinct and identical incoming batches; stable final retention and source counts.",
+    "Earlier full clean-base results are retained; all 15 failed IDs were rerun on that unchanged clean base for this round.",
+    "No new real-model, historical prototype or deployment result is claimed."
+  ],
+  "previous_ci_failure": {
+    "run_id": 34683883582,
+    "job_id": 103527323502,
+    "step": "Install uv",
+    "error": "fetch failed",
+    "backend_dependency_install": "skipped",
+    "backend_tests": "skipped"
+  },
+  "source_sha256": {
+    "backend/packages/harness/deerflow/agents/middlewares/AGENTS.md": "db9ff80a863c6ce8045264d0d048a2fb5e91cf00f951d271df64a87390b53917",
+    "backend/packages/harness/deerflow/agents/middlewares/durable_context_middleware.py": "cf37b6d48e81b1f4c8c9a9c1a12a874d893e423e13a771c17d988c19dde9bdfd",
+    "backend/packages/harness/deerflow/agents/task_continuity/archive.py": "f15ffc029e571f09ab3fa41319f6e5a7a70c0ce48425677cc3ccbe400a0dd448",
+    "backend/packages/harness/deerflow/agents/task_continuity/state.py": "0d35bf66316d9d2e09b20b124af77cbb40aa0f38eb0d43cb333a31d0266510c0",
+    "backend/tests/test_task_continuity.py": "5e46fdda1dcc14a896ef9a6cfeb64fa80d9842238adb995f46b5ef29a2e49149",
+    "docs/task-continuity.md": "38e242b80a2134247fef0094b6663184a365705540c7ed38ae62039b371812dc"
+  },
+  "log_sha256": {
+    "red": "b09887adda07187a612cfabd15123b825e1639013b829b1fae520707b5118ab6",
+    "focused": "a2d44dccc5bb9110be1dffb5154df8d6a3104ac8a14aba6712e35e71ad49d3ca",
+    "format": "e460172c2fa4fa9bb169e44621311f0785bf4a4deb011ba04364a7d13e55f453",
+    "lint": "f2d84da72b0d5e3287e7bf39c8b1096f1291c6d95f4e87e96d226557177f1229",
+    "full_branch": "7a43ffcc2d2e17fa5cc0657a3053d829b63a3bd65ede1c81fdf4e038b50c4710",
+    "base_failure_rerun": "bf3ada8c9b018f87438a4661480fb8e83143a8b2ac1f4a909c2f52b92af8779c",
+    "transaction_negative_control": "41a768c42168e1e74e429149f932851fb7c2f261d40bab68fd60b6e7177c9bd7",
+    "guidance": "cf6328d4b2e711aae8b9b3d4e6b733bfdbd4d6cbe22f47e04342e4f9c41ef97d",
+    "scope_control": "574971bfef4d6048d97de89a00e57f2377c8bd3429f9be2ce6acbec7971c6c0d"
+  }
+}

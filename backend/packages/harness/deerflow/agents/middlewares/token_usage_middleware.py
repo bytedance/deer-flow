@@ -9,12 +9,15 @@ from typing import Any, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.todo import Todo
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
+
+from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, normalize_token_usage
 
 logger = logging.getLogger(__name__)
 
 TOKEN_USAGE_ATTRIBUTION_KEY = "token_usage_attribution"
+SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY = "subagent_token_usage_attributed"
 
 
 def _string_arg(value: Any) -> str | None:
@@ -39,7 +42,7 @@ def _normalize_todos(value: Any) -> list[Todo]:
 
         if content is not None:
             todo["content"] = content
-        if status in {"pending", "in_progress", "completed"}:
+        if isinstance(status, str) and status in {"pending", "in_progress", "completed", "blocked", "waiting"}:
             todo["status"] = status
 
         normalized.append(todo)
@@ -97,7 +100,7 @@ def _build_todo_actions(previous_todos: list[Todo], next_todos: list[Todo]) -> l
                 previous_index, previous_match = content_matches.pop(0)
                 matched_previous_indices.add(previous_index)
 
-        if previous_match is None and index < len(previous_todos) and index not in matched_previous_indices:
+        if previous_match is None and content not in previous_by_content and index < len(previous_todos) and index not in matched_previous_indices:
             previous_match = previous_todos[index]
             matched_previous_indices.add(index)
 
@@ -217,10 +220,34 @@ def _infer_step_kind(message: AIMessage, actions: list[dict[str, Any]]) -> str:
     return "thinking"
 
 
-def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
+def _has_tool_call(message: AIMessage, tool_call_id: str) -> bool:
+    """Return True if the AIMessage contains a tool_call with the given id."""
+    for tc in message.tool_calls or []:
+        if isinstance(tc, dict):
+            if tc.get("id") == tool_call_id:
+                return True
+        elif hasattr(tc, "id") and tc.id == tool_call_id:
+            return True
+    return False
+
+
+def _subagent_usage_from_tool_message(message: ToolMessage) -> dict[str, int] | None:
+    """Read validated subagent usage from the current run's message state."""
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        return None
+    if additional_kwargs.get(SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY) is True:
+        return None
+    return normalize_token_usage(additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
+
+
+def _build_attribution(message: AIMessage, todos: Any) -> dict[str, Any]:
     tool_calls = getattr(message, "tool_calls", None) or []
     actions: list[dict[str, Any]] = []
-    current_todos = list(todos)
+    # ``todos`` is the stored channel value: checkpoint writes and direct
+    # integrations can Overwrite it with any shape, so normalize it before
+    # reading entries instead of trusting the write_todos shape.
+    current_todos = _normalize_todos(todos)
 
     for raw_tool_call in tool_calls:
         if not isinstance(raw_tool_call, dict):
@@ -253,6 +280,76 @@ def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
     }
 
 
+def _add_subagent_usage(message: AIMessage, usage: dict[str, int]) -> AIMessage:
+    previous = message.usage_metadata or {}
+    merged = {
+        **previous,
+        "input_tokens": previous.get("input_tokens", 0) + usage["input_tokens"],
+        "output_tokens": previous.get("output_tokens", 0) + usage["output_tokens"],
+        "total_tokens": previous.get("total_tokens", 0) + usage["total_tokens"],
+    }
+    return message.model_copy(update={"usage_metadata": merged})
+
+
+def attribute_deferred_subagent_usage(messages: list[Any], deferred: list[tuple[str, dict[str, int]]]) -> list[AIMessage]:
+    """Return AIMessage copies carrying usage of subagents that outlived their ToolMessage.
+
+    A steered task's pending ToolMessage is no longer next to the latest
+    AIMessage and its receipt is a HumanMessage, so the terminal-message walk
+    below cannot see this usage. The caller owns delivering each entry once.
+    """
+    updates: dict[int, AIMessage] = {}
+    indexes = [idx for idx in range(len(messages) - 1, -1, -1) if isinstance(messages[idx], AIMessage)]
+    for tool_call_id, usage in deferred:
+        # Compaction can drop the dispatch, so fall back to the newest AIMessage.
+        target = next((idx for idx in indexes if _has_tool_call(messages[idx], tool_call_id)), indexes[0] if indexes else None)
+        if target is None:
+            logger.warning("Token budget missed subagent usage for %s: no AIMessage to charge", tool_call_id)
+            continue
+        updates[target] = _add_subagent_usage(updates.get(target, messages[target]), usage)
+    return [updates[idx] for idx in sorted(updates)]
+
+
+def _attribute_completed_subagent_usage(messages: list[Any]) -> dict[int, AIMessage | ToolMessage]:
+    """Return copied dispatch/terminal message updates without current-step attribution."""
+    # Annotate subagent token usage onto the AIMessage that dispatched it.
+    # Terminal usage travels with the current run's ToolMessage, so provider
+    # tool-call IDs reused by another run cannot overwrite attribution state.
+    # Walk backward through consecutive ToolMessages before the new AIMessage
+    # so that multiple concurrent task tool calls all get their subagent tokens
+    # written back to the same dispatch message (merging into one update).
+    state_updates: dict[int, AIMessage | ToolMessage] = {}
+    if len(messages) >= 2:
+        idx = len(messages) - 2
+        while idx >= 0:
+            tool_msg = messages[idx]
+            if not isinstance(tool_msg, ToolMessage) or not tool_msg.tool_call_id:
+                break
+
+            subagent_usage = _subagent_usage_from_tool_message(tool_msg)
+            if subagent_usage:
+                # Search backward from the ToolMessage to find the AIMessage
+                # that dispatched it.  A single model response can dispatch
+                # multiple task tool calls, so we can't assume a fixed offset.
+                dispatch_idx = idx - 1
+                while dispatch_idx >= 0:
+                    candidate = messages[dispatch_idx]
+                    if isinstance(candidate, AIMessage) and _has_tool_call(candidate, tool_msg.tool_call_id):
+                        # Accumulate into an existing update for the same
+                        # AIMessage (multiple task calls in one response),
+                        # or merge fresh from the original message.
+                        existing_update = state_updates.get(dispatch_idx)
+                        state_updates[dispatch_idx] = _add_subagent_usage(existing_update if isinstance(existing_update, AIMessage) else candidate, subagent_usage)
+                        tool_metadata = dict(tool_msg.additional_kwargs)
+                        tool_metadata[SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY] = True
+                        state_updates[idx] = tool_msg.model_copy(update={"additional_kwargs": tool_metadata})
+                        break
+                    dispatch_idx -= 1
+            idx -= 1
+
+    return state_updates
+
+
 class TokenUsageMiddleware(AgentMiddleware):
     """Logs token usage from model responses and annotates the AI step."""
 
@@ -261,17 +358,30 @@ class TokenUsageMiddleware(AgentMiddleware):
         if not messages:
             return None
 
+        state_updates = _attribute_completed_subagent_usage(messages)
+
         last = messages[-1]
         if not isinstance(last, AIMessage):
+            if state_updates:
+                return {"messages": [state_updates[idx] for idx in sorted(state_updates)]}
             return None
 
         usage = getattr(last, "usage_metadata", None)
         if usage:
+            input_token_details = usage.get("input_token_details") or {}
+            output_token_details = usage.get("output_token_details") or {}
+            detail_parts = []
+            if input_token_details:
+                detail_parts.append(f"input_token_details={input_token_details}")
+            if output_token_details:
+                detail_parts.append(f"output_token_details={output_token_details}")
+            detail_suffix = f" {' '.join(detail_parts)}" if detail_parts else ""
             logger.info(
-                "LLM token usage: input=%s output=%s total=%s",
+                "LLM token usage: input=%s output=%s total=%s%s",
                 usage.get("input_tokens", "?"),
                 usage.get("output_tokens", "?"),
                 usage.get("total_tokens", "?"),
+                detail_suffix,
             )
 
         todos = state.get("todos") or []
@@ -279,11 +389,28 @@ class TokenUsageMiddleware(AgentMiddleware):
         additional_kwargs = dict(getattr(last, "additional_kwargs", {}) or {})
 
         if additional_kwargs.get(TOKEN_USAGE_ATTRIBUTION_KEY) == attribution:
-            return None
+            return {"messages": [state_updates[idx] for idx in sorted(state_updates)]} if state_updates else None
 
         additional_kwargs[TOKEN_USAGE_ATTRIBUTION_KEY] = attribution
         updated_msg = last.model_copy(update={"additional_kwargs": additional_kwargs})
-        return {"messages": [updated_msg]}
+        state_updates[len(messages) - 1] = updated_msg
+        return {"messages": [state_updates[idx] for idx in sorted(state_updates)]}
+
+    @override
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._apply(state)
+
+    @override
+    async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._apply(state)
+
+
+class CompletedSubagentUsageMiddleware(AgentMiddleware):
+    """Backfill completed subagent usage before the lead budget checks it."""
+
+    def _apply(self, state: AgentState) -> dict | None:
+        state_updates = _attribute_completed_subagent_usage(state.get("messages", []))
+        return {"messages": [state_updates[idx] for idx in sorted(state_updates)]} if state_updates else None
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:

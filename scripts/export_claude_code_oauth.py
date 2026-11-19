@@ -44,7 +44,7 @@ def default_account_name() -> str:
     return os.getenv("USER") or "claude-code-user"
 
 
-def load_keychain_container(service: str, account: str) -> dict[str, Any]:
+def load_keychain_container(service: str, account: str) -> tuple[dict[str, Any], str]:
     if platform.system() != "Darwin":
         raise RuntimeError("Claude Code Keychain export is only supported on macOS.")
 
@@ -71,11 +71,12 @@ def load_keychain_container(service: str, account: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Claude Code Keychain item did not contain valid JSON.") from exc
 
-    access_token = data.get("claudeAiOauth", {}).get("accessToken", "")
-    if not access_token:
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    access_token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+    if not isinstance(access_token, str) or not access_token.strip():
         raise RuntimeError("Claude Code Keychain item did not contain claudeAiOauth.accessToken.")
 
-    return data
+    return data, access_token
 
 
 def write_credentials_file(output_path: Path, data: dict[str, Any]) -> None:
@@ -141,12 +142,10 @@ def main() -> int:
         return 0
 
     try:
-        data = load_keychain_container(service=args.service, account=args.account)
+        data, access_token = load_keychain_container(service=args.service, account=args.account)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-
-    access_token = data["claudeAiOauth"]["accessToken"]
 
     if args.print_token:
         print(access_token)

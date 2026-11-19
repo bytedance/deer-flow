@@ -1,3 +1,3 @@
-from .tools import web_search_tool
+from .tools import image_search_tool, web_search_tool
 
-__all__ = ["web_search_tool"]
+__all__ = ["image_search_tool", "web_search_tool"]

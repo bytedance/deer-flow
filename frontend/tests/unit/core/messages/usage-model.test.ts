@@ -1,5 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { expect, test } from "vitest";
+import { expect, test } from "@rstest/core";
 
 import { enUS } from "@/core/i18n";
 import {
@@ -122,6 +122,29 @@ test("uses generic todo labels when backend attribution is absent", () => {
     expect.objectContaining({
       messageId: "ai-3",
       label: "Final answer",
+      sharedAttribution: false,
+    }),
+  ]);
+});
+
+test("labels Anthropic thinking-only blocks as thinking", () => {
+  const messages = [
+    {
+      id: "ai-thinking",
+      type: "ai",
+      content: [{ type: "thinking", thinking: "Still checking." }],
+      usage_metadata: {
+        input_tokens: 20,
+        output_tokens: 5,
+        total_tokens: 25,
+      },
+    },
+  ] as unknown as Message[];
+
+  expect(buildTokenDebugSteps(messages, enUS)).toEqual([
+    expect.objectContaining({
+      messageId: "ai-thinking",
+      label: "Thinking",
       sharedAttribution: false,
     }),
   ]);

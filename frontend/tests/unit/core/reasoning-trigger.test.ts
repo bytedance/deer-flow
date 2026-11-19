@@ -1,8 +1,8 @@
+import { expect, test, rs } from "@rstest/core";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, test, vi } from "vitest";
 
-vi.mock("streamdown", () => ({
+rs.mock("streamdown", () => ({
   Streamdown: ({ children }: { children: string }) =>
     createElement("div", null, children),
 }));

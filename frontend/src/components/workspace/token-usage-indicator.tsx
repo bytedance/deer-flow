@@ -15,17 +15,28 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useI18n } from "@/core/i18n/hooks";
-import { accumulateUsage, formatTokenCount } from "@/core/messages/usage";
+import {
+  formatTokenCount,
+  selectHeaderTokenUsage,
+  type TokenUsage,
+} from "@/core/messages/usage";
 import {
   getTokenUsageViewPreset,
   tokenUsagePreferencesFromPreset,
   type TokenUsagePreferences,
   type TokenUsageViewPreset,
 } from "@/core/messages/usage-model";
+import type { ContextUsage } from "@/core/threads/token-usage";
 import { cn } from "@/lib/utils";
 
+import { formatContextUsagePercentage } from "./context-usage-format";
+
 interface TokenUsageIndicatorProps {
+  threadId?: string;
   messages: Message[];
+  pendingMessages?: Message[];
+  backendUsage?: TokenUsage | null;
+  contextUsage?: ContextUsage | null;
   enabled?: boolean;
   preferences: TokenUsagePreferences;
   onPreferencesChange: (preferences: TokenUsagePreferences) => void;
@@ -33,7 +44,11 @@ interface TokenUsageIndicatorProps {
 }
 
 export function TokenUsageIndicator({
+  threadId,
   messages,
+  pendingMessages,
+  backendUsage,
+  contextUsage,
   enabled = false,
   preferences,
   onPreferencesChange,
@@ -41,8 +56,19 @@ export function TokenUsageIndicator({
 }: TokenUsageIndicatorProps) {
   const { t } = useI18n();
 
-  const usage = useMemo(() => accumulateUsage(messages), [messages]);
+  const usage = useMemo(
+    () =>
+      selectHeaderTokenUsage({
+        backendUsage: threadId ? backendUsage : null,
+        messages,
+        pendingMessages,
+      }),
+    [backendUsage, messages, pendingMessages, threadId],
+  );
   const preset = getTokenUsageViewPreset(preferences);
+  const contextPercentage = formatContextUsagePercentage(
+    contextUsage?.percentage,
+  );
 
   if (!enabled) {
     return null;
@@ -68,6 +94,14 @@ export function TokenUsageIndicator({
                 : "-"
               : t.tokenUsage.presets[presetKeyToTranslationKey(preset)]}
           </span>
+          {contextPercentage != null && (
+            <span
+              className="text-muted-foreground/80 border-l pl-1.5 font-mono"
+              aria-label={t.contextUsage.badgeAriaLabel(contextPercentage)}
+            >
+              {contextPercentage}%
+            </span>
+          )}
           <ChevronDownIcon className="size-3" />
         </Button>
       </DropdownMenuTrigger>

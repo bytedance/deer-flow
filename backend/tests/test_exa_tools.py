@@ -133,6 +133,52 @@ class TestWebSearchTool:
 
         assert result == "Error: API rate limit exceeded"
 
+    def test_search_accepts_env_var_string_limits(self):
+        """``$VAR`` config references resolve to strings; exa-py rejects a string num_results."""
+        from exa_py import Exa
+
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"max_results": "10", "contents_max_characters": "2000", "api_key": "test-key"}
+            mock_config.return_value.get_tool_config.return_value = tool_config
+
+            sent = {}
+
+            def fake_request(self, endpoint, data=None, *args, **kwargs):
+                sent.update(data or {})
+                return {"results": [], "requestId": "req"}
+
+            # The real SDK does the type check, so only its HTTP layer is replaced.
+            with patch.object(Exa, "request", fake_request):
+                from deerflow.community.exa.tools import web_search_tool
+
+                result = web_search_tool.invoke({"query": "test query"})
+
+        assert json.loads(result) == []
+        assert sent["numResults"] == 10
+        assert sent["contents"] == {"highlights": {"maxCharacters": 2000}}
+
+    @pytest.mark.parametrize("raw", [None, "", "many", "3.5", 3.5, 10.0, True, False, 0, -2, "-2"])
+    def test_search_invalid_limits_fall_back_to_defaults(self, mock_exa_client, raw):
+        """An unusable value warns and keeps the default instead of failing the search."""
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"max_results": raw, "contents_max_characters": raw, "api_key": "test-key"}
+            mock_config.return_value.get_tool_config.return_value = tool_config
+            mock_exa_client.search.return_value = MagicMock(results=[])
+
+            from deerflow.community.exa.tools import web_search_tool
+
+            result = web_search_tool.invoke({"query": "test query"})
+
+        assert json.loads(result) == []
+        mock_exa_client.search.assert_called_once_with(
+            "test query",
+            type="auto",
+            num_results=5,
+            contents={"highlights": {"max_characters": 1000}},
+        )
+
 
 class TestWebFetchTool:
     def test_basic_fetch(self, mock_app_config, mock_exa_client):
@@ -258,3 +304,88 @@ class TestWebFetchTool:
         # "# Long Page\n\n" is 14 chars, content truncated to 4096
         content_after_header = result.split("\n\n", 1)[1]
         assert len(content_after_header) == 4096
+
+
+@pytest.fixture(autouse=True)
+def _no_exa_base_url_env(monkeypatch):
+    monkeypatch.delenv("EXA_BASE_URL", raising=False)
+
+
+def _patch_tool_config(extra):
+    patcher = patch("deerflow.community.exa.tools.get_app_config")
+    mock_config = patcher.start()
+    tool_config = MagicMock()
+    tool_config.model_extra = extra
+    mock_config.return_value.get_tool_config.return_value = tool_config
+    return patcher
+
+
+class TestBaseUrl:
+    def _search(self, extra):
+        patcher = _patch_tool_config(extra)
+        try:
+            with patch("deerflow.community.exa.tools.Exa") as mock_exa_cls:
+                mock_exa_cls.return_value.search.return_value = MagicMock(results=[])
+                from deerflow.community.exa.tools import web_search_tool
+
+                result = web_search_tool.invoke({"query": "q"})
+                return result, mock_exa_cls
+        finally:
+            patcher.stop()
+
+    def test_default_endpoint_when_unset(self):
+        result, mock_exa_cls = self._search({"api_key": "k"})
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k")
+
+    def test_tool_base_url_is_passed_to_sdk_without_trailing_slash(self, monkeypatch):
+        monkeypatch.setenv("EXA_BASE_URL", "https://env.example")
+        result, mock_exa_cls = self._search({"api_key": "k", "base_url": "  https://exa-compatible.example/api/  "})
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://exa-compatible.example/api")
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", 123])
+    def test_env_base_url_is_used_when_tool_value_missing(self, monkeypatch, raw):
+        monkeypatch.setenv("EXA_BASE_URL", "https://env.example/")
+        extra = {"api_key": "k"} if raw is None else {"api_key": "k", "base_url": raw}
+        result, mock_exa_cls = self._search(extra)
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://env.example")
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["api.example.com", "ftp://api.example.com", "https://", "https://api.example.com?x=1", "https://api.example.com/#", "https://api.example.com:99999"],
+    )
+    def test_invalid_base_url_returns_error_without_value(self, raw):
+        result, mock_exa_cls = self._search({"api_key": "k", "base_url": raw})
+        assert result.startswith("Error: Invalid Exa base_url/EXA_BASE_URL")
+        assert raw not in result
+        mock_exa_cls.assert_not_called()
+
+    def _fetch(self, extra):
+        patcher = _patch_tool_config(extra)
+        try:
+            with patch("deerflow.community.exa.tools.Exa") as mock_exa_cls:
+                mock_exa_cls.return_value.get_contents.return_value = MagicMock(results=[MagicMock(title="Page", text="Body")])
+                from deerflow.community.exa.tools import web_fetch_tool
+
+                result = web_fetch_tool.invoke({"url": "https://example.com"})
+                return result, mock_exa_cls
+        finally:
+            patcher.stop()
+
+    def test_fetch_refuses_private_backend_without_isolation_confirmation(self):
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "http://127.0.0.1:8080"})
+        assert result.startswith("Error:")
+        assert "network_isolation_confirmed" in result
+        mock_exa_cls.assert_not_called()
+
+    def test_fetch_allows_private_backend_with_isolation_confirmed(self):
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "http://127.0.0.1:8080", "network_isolation_confirmed": "true"})
+        assert result == "# Page\n\nBody"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="http://127.0.0.1:8080")
+
+    def test_fetch_allows_public_backend(self):
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "https://93.184.216.34"})
+        assert result == "# Page\n\nBody"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://93.184.216.34")

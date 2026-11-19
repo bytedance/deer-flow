@@ -1,6 +1,7 @@
 """Background skill reviewer that analyzes conversations and creates/updates skills."""
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from langchain.agents import create_agent
@@ -11,6 +12,7 @@ from deerflow.agents.skill_review.prompt import SKILL_REVIEW_SYSTEM_PROMPT, SKIL
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,7 @@ class SkillReviewer:
         from deerflow.tools.skill_manage_tool import skill_manage_tool
 
         model_name = self._get_model_name()
-        model = create_chat_model(name=model_name, thinking_enabled=False)
+        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=self._config)
 
         return create_agent(
             model=model,
@@ -58,9 +60,10 @@ class SkillReviewer:
     def _build_existing_skills_section(self) -> str:
         """Build a section listing existing skills for the review prompt."""
         try:
-            from deerflow.skills import load_skills
+            from deerflow.skills.storage import get_or_new_user_skill_storage
 
-            skills = list(load_skills(enabled_only=False))
+            storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._config)
+            skills = storage.load_skills(enabled_only=False)
             if not skills:
                 return ""
             lines = ['\n\n## Existing Skills\n\nThe following skills already exist. Update them with `skill_manage` action="patch" if they need new learnings, rather than creating duplicates.\n']
@@ -72,14 +75,14 @@ class SkillReviewer:
             logger.debug("Failed to load existing skills for review prompt", exc_info=True)
             return ""
 
-    async def review(self, thread_id: str, messages: list[Any]) -> None:
+    async def review(self, thread_id: str, messages: Sequence[Any]) -> None:
         """Run a background skill review on the conversation.
 
         Best-effort: all exceptions are caught and logged, never propagated.
 
         Args:
             thread_id: The thread ID for tool execution context.
-            messages: List of conversation messages to review.
+            messages: Snapshot of conversation messages to review.
         """
         try:
             agent = self._create_review_agent()
@@ -91,7 +94,7 @@ class SkillReviewer:
 
             # Initial state: conversation messages + review prompt
             state: dict[str, Any] = {
-                "messages": messages + [review_message],
+                "messages": list(messages) + [review_message],
             }
 
             # Build config with thread_id for skill_manage tool context

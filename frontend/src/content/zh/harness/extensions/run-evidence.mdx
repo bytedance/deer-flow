@@ -1,0 +1,335 @@
+---
+title: 运行证据
+description: 让服务或路由发现有变化的运行并读取其持久化事件的只读读取器。涵盖全局的服务读取器和限定调用方的请求读取器、读取器的三个方法及返回类型、游标语义、删除、脱敏、后端差异、一个轮询服务，以及一个按用户的路由。
+---
+
+import { Callout } from "nextra/components";
+
+# 运行证据
+
+中间件和生命周期钩子在运行发生时看到它。**运行证据读取器**让扩展在事后查看运行，依据的是 Gateway 已经持久化的记录：有哪些运行、它们最终处于什么状态、每个运行写下了怎样的事件流。扩展可以借此构建导出、审计索引或看板，而不必挂钩每一次调用。
+
+读取器是只读的，没有任何方法会写入宿主。
+
+## 获取读取器
+
+读取器有两种，区别只在于能看到什么：
+
+| 读取器     | 获取方式                                                                  | 能看到                           | 用在           |
+| ---------- | ------------------------------------------------------------------------- | -------------------------------- | -------------- |
+| 服务读取器 | `ExtensionRuntimeDeps.run_evidence_reader`，传给 `start()`                 | 所有用户的运行和事件             | 服务：导出器、索引 |
+| 请求读取器 | `resolve_run_evidence_reader(request)` 或 `require_run_evidence_reader(request)` | 只有已认证调用方自己的运行和事件 | 贡献的路由     |
+
+两者都实现下文介绍的同一个 `RunEvidenceReader` 接口。
+
+### 服务读取器
+
+Gateway 把一个读取器交给每个服务：
+
+```python
+class MyService:
+    async def start(self, deps):
+        reader = deps.run_evidence_reader
+        if reader is None:
+            return  # this host does not provide run evidence
+```
+
+Gateway 总会提供它。`None` 表示扩展运行在一个没有实现读取器的宿主上，应当视为"不支持"，而不是"没有运行"。服务的生命周期和顺序见[服务与路由](/docs/harness/extensions/services-and-routes)；从 `start()` 被调用到 `stop()` 返回，读取器都可以使用。
+
+<Callout type="warning">
+  服务读取器具有**全局**可见性：它能看到所有用户的运行和事件。服务没有请求
+  principal，所以 Gateway 有意不把这个读取器绑定到任何用户。事件内容按存储原样返回。
+  永远不要把它的数据返回给调用方；路由处理函数请改用请求读取器。
+</Callout>
+
+### 请求读取器
+
+路由处理函数向宿主索取一个绑定到当前请求的读取器：
+
+| 辅助函数                                | 宿主支持     | 调用方无权访问           | 宿主不支持                   |
+| --------------------------------------- | ------------ | ------------------------ | ---------------------------- |
+| `resolve_run_evidence_reader(request)`  | 返回读取器   | 抛出 `PermissionError`   | 返回 `None`                  |
+| `require_run_evidence_reader(request)`  | 返回读取器   | 抛出 `PermissionError`   | 抛出 `NotImplementedError`   |
+
+在你的 HTTP 边界做映射：`PermissionError` 映射为 `403`，`None` 或 `NotImplementedError` 映射为 `503`。宿主解析器抛出的其他异常原样传播。两个辅助函数都不会回退到服务读取器。
+
+Gateway 依据请求的认证信息绑定读取器，绝不依据调用方发送的任何内容：
+
+- 调用方必须已认证并持有 **`runs:read`** 权限。默认所有已登录用户都有。在 `config.yaml` 中设置了 `authorization.enabled` 时，由配置的提供方决定。个人访问令牌还必须带有 `runs:read` scope。
+- 读取器限定在调用方自己的用户 ID 上：只能看到以该用户为所有者记录的运行，别的都看不到。
+- 管理员和内部调用方**不会**被放宽：管理员的请求读取器只能看到管理员自己的运行，而不是所有人的。
+
+一个读取器签发的游标会被作用域不同的读取器拒绝，所以签发给某个用户的游标无法被另一个用户重放。见[游标规则](#游标规则)。
+
+## 读取器接口
+
+`RunEvidenceReader` 有三个异步方法，全部只接受关键字参数：
+
+| 方法                                                                    | 返回                    | 用途                                     |
+| ----------------------------------------------------------------------- | ----------------------- | ---------------------------------------- |
+| `list_changed_runs(cursor=..., limit=...)`                              | `RunPage`               | 发现自某个游标以来创建或变化的运行       |
+| `list_run_events(thread_id=..., run_id=..., after_seq=..., limit=...)`  | `RunEventPage`          | 从某个序号向后读取一个运行的持久化事件   |
+| `get_run_status(thread_id=..., run_id=...)`                             | `RunStatusView \| None` | 读取一个已知运行的权威状态               |
+
+`limit` 必须是 1 到 2000 之间的整数，否则抛出 `ValueError`。`after_seq` 必须是 `None` 或非负整数。
+
+### 返回类型
+
+所有返回类型都是 `deerflow_extension_api` 中的冻结 dataclass。
+
+**`RunStatusView`**：一个运行的生命周期状态。
+
+| 字段                       | 含义                                                               |
+| -------------------------- | ------------------------------------------------------------------ |
+| `thread_id`、`run_id`      | 运行的标识                                                         |
+| `status`                   | `pending`、`running`、`success`、`error`、`timeout` 或 `interrupted` |
+| `created_at`、`updated_at` | 字符串形式的时间戳                                                 |
+| `error`                    | 运行失败时的错误信息                                               |
+| `stop_reason`              | 运行提前停止时的原因                                               |
+
+**`RunEventView`**：一条持久化事件。
+
+| 字段                       | 含义                                               |
+| -------------------------- | -------------------------------------------------- |
+| `thread_id`、`run_id`      | 事件所属的运行                                     |
+| `seq`                      | 序号，在**线程**内递增                             |
+| `event_type`、`category`   | 事件的种类，与事件存储记录的一致                   |
+| `content`                  | 事件负载，原样返回                                 |
+| `metadata`                 | 事件元数据，已移除遗留的 `auth_token` 键           |
+| `created_at`               | 字符串形式的时间戳                                 |
+
+**`RunPage`**：`items`（`RunStatusView` 元组）、`next_cursor` 和 `has_more`。
+
+**`RunEventPage`**：`items`（`RunEventView` 元组）、`next_after_seq` 和 `has_more`。
+
+`content` 和 `metadata` 是深拷贝。dataclass 字段是冻结的，但你收到的嵌套 dict 和 list 可以随意修改，不会影响宿主存储。
+
+## 发现有变化的运行
+
+`list_changed_runs` 按稳定的顺序返回运行，最早的变化排在最前。把每页的 `next_cursor` 传给下一次调用即可翻页：
+
+- `cursor=None` 从头开始。
+- `has_more=True` 表示此刻还有下一页。
+- 空页表示已经追平。它的 `next_cursor` 就是你传入的游标，保留它，稍后再轮询。
+
+只有 Agent 运行会出现。宿主针对线程记录的其他操作，例如 checkpoint 写入、产物写入、分支和删除，既不出现在这个流里，也查不到 `get_run_status`。
+
+运行每次变化都会再次出现。这个流不是每个运行一条记录，而是每个在你的游标之后发生过变化的运行的**当前**状态。在两次轮询之间被创建、启动并完成的运行只出现一次，且已经是完成状态。
+
+### 什么算变化
+
+每个运行都有一个变化位置。运行被创建、生命周期状态改变、被取消或模型名被更新时，宿主会推进这个位置。进度快照和租约心跳不会推进它，所以长时间运行的任务在工作期间不会刷屏。
+
+在引入变化追踪之前就存在的运行，位置为零。它们排在最前，按运行 ID 排序。
+
+### 游标规则
+
+游标是不透明的字符串。保存它、传回它，不要解析它。
+
+- **会重放，不会跳过。** 重用游标总是合法的，可能会再次返回你见过的运行。你拿到之后又变化的运行会以新状态再次出现。你还没拿到的运行不会被跳过。
+- **先产出，后提交。** 只有在这一页的工作已经持久化之后才保存 `next_cursor`。如果中途崩溃，下一次轮询会重放这一页。让你的处理具备幂等性，例如覆盖每个运行的记录，而不是追加。
+- **绑定作用域。** 游标属于签发它的读取器。把游标传给可见性范围不同的读取器，或者传入格式错误、版本不受支持的游标，都会抛出 `InvalidRunEvidenceCursor`（`ValueError` 的子类）。从 `None` 重新开始即可恢复，这会重放所有可见内容。
+
+### 删除
+
+这个流**不会**报告删除。被删除的运行会从后续页面和 `get_run_status` 中消失，但没有任何东西告诉你它没了。如果你的扩展镜像了运行并且必须清掉已删除的运行，请定期对已知运行调用 `get_run_status`，把 `None` 视为已删除。
+
+只要运行不可见，`get_run_status` 就返回 `None`：运行不存在、已被删除、`thread_id` 与运行不匹配，或者不在读取器的作用域内。
+
+## 读取运行的事件
+
+`list_run_events` 在一个运行的持久化事件中向后翻页：
+
+- `after_seq=None` 从第一条事件开始。把每页的 `next_after_seq` 传入以继续。
+- `seq` 递增，但在一个运行内并不连续，因为计数器由线程里的所有运行共享。请始终从 `next_after_seq` 继续，而不要自己推算下一个数字。
+- 不存在或不可见的运行返回空页而不是错误，这样调用方无法探测其作用域之外的运行 ID。
+
+状态始终来自运行存储，它是权威来源。不要根据最后一条事件推断运行的最终状态。
+
+## 存储后端
+
+| 设置                                     | 运行位置与游标                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------ |
+| `database.backend: sqlite` 或 `postgres` | 存储在数据库中。位置和游标在 Gateway 重启后依然有效                       |
+| `database.backend: memory`               | 保存在进程内存中。重启后所有运行和位置都会丢失                            |
+
+事件来自配置的 `run_events` 存储（`memory`、`db` 或 `jsonl`），使用它自己的 `seq` 编号。
+
+<Callout type="warning">
+  使用内存后端时，**不要跨重启持久化游标**。新进程会从零开始重新编号变化，旧游标指向
+  所有这些变化之后的位置，于是读取器会一直返回空页，直到新进程追上保存的位置。
+  每次重启后请从 `None` 开始，或者只把游标保存在内存里。
+</Callout>
+
+## 示例：运行摘要服务
+
+这个服务轮询读取器，为每个已完成的运行记录它持久化了多少条各类型的事件。游标只保存在内存里，所以重启后会从头重新扫描。真正的导出器会把游标和它的产出存放在一起。
+
+```python filename="deerflow_extension_digest/__init__.py"
+"""Count persisted event types for every finished run."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections import Counter
+from collections.abc import Mapping
+from typing import Any
+
+from deerflow_extension_api import (
+    ExtensionRegistry,
+    ExtensionRuntimeDeps,
+    InvalidRunEvidenceCursor,
+    RunEvidenceReader,
+    extension,
+)
+
+logger = logging.getLogger(__name__)
+
+TERMINAL = {"success", "error", "timeout", "interrupted"}
+
+
+class RunDigestService:
+    def __init__(self, interval_seconds: float) -> None:
+        self.interval_seconds = interval_seconds
+        self.cursor: str | None = None
+        self.digests: dict[str, Counter[str]] = {}
+        self._task: asyncio.Task[None] | None = None
+
+    async def start(self, deps: ExtensionRuntimeDeps) -> None:
+        reader = deps.run_evidence_reader
+        if reader is None:
+            logger.warning("run evidence is not available on this host; digest disabled")
+            return
+        self._task = asyncio.create_task(self._poll(reader))
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+            self._task = None
+
+    async def _poll(self, reader: RunEvidenceReader) -> None:
+        while True:
+            try:
+                await self.sync_once(reader)
+            except Exception:
+                logger.exception("run digest sync failed; retrying")
+            await asyncio.sleep(self.interval_seconds)
+
+    async def sync_once(self, reader: RunEvidenceReader) -> None:
+        while True:
+            try:
+                page = await reader.list_changed_runs(cursor=self.cursor, limit=100)
+            except InvalidRunEvidenceCursor:
+                logger.warning("stored cursor rejected; rescanning from the beginning")
+                self.cursor = None
+                continue
+            for run in page.items:
+                if run.status in TERMINAL:
+                    self.digests[run.run_id] = await self._count_events(reader, run.thread_id, run.run_id)
+            # Advance only after this page's output is recorded. Replaying a
+            # page is harmless because each digest is recomputed, not appended.
+            self.cursor = page.next_cursor
+            if not page.has_more:
+                return
+
+    async def _count_events(self, reader: RunEvidenceReader, thread_id: str, run_id: str) -> Counter[str]:
+        counts: Counter[str] = Counter()
+        after_seq: int | None = None
+        while True:
+            page = await reader.list_run_events(thread_id=thread_id, run_id=run_id, after_seq=after_seq, limit=500)
+            counts.update(event.event_type for event in page.items)
+            after_seq = page.next_after_seq
+            if not page.has_more:
+                return counts
+
+
+@extension(api="0.2.0", name="digest")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    registry.service(RunDigestService(float(config.get("interval_seconds", 30))))
+```
+
+值得借鉴的几点：
+
+- `start()` 只创建轮询任务就返回，不会拖慢 Gateway 启动。
+- `stop()` 取消任务并等待它结束，远在 30 秒的停止预算之内。
+- 每次运行出现时都会重新计算它的摘要，所以重放的页面不会造成重复计数。
+- 遇到 `InvalidRunEvidenceCursor` 时把游标重置为 `None`，而不是让服务停下。
+- 一次同步中的异常会被记录，下一次轮询从最后提交的游标继续。
+
+## 示例：调用方自己的运行
+
+这个路由分页返回已登录用户最近发生变化的运行。它使用请求读取器，所以由宿主保证每个调用方只能看到自己的运行。它声明 `api="0.2.3"`，因为请求读取器辅助函数最早随该契约版本发布。
+
+```python filename="deerflow_extension_myruns/__init__.py"
+"""List the caller's own recently changed runs."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from deerflow_extension_api import (
+    ExtensionRegistry,
+    InvalidRunEvidenceCursor,
+    RunEvidenceReader,
+    extension,
+    require_run_evidence_reader,
+)
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+
+def caller_reader(request: Request) -> RunEvidenceReader:
+    try:
+        return require_run_evidence_reader(request)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=503, detail="run evidence is not available on this host") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+def build_router() -> APIRouter:
+    router = APIRouter(prefix="/api/ext-myruns", tags=["ext-myruns"])
+
+    @router.get("/runs")
+    async def my_runs(
+        cursor: str | None = None,
+        limit: int = 50,
+        reader: RunEvidenceReader = Depends(caller_reader),
+    ) -> dict[str, Any]:
+        try:
+            page = await reader.list_changed_runs(cursor=cursor, limit=min(max(limit, 1), 200))
+        except InvalidRunEvidenceCursor as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "runs": [{"thread_id": run.thread_id, "run_id": run.run_id, "status": run.status} for run in page.items],
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        }
+
+    return router
+
+
+@extension(api="0.2.3", name="myruns")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    registry.routers((build_router(),))
+```
+
+| 请求                                   | 响应                                                                       |
+| -------------------------------------- | -------------------------------------------------------------------------- |
+| 没有会话                               | 宿主返回 `401`，处理函数不会运行                                            |
+| 已登录，但没有 `runs:read`             | `403 {"detail": "run evidence requires an authenticated user with runs:read"}` |
+| 已登录                                 | `200`，只包含调用方的运行，以及 `next_cursor` 和 `has_more`                 |
+| `?cursor=` 不是签发给这个调用方的      | `400 {"detail": "invalid run evidence cursor"}`；如果是其他用户的游标，则为 `run evidence cursor scope does not match this reader` |
+| 宿主不支持请求作用域的证据             | `503 {"detail": "run evidence is not available on this host"}`            |
+
+客户端保存 `next_cursor`，并以 `?cursor=` 传回以继续翻页。游标绑定到调用方，泄露给其他用户也没有用。
+
+## 常见误区
+
+- **把空页当作不支持。** 空页表示已追平。不支持是 `run_evidence_reader is None`。
+- **在工作保存之前推进游标。** 一旦崩溃，这一页会被永久跳过。请先保存再推进。
+- **以为每个运行只有一条记录。** 运行每次变化都会再次出现。请以 `run_id` 为键组织产出。
+- **等待删除事件。** 没有这种事件。请用 `get_run_status` 对账。
+- **把服务读取器的数据提供给用户。** 它能看到所有用户。路由处理函数请使用 `require_run_evidence_reader(request)`，由宿主把它限定到调用方。
