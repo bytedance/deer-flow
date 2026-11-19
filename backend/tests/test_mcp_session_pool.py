@@ -3196,7 +3196,7 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
 
 
 @pytest.mark.asyncio
-async def test_session_pool_disconnect_cleanup_timeout_preserves_error_and_tracks_owner():
+async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
     """A stuck owner exit cannot hold a disconnected tool call indefinitely."""
     pool = MCPSessionPool()
     pool.SESSION_CLOSE_TIMEOUT = 0.01
@@ -3284,6 +3284,8 @@ async def test_session_pool_disconnect_cleanup_timeout_preserves_error_and_track
             if cm.owner is not None:
                 await asyncio.gather(cm.owner, return_exceptions=True)
             while pool._teardown_tasks:
-                await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
+                await asyncio.gather(
+                    *list(pool._teardown_tasks), return_exceptions=True
+                )
 
     assert not pool._teardown_tasks
