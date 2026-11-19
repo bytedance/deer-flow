@@ -3200,6 +3200,14 @@ async def test_session_pool_disconnect_cleanup_timeout_preserves_error_and_track
     """A stuck owner exit cannot hold a disconnected tool call indefinitely."""
     pool = MCPSessionPool()
     pool.SESSION_CLOSE_TIMEOUT = 0.01
+    tracked_teardown_targets = []
+    track_owner_teardown = pool._track_owner_teardown
+
+    def record_owner_teardown(task):
+        tracked_teardown_targets.append(task)
+        track_owner_teardown(task)
+
+    pool._track_owner_teardown = record_owner_teardown
     exit_started = asyncio.Event()
     release_exit = asyncio.Event()
     session = AsyncMock()
@@ -3246,9 +3254,27 @@ async def test_session_pool_disconnect_cleanup_timeout_preserves_error_and_track
                 await call
 
             # The caller has returned, but __aexit__ is deliberately still blocked.
-            # Assert that the pool retains a reaper for this exact owner task,
-            # not merely some unrelated cleanup/reaper task.
+            # Wait for the cleanup waiter itself to finish before checking owner
+            # tracking; otherwise its own reaper could satisfy a set-nonempty check.
+            cleanup_waiter = next(
+                (
+                    task
+                    for task in tracked_teardown_targets
+                    if task.get_name() == "mcp-disconnect-cleanup:srv"
+                ),
+                None,
+            )
+            assert cleanup_waiter is not None
+            await asyncio.wait_for(
+                asyncio.gather(cleanup_waiter, return_exceptions=True),
+                timeout=0.5,
+            )
+            assert cleanup_waiter.done()
+
+            # The pool must have handed off this exact owner, and its reaper must
+            # remain retained until the blocked __aexit__ is released.
             assert cm.owner is not None and not cm.owner.done()
+            assert cm.owner in tracked_teardown_targets
             owner_reaper = f"mcp-session-owner-reap:{cm.owner.get_name()}"
             assert any(task.get_name() == owner_reaper for task in pool._teardown_tasks)
         finally:
