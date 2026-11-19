@@ -52,7 +52,7 @@ def test_anthropic_max_tokens_detector_matches_stop_reason():
     assert hit.reason_value == "max_tokens"
 
 
-def test_default_detectors_cover_openai_anthropic_gemini_and_responses():
+def test_default_detectors_cover_chat_and_responses_providers():
     names = [detector.name for detector in default_detectors()]
 
     assert names == [
@@ -60,4 +60,5 @@ def test_default_detectors_cover_openai_anthropic_gemini_and_responses():
         "anthropic_max_tokens",
         "gemini_max_tokens",
         "openai_responses_length",
+        "ollama_length",
     ]

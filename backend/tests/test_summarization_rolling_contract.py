@@ -11,13 +11,16 @@ from unittest.mock import Mock
 
 import pytest
 from deerflow_extension_api import SystemOperationKind
+from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, get_buffer_string
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummaryGenerationError
+from deerflow.agents.thread_state import ThreadState
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.extensions import ExtensionRegistry
 
@@ -89,8 +92,20 @@ async def _compact(middleware, state, asynchronous, runtime=None):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-async def test_middle_chunk_fallback_becomes_the_next_full_carry(asynchronous):
-    primary = RecordingModel(answers=["PRIMARY_ONE", RuntimeError("primary unavailable")], default_answer="PRIMARY_LATER")
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("primary unavailable"),
+        AIMessage(content="PARTIAL", response_metadata={"finish_reason": "length"}),
+        AIMessage(content="PARTIAL", response_metadata={"stop_reason": "max_tokens"}),
+        AIMessage(content="PARTIAL", response_metadata={"finish_reason": "MAX_TOKENS"}),
+        AIMessage(content="PARTIAL", response_metadata={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}),
+        AIMessage(content="PARTIAL", response_metadata={"done_reason": "length"}),
+    ],
+    ids=["exception", "openai-chat", "anthropic", "gemini", "openai-responses", "ollama"],
+)
+async def test_middle_chunk_fallback_becomes_the_next_full_carry(asynchronous, failure):
+    primary = RecordingModel(answers=["PRIMARY_ONE", copy.deepcopy(failure)], default_answer="PRIMARY_LATER")
     fallback = RecordingModel(default_answer="FALLBACK_TWO")
     middleware = _middleware(primary, configured_model_name="primary", run_model_name="fallback", prebuilt_models={"fallback": fallback})
     state, selected = _state()
@@ -112,30 +127,39 @@ async def test_middle_chunk_fallback_becomes_the_next_full_carry(asynchronous):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize(
-    "metadata",
-    [
-        {"finish_reason": "length"},
-        {"stop_reason": "max_tokens"},
-        {"finish_reason": "MAX_TOKENS"},
-        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
-    ],
-    ids=["openai-chat", "anthropic", "gemini", "openai-responses"],
-)
-async def test_length_capped_summary_falls_back_before_becoming_carry(asynchronous, metadata):
-    primary = RecordingModel(
-        answers=["PRIMARY_ONE", AIMessage(content="PARTIAL", response_metadata=metadata)],
-        default_answer="PRIMARY_LATER",
+@pytest.mark.parametrize("done_reason", ["length", "stop"])
+async def test_ollama_summary_compaction_checkpoint(asynchronous, done_reason):
+    summary = AIMessage(content="Ollama summary", response_metadata={"done_reason": done_reason})
+    primary = RecordingModel(answers=[summary])
+    fallback = RecordingModel(answers=[summary.model_copy(deep=True)])
+    middleware = _middleware(
+        primary,
+        configured_model_name="primary",
+        run_model_name="fallback",
+        prebuilt_models={"fallback": fallback},
+        trim_tokens_to_summarize=None,
     )
-    fallback = RecordingModel(default_answer="FALLBACK_TWO")
-    middleware = _middleware(primary, configured_model_name="primary", run_model_name="fallback", prebuilt_models={"fallback": fallback})
-    state, _ = _state()
+    graph = create_agent(RecordingModel(default_answer="new answer"), middleware=[middleware], state_schema=ThreadState, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "ollama-compaction"}}
+    state, old_messages = _state("Earlier context")
+    if asynchronous:
+        await graph.ainvoke(state, config)
+        snapshot = await graph.aget_state(config)
+    else:
+        graph.invoke(state, config)
+        snapshot = graph.get_state(config)
 
-    result = await _compact(middleware, state, asynchronous)
-
-    assert result is not None
-    assert fallback.prompts == [primary.prompts[1]]
-    assert _sections(primary.prompts[2])["existing_summary"] == "FALLBACK_TWO"
+    messages = snapshot.values["messages"]
+    assert messages[-1].content == "new answer"
+    assert len(primary.prompts) == 1
+    if done_reason == "length":
+        assert messages[:2] == old_messages
+        assert snapshot.values["summary_text"] == "S"
+        assert fallback.prompts == primary.prompts
+    else:
+        assert {message.id for message in messages}.isdisjoint(message.id for message in old_messages)
+        assert snapshot.values["summary_text"] == "Ollama summary"
+        assert fallback.prompts == []
 
 
 @pytest.mark.asyncio
