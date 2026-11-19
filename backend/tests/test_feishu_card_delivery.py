@@ -127,6 +127,95 @@ async def test_plain_reply_keeps_markdown_wrapper(card_channel):
     assert card["elements"] == [{"tag": "markdown", "content": "Pick one"}]
 
 
+def _record_image_card_requests(channel, monkeypatch, *, error_code=230099, reason="the card contains images but no imagekey is passed in"):
+    import lark_oapi as lark
+
+    requests = []
+
+    def respond(method, url, *, data, **kwargs):
+        if url.endswith("/auth/v3/tenant_access_token/internal"):
+            payload = {"code": 0, "tenant_access_token": "test-token", "expire": 1}
+        else:
+            (element,) = json.loads(json.loads(data)["content"])["elements"]
+            requests.append((method, url, element))
+            if element["tag"] == "markdown" and any(token in element["content"] for token in ("![chart]()", "![remote](https://", "<img ")):
+                payload = {"code": error_code, "msg": f"Failed to create card content, ext=ErrCode: 11310; ErrMsg: {reason}"}
+            else:
+                payload = {"code": 0, "data": {"message_id": "delivered-card"}}
+        return SimpleNamespace(status_code=400 if payload["code"] else 200, headers={}, content=json.dumps(payload).encode())
+
+    channel._api_client = lark.Client.builder().app_id("offline-image-card").app_secret("test").build()
+    monkeypatch.setattr("requests.request", respond)
+    return requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "method", "path"),
+    [("running", "PATCH", "/messages/running-card"), ("reply", "POST", "/messages/source-1/reply"), ("create", "POST", "/messages")],
+)
+async def test_missing_image_key_delivers_answer_and_preserves_valid_images(card_channel, monkeypatch, mode, method, path):
+    requests = _record_image_card_requests(card_channel, monkeypatch)
+    if mode == "running":
+        card_channel._running_card_ids["source-1"] = "running-card"
+    msg = OutboundMessage(channel_name="feishu", chat_id="chat-1", thread_id="thread-1", thread_ts=None if mode == "create" else "source-1", text="![native](img_v2_existing)", is_final=mode != "running")
+    await card_channel.send(msg, _max_retries=1)
+    assert requests[-1][2] == {"tag": "markdown", "content": msg.text}
+
+    msg.text = "Before **answer** ![native](img_v2_existing) ![chart]() ![remote](https://example.org/image.png) ![angle](<https://example.org/angle.png>) after `![literal]()`"
+    readable = "Before **answer** ![native](img_v2_existing) chart [remote](https://example.org/image.png) [angle](https://example.org/angle.png) after `![literal]()`"
+    await card_channel.send(msg, _max_retries=1)
+    assert [element for _, _, element in requests[1:]] == [{"tag": "markdown", "content": readable}]
+    if mode == "running":
+        msg.text += " — final answer"
+        msg.is_final = True
+        await card_channel.send(msg, _max_retries=1)
+        assert requests[-1][2] == {"tag": "markdown", "content": readable + " — final answer"}
+    assert all(verb == method and url.endswith(path) for verb, url, _ in requests)
+
+
+@pytest.mark.asyncio
+async def test_missing_image_key_is_handled_before_answer_is_split_across_cards(card_channel, monkeypatch):
+    requests = _record_image_card_requests(card_channel, monkeypatch)
+    # The 24 KiB card budget cuts through the image description.
+    before = "a" * 24_000
+    description = "b" * 1_000
+    msg = OutboundMessage(channel_name="feishu", chat_id="chat-1", thread_id="thread-1", thread_ts="source-1", text=f"{before}![{description}]() after", is_final=True)
+
+    await card_channel.send(msg, _max_retries=1)
+
+    assert len(requests) == 2
+    assert all(verb == "POST" and url.endswith("/messages/source-1/reply") and element["tag"] == "markdown" for verb, url, element in requests)
+    assert "".join(element["content"] for _, _, element in requests) == before + description + " after"
+
+
+@pytest.mark.asyncio
+async def test_missing_image_key_in_unrecognized_markup_keeps_answer_as_plain_text(card_channel, monkeypatch):
+    requests = _record_image_card_requests(card_channel, monkeypatch)
+    card_channel._running_card_ids["source-1"] = "running-card"
+    msg = OutboundMessage(channel_name="feishu", chat_id="chat-1", thread_id="thread-1", thread_ts="source-1", text='Before <img alt="chart"> after', is_final=False)
+
+    await card_channel.send(msg, _max_retries=1)
+
+    assert [element for _, _, element in requests] == [
+        {"tag": "markdown", "content": msg.text},
+        {"tag": "div", "text": {"tag": "plain_text", "content": msg.text}},
+    ]
+    assert all(verb == "PATCH" and url.endswith("/messages/running-card") for verb, url, _ in requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("error_code", "reason"), [(230099, "card action is lock"), (999999, "the card contains images but no imagekey is passed in")])
+async def test_other_card_errors_keep_the_original_rejection(card_channel, monkeypatch, error_code, reason):
+    requests = _record_image_card_requests(card_channel, monkeypatch, error_code=error_code, reason=reason)
+    card_channel._running_card_ids["source-1"] = "running-card"
+    msg = OutboundMessage(channel_name="feishu", chat_id="chat-1", thread_id="thread-1", thread_ts="source-1", text='Before <img alt="chart"> after', is_final=False)
+
+    with pytest.raises(RuntimeError, match=reason):
+        await card_channel.send(msg, _max_retries=1)
+    assert [element["tag"] for _, _, element in requests] == ["markdown"]
+
+
 @pytest.mark.asyncio
 async def test_button_answer_is_persisted_as_latest_human_input(card_channel):
     from langchain_core.messages import HumanMessage

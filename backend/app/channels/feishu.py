@@ -159,6 +159,25 @@ _CARD_CONTINUES_MARKER = "\n\n…"
 _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 # Characters JSON escapes, measured after the second escape: ``"`` is ``\\\"``.
 _ESCAPED_CARD_CHAR_BYTES = {'"': 4, "\\": 4, "\b": 3, "\f": 3, "\n": 3, "\r": 3, "\t": 3}
+# Match inline images in prose. Leave code examples and their literal image syntax alone.
+_CARD_IMAGE_OR_CODE = re.compile(
+    r"(?P<fence>`+|~{3,})(?s:.*?)(?:(?P=fence)|\Z)"
+    r"|(?<!\\)!\[(?P<alt>(?:\\[^\n]|[^\[\]\\\n])*)\]\((?P<target>(?:[^()\s]|\([^()\s]*\))*)\)"
+)
+
+
+def _replace_unrenderable_card_image(match: re.Match[str]) -> str:
+    target = match["target"]
+    if target is None:
+        return match[0]
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1]
+    alt = match["alt"]
+    if target.startswith("img_"):
+        return f"![{alt}]({target})"
+    if target.lower().startswith(("https://", "http://")):
+        return f"[{alt}]({target})" if alt else target
+    return alt or "image"
 
 
 def _card_char_bytes(char: str) -> int:
@@ -188,7 +207,8 @@ def _card_text_bytes(text: str) -> int:
 
 
 def _card_text_budget() -> int:
-    return FEISHU_CARD_MAX_BYTES - _card_text_bytes(FeishuChannel._build_card_content(""))
+    # Leave room for the larger plain-text envelope if Feishu rejects Markdown.
+    return FEISHU_CARD_MAX_BYTES - _card_text_bytes(FeishuChannel._build_card_content("", plain_text=True))
 
 
 def _fitting_prefix_end(text: str, start: int, budget: int) -> tuple[int, int]:
@@ -354,11 +374,10 @@ class FeishuChannel(Channel):
             raw_preview = metadata.get(SOURCE_PREVIEW_METADATA_KEY)
             if isinstance(raw_preview, str) and raw_preview.strip():
                 preview = raw_preview.strip()
-        if not preview:
-            return text
-
-        quoted_preview = "\n".join(f"> {line}" for line in preview.splitlines())
-        return f"{quoted_preview}\n\n{text}"
+        if preview:
+            quoted_preview = "\n".join(f"> {line}" for line in preview.splitlines())
+            text = f"{quoted_preview}\n\n{text}"
+        return _CARD_IMAGE_OR_CODE.sub(_replace_unrenderable_card_image, text) if "![" in text else text
 
     @property
     def supports_streaming(self) -> bool:
@@ -990,16 +1009,14 @@ class FeishuChannel(Channel):
     # -- message formatting ------------------------------------------------
 
     @staticmethod
-    def _build_card_content(text: str) -> str:
-        """Build a Feishu interactive card with markdown content.
-
-        Feishu's interactive card format natively renders markdown, including
-        headers, bold/italic, code blocks, lists, and links.
-        """
+    def _build_card_content(text: str, *, plain_text: bool = False) -> str:
+        """Build an updatable card containing either Markdown or literal text."""
+        # Unpaired surrogates cannot be encoded as UTF-8.
+        text = _LONE_SURROGATE.sub("\ufffd", text)
+        element = {"tag": "div", "text": {"tag": "plain_text", "content": text}} if plain_text else {"tag": "markdown", "content": text}
         card = {
             "config": {"wide_screen_mode": True, "update_multi": True},
-            # Unpaired surrogates cannot be encoded as UTF-8.
-            "elements": [{"tag": "markdown", "content": _LONE_SURROGATE.sub("\ufffd", text)}],
+            "elements": [element],
         }
         # ASCII escapes would make each CJK character 6 bytes instead of 3.
         return json.dumps(card, ensure_ascii=False)
@@ -1027,6 +1044,15 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to add reaction '%s' to message %s", emoji_type, message_id)
 
+    async def _send_card_request(self, send: Callable[[Any], Any], request: Any, *, markdown_text: str | None) -> Any:
+        response = await asyncio.to_thread(send, request)
+        # Feishu may parse image markup that we do not recognize. Other 230099
+        # rejections and structured button cards keep their usual handling.
+        if markdown_text is not None and not response.success() and response.code == 230099 and "no imagekey is passed in" in (response.msg or "").lower():
+            request.request_body.content = self._build_card_content(markdown_text, plain_text=True)
+            return await asyncio.to_thread(send, request)
+        return response
+
     async def _reply_card(self, message_id: str, text: str, *, raw_card_content: bool = False) -> str | None:
         """Reply with text or serialized card JSON and return the card message ID."""
         if not self._api_client:
@@ -1034,7 +1060,7 @@ class FeishuChannel(Channel):
 
         content = text if raw_card_content else self._build_card_content(text)
         request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).build()).build()
-        response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+        response = await self._send_card_request(self._api_client.im.v1.message.reply, request, markdown_text=None if raw_card_content else text)
         if not response.success():
             raise RuntimeError(f"Feishu card reply failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
         response_data = getattr(response, "data", None)
@@ -1047,7 +1073,7 @@ class FeishuChannel(Channel):
 
         content = self._build_card_content(text)
         request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("interactive").content(content).build()).build()
-        response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        response = await self._send_card_request(self._api_client.im.v1.message.create, request, markdown_text=text)
         if not response.success():
             raise RuntimeError(f"Feishu card creation failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
@@ -1061,7 +1087,7 @@ class FeishuChannel(Channel):
 
         content = text if raw_card_content else self._build_card_content(text)
         request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
-        response = await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+        response = await self._send_card_request(self._api_client.im.v1.message.patch, request, markdown_text=None if raw_card_content else text)
         if not response.success():
             raise RuntimeError(f"Feishu card update failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
@@ -1234,7 +1260,7 @@ class FeishuChannel(Channel):
                 await self._add_reaction(source_message_id, "DONE")
             return
 
-        for card_text in _split_card_text(msg.text)[len(delivered) :]:
+        for card_text in _split_card_text(self._compose_card_text(msg.text))[len(delivered) :]:
             await self._create_card(msg.chat_id, card_text)
             delivered.append(None)
 

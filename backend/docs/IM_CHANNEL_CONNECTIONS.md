@@ -203,6 +203,11 @@ the last card is clipped and marked `... (truncated)`. A retry of a partially
 delivered answer resumes after the cards already sent, and a reply to any of the
 cards continues the conversation.
 
+Feishu reply cards render inline images that have a Feishu image key. A web
+image appears as a link, and a local image path or an empty destination shows
+the alt text. If Feishu still rejects an update because an image is missing
+its key, DeerFlow sends the text to the same card with Markdown disabled.
+
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
 
 ## Attachment delivery feedback
