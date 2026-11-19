@@ -21,9 +21,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_config
 
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.agents.task_continuity.state import normalize_task_history
+from deerflow.agents.task_continuity.state import SOURCE_ID_PATTERN, normalize_task_history
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.tools.types import Runtime
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.messages import message_content_to_text
 
@@ -197,6 +198,8 @@ async def acapture(*args) -> dict:
 def _distinct_archived_sources(rows: Iterable[tuple[str, int]]) -> Iterator[tuple[str, int]]:
     seen = set()
     for source_id, rowid in rows:
+        if not isinstance(source_id, str) or SOURCE_ID_PATTERN.fullmatch(source_id) is None:
+            raise sqlite3.DatabaseError("Invalid source ID in archived history index")
         if source_id not in seen:
             seen.add(source_id)
             yield source_id, rowid
@@ -240,7 +243,7 @@ def _archived_page_records(db: sqlite3.Connection, batches: list[str], page: lis
     return records_by_id
 
 
-def _search(state: dict, runtime, query: str, role: str | None, excerpts: bool, cursor: str | None) -> dict:
+def _search(state: dict, runtime: Runtime, query: str, role: str | None, excerpts: bool, cursor: str | None) -> dict:
     path, owner = scope(runtime)
     batches = reachable(state, owner)
     history = normalize_task_history(state.get("task_history"))
@@ -250,7 +253,7 @@ def _search(state: dict, runtime, query: str, role: str | None, excerpts: bool, 
     stale_cursor = {"results": [], "status": "stale_cursor"}
     messages = state.get("messages", [])
     offset, message_count = 0, len(messages)
-    fingerprint, prefix_fingerprint = None, None
+    fingerprint, rank_fingerprint = None, None
     if cursor is not None:
         parsed = _SEARCH_CURSOR.fullmatch(cursor)
         if parsed is None:
@@ -260,7 +263,7 @@ def _search(state: dict, runtime, query: str, role: str | None, excerpts: bool, 
             return {"results": [], "status": "invalid_cursor"}
         if message_count > len(messages):
             return stale_cursor
-        fingerprint, prefix_fingerprint = parsed.group(3, 4)
+        fingerprint, rank_fingerprint = parsed.group(3, 4)
 
     keywords = terms(query)
     if not keywords:
@@ -293,20 +296,25 @@ def _search(state: dict, runtime, query: str, role: str | None, excerpts: bool, 
                 parameters = [match, *batches, *([role] if role is not None else [])]
                 rows = db.execute(f"SELECT id, rowid FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
             ordered = _ordered_search_sources(rows, active_matches)
-            # Keep FTS's rank-only query plan. Check the consumed source order
-            # before returning a page so a changed tie order cannot skip a hit.
-            prefix = hashlib.sha256()
-            for source_id, _ in islice(ordered, offset):
-                prefix.update(source_id.encode())
-            if prefix_fingerprint is not None and prefix_fingerprint != prefix.hexdigest()[:16]:
+            # A rebuilt index can change unseen hits while leaving the first
+            # page intact. Fingerprint every ranked ID in the read transaction.
+            rank = hashlib.sha256()
+            page = []
+            for index, (source_id, rowid) in enumerate(ordered):
+                rank.update(source_id.encode("ascii"))
+                if offset <= index <= offset + _SEARCH_PAGE_SIZE:
+                    page.append((source_id, rowid))
+            current_rank = rank.hexdigest()[:16]
+            if rank_fingerprint is not None and rank_fingerprint != current_rank:
                 return stale_cursor
-            page = list(islice(ordered, _SEARCH_PAGE_SIZE + 1))
             if len(page) > _SEARCH_PAGE_SIZE:
                 next_offset = offset + _SEARCH_PAGE_SIZE
                 page.pop()
-                for source_id, _ in page:
-                    prefix.update(source_id.encode())
-                next_cursor = f"1:{next_offset}:{message_count}:{digest([snapshot, next_offset])[:32]}:{prefix.hexdigest()[:16]}"
+                next_cursor = f"1:{next_offset}:{message_count}:{digest([snapshot, next_offset])[:32]}:{current_rank}"
+            # Rank against the original prefix, but use the current active text
+            # for selected archive hits just as history_read does.
+            if message_count < len(messages) and any(source_id not in active for source_id, _ in page):
+                active.update((row["id"], row) for row in records(messages[message_count:], 64000))
             archived = _archived_page_records(db, batches, page, active, canonical=excerpts) if db is not None else {}
             if any(source_id not in active and source_id not in archived for source_id, _ in page):
                 raise sqlite3.DatabaseError("Archived history source ID does not match its payload")

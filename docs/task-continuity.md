@@ -46,16 +46,22 @@ The standard lead-agent builders (including custom-agent bootstrap) and
   type; omission or `null` preserves search across all roles. These values map to
   internal `human`, `ai`, and `tool` roles; returned role values stay unchanged.
   Both active and archived history are filtered before the eight-result limit.
-  Results include `next_cursor` when more distinct sources match. Pass it as
+  Results include `next_cursor` when more distinct sources match in a readable
+  snapshot. Pass it as
   `cursor` with the same query and role to get the next page. Each page returns
   at most eight sources, and the last page omits `next_cursor`.
   The first page reserves space for active matches. Later pages continue with the
   remaining active and ranked archived matches from that search. Appended messages
-  are left for the next fresh search, so the search tool's own replies do not
-  change the results during pagination. If earlier messages or archive batches
-  change, a continuation returns `stale_cursor`. New batches outside the current
-  checkpoint can also affect full-text ranking and expire the cursor. A continuation
-  checks the order of previous hits, including ties, before returning more results.
+  do not enter the ranking, so the search tool's own replies do not change the
+  list during pagination. An archived hit uses the current active version for
+  the excerpt and truncation flag if the same source ID reappears in active
+  history. Changes to the original active prefix or the archive batches can
+  expire the cursor. Each page checks the full ranked source ID sequence, so a
+  change to matching or order after index maintenance also expires it. Only
+  the returned page's archived records are decoded for excerpts.
+  If the archive cannot be read, a fresh search returns up to eight active hits
+  with `unavailable` and omits `next_cursor`. An existing cursor returns
+  `stale_cursor` because the archived result order cannot be continued safely.
   Start a fresh search for `stale_cursor` or `invalid_cursor`. Each page checks the
   current thread scope and reachable archive batches before returning sources.
   For example, `history_search(query="replicas", role="user")` narrows the search

@@ -1198,18 +1198,93 @@ def test_history_search_cursor_rejects_changed_rank_prefix(role_runtime):
     assert json.loads(history_search.invoke({**arguments, "cursor": first["next_cursor"]})) == {"results": [], "status": "stale_cursor"}
 
 
-def test_history_search_reports_unavailable_for_mismatched_archive_id(role_runtime):
+@pytest.mark.parametrize(("journal_mode", "replace_hit"), [("delete", False), ("wal", True)])
+def test_history_search_cursor_rejects_changed_index_beyond_first_page(role_runtime, journal_mode, replace_hit):
     import json
     import sqlite3
     from contextlib import closing
 
-    message = HumanMessage(content="needle", id="hit")
-    role_runtime.state["task_history"] = archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))
+    messages = [HumanMessage(content="needle body", id=f"hit-{i}") for i in range(12)]
+    replacement = HumanMessage(content="different body", id="replacement")
+    role_runtime.state["task_history"] = archive.capture({}, role_runtime, [*messages, replacement], TaskContinuityConfig(enabled=True))
+    arguments = {"runtime": role_runtime, "query": "needle"}
+    path, _ = archive.scope(role_runtime)
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute(f"PRAGMA journal_mode={journal_mode}").fetchone() == (journal_mode,)
+        first = json.loads(history_search.invoke(arguments))
+        previous_tail = json.loads(history_search.invoke({**arguments, "cursor": first["next_cursor"]}))
+        assert [row["message_id"] for row in previous_tail["results"]] == [message.id for message in messages[8:]]
+        with db:
+            db.execute("UPDATE sources SET words = 'different body' WHERE rowid = 12")
+            if replace_hit:
+                db.execute("UPDATE sources SET words = 'needle body' WHERE rowid = 13")
+        refreshed = json.loads(history_search.invoke(arguments))
+        assert refreshed["results"] == first["results"]
+        refreshed_tail = json.loads(history_search.invoke({**arguments, "cursor": refreshed["next_cursor"]}))
+        expected_tail = [message.id for message in messages[8:-1]]
+        if replace_hit:
+            expected_tail.append(replacement.id)
+        assert [row["message_id"] for row in refreshed_tail["results"]] == expected_tail
+        assert json.loads(history_search.invoke({**arguments, "cursor": first["next_cursor"]})) == {"results": [], "status": "stale_cursor"}
+
+
+def test_history_search_cursor_uses_restored_active_text_without_reranking(role_runtime):
+    import json
+
+    text = "x" * 850 + " needle " + "y" * 1100
+    messages = [HumanMessage(content=text, id=f"hit-{i}") for i in range(12)]
+    role_runtime.state["task_history"] = archive.capture({}, role_runtime, messages, TaskContinuityConfig(enabled=True, max_record_chars=1000))
+    arguments = {"runtime": role_runtime, "query": "needle"}
+    first = json.loads(history_search.invoke(arguments))
+    next_arguments = {**arguments, "cursor": first["next_cursor"]}
+    previous_tail = json.loads(history_search.invoke(next_arguments))["results"]
+    assert previous_tail[-1]["message_id"] == messages[-1].id
+    assert previous_tail[-1]["truncated"] is True
+
+    role_runtime.state["messages"] = [HumanMessage(content="needle after first page", id="new-message"), messages[-1]]
+    continued = json.loads(history_search.invoke(next_arguments))
+    assert continued["status"] == "available"
+    assert [row["id"] for row in continued["results"]] == [row["id"] for row in previous_tail]
+    restored = continued["results"][-1]
+    readable = json.loads(history_read.invoke({"runtime": role_runtime, "source_id": restored["id"]}))
+    assert readable["text"] == text
+    assert restored["truncated"] is readable["truncated"] is False
+    assert restored["excerpt"] == readable["text"][restored["excerpt_start"] : restored["excerpt_end"]]
+    assert restored["excerpt"] != previous_tail[-1]["excerpt"]
+
+
+@pytest.mark.parametrize(("archive_id", "row_count"), [("r" + "0" * 32, 1), (None, 12)], ids=["mismatch", "null_with_next_page"])
+def test_history_search_reports_unavailable_for_mismatched_archive_id(role_runtime, archive_id, row_count):
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    messages = [HumanMessage(content="needle", id=f"hit-{i}") for i in range(row_count)]
+    role_runtime.state["task_history"] = archive.capture({}, role_runtime, messages, TaskContinuityConfig(enabled=True))
     path, _ = archive.scope(role_runtime)
     with closing(sqlite3.connect(path)) as db, db:
-        db.execute("UPDATE sources SET id = ? WHERE rowid = 1", ["r" + "0" * 32])
+        db.execute("UPDATE sources SET id = ? WHERE rowid = 1", [archive_id])
     result = json.loads(history_search.invoke({"runtime": role_runtime, "query": "needle"}))
     assert result == {"results": [], "status": "unavailable"}
+
+
+def test_history_search_preserves_first_active_page_when_archive_is_unavailable(role_runtime):
+    import json
+
+    archived = [HumanMessage(content="needle", id="archived")]
+    active = [HumanMessage(content="needle", id=f"active-{i}") for i in range(12)]
+    role_runtime.state["task_history"] = archive.capture({}, role_runtime, archived, TaskContinuityConfig(enabled=True))
+    role_runtime.state["messages"] = active
+    arguments = {"runtime": role_runtime, "query": "needle"}
+    first = json.loads(history_search.invoke(arguments))
+    path, _ = archive.scope(role_runtime)
+    path.unlink()
+
+    assert json.loads(history_search.invoke({**arguments, "cursor": first["next_cursor"]})) == {"results": [], "status": "stale_cursor"}
+    degraded = json.loads(history_search.invoke(arguments))
+    assert degraded["status"] == "unavailable"
+    assert [row["message_id"] for row in degraded["results"]] == [message.id for message in active[:8]]
+    assert "next_cursor" not in degraded
 
 
 @pytest.mark.asyncio
