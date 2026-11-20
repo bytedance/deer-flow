@@ -2030,7 +2030,7 @@ def test_custom_skill_update_history_survives_concurrent_put(monkeypatch, tmp_pa
     app = _make_test_app(config)
     server, server_thread, base_url = _run_live_server(app)
     try:
-        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+        with httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_a, httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_b:
             a_result: dict = {}
 
             def _request_a():
@@ -2109,7 +2109,7 @@ def test_custom_skill_rollback_history_survives_concurrent_put(monkeypatch, tmp_
     app = _make_test_app(config)
     server, server_thread, base_url = _run_live_server(app)
     try:
-        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+        with httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_a, httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_b:
             a_result: dict = {}
 
             def _request_a():
@@ -2251,7 +2251,7 @@ def test_custom_skill_update_does_not_serialize_an_unrelated_user(monkeypatch, t
     server, server_thread, base_url = _run_live_server(app)
     bob_progressed = False
     try:
-        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+        with httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_a, httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_b:
             a_result: dict = {}
             b_result: dict = {}
 
