@@ -417,7 +417,13 @@ class _BoundAgentRuns:
             row = await get_run_store(request).get(run_id, user_id=self._user_id)
             if row is None or row["thread_id"] != thread_id or row.get("cancel_requested_at"):
                 return None
-        return await self.get_state(thread_id=thread_id)
+        try:
+            return await self.get_state(thread_id=thread_id)
+        except AgentRunError as exc:
+            if exc.status_code != 404:
+                raise
+            # A run can stop before persisting its first checkpoint.
+            return None
 
     async def coordination_artifacts(self, *, thread_id, run_id):
         from app.gateway.artifact_archive import MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES

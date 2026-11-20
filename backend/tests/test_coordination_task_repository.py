@@ -273,8 +273,12 @@ async def test_worker_admission_rechecks_grant_generation_and_session_version(da
         (await session.get(UserRow, "alice")).token_version = 1
     with pytest.raises(ConflictError, match="authorization"):
         await runs.create_thread_operation_atomic("stale-session", **kwargs, metadata={RUN_GRANT_METADATA: "old"})
+    await workers.settle("alice", task["id"], execution["id"], None, "admission_failed", [], expected_grant_id="old")
+    assert (await workers.view("alice", task["id"]))["execution"]["status"] == "admitting"
     await workers.set_grant("alice", task["id"], {**grant, "id": "new", "authority": {**grant["authority"], "token_version": 1}})
     with pytest.raises(ConflictError, match="authorization"):
         await runs.create_thread_operation_atomic("stale-grant", **kwargs, metadata={RUN_GRANT_METADATA: "old"})
+    await workers.settle("alice", task["id"], execution["id"], None, "admission_failed", [], expected_grant_id="old")
+    assert (await workers.view("alice", task["id"]))["execution"]["status"] == "admitting"
     await runs.create_thread_operation_atomic("authorized", **kwargs, metadata={RUN_GRANT_METADATA: "new"})
     assert (await workers.view("alice", task["id"]))["execution"]["run_id"] == "authorized"

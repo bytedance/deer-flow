@@ -158,6 +158,17 @@ class CoordinationWorkers:
             except AgentRunError as exc:
                 if exc.status_code in (400, 404, 422):
                     await self.repo.settle(owner, task_id, execution["id"], None, "admission_failed", [])
+                elif exc.status_code == 403:
+                    # A denied operation can be terminal only while its grant is
+                    # still usable. Revocation or renewal leaves the turn pending.
+                    try:
+                        _, current_grant_id = await self.authority(owner, task_id)
+                    except AgentRunError as grant_error:
+                        if grant_error.status_code != 403:
+                            raise
+                    else:
+                        if current_grant_id == grant_id:
+                            await self.repo.settle(owner, task_id, execution["id"], None, "admission_failed", [], expected_grant_id=grant_id)
                 raise
         return execution["run_id"]
 

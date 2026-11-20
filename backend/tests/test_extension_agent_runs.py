@@ -1005,18 +1005,20 @@ async def _restart_coordination(state):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("previous_outcome", ["completed", "shutdown", "cancel-takeover"])
+@pytest.mark.parametrize("previous_outcome", ["completed", "shutdown", "cancel-takeover", "orphan-no-checkpoint"])
 async def test_managed_worker_restart_reconciles_the_persisted_task(worker_gateway, tmp_path, previous_outcome):
     import asyncio
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON
+    from deerflow.runtime.runs.manager import STARTUP_ORPHAN_RECOVERY_ERROR
 
     client, runs, state, entered, _ = worker_gateway
     path = str(tmp_path / "checkpoints.sqlite")
     async with AsyncSqliteSaver.from_conn_string(path) as saver:
-        state.checkpointer = saver
+        if previous_outcome != "orphan-no-checkpoint":
+            state.checkpointer = saver
         first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart"})).raise_for_status().json()
         task_id, run_id, thread = first["task"]["id"], first["execution"]["run_id"], first["assignment"]["thread_id"]
         await asyncio.wait_for(entered.wait(), 10)
@@ -1027,14 +1029,58 @@ async def test_managed_worker_restart_reconciles_the_persisted_task(worker_gatew
         await state.run_manager.shutdown()
         if previous_outcome == "cancel-takeover":
             await state.run_store.update_status(run_id, "error", error="Run reclaimed by worker during cancellation", stop_reason=ORPHAN_RECOVERY_STOP_REASON)
+        elif previous_outcome == "orphan-no-checkpoint":
+            await state.run_store.update_status(run_id, "error", error=STARTUP_ORPHAN_RECOVERY_ERROR, stop_reason=ORPHAN_RECOVERY_STOP_REASON)
     async with AsyncSqliteSaver.from_conn_string(path) as saver:
         state.checkpointer = saver
         await _restart_coordination(state)
         state.release_worker.set()
-        finished = await _wait_for_worker(client, task_id, "task", "status", "failed" if previous_outcome == "cancel-takeover" else "succeeded")
+        finished = await _wait_for_worker(client, task_id, "task", "status", "failed" if previous_outcome in ("cancel-takeover", "orphan-no-checkpoint") else "succeeded")
     assert finished["assignment"]["thread_id"] == thread
     assert finished["execution"]["turn"] == (2 if previous_outcome == "shutdown" else 1)
     assert (finished["execution"]["run_id"] != run_id) is (previous_outcome == "shutdown")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denial", ["permission", "revoked"])
+async def test_managed_worker_admission_distinguishes_permission_loss_from_revocation(worker_gateway, host, monkeypatch, denial):
+    client, runs, state, _, owner = worker_gateway
+    service = state.coordination_workers
+    task = await service.repo.create(owner, request_id="pending-admission", objective="wait")
+    task_id = task["id"]
+    grant = service._new_grant(runs.capture_authority())
+    turn = await service.repo.prepare(owner, task_id, "lead_agent", initial_grant=grant)
+    authorized, grant_id = await service.authority(owner, task_id)
+    if denial == "permission":
+        _, request, _ = host
+        monkeypatch.setattr(
+            "app.gateway.extension_agent_runs.resolve_route_permissions",
+            AsyncMock(return_value=[permission for permission in request.state.auth.permissions if permission != "runs:create"]),
+        )
+    else:
+        await service.repo.set_grant(owner, task_id, None)
+
+    driver = service.watch(authorized, owner, task_id, grant_id)
+    with pytest.raises(AgentRunError) as exc:
+        await driver
+    assert exc.value.status_code == 403
+    url = f"/api/coordination/tasks/{task_id}"
+    view = (await client.get(url)).raise_for_status().json()
+    assert view["execution"]["id"] == turn[1]["id"]
+    assert view["execution"]["run_id"] is None
+    if denial == "permission":
+        assert view["task"]["status"] == "failed"
+        assert view["execution"]["status"] == "admission_failed"
+        assert view["authorization_required"] is False
+        await service.recover_once()
+        assert (owner, task_id) not in service._drivers
+    else:
+        assert view["task"]["status"] == "running"
+        assert view["execution"]["status"] == "admitting"
+        assert view["authorization_required"] is True
+        assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
+        await service.recover_once()
+        await _wait_for_worker(client, task_id, "execution", "status", "running")
 
 
 @pytest.mark.asyncio
