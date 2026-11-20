@@ -53,6 +53,19 @@ class TestMergeDelegations:
         assert merge_delegations(None, [_entry("a", "in_progress")])[0]["id"] == "a"
         assert merge_delegations([_entry("a", "in_progress")], None)[0]["id"] == "a"
 
+    def test_unusable_stored_values_do_not_fail_later_writes(self):
+        """A checkpoint can hold a non-list value or an entry without the
+        reducer's identity key (written before the gateway validated this
+        channel). Later genuine writes keep working instead of failing on it."""
+        assert merge_delegations(None, "oops") == []
+        assert merge_delegations("oops", None) == []
+        assert merge_delegations("oops", [_entry("a", "in_progress")]) == [_entry("a", "in_progress")]
+        assert merge_delegations([_entry("a", "in_progress")], "oops") == [_entry("a", "in_progress")]
+        assert merge_delegations(
+            [_entry("a", "in_progress"), "oops", {"status": "completed"}, {"id": "b"}],
+            [_entry("c", "completed")],
+        ) == [_entry("a", "in_progress"), _entry("c", "completed")]
+
     def test_same_id_preserves_original_created_at(self):
         existing = [_entry("a", "in_progress")]
         new = [{**_entry("a", "completed"), "created_at": "2026-06-30T00:00:01Z", "result_sha256": "x"}]

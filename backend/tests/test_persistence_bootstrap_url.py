@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy.engine.url import make_url
 
 from deerflow.persistence.bootstrap import _alembic_safe_url, _escape_url_for_alembic, _get_alembic_config
@@ -86,17 +87,62 @@ def test_alembic_config_omits_schema_option_when_unset() -> None:
     assert cfg.get_main_option("deerflow_pg_schema") is None
 
 
-def test_env_module_pins_search_path_from_schema_option() -> None:
-    """env.py must read ``deerflow_pg_schema`` and pin the alembic-spawned
-    engine's search_path. That engine is built from the bare URL and does not
-    inherit the app engine's asyncpg ``server_settings``, so without this both
-    ``alembic_version`` and migration DDL would land in ``public`` while the
-    ORM tables land in the custom schema. Source-parity check mirroring
-    ``test_env_module_wires_busy_timeout_for_sqlite``.
-    """
+@pytest.mark.parametrize("scheme", ["postgresql+asyncpg", "postgresql", "postgres"])
+def test_env_module_pins_search_path_from_schema_option(monkeypatch: pytest.MonkeyPatch, scheme: str) -> None:
+    """Behavioral verification on migrations/env.py: run_migrations_online reads
+    ``deerflow_pg_schema`` from the Alembic Config and passes the pinned asyncpg
+    ``search_path`` connect_args to ``create_async_engine``."""
+    import asyncio
+    import importlib.util
+    from contextlib import asynccontextmanager
     from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
 
+    from alembic.config import Config
+
+    from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+
+    alembic_cfg = Config()
+    dsn = f"{scheme}://deerflow:deerflow@localhost:5432/deerflow_test"
+    alembic_cfg.set_main_option("sqlalchemy.url", dsn)
+    alembic_cfg.set_main_option("deerflow_pg_schema", "tenant_isolated")
+
+    captured: dict[str, object] = {}
+
+    class _FakeAsyncEngine:
+        url = make_url(dsn)
+        sync_engine = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        @asynccontextmanager
+        async def connect(self):
+            class _Conn:
+                async def run_sync(self, _fn):
+                    return None
+
+            yield _Conn()
+
+        async def dispose(self):
+            return None
+
+    def _fake_create_async_engine(url, **kwargs):
+        captured["url"] = url
+        captured["connect_args"] = kwargs.get("connect_args")
+        return _FakeAsyncEngine()
+
+    fake_ctx = MagicMock()
+    fake_ctx.config = alembic_cfg
+    fake_ctx.is_offline_mode.return_value = True  # avoid running online at import time
+
+    monkeypatch.setattr("alembic.context", fake_ctx)
     env_path = Path(__file__).resolve().parents[1] / "packages/harness/deerflow/persistence/migrations/env.py"
-    src = env_path.read_text(encoding="utf-8")
-    assert 'get_main_option("deerflow_pg_schema")' in src, "env.py must read the deerflow_pg_schema option set by _get_alembic_config"
-    assert "build_asyncpg_connect_args" in src, "env.py must pin the alembic engine's search_path via build_asyncpg_connect_args"
+    spec = importlib.util.spec_from_file_location("_test_migrations_env_schema", env_path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "create_async_engine", _fake_create_async_engine)
+
+    asyncio.run(mod.run_migrations_online())
+
+    assert captured["url"] == dsn
+    assert captured["connect_args"] == build_asyncpg_connect_args("tenant_isolated")

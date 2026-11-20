@@ -80,7 +80,8 @@ rejected, so continue the work in a new thread. In-place recovery is tracked in
 [#8071](https://github.com/bytedance/deer-flow/issues/8071).
 
 `waiting_for_input` is not terminal success or failure. Goals, delivery checks,
-and batch continuation must preserve a native pause. New runs cannot discard it.
+batch continuation and edit-replay rollback must preserve a native pause. New runs
+cannot discard it.
 Root checkpoint approvals do not expire and block new runs until resolved;
 live child approvals retain the time limit described above.
 See [HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for grant scoping,

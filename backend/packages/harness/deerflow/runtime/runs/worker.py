@@ -2076,7 +2076,9 @@ async def run_agent(
 
                 # A rejected resume has not written state; compensating it through
                 # the state-only graph would itself discard the pending Sends.
-                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_resume_rejected:
+                # A native pause has not failed: restoring the pre-run checkpoint
+                # would drop the edit and strand the interrupt behind the new head.
+                if not record.ownership_lost and _is_edit_replay_run(record) and record.status not in (RunStatus.success, RunStatus.waiting_for_input) and not checkpoint_resume_rejected:
                     if not record.finalizing:
                         await run_manager.set_finalizing(run_id, True)
                     try:
@@ -2257,11 +2259,12 @@ async def run_agent(
                     except Exception:
                         logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
 
-                if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+                needs_local_title = record.status == RunStatus.interrupted or (record.status == RunStatus.error and getattr(record, "stop_reason", None) == _RECURSION_CAPPED_STOP_REASON)
+                if started and not record.ownership_lost and checkpointer is not None and needs_local_title and not _is_edit_replay_run(record):
                     try:
                         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                         if not await run_manager.has_later_started_run(thread_id, run_id):
-                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input, accessor=accessor)
                     except Exception:
                         logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
@@ -3777,8 +3780,8 @@ async def _persist_run_duration(
     )
 
 
-async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:
-    """Persist a local fallback title for interrupted first-turn runs.
+async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None, accessor: CheckpointStateAccessor | None = None) -> str | None:
+    """Persist a local fallback title for interrupted or recursion-capped first turns.
 
     Returns the title that is now persisted (existing or newly written), or
     ``None`` when no checkpoint is available or no title text can be derived.
@@ -3798,6 +3801,10 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
         if existing_title:
             return existing_title
 
+        if ckpt_tuple is not None and accessor is not None and accessor.mode == "delta":
+            # Reconstruct messages at this exact checkpoint before checking which turn stopped.
+            snapshot = await accessor.aget(ckpt_tuple.config)
+            channel_values = snapshot.values
         result = middleware._generate_title_result(_title_generation_state(channel_values, graph_input), allow_partial_exchange=True)
         title = result.get("title") if isinstance(result, dict) else None
         if not title:
