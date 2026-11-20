@@ -832,6 +832,11 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
 def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool, model_name: str | None = None) -> None:
     hitl_config = getattr(app_config, "hitl_approval", None)
     if hitl_config is None or hitl_config.enabled is not True:
+        logger.warning(
+            "hitl_approval is not enabled: tool calls will execute without runtime human approval "
+            "(HITL middleware not mounted). Set hitl_approval.enabled=true and list the tools to review "
+            "in your config before running this agent in production. See docs/guide/skills-and-tools.md."
+        )
         return
     from deerflow.approvals.middleware import ToolApprovalMiddleware
 
