@@ -10,6 +10,7 @@ import {
 import {
   memo,
   useCallback,
+  useContext,
   useId,
   useMemo,
   useState,
@@ -76,6 +77,7 @@ import { MarkdownContent } from "./markdown-content";
 import {
   createMarkdownLinkComponent,
   MessageArtifactPathsContext,
+  TextOnlyMessageContext,
 } from "./markdown-link";
 import { MessageReasoning } from "./message-reasoning";
 
@@ -465,7 +467,9 @@ function MessageContent_({
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
 
+  const textOnly = useContext(TextOnlyMessageContext);
   const files = useMemo(() => {
+    if (textOnly) return null;
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
       if (
@@ -483,7 +487,7 @@ function MessageContent_({
       return null;
     }
     return files as FileInMessage[];
-  }, [message.additional_kwargs?.files, rawContent]);
+  }, [message.additional_kwargs?.files, rawContent, textOnly]);
   const referenceAttachments = useMemo(
     () =>
       readReferenceMessageContexts(message.additional_kwargs).map(
@@ -666,7 +670,7 @@ function MessageContent_({
       </MessageArtifactPathsContext.Provider>
       <CitationSourcesPanel sources={citationSources} />
       <KnowledgeSourcesPanel content={contentToDisplay} />
-      {message.type === "ai" && showWorkspaceChanges && (
+      {message.type === "ai" && !textOnly && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}
           runId={runId}

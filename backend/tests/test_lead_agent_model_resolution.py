@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, create_autospec
+from unittest.mock import ANY, AsyncMock, MagicMock, create_autospec, patch
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
@@ -130,6 +130,113 @@ class ConfiguredNonMiddleware:
 
 def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
     assert list(inspect.signature(lead_agent_module.make_lead_agent).parameters) == ["config"]
+
+
+def test_chat_assembly_keeps_the_agent_and_only_its_conversation_tools(monkeypatch, tmp_path):
+    from langchain_core.tools import StructuredTool
+
+    from deerflow.capabilities.runtime import installation_id
+    from deerflow.config.tool_config import ToolConfig
+    from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, AgentMcpAuthority
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+    from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+    default = _make_model("default", supports_thinking=False)
+    chosen = _make_model("chosen", supports_thinking=False).model_copy(update={"supports_vision": True})
+    config = _make_app_config([default, chosen])
+    config.memory = MemoryConfig(enabled=True, mode="tool")
+    config.task_continuity.enabled = True
+    config.tool_search.enabled = True
+    config.knowledge_base.enabled = True
+    config.skill_evolution.enabled = True
+    config.tools = [
+        ToolConfig(name=name, group=group, use=use)
+        for name, group, use in (
+            ("web_search", "web", "deerflow.community.ddg_search.tools:web_search_tool"),
+            ("web_fetch", "web", "deerflow.community.jina_ai.tools:web_fetch_tool"),
+            ("web_capture", "web", "deerflow.community.browserless.tools:web_capture_tool"),
+            ("image_search", "web", "deerflow.community.image_search.tools:image_search_tool"),
+            ("knowledge_entries_search", "knowledge", "deerflow.knowledge.tools:knowledge_entries_search_tool"),
+            ("read_conversation", "conversation", "deerflow.tools.conversation:read_conversation"),
+            ("read_file", "file:read", "deerflow.sandbox.tools:read_file_tool"),
+            ("write_file", "file:write", "deerflow.sandbox.tools:write_file_tool"),
+            ("bash", "bash", "deerflow.sandbox.tools:bash_tool"),
+        )
+    ]
+    agent = AgentConfig(name="analyst", model="chosen", mcp_plugins=[installation_id("reports", {})])
+    authority = AgentMcpAuthority("alice", (), agent.model_dump_json(), "Answer in the tone of a patient tutor.")
+    extensions = tmp_path / "extensions.json"
+    extensions.write_text('{"mcpServers": {"reports": {"type": "http", "url": "https://reports.test/mcp"}, "other": {"type": "http", "url": "https://other.test/mcp"}}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions))
+
+    def mcp_tool(name, server):
+        return tag_mcp_tool(StructuredTool.from_function(lambda: "ok", name=name, description=name), server_name=server)
+
+    # Both read- and write-named remote operations are governed by the same
+    # existing MCP selection; the Chat restriction applies to local tools.
+    mcp = [mcp_tool("report_search", "reports"), mcp_tool("report_update", "reports"), mcp_tool("other_search", "other")]
+    monkeypatch.setattr("deerflow.mcp.cache.get_cached_mcp_tools", lambda: mcp)
+    monkeypatch.setattr("deerflow.mcp.user_tools.get_user_mcp_tools", lambda: ([], ExtensionsConfig()))
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: kwargs["name"])
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    run = {
+        "context": {"mode": "chat", "user_id": "alice", "agent_name": "analyst", AGENT_AUTH_CONTEXT_KEY: authority, PROJECT_CONTEXT_KEY: {}, "__conversation_reader": lambda: None},
+        "configurable": {"is_plan_mode": True, "subagent_enabled": True, "is_bootstrap": True, "subagent_model_name": "default"},
+    }
+    with patch.object(lead_agent_module, "apply_tool_authorization", wraps=lead_agent_module.apply_tool_authorization) as authorize:
+        result = lead_agent_module._make_lead_agent(run, app_config=config)
+
+    assert result["model"] == "chosen"
+    assert authority.soul in result["system_prompt"]
+    assert "working_directory" not in result["system_prompt"]
+    assert "/mnt/user-data" not in result["system_prompt"]
+    assert {tool.name for tool in result["tools"]} == {
+        "web_search",
+        "web_fetch",
+        "knowledge_entries_search",
+        "read_conversation",
+        "ask_clarification",
+        "report_search",
+        "report_update",
+        "tool_search",
+        "memory_get",
+        "memory_search",
+        "memory_add",
+        "memory_update",
+        "memory_delete",
+    }
+    names = {middleware.name for middleware in result["middleware"]}
+    assert not names & {
+        "SandboxMiddleware",
+        "UploadsMiddleware",
+        "ReadBeforeWriteMiddleware",
+        "ViewImageMiddleware",
+        "TodoMiddleware",
+        "SkillActivationMiddleware",
+        "SubagentLimitMiddleware",
+        "ArtifactCaptureMiddleware",
+        "ArtifactResolutionMiddleware",
+    }
+    assert names >= {"DynamicContextMiddleware", "KnowledgeScopeMiddleware", "DeferredToolFilterMiddleware"}
+    assert run["metadata"]["subagent_enabled"] is run["metadata"]["is_plan_mode"] is False
+    options = authorize.call_args.kwargs["context"]
+    assert options["is_plan_mode"] is options["subagent_enabled"] is options["is_bootstrap"] is False
+
+
+def test_chat_narrows_extension_declarations_without_mutating_their_other_runs():
+    from deerflow.tools.builtins import task_tool
+
+    config = _make_app_config([_make_model("model", supports_thinking=False)])
+    contribution = ConfiguredAuditMiddleware()
+    contribution.tools = [task_tool]
+
+    def stack(mode):
+        return lead_agent_module.build_middlewares({"context": {"mode": mode}}, "model", custom_middlewares=[contribution], app_config=config)
+
+    chat = stack("chat")
+    assert chat[0].name == "ChatModeMiddleware"
+    assert not any(getattr(middleware, "tools", ()) for middleware in chat)
+    assert next(middleware for middleware in stack("ultra") if isinstance(middleware, ConfiguredAuditMiddleware)).tools == [task_tool]
 
 
 @pytest.mark.parametrize(

@@ -180,6 +180,8 @@ def authorize_sandbox_execution(*, context: Mapping[str, Any], app_config: AppCo
     with ``fail_closed``), raises :class:`SandboxAuthorizationError`; on
     provider error with fail-open, returns silently (legacy allow behavior).
     """
+    if context.get("mode") == "chat":
+        raise SandboxAuthorizationError("Sandbox execution is unavailable in Chat mode")
     inputs = _resolve_authorization_inputs(context=context, app_config=app_config)
     if inputs is None:
         return
@@ -205,6 +207,8 @@ async def authorize_sandbox_execution_async(*, context: Mapping[str, Any], app_c
     loop. Provider construction stays on the event loop because a valid async
     provider may create loop-affine clients in ``__init__``.
     """
+    if context.get("mode") == "chat":
+        raise SandboxAuthorizationError("Sandbox execution is unavailable in Chat mode")
     context_snapshot = dict(context)
     inputs = await _resolve_authorization_inputs_async(
         context=context_snapshot,

@@ -221,3 +221,120 @@ test("keeps quote and conversation reference chips on the optimistic bubble thro
     },
   ]);
 });
+
+test("Chat refuses selected or staged files before dispatch and marks an ordinary text turn", async () => {
+  const { useThreadStream } = await import("@/core/threads/hooks");
+  const { result } = renderHook(
+    () =>
+      useThreadStream({
+        context: { ...DEFAULT_LOCAL_SETTINGS.context, mode: "chat" },
+        threadId: "thread-1",
+      }),
+    {
+      wrapper: createWrapper(
+        new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+      ),
+    },
+  );
+  const attachment = {
+    type: "file" as const,
+    filename: "brief.md",
+    mediaType: "text/plain",
+    url: "blob:brief",
+  };
+  await expect(
+    result.current.sendMessage("thread-1", {
+      text: "test",
+      files: [attachment],
+    }),
+  ).rejects.toThrow("Chat accepts text only");
+  await expect(
+    result.current.sendMessage(
+      "thread-1",
+      { text: "test", files: [] },
+      undefined,
+      { additionalKwargs: { files: [STAGED_FILE] } },
+    ),
+  ).rejects.toThrow("Chat accepts text only");
+  expect(streamMockState.submit).not.toHaveBeenCalled();
+  await act(() =>
+    result.current.sendMessage("thread-1", { text: "hello", files: [] }),
+  );
+  expect(streamMockState.submit).toHaveBeenCalledWith(
+    expect.objectContaining({
+      messages: [
+        expect.objectContaining({
+          additional_kwargs: { deerflow_mode: "chat" },
+        }),
+      ],
+    }),
+    expect.objectContaining({
+      context: expect.objectContaining({ mode: "chat" }),
+    }),
+  );
+});
+
+test("clarification replies carry only text and leave mode recovery to the original run", async () => {
+  const { useThreadStream } = await import("@/core/threads/hooks");
+  const { result } = renderHook(
+    () =>
+      useThreadStream({
+        context: {
+          ...DEFAULT_LOCAL_SETTINGS.context,
+          agent_name: "reviewer",
+          mode: "pro",
+        },
+        assistantId: "reviewer",
+        threadId: "thread-1",
+      }),
+    {
+      wrapper: createWrapper(
+        new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+      ),
+    },
+  );
+  const response = {
+    hide_from_ui: true,
+    human_input_response: {
+      version: 1,
+      kind: "human_input_response",
+      source: "ask_clarification",
+      request_id: "clarify",
+      response_kind: "text",
+      value: "blue",
+    },
+  };
+  const message = { text: "blue", files: [] };
+  await expect(
+    result.current.sendMessage("thread-1", message, undefined, {
+      additionalKwargs: { ...response, files: [STAGED_FILE] },
+    }),
+  ).rejects.toThrow();
+  expect(streamMockState.submit).not.toHaveBeenCalled();
+  await act(() =>
+    result.current.sendMessage("thread-1", message, undefined, {
+      additionalKwargs: response,
+    }),
+  );
+  expect(streamMockState.submit).toHaveBeenCalledWith(
+    expect.objectContaining({
+      messages: [expect.objectContaining({ additional_kwargs: response })],
+    }),
+    expect.objectContaining({
+      context: expect.objectContaining({
+        agent_name: "reviewer",
+        thread_id: "thread-1",
+        thinking_enabled: true,
+        is_plan_mode: true,
+        subagent_enabled: false,
+        reasoning_effort: "medium",
+      }),
+    }),
+  );
+  expect(streamMockState.submit).not.toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({
+      context: expect.objectContaining({ mode: expect.any(String) }),
+    }),
+  );
+});

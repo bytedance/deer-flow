@@ -11,6 +11,7 @@ from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.tool_config import ToolConfig
 from deerflow.constants import CONVERSATION_TOOL_USE
+from deerflow.knowledge.providers import KNOWLEDGE_TOOL_OPERATIONS
 from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
@@ -44,6 +45,11 @@ SUBAGENT_TOOLS = [
     task_tool,
     # task_status_tool is no longer exposed to LLM (backend handles polling internally)
 ]
+
+# These configured tools return conversational evidence. The web group also
+# contains capture and image tools, so group membership alone is insufficient.
+# MCP selection and authorization are independent of this local tool list.
+_CHAT_RETRIEVAL_TOOLS = frozenset({"web_search", "web_fetch", "read_conversation", "list_knowledge_bases", *KNOWLEDGE_TOOL_OPERATIONS})
 
 # These operations are assembled from the host grant in get_available_tools().
 # Registering a tool path in YAML cannot widen that grant or its interaction mode.
@@ -173,6 +179,7 @@ def get_available_tools(
     app_config: AppConfig | None = None,
     extensions=None,
     chat_model: BaseChatModel | None = None,
+    chat_mode: bool = False,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -197,6 +204,8 @@ def get_available_tools(
         scheduler_capability: Current-run host grant for conversation schedule
             management or own-schedule stopping. Omitted for embedded,
             bootstrap and subagent assembly.
+        chat_mode: Bind local text retrieval and clarification alongside the
+            agent's existing MCP catalog.
 
     Returns:
         List of available tools.
@@ -217,6 +226,8 @@ def get_available_tools(
 
     loaded_tools: list[BaseTool] = []
     for cfg in _select_tool_configs(config, groups, include_conversation_reader):
+        if chat_mode and cfg.name not in _CHAT_RETRIEVAL_TOOLS and cfg.group not in {"web", "knowledge", "conversation"}:
+            continue
         loaded = resolve_variable(cfg.use, BaseTool)
         # Warn when the config ``name`` field and the tool object's ``.name``
         # attribute diverge — this mismatch is the root cause of issue #1803 where
@@ -229,6 +240,8 @@ def get_available_tools(
                 loaded.name,
                 cfg.use,
             )
+        if chat_mode and (loaded.name not in _CHAT_RETRIEVAL_TOOLS or (loaded.name == "read_conversation" and not include_conversation_reader)):
+            continue
         loaded = _ensure_sync_invocable_tool(loaded)
         if budget_note is not None and loaded.name == "write_file" and hasattr(loaded, "description"):
             description = getattr(loaded, "description", "") or ""
@@ -237,36 +250,37 @@ def get_available_tools(
         loaded_tools.append(loaded)
 
     # Conditionally add tools based on config
-    builtin_tools = BUILTIN_TOOLS.copy()
-    if scheduler_tools_enabled(config) and is_scheduler_capability(scheduler_capability):
-        from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
+    if chat_mode:
+        builtin_tools = [ask_clarification_tool]
+    else:
+        builtin_tools = BUILTIN_TOOLS.copy()
+        if scheduler_tools_enabled(config) and is_scheduler_capability(scheduler_capability):
+            from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
 
-        builtin_tools.append(schedule_task if scheduler_capability.mode == "interactive" else stop_scheduled_task)
-    if is_mcp_task_runtime_available():
-        builtin_tools.extend((list_background_tasks, cancel_background_task))
-    if include_upload_tool:
-        builtin_tools.append(list_uploaded_files)
-    skill_evolution_config = getattr(config, "skill_evolution", None)
-    if getattr(skill_evolution_config, "enabled", False):
-        from deerflow.tools.skill_manage_tool import skill_manage_tool
+            builtin_tools.append(schedule_task if scheduler_capability.mode == "interactive" else stop_scheduled_task)
+        if is_mcp_task_runtime_available():
+            builtin_tools.extend((list_background_tasks, cancel_background_task))
+        if include_upload_tool:
+            builtin_tools.append(list_uploaded_files)
+        skill_evolution_config = getattr(config, "skill_evolution", None)
+        if getattr(skill_evolution_config, "enabled", False):
+            from deerflow.tools.skill_manage_tool import skill_manage_tool
 
-        builtin_tools.append(skill_manage_tool)
+            builtin_tools.append(skill_manage_tool)
 
-    # Add subagent tools only if enabled via runtime parameter
-    if subagent_enabled:
-        builtin_tools.extend(SUBAGENT_TOOLS)
-        if is_subagent_batch_runtime_available():
-            from deerflow.subagents.batch_runtime import get_subagent_batch_submitter
-            from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
+        if subagent_enabled:
+            builtin_tools.extend(SUBAGENT_TOOLS)
+            if is_subagent_batch_runtime_available():
+                from deerflow.subagents.batch_runtime import get_subagent_batch_submitter
+                from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
 
-            builtin_tools.extend(bind_batch_tools(submitter_provider=get_subagent_batch_submitter, app_config=config))
-        logger.info("Including native subagent tools")
+                builtin_tools.extend(bind_batch_tools(submitter_provider=get_subagent_batch_submitter, app_config=config))
+            logger.info("Including native subagent tools")
 
-    # Add view_image_tool only if the model supports vision
-    builtin_tools.append(build_inspect_run_status_tool(context_window=model_config.context_window if model_config else None))
-    if model_config is not None and model_config.supports_vision:
-        builtin_tools.append(view_image_tool)
-        logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
+        builtin_tools.append(build_inspect_run_status_tool(context_window=model_config.context_window if model_config else None))
+        if model_config is not None and model_config.supports_vision:
+            builtin_tools.append(view_image_tool)
+            logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
@@ -341,7 +355,9 @@ def get_available_tools(
     try:
         from deerflow.tools.builtins.invoke_acp_agent_tool import build_invoke_acp_agent_tool
 
-        if app_config is None:
+        if chat_mode:
+            acp_agents = {}
+        elif app_config is None:
             from deerflow.config.acp_config import get_acp_agents
 
             acp_agents = get_acp_agents()
@@ -363,7 +379,7 @@ def get_available_tools(
 
     # Keep plugin-vs-plugin validation strict. Host/plugin collisions use the
     # ordinary-first deduplication below, without dropping unrelated tools.
-    plugin_tools = build_plugin_tools(extensions if extensions is not None else get_agent_build_extensions(), groups=groups)
+    plugin_tools = [] if chat_mode else build_plugin_tools(extensions if extensions is not None else get_agent_build_extensions(), groups=groups)
     seen_names: set[str] = set()
     unique_tools: list[BaseTool] = []
     for t in itertools.chain(loaded_tools, builtin_tools, mcp_tools, acp_tools, plugin_tools):

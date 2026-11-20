@@ -126,6 +126,13 @@ describe("resolveReasoningEffort", () => {
 });
 
 describe("getResolvedMode", () => {
+  it("keeps Chat with any thinking capability and leaves effort to the model", () => {
+    for (const candidate of [undefined, legacyPlain, legacyThinking, glm]) {
+      expect(getResolvedMode("chat", candidate)).toBe("chat");
+      expect(reasoningEffortForMode("chat", candidate)).toBeUndefined();
+    }
+  });
+
   it("clamps every mode to flash on a model without thinking", () => {
     expect(getResolvedMode("pro", legacyPlain)).toBe("flash");
     expect(getResolvedMode(undefined, legacyPlain)).toBe("flash");

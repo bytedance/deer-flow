@@ -30,7 +30,7 @@ from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
-from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -41,8 +41,10 @@ from app.gateway.internal_auth import (
 from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.run_origin import resolve_request_origin
+from app.gateway.thread_mode import selected_mode, state_has_attachments, thread_mode
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
+from deerflow.agents.chat_mode import CHAT_MODE_KEY, has_attachment_fields
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
@@ -95,6 +97,7 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
 from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
+from deerflow.runtime.events.store.base import IncompleteMessageRunLookupError, RunEventStore
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
@@ -183,6 +186,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             # Only the scheduler's internal launch may mark a message as a
             # scheduled run prompt.
             SCHEDULED_ORIGIN_KEY,
+            CHAT_MODE_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -268,7 +272,7 @@ async def _ensure_thread_metadata(
     *,
     owner_user_id: str | None,
     require_existing_thread: bool = False,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     async with goal_thread_lock(record.thread_id):
         return await _ensure_thread_metadata_locked(run_ctx, record, owner_user_id=owner_user_id, require_existing_thread=require_existing_thread)
@@ -280,19 +284,33 @@ async def _ensure_thread_metadata_locked(
     *,
     owner_user_id: str | None,
     require_existing_thread: bool,
-) -> dict[str, Any]:
+    sync_file_mode: bool = False,
+) -> dict[str, Any] | None:
     """Share create admission with HTTP while retaining detached task ownership."""
     thread_store = run_ctx.thread_store
     existing = await thread_store.get(record.thread_id)
-    if existing is None and owner_user_id:
+    if existing is None and (owner_user_id or sync_file_mode):
         unscoped = await thread_store.get(record.thread_id, user_id=None)
-        if unscoped is not None:
+        if unscoped is not None and owner_user_id:
             if unscoped.get("user_id") != owner_user_id:
                 await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
             existing = await thread_store.get(record.thread_id)
+        elif unscoped is not None and unscoped.get("user_id") is None:
+            # Shared pre-auth rows pass ordinary thread ownership checks.
+            # A mode selection must neither recreate nor claim such a thread.
+            existing = unscoped
+        elif unscoped is not None:
+            raise HTTPException(404, "Thread not found")
+    if existing is None and require_existing_thread:
+        raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
+    fresh_mode = selected_mode(record.metadata)
+    if sync_file_mode and fresh_mode != "chat":
+        # Ordinary selections are per run. Only leaving Chat or repairing a
+        # legacy unsupported selection changes an existing thread preference.
+        metadata = (existing or {}).get("metadata") or {}
+        if metadata.get("mode") is None or selected_mode(metadata) not in (None, "chat"):
+            return existing
     if existing is None:
-        if require_existing_thread:
-            raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
         from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
 
         run_metadata = record.metadata or {}
@@ -303,8 +321,10 @@ async def _ensure_thread_metadata_locked(
             # membership key: run admission never modifies project membership —
             # the column is written only by POST /api/threads and
             # /threads/{id}/move — so the key must not persist either.
-            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
+            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, "mode")
         }
+        if selected_mode(run_metadata) == "chat":
+            metadata["mode"] = "chat"
         # A run that names its thread in the input (a scheduled run) creates it
         # named: the worker copies the title to the thread list only when the
         # run ends, and a server-created thread is listed as soon as it exists.
@@ -316,6 +336,11 @@ async def _ensure_thread_metadata_locked(
             display_name=title if isinstance(title, str) and title.strip() else None,
             metadata=metadata,
         )
+    elif sync_file_mode and (existing.get("metadata") or {}).get("mode") != fresh_mode:
+        shared = existing.get("user_id") is None
+        await thread_store.update_metadata(record.thread_id, {"mode": fresh_mode}, touch=False, **({"allow_unowned": True} if shared else {}))
+        if shared and await thread_mode(thread_store, record.thread_id, user_id=record.user_id) != fresh_mode:
+            raise HTTPException(409, "Thread mode changed during run admission")
     return existing
 
 
@@ -2301,15 +2326,51 @@ def _is_scope_source_human_message(message: Any) -> bool:
     return not _skips_input_guardrail(dict(_message_additional_kwargs(message)), message.get("name"))
 
 
-async def _recover_run_knowledge_scope(
+async def _matches_interrupted_answer(run_mgr: RunManager, events: RunEventStore, thread_id: str, run_id: str, message_id: str, *, user_id: str | None) -> bool:
+    """Bind an uncheckpointed answer to its journal or one unambiguous interrupted run."""
+    page_size = 200
+    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size)
+    record = await run_mgr.get(run_id, user_id=user_id)
+    if record is None:
+        record = next((candidate for candidate in records if candidate.run_id == run_id), None)
+    if record is None or record.thread_id != thread_id or record.status != RunStatus.interrupted:
+        return False
+    try:
+        origins = await events.find_latest_ai_message_run_ids(thread_id, {message_id}, user_id=user_id)
+    except IncompleteMessageRunLookupError:
+        return False
+    if message_id in origins:
+        return origins[message_id] == run_id
+    # Partial streams may have no AI event. Verify the unique interrupted
+    # candidate across all pages, stopping as soon as a second one is found.
+    found = False
+    cursor = None
+    while True:
+        for other in records:
+            if other.status == RunStatus.interrupted:
+                if other.run_id != run_id:
+                    return False
+                found = True
+        if len(records) < page_size:
+            return found
+        last = records[-1]
+        next_cursor = (last.created_at, last.run_id)
+        if cursor == next_cursor:
+            return False
+        cursor = next_cursor
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size, before_created_at=last.created_at, before_run_id=last.run_id)
+
+
+async def _recover_source_message_metadata(
     request: Request,
     *,
     thread_id: str,
     target_message_id: str | None,
+    target_run_id: str | None = None,
     checkpoint_id: str | None = None,
     checkpoint_ns: str = "",
-) -> object | None:
-    """Recover the source turn's scope from the selected checkpoint or head."""
+) -> Mapping[str, Any] | None:
+    """An ordinary source may have empty metadata. None means its message is missing."""
     checkpoint_kwargs: dict[str, Any] = {}
     if checkpoint_id is not None:
         checkpoint_kwargs["checkpoint_id"] = checkpoint_id
@@ -2323,8 +2384,8 @@ async def _recover_run_knowledge_scope(
     try:
         snapshot = await accessor.aget(config)
     except Exception as exc:
-        logger.exception("Failed to recover knowledge scope for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to recover knowledge scope") from exc
+        logger.exception("Failed to recover source turn for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to recover source turn") from exc
     values = getattr(snapshot, "values", None)
     messages = values.get("messages") if isinstance(values, Mapping) else None
     if not isinstance(messages, list):
@@ -2341,27 +2402,38 @@ async def _recover_run_knowledge_scope(
                 (message for message in reversed(messages[:target_index]) if _is_scope_source_human_message(message)),
                 None,
             )
-        else:
-            # Interrupted assistant output may never reach a checkpoint. Its
-            # source is still the terminal HumanMessage of the latest state.
+        elif target_run_id:
+            # A prepared, interrupted response can lack a checkpointed AI
+            # message. Its server-stamped human turn must match the source run.
             source = next(
                 (message for message in reversed(messages) if _is_scope_source_human_message(message)),
                 None,
             )
+            current_user = get_current_user()
+            if _message_additional_kwargs(source).get("run_id") != target_run_id or not await _matches_interrupted_answer(
+                get_run_manager(request),
+                get_run_event_store(request),
+                thread_id,
+                target_run_id,
+                target_message_id,
+                user_id=str(current_user.id) if current_user is not None else None,
+            ):
+                source = None
         if source is None:
             raise HTTPException(
                 status_code=409,
-                detail="Could not recover the source HumanMessage knowledge_scope",
+                detail="Could not recover the source user message",
             )
     else:
         source = next(
             (message for message in reversed(messages) if _is_scope_source_human_message(message)),
             None,
         )
-    if source is None:
-        return None
-    additional_kwargs = _message_additional_kwargs(source)
-    return additional_kwargs.get(KNOWLEDGE_SCOPE_KEY)
+    if source is not None:
+        return _message_additional_kwargs(source)
+    if selected_mode(getattr(snapshot, "metadata", None)) == "chat":
+        return {CHAT_MODE_KEY: "chat"}
+    return None
 
 
 def _current_human_message(graph_input: object) -> HumanMessage | None:
@@ -2567,16 +2639,18 @@ async def start_run(
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
     user = getattr(request.state, "user", None)
+    path_owner_checked = user is not None and getattr(request.state, "owner_checked_run_thread", None) == (thread_id, str(user.id))
+    existing_at_admission = require_existing_thread or path_owner_checked
 
     async def thread_access_allowed() -> bool:
         if user is None:
-            if not require_existing_thread:
+            if not existing_at_admission:
                 return True
             return await run_ctx.thread_store.get(thread_id) is not None
         allowed = await run_ctx.thread_store.check_access(
             thread_id,
             str(user.id),
-            require_existing=require_existing_thread,
+            require_existing=existing_at_admission,
         )
         if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
             # Channel workers may also act for the connection owner named in
@@ -2585,11 +2659,11 @@ async def start_run(
             allowed = await run_ctx.thread_store.check_access(
                 thread_id,
                 owner_user_id,
-                require_existing=require_existing_thread,
+                require_existing=existing_at_admission,
             )
         return allowed
 
-    if not await thread_access_allowed():
+    if not path_owner_checked and not await thread_access_allowed():
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     from app.gateway.coordination_workers import direct_worker_run, managed_task
@@ -2719,20 +2793,71 @@ async def start_run(
         # run to every operator-approved dataset. Other replay paths always use
         # server recovery regardless of client input.
         is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
-        recovery_checkpoint: dict[str, Any] = {}
+        recovery_args: dict[str, Any] = {}
         if graph_input is None:
             configurable = config.get("configurable") or {}
-            recovery_checkpoint = {key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)}
-        recovery_scope = (
-            await _recover_run_knowledge_scope(
+            recovery_args.update({key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)})
+        is_replay = is_scope_recovery or is_human_input_response or (isinstance(target_message_id, str) and bool(target_message_id))
+        source_metadata: Mapping[str, Any] | None = {}
+        if is_replay and admitted_run is not None and target_message_id:
+            # A keyed retry can outlive its source checkpoint. The original
+            # admission already persisted the canonical turn and its scope.
+            stored_input = (admitted_run.kwargs or {}).get("input") or {}
+            source_metadata = next((_message_additional_kwargs(msg) for msg in reversed(stored_input.get("messages") or []) if _is_scope_source_human_message(msg)), {})
+        elif is_replay:
+            target_run_id = run_metadata.get("regenerate_from_run_id")
+            if isinstance(target_run_id, str) and target_run_id:
+                recovery_args["target_run_id"] = target_run_id
+            source_metadata = await _recover_source_message_metadata(
                 request,
                 thread_id=thread_id,
                 target_message_id=(target_message_id if isinstance(target_message_id, str) else None),
-                **recovery_checkpoint,
+                **recovery_args,
             )
-            if is_scope_recovery
-            else None
-        )
+        recovery_scope = (source_metadata or {}).get(KNOWLEDGE_SCOPE_KEY) if is_scope_recovery else None
+
+        # A fresh context.mode selects this turn. A checkpoint continuation
+        # retains a source Chat turn's restrictions even after the user selects
+        # another mode for future sends. A keyed retry uses its admitted record.
+        requested_mode = selected_mode(body_context) or selected_mode(config.get("context")) or selected_mode(config.get("configurable"))
+        continuing_mode = is_replay or getattr(request.state, "run_input_dispatch", False) is True
+        mode = "chat" if (source_metadata or {}).get(CHAT_MODE_KEY) == "chat" else requested_mode
+        if admitted_run is not None:
+            mode = selected_mode(admitted_run.metadata)
+        elif source_metadata is None and mode != "chat":
+            # An interrupt may survive after its source message has been pruned.
+            # Use the same paused run that the resume handler will answer.
+            paused = None
+            if command and command.get("resume") is not None:
+                records = await run_mgr.list_by_thread(thread_id, user_id=owner_user_id or run_user_id, limit=5)
+                paused = next((record for record in records if record.status == RunStatus.waiting_for_input), None)
+            if paused is not None:
+                if selected_mode(paused.metadata) == "chat":
+                    mode = "chat"
+            elif await thread_mode(run_ctx.thread_store, thread_id, user_id=str(user.id) if user is not None else run_user_id, internal_owner_id=owner_user_id) == "chat":
+                raise HTTPException(409, "Could not recover the source turn for this Chat continuation")
+        # The run metadata is echoed and used for retries.
+        # Only the admitted mode belongs here, never arbitrary body.metadata.
+        run_metadata.pop("mode", None)
+        config["metadata"].pop("mode", None)
+        if mode is not None:
+            run_metadata["mode"] = mode
+            config["metadata"]["mode"] = mode
+            config.setdefault("context", {})["mode"] = mode
+            config["configurable"]["mode"] = mode
+        if mode == "chat":
+            raw_config = body_config or {}
+            if (
+                state_has_attachments(normalized_input)
+                or any(has_attachment_fields(section) for section in (body_context, raw_config.get("context"), raw_config.get("configurable")))
+                or getattr(request.state, "extension_artifact_imports", None)
+            ):
+                raise HTTPException(422, "Chat mode accepts text only. Switch modes to send attachments.")
+            if current_human_message is not None:
+                current_human_message.additional_kwargs[CHAT_MODE_KEY] = "chat"
+        elif current_human_message is not None:
+            # The turn marker is issued here, including for trusted IM input.
+            current_human_message.additional_kwargs.pop(CHAT_MODE_KEY, None)
         # Match lead-agent assembly: runtime context overrides configurable.
         # Older API/channel callers may name an agent through context while
         # retaining lead_agent as their routing assistant ID.
@@ -3067,8 +3192,18 @@ async def start_run(
                 # delete route holds a durable thread-operation reservation,
                 # so after this point either the run or the delete wins; they
                 # cannot both succeed across Gateway workers.
-                if require_existing_thread and not await thread_access_allowed():
+                read_saved_mode = not continuing_mode and requested_mode is None and admitted_run is None
+                # For a fresh default run, one row supplies both ownership and
+                # the previous file policy. Unauthenticated internal calls keep
+                # their existing context-scoped access check.
+                if existing_at_admission and (not read_saved_mode or user is None) and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                sync_file_mode = not continuing_mode and requested_mode is not None
+                if read_saved_mode:
+                    # A fresh request without a mode uses the agent's original
+                    # defaults. Reopen file operations if the last turn used Chat.
+                    saved_mode = await thread_mode(run_ctx.thread_store, thread_id, user_id=str(user.id) if user is not None else run_user_id, internal_owner_id=owner_user_id, require_existing=existing_at_admission)
+                    sync_file_mode = saved_mode == "chat"
                 admission_run_id = str(uuid.uuid4())
                 start_producer_lease = _declared_bridge_method(
                     bridge,
@@ -3109,6 +3244,9 @@ async def start_run(
                             # The live config built above keeps them for the actual run.
                             kwargs={
                                 "input": run_record_input,
+                                # A replay can narrow a requested normal mode to Chat.
+                                # Remember that choice for an identical keyed retry.
+                                **({"requested_mode": requested_mode} if idempotency_key and requested_mode and requested_mode != mode else {}),
                                 **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                                 "config": redact_config_secrets(body.config),
                                 **({"conversation_references": conversation_references} if conversation_references else {}),
@@ -3156,7 +3294,9 @@ async def start_run(
                         # this compatibility path.
                         matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
                         matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == request_input or stored_input == run_record_input
-                    if not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
+                    previous_mode = selected_mode(record.metadata)
+                    changes_chat_mode = requested_mode is not None and requested_mode not in (previous_mode, stored.get("requested_mode")) and "chat" in (requested_mode, previous_mode)
+                    if changes_chat_mode or not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",
@@ -3200,6 +3340,10 @@ async def start_run(
                             )
                             if current_request_ids != validated_approval_request_ids:
                                 raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
+                    if sync_file_mode:
+                        # Publish Chat policy transitions before file routes
+                        # can observe the response, including on a new thread.
+                        await await_drained(_ensure_thread_metadata_locked(run_ctx, record, owner_user_id=owner_user_id, require_existing_thread=require_existing_thread, sync_file_mode=True))
                     # The stream lease was established before durable admission.
                     # Once resume persistence succeeds, keep task attachment
                     # await-free so cancellation cannot strand a pending row.

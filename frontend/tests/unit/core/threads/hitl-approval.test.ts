@@ -179,7 +179,11 @@ describe("HITL approval resume options", () => {
     })!;
     const options = buildHitlApprovalSubmitOptions({
       threadId: "thread-1",
-      settings: DEFAULT_LOCAL_SETTINGS.context,
+      settings: {
+        ...DEFAULT_LOCAL_SETTINGS.context,
+        mode: "ultra",
+        reasoning_effort: "xhigh",
+      },
       responses,
       extraContext: {
         model_name: "model-for-paused-turn",
@@ -198,9 +202,14 @@ describe("HITL approval resume options", () => {
       context: {
         thread_id: "thread-1",
         model_name: "model-for-paused-turn",
+        thinking_enabled: true,
+        is_plan_mode: true,
+        subagent_enabled: true,
+        reasoning_effort: "xhigh",
         conversation_references: ["referenced-thread"],
       },
     });
+    expect(options.context).not.toHaveProperty("mode");
     expect("streamSubgraphs" in options).toBe(false);
   });
 });

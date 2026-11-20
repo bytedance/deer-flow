@@ -104,6 +104,21 @@ test("ignores sidecar search results from another parent thread", async () => {
   ).resolves.toBeNull();
 });
 
+test("creates a Chat side conversation with the same file policy", async () => {
+  fetchWithAuth.mockResolvedValue(threadResponse("sidecar-1"));
+  await createSidecarThread({
+    parentThreadId: "parent-1",
+    context,
+    mode: "chat",
+  });
+  const body = JSON.parse(fetchWithAuth.mock.calls[0]![1]?.body as string);
+  expect(body.metadata).toMatchObject({
+    mode: "chat",
+    parent_thread_id: "parent-1",
+    deerflow_sidecar: true,
+  });
+});
+
 test("coalesces concurrent creates for the same parent into one request", async () => {
   let resolveFetch: ((value: Response) => void) | undefined;
   fetchWithAuth.mockReturnValueOnce(

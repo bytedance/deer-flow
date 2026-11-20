@@ -156,7 +156,7 @@ async def test_agent_writes_check_the_model_off_the_loop(route: str, agents_api:
 
 @pytest.fixture
 def browser_access(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(browser, "_browser_thread_owned_by", AsyncMock(return_value=True))
+    monkeypatch.setattr(browser, "_require_browser_thread", AsyncMock(return_value=None))
     monkeypatch.setattr(browser, "_authenticate_ws", AsyncMock(return_value=SimpleNamespace(id="user-1")))
     monkeypatch.setattr(browser, "_ws_origin_allowed", lambda _websocket: True)
     monkeypatch.setattr(browser, "resolve_route_permissions", AsyncMock(return_value={Permissions.THREADS_WRITE}))

@@ -70,6 +70,7 @@ export function MentionPicker({
   references,
   threadId,
   projectId,
+  allowFiles = true,
   busy,
   error,
   onSelect,
@@ -96,6 +97,7 @@ export function MentionPicker({
   references: ConversationReference[];
   threadId: string;
   projectId?: string | null;
+  allowFiles?: boolean;
   busy: boolean;
   error: string | null;
   onSelect: (selection: MentionSelection) => void;
@@ -133,18 +135,20 @@ export function MentionPicker({
           !selectedSkills?.includes(skill.name) &&
           new Set(selectedSkills).size >= MAX_EXPLICIT_SKILLS,
       }));
-    for (const document of documents.data?.pages.flatMap(
-      (page) => page.documents,
-    ) ?? []) {
-      result.push({
-        id: `file:${document.id}`,
-        label: document.name,
-        description: document.content_missing
-          ? labels.mentionUnavailable
-          : undefined,
-        selection: { kind: "file", document },
-        disabled: document.content_missing,
-      });
+    if (allowFiles) {
+      for (const document of documents.data?.pages.flatMap(
+        (page) => page.documents,
+      ) ?? []) {
+        result.push({
+          id: `file:${document.id}`,
+          label: document.name,
+          description: document.content_missing
+            ? labels.mentionUnavailable
+            : undefined,
+          selection: { kind: "file", document },
+          disabled: document.content_missing,
+        });
+      }
     }
     if (capability.enabled) {
       const seen = new Set<string>();
@@ -189,13 +193,15 @@ export function MentionPicker({
           new Set(selectedExtensions).size >= MAX_EXTENSION_MENTIONS,
       });
     }
-    filtered.push({
-      id: "upload",
-      label: labels.mentionUpload,
-      selection: { kind: "upload" },
-    });
+    if (allowFiles)
+      filtered.push({
+        id: "upload",
+        label: labels.mentionUpload,
+        selection: { kind: "upload" },
+      });
     return filtered;
   }, [
+    allowFiles,
     extensions.items,
     selectedExtensions,
     skills,
@@ -427,7 +433,7 @@ export function MentionPicker({
           {labels.mentionLoadMore}
         </button>
       )}
-      {!projectId && (
+      {allowFiles && !projectId && (
         <p className="text-muted-foreground px-2 py-1 text-xs">
           {labels.mentionNoProject}
         </p>

@@ -99,6 +99,30 @@ def test_browser_stream_closes_4404_when_tools_disabled_for_owned_thread():
         _expect_ws_close(app, 4404)
 
 
+def test_browser_stream_rejects_owned_chat_thread_before_loading_browser():
+    store = MagicMock()
+    store.get = AsyncMock(return_value={"user_id": "browser-user", "metadata": {"mode": "chat"}})
+    app = _browser_ws_app(store)
+    with (
+        patch.object(browser_router, "_authenticate_ws", AsyncMock(return_value=_user())),
+        patch.object(browser_router, "_browser_tools_enabled", return_value=False) as check_tools,
+    ):
+        _expect_ws_close(app, 4403)
+    check_tools.assert_not_called()
+
+
+def test_browser_navigate_rejects_owned_chat_thread_before_loading_browser():
+    user = User(email="browser@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user)
+    app.include_router(browser_router.router)
+    app.state.thread_store.get = AsyncMock(return_value={"user_id": str(user.id), "metadata": {"mode": "chat"}})
+    with patch.object(browser_router, "_browser_tools_enabled", return_value=False) as check_tools:
+        response = TestClient(app).post("/api/threads/thread-1/browser/navigate", json={"url": "https://example.com"})
+    assert response.status_code == 422
+    assert "Chat mode" in response.json()["detail"]
+    check_tools.assert_not_called()
+
+
 def test_browser_stream_closes_4501_when_browser_runtime_unavailable():
     store = MagicMock()
     store.check_access = AsyncMock(return_value=True)
@@ -421,3 +445,118 @@ def test_browser_stream_acquires_the_session_with_pinned_egress():
 
     manager.acquire_session.assert_called_once()
     assert manager.acquire_session.call_args.kwargs["egress_resolver"] is resolve_browser_egress
+
+
+@pytest.fixture
+def live_browser():
+    store = MagicMock()
+    store.get = AsyncMock(return_value={"user_id": "browser-user"})
+    ws = MagicMock()
+    ws.headers = {}
+    ws.query_params = {}
+    ws.app.state.thread_store = store
+    ws.accept = AsyncMock()
+    ws.close = AsyncMock()
+    ws.send_text = AsyncMock()
+    ws.receive_text = asyncio.Event().wait  # The client remains connected and idle.
+    session = MagicMock()
+    session.current_url = AsyncMock(return_value=None)
+    session.tabs = AsyncMock(return_value=[])
+    session.start_screencast = AsyncMock()
+    session.stop_screencast = AsyncMock()
+    manager = MagicMock()
+    lease = manager.acquire_session.return_value
+    lease.__enter__.return_value = session
+    with (
+        patch.object(browser_router, "_authenticate_ws", AsyncMock(return_value=_user())),
+        patch.object(browser_router, "_browser_tools_enabled", return_value=True),
+        patch("deerflow.config.get_app_config", return_value=SimpleNamespace(get_tool_config=lambda _: None)),
+        patch("deerflow.community.browser_automation.get_browser_session_manager", return_value=manager),
+    ):
+        yield ws, session, lease, store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("next_record", "close_code", "blocked_start"),
+    [
+        ({"user_id": "browser-user", "metadata": {"mode": "chat"}}, 4403, False),
+        ({"user_id": "other-user"}, 4404, False),
+        (OSError("store unavailable"), 4501, False),
+        pytest.param({"user_id": "browser-user", "metadata": {"mode": "chat"}}, 4403, True, id="chat-during-startup"),
+    ],
+)
+async def test_live_browser_closes_and_releases_idle_socket_after_access_changes(live_browser, next_record, close_code, blocked_start):
+    ws, session, lease, store = live_browser
+    store.get = AsyncMock(side_effect=[{"user_id": "browser-user"}, next_record])
+    startup_cancelled = asyncio.Event()
+
+    async def start_screencast(_callback):
+        if blocked_start:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                startup_cancelled.set()
+                raise
+
+    session.start_screencast = AsyncMock(side_effect=start_screencast)
+    with patch.object(browser_router, "_BROWSER_ACCESS_CHECK_SECONDS", 0):
+        await asyncio.wait_for(browser_router.browser_stream(ws, "thread-1"), timeout=2)
+    ws.accept.assert_awaited_once()
+    ws.close.assert_awaited_once_with(code=close_code)
+    if blocked_start:
+        assert startup_cancelled.is_set()
+    session.stop_screencast.assert_awaited_once()
+    lease.__exit__.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_location_update_reaches_slow_live_browser_while_access_is_checked(live_browser):
+    ws, session, _, store = live_browser
+    session.current_url = AsyncMock(side_effect=[None, "https://visited.example/"])
+    delivered = asyncio.Event()
+
+    async def send_text(raw):
+        if json.loads(raw)["type"] == "url":
+            before = store.get.await_count
+            await asyncio.sleep(0.1)
+            assert store.get.await_count > before
+            delivered.set()
+
+    async def receive_text():
+        await delivered.wait()
+        raise WebSocketDisconnect()
+
+    ws.send_text = send_text
+    ws.receive_text = receive_text
+    with patch.object(browser_router, "_BROWSER_ACCESS_CHECK_SECONDS", 0.02):
+        await asyncio.wait_for(browser_router.browser_stream(ws, "thread-1"), timeout=2)
+    assert delivered.is_set()
+
+
+def test_browser_navigate_reports_thread_read_timeout_as_unavailable():
+    user = User(email="browser@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user)
+    app.include_router(browser_router.router)
+    app.state.thread_store.get = AsyncMock(side_effect=TimeoutError())
+    with patch.object(browser_router, "_browser_tools_enabled") as check_tools:
+        response = TestClient(app, raise_server_exceptions=False).post("/api/threads/thread-1/browser/navigate", json={"url": "https://example.com"})
+    assert response.status_code == 503
+    check_tools.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_peer_disconnect_during_live_frame_does_not_log_stream_failure(live_browser, caplog):
+    ws, session, lease, _ = live_browser
+
+    async def start_screencast(on_frame):
+        on_frame(b"jpeg")
+
+    session.start_screencast.side_effect = start_screencast
+    ws.query_params = {"frame_format": "binary"}
+    ws.send_bytes = AsyncMock(side_effect=WebSocketDisconnect(code=1000))
+    with caplog.at_level(logging.ERROR, logger=browser_router.__name__):
+        await asyncio.wait_for(browser_router.browser_stream(ws, "thread-1"), timeout=2)
+    ws.send_bytes.assert_awaited_once_with(b"jpeg")
+    lease.__exit__.assert_called_once()
+    assert "browser stream error" not in caplog.text

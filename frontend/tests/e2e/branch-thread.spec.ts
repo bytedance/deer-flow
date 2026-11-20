@@ -130,6 +130,57 @@ test.describe("Branch from turn", () => {
     ]);
   });
 
+  test("opens a legacy Chat branch on the agent route returned by the Gateway", async ({
+    page,
+  }) => {
+    const messages = [
+      { type: "human" as const, id: "human", content: "Question" },
+      { type: "ai" as const, id: "answer", content: "Answer" },
+    ];
+    const mock = mockLangGraphAPI(page, {
+      agents: [{ name: "reviewer", description: "Review agent" }],
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Legacy Chat",
+          messages,
+          metadata: { mode: "chat" },
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${MOCK_THREAD_ID}/branches`,
+      async (route) => {
+        const metadata = { mode: "chat", agent_name: "reviewer" };
+        mock.upsertThread({
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Branch",
+          metadata,
+          messages,
+        });
+        await route.fulfill({
+          json: {
+            thread_id: MOCK_THREAD_ID_2,
+            parent_thread_id: MOCK_THREAD_ID,
+            parent_checkpoint_id: "checkpoint",
+            branched_from_message_id: "answer",
+            workspace_clone_mode: "skipped",
+            assistant_id: metadata.agent_name,
+          },
+        });
+      },
+    );
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    const turn = page
+      .locator("[data-assistant-turn]")
+      .filter({ hasText: "Answer" });
+    await turn.hover();
+    await turn.getByRole("button", { name: /branch conversation/i }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/workspace/agents/reviewer/chats/${MOCK_THREAD_ID_2}$`),
+    );
+  });
+
   test("keeps a pinned branch top-level when its parent is unpinned", async ({
     page,
   }) => {

@@ -86,7 +86,12 @@ function renderComposer({ onSubmit }: { onSubmit: SubmitSpy }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  const tree = (onSubmitProp: SubmitSpy, threadId = "thread-1"): ReactNode => (
+  const tree = (
+    onSubmitProp: SubmitSpy,
+    threadId = "thread-1",
+    mode = "flash",
+    status: "streaming" | "ready" = "ready",
+  ): ReactNode => (
     <I18nProvider initialLocale={DEFAULT_LOCALE}>
       <QueryClientProvider client={queryClient}>
         <AuthProvider
@@ -104,8 +109,8 @@ function renderComposer({ onSubmit }: { onSubmit: SubmitSpy }) {
             <PromptInputProvider>
               <InputBox
                 threadId={threadId}
-                status="ready"
-                context={{ mode: "flash" } as never}
+                status={status}
+                context={{ mode } as never}
                 onSubmit={onSubmitProp}
               />
             </PromptInputProvider>
@@ -117,6 +122,10 @@ function renderComposer({ onSubmit }: { onSubmit: SubmitSpy }) {
   const rendered = render(tree(onSubmit));
   return {
     ...rendered,
+    startStreaming: () =>
+      rendered.rerender(tree(onSubmit, "thread-1", "flash", "streaming")),
+    switchMode: (mode: string) =>
+      rendered.rerender(tree(onSubmit, "thread-1", mode)),
     switchThread: (threadId: string) =>
       rendered.rerender(tree(onSubmit, threadId)),
   };
@@ -148,6 +157,80 @@ afterEach(() => {
 });
 
 describe("InputBox staged project attachments", () => {
+  it("switches to text-only Chat, discarding staged files and refusing pasted or dropped files", async () => {
+    stageProjectAttachment("thread-1", ATTACHMENT);
+    const onSubmit = rs.fn();
+    const { container, switchMode } = renderComposer({ onSubmit });
+    await screen.findByTestId("project-attachment-chip");
+    switchMode("chat");
+    await waitFor(() =>
+      expect(screen.queryByTestId("add-attachments-button")).toBeNull(),
+    );
+    expect(screen.queryByTestId("project-attachment-chip")).toBeNull();
+    const file = new File(["secret"], "hidden.txt", { type: "text/plain" });
+    fireEvent.paste(screen.getByRole("textbox"), {
+      clipboardData: { items: [{ kind: "file", getAsFile: () => file }] },
+    });
+    fireEvent.drop(container.querySelector("form")!, {
+      dataTransfer: { files: [file], types: ["Files"] },
+    });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "hello" },
+    });
+    fireEvent.click(getSubmitButton(container));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(lastSubmit(onSubmit).message.files).toEqual([]);
+    expect(
+      lastSubmit(onSubmit).options?.additionalKwargs?.files,
+    ).toBeUndefined();
+    expect(readProjectAttachments("thread-1")).toEqual([]);
+  });
+
+  it("allows ordinary mode selection during streaming and disables entering Chat", async () => {
+    const { startStreaming } = renderComposer({ onSubmit: rs.fn() });
+    startStreaming();
+    const trigger = screen.getByRole("button", { name: "Flash" });
+    expect(trigger.hasAttribute("disabled")).toBe(false);
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const chat = await screen.findByRole("menuitem", { name: /^Chat/ });
+    expect(chat.getAttribute("aria-disabled")).toBe("true");
+    expect(
+      screen
+        .getByRole("menuitem", { name: /^Pro/ })
+        .getAttribute("aria-disabled"),
+    ).not.toBe("true");
+  });
+
+  it("keeps the browser's native text paste when the clipboard also contains a file", () => {
+    const onSubmit = rs.fn();
+    const { switchMode } = renderComposer({ onSubmit });
+    switchMode("chat");
+    const textbox = screen.getByRole("textbox");
+    const file = new File(["image"], "photo.png", { type: "image/png" });
+    // Dispatch returns false when preventDefault cancelled native text insertion.
+    expect(
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: (type: string) =>
+            type === "text/plain" ? "pasted text" : "",
+          items: [
+            { kind: "string", type: "text/plain" },
+            { kind: "file", getAsFile: () => file },
+          ],
+        },
+      }),
+    ).toBe(true);
+    expect(
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: () => "",
+          items: [{ kind: "file", getAsFile: () => file }],
+        },
+      }),
+    ).toBe(false);
+    expect(screen.queryByText("photo.png")).toBeNull();
+  });
+
   it("submits an attachment-only message instead of reading it as empty", async () => {
     stageProjectAttachment("thread-1", ATTACHMENT);
     const onSubmit = rs.fn();
@@ -298,14 +381,15 @@ describe("InputBox staged project attachments", () => {
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "summarize it" },
     });
-    await new Promise((resolve) => setTimeout(resolve, 400));
     const sendingDraftKey = buildComposerDraftKey({
       userId: "user-1",
       threadId: "thread-1",
     });
     const storage = window.sessionStorage;
-    expect(readComposerDraft(storage, sendingDraftKey)?.text).toBe(
-      "summarize it",
+    await waitFor(() =>
+      expect(readComposerDraft(storage, sendingDraftKey)?.text).toBe(
+        "summarize it",
+      ),
     );
     fireEvent.click(getSubmitButton(container));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));

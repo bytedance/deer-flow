@@ -22,6 +22,7 @@ export type CompactThreadContextOptions = {
 
 export type ThreadBranchResponse = {
   thread_id: string;
+  assistant_id?: string | null;
   parent_thread_id: string;
   parent_checkpoint_id: string;
   branched_from_message_id: string;
@@ -137,6 +138,8 @@ export async function patchThreadMetadata(
 export async function createThread(
   threadId: string,
   projectId?: string,
+  mode?: "chat",
+  assistantId?: string,
 ): Promise<AgentThread> {
   const response = await fetchWithAuth(`${getBackendBaseURL()}/api/threads`, {
     method: "POST",
@@ -145,7 +148,9 @@ export async function createThread(
     },
     body: JSON.stringify({
       thread_id: threadId,
+      ...(assistantId ? { assistant_id: assistantId } : {}),
       ...(projectId ? { project_id: projectId } : {}),
+      ...(mode ? { metadata: { mode } } : {}),
     }),
   });
 
@@ -155,7 +160,14 @@ export async function createThread(
     );
   }
 
-  return (await response.json()) as AgentThread;
+  const thread = (await response.json()) as AgentThread;
+  // An earlier command may already have created this lazy thread ID. The
+  // idempotent create returns that row without applying new metadata.
+  if (mode && thread.metadata?.mode !== mode) {
+    const updated = await patchThreadMetadata(threadId, { mode });
+    return { ...thread, metadata: updated.metadata };
+  }
+  return thread;
 }
 
 export async function moveThreadToProject(

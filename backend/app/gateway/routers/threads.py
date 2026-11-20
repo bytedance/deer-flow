@@ -57,7 +57,9 @@ from app.gateway.services import (
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
+from app.gateway.thread_mode import require_thread_files, saved_thread_mode, state_has_attachments, stored_custom_agent, validate_mode_options
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.chat_mode import CHAT_MODE_KEY
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.app_config import AppConfig
@@ -157,15 +159,16 @@ _BRANCH_SIBLING_PAGE_SIZE = 100
 
 
 def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    """Return ``metadata`` with server-controlled keys removed."""
+    """Validate thread preferences and remove server-controlled keys on writes."""
     if not metadata:
         return metadata or {}
+    validate_mode_options(metadata, allow_null=False)
     return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
 
 
-def _is_organization_metadata_patch(metadata: dict[str, Any]) -> bool:
-    """Recognize list-organization writes that must preserve activity time."""
-    return bool(metadata) and set(metadata) <= {THREAD_PINNED_METADATA_KEY, THREAD_ARCHIVED_METADATA_KEY} and all(isinstance(value, bool) for value in metadata.values())
+def _is_thread_preference_patch(metadata: dict[str, Any]) -> bool:
+    """A mode, pin or archive selection preserves the conversation's activity time."""
+    return bool(metadata) and all(key in {THREAD_PINNED_METADATA_KEY, THREAD_ARCHIVED_METADATA_KEY} and isinstance(value, bool) for key, value in metadata.items() if key != "mode")
 
 
 def _message_id(message: Any) -> str | None:
@@ -684,6 +687,7 @@ class ThreadBranchResponse(BaseModel):
     # "seeded" | "skipped_empty" | "failed" — whether the parent history was
     # copied into the branch's run-event feed (see branch_thread).
     history_seed_mode: str
+    assistant_id: str | None = Field(default=None, description="Custom agent selected for a Chat branch")
 
 
 # ---------------------------------------------------------------------------
@@ -1112,7 +1116,7 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     return _existing_thread_response(thread_id, created_record)
 
 
-@router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)
+@router.post("/{thread_id}/branches", response_model=ThreadBranchResponse, response_model_exclude_none=True)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def branch_thread(thread_id: ThreadId, body: ThreadBranchRequest, request: Request) -> ThreadBranchResponse:
     """Create a new main-thread branch from a completed assistant turn."""
@@ -1159,7 +1163,8 @@ async def _branch_thread_with_reservation(
     parent_checkpoint_id = _checkpoint_id(snapshot)
     if not parent_checkpoint_id:
         raise HTTPException(status_code=409, detail="This turn can no longer be branched from.")
-    target_human = _branch_target_human_message(_checkpoint_messages(snapshot), target_message_ids)
+    messages = _checkpoint_messages(snapshot)
+    target_human = _branch_target_human_message(messages, target_message_ids)
     target_human_id = _message_id(target_human)
     if not target_human_id:
         raise HTTPException(status_code=409, detail="This turn can no longer be branched from.")
@@ -1186,6 +1191,22 @@ async def _branch_thread_with_reservation(
         "branch_parent_message_id": body.message_id,
         "branch_created_at": now,
     }
+    turn_ids = target_message_ids | {target_human_id}
+    chat_turn = any(_message_additional_kwargs(message).get(CHAT_MODE_KEY) == "chat" for message in messages if _message_id(message) in turn_ids)
+    branch_mode = "chat" if chat_turn else saved_thread_mode(source_metadata)
+    if branch_mode is not None:
+        branch_metadata["mode"] = branch_mode
+    binding = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
+    branch_assistant_id = source_record.get("assistant_id")
+    if branch_assistant_id is None and chat_turn:
+        branch_assistant_id = stored_custom_agent(binding.get(CHECKPOINT_AGENT_NAME_METADATA_KEY))
+    try:
+        custom_agent = custom_agent_name(branch_assistant_id)
+    except ValueError:
+        # Do not carry an invalid legacy thread ID into a new conversation.
+        branch_assistant_id = custom_agent = None
+    if chat_turn and custom_agent:
+        branch_metadata["agent_name"] = custom_agent
     # A branch extends its source conversation, so the new row inherits the
     # source thread's project membership — an unassigned branch would surface
     # under Recent chats instead of the source thread's project group. The
@@ -1250,7 +1271,7 @@ async def _branch_thread_with_reservation(
     # Stamp both synthetic checkpoints with the branch-creation time because
     # serializers fall back to metadata when snapshot.created_at is absent.
     checkpoint_metadata_updates = {
-        **checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None)),
+        **binding,
         **branch_metadata,
         "source": "branch",
         "updated_at": now,
@@ -1276,14 +1297,6 @@ async def _branch_thread_with_reservation(
     except Exception:
         logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
-
-    branch_assistant_id = source_record.get("assistant_id")
-    try:
-        custom_agent_name(branch_assistant_id)
-    except ValueError:
-        # Read compatibility for legacy records must not copy an invalid id
-        # into a new thread. Preserve every valid spelling as create does.
-        branch_assistant_id = None
 
     async def _write_branch_row(project_id: str | None) -> dict:
         try:
@@ -1320,7 +1333,7 @@ async def _branch_thread_with_reservation(
     try:
         async with reserve_history_seed(request, new_thread_id) as reservation:
             seed_events = build_branch_history_seed_events(
-                _checkpoint_messages(snapshot),
+                messages,
                 thread_id=new_thread_id,
                 run_id_prefix=f"branch-seed-{new_thread_id}",
                 parent_thread_id=thread_id,
@@ -1336,7 +1349,9 @@ async def _branch_thread_with_reservation(
         logger.exception("Failed to seed branch history run-events for thread %s", sanitize_log_param(new_thread_id))
         history_seed_mode = "failed"
 
-    if branch_from_latest_turn:
+    if branch_mode == "chat":
+        workspace_clone_mode = "skipped_chat_mode"
+    elif branch_from_latest_turn:
         workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
     else:
         workspace_clone_mode = "skipped_historical_turn"
@@ -1347,6 +1362,7 @@ async def _branch_thread_with_reservation(
         branched_from_message_id=body.message_id,
         workspace_clone_mode=workspace_clone_mode,
         history_seed_mode=history_seed_mode,
+        assistant_id=branch_metadata.get("agent_name"),
     )
 
 
@@ -1442,10 +1458,7 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
-    # Pin/unpin and archive/restore are not conversation activity, so it must not bump ``updated_at``.
-    # Other metadata PATCH callers keep the public endpoint's existing recency
-    # contract unless they get their own explicit no-touch API surface.
-    touch = not _is_organization_metadata_patch(body.metadata)
+    touch = not _is_thread_preference_patch(body.metadata)
     try:
         await thread_store.update_metadata(thread_id, body.metadata, touch=touch)
     except Exception:
@@ -1905,6 +1918,8 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     thread_store = get_thread_store(request)
     # Validate external roles before materializing a graph or reserving a write.
     values = strip_server_owned_state_metadata(dict(body.values or {}))
+    if state_has_attachments(values):
+        await require_thread_files(thread_store, thread_id, user_id=get_effective_user_id(), internal_owner_id=get_trusted_internal_owner_user_id(request))
     checkpoint_id = body.checkpoint_id
     checkpoint_ns = ""
     if body.checkpoint is not None:

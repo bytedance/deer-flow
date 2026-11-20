@@ -2,7 +2,10 @@ import type { AIMessage, Message, ToolMessage } from "@langchain/langgraph-sdk";
 
 import { getBackendBaseURL } from "../config";
 import { indexToolResults } from "../messages/tool-result";
-import { extractPresentFilesFromMessage } from "../messages/utils";
+import {
+  chatTurnMessages,
+  extractPresentFilesFromMessage,
+} from "../messages/utils";
 import { isStaticWebsiteOnly } from "../static-mode";
 import type { AgentThreadState } from "../threads";
 
@@ -198,8 +201,10 @@ export function collectThreadArtifactPaths(
   messages: readonly Message[],
 ): readonly string[] {
   let toolResults: ReturnType<typeof indexToolResults<Message>> | undefined;
+  const chatMessages = chatTurnMessages(messages);
   const presented = messages
     .flatMap((message, index) => {
+      if (chatMessages.has(message)) return [];
       const paths = extractPresentFilesFromMessage(message);
       if (
         message.type !== "ai" ||

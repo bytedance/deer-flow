@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import Permissions, require_permission, resolve_route_permissions
 from app.gateway.browser_capability import browser_capability
+from app.gateway.thread_mode import require_file_mode, saved_thread_mode
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
 from deerflow.utils.file_io import await_drained
@@ -17,6 +18,8 @@ from deerflow.utils.thread_id import ThreadId
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["browser"])
+
+_BROWSER_ACCESS_CHECK_SECONDS = 5
 
 
 class BrowserNavigateRequest(BaseModel):
@@ -60,7 +63,7 @@ def _browser_tools_enabled() -> bool:
     return False
 
 
-async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -> bool:
+async def _require_browser_thread(thread_store, thread_id: str, user_id: str) -> None:
     """Require an explicit owner for browser control's high-trust surface.
 
     General thread reads retain compatibility with legacy ``user_id=NULL``
@@ -68,8 +71,15 @@ async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -
     so REST navigation and the Live socket deliberately use a stricter policy:
     only an existing row whose owner exactly matches may drive it.
     """
-    record = await thread_store.get(thread_id, user_id=user_id)
-    return record is not None and record.get("user_id") == user_id
+    try:
+        async with asyncio.timeout(5):
+            record = await thread_store.get(thread_id, user_id=user_id) if thread_store is not None else None
+    except Exception as exc:
+        logger.warning("Failed to read browser thread access", exc_info=True)
+        raise HTTPException(status_code=503, detail="Browser thread access is unavailable") from exc
+    if record is None or record.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+    require_file_mode(saved_thread_mode(record.get("metadata")))
 
 
 @router.post(
@@ -82,8 +92,7 @@ async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -
 async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, request: Request) -> BrowserNavigateResponse:
     user_id = str(request.state.auth.user.id)
     thread_store = getattr(request.app.state, "thread_store", None)
-    if thread_store is None or not await _browser_thread_owned_by(thread_store, thread_id, user_id):
-        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+    await _require_browser_thread(thread_store, thread_id, user_id)
 
     if not await asyncio.to_thread(_browser_tools_enabled):
         raise HTTPException(status_code=404, detail="Browser automation is not enabled")
@@ -246,18 +255,17 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         return
 
     thread_store = getattr(websocket.app.state, "thread_store", None)
-    if thread_store is None:
-        # Fail closed: the live stream drives a real browser (cookies,
-        # logged-in pages), so if the ownership store can't be resolved we must
-        # deny rather than let any authenticated caller attach to any thread's
-        # retained session.
-        await websocket.close(code=4404)
-        return
-    # Browser control is stricter than ordinary legacy-thread access: NULL-owner
-    # rows are not shared because a retained page may expose cookies or account
-    # data from a previous authenticated browser session.
-    if not await _browser_thread_owned_by(thread_store, thread_id, str(user.id)):
-        await websocket.close(code=4404)
+
+    async def _check_access() -> bool:
+        try:
+            await _require_browser_thread(thread_store, thread_id, str(user.id))
+        except HTTPException as exc:
+            await websocket.close(code={404: 4404, 503: 4501}.get(exc.status_code, 4403))
+        else:
+            return True
+        return False
+
+    if not await _check_access():
         return
 
     if not await asyncio.to_thread(_browser_tools_enabled):
@@ -380,6 +388,14 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
                 },
             )
 
+    async def _watch_access() -> None:
+        while True:
+            await asyncio.sleep(_BROWSER_ACCESS_CHECK_SECONDS)
+            if not await _check_access():
+                return
+
+    screencast_ready = asyncio.Event()
+
     async def _poll_location() -> None:
         # The agent drives the same session through its tools (browser_navigate /
         # click / type), which do not flow through this socket's input handler, so
@@ -389,6 +405,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         # Avoid screenshotting here, because opening a Live panel already primes a
         # frame and GitHub-style SPAs can generate many URL/render transitions.
         last_url: str | None = None
+        await screencast_ready.wait()
         while True:
             await asyncio.sleep(1.0)
             with contextlib.suppress(Exception):
@@ -440,6 +457,8 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         return None
 
     async def _read_inputs() -> None:
+        await _send_url()
+        await _send_tabs()
         while True:
             try:
                 raw = await websocket.receive_text()
@@ -480,12 +499,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
                         await _send_url()
                         await _send_tabs()
 
-    pump_task = asyncio.create_task(_pump_frames())
-    input_task: asyncio.Task | None = None
-    reader_task: asyncio.Task | None = None
-    poll_task: asyncio.Task | None = None
-    cancellation: asyncio.CancelledError | None = None
-    try:
+    async def _serve_session() -> None:
         # Seed the live page from the latest browser_view URL. A thread can have
         # a stale browser session from an earlier panel/live attempt; if that
         # page differs from the latest visible browser artifact, align Live with
@@ -501,26 +515,22 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         except BrowserLiveViewerError:
             await websocket.close(code=4409)
             return
-        await _send_url()
-        await _send_tabs()
-        input_task = asyncio.create_task(_process_inputs())
-        reader_task = asyncio.create_task(_read_inputs())
-        poll_task = asyncio.create_task(_poll_location())
-        await reader_task
-    except WebSocketDisconnect:
-        pass
+        screencast_ready.set()
+        await _read_inputs()
+
+    cancellation: asyncio.CancelledError | None = None
+    try:
+        with contextlib.suppress(WebSocketDisconnect):
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(run()) for run in (_serve_session, _watch_access, _pump_frames, _process_inputs, _poll_location)]
+                _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
     except asyncio.CancelledError as exc:
         cancellation = exc
     except Exception as exc:
         logger.exception("browser stream error: thread_id=%s err=%s", thread_id, exc)
     finally:
-        pump_task.cancel()
-        if input_task is not None:
-            input_task.cancel()
-        if reader_task is not None:
-            reader_task.cancel()
-        if poll_task is not None:
-            poll_task.cancel()
         try:
             await await_drained(session.stop_screencast(_on_frame))
         except asyncio.CancelledError as exc:

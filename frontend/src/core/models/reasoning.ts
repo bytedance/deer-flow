@@ -17,9 +17,19 @@ export type GenericReasoningEffort = (typeof GENERIC_REASONING_EFFORTS)[number];
  */
 export type ReasoningEffortValue = GenericReasoningEffort | (string & {});
 
-export type InputMode = "flash" | "thinking" | "pro" | "ultra";
+export const INPUT_MODES = [
+  "flash",
+  "thinking",
+  "pro",
+  "ultra",
+  "chat",
+] as const;
+export type InputMode = (typeof INPUT_MODES)[number];
 
-const MODE_EFFORT_PRESETS: Record<InputMode, GenericReasoningEffort> = {
+const MODE_EFFORT_PRESETS: Record<
+  Exclude<InputMode, "chat">,
+  GenericReasoningEffort
+> = {
   flash: "minimal",
   thinking: "low",
   pro: "medium",
@@ -116,6 +126,7 @@ export function getResolvedMode(
   mode: InputMode | undefined,
   model: Model | null | undefined,
 ): InputMode {
+  if (mode === "chat") return mode;
   const { thinking } = getReasoningCapabilities(model);
   if (thinking === "unsupported") {
     return "flash";
@@ -134,5 +145,7 @@ export function reasoningEffortForMode(
   mode: InputMode,
   model: Model | null | undefined,
 ): ReasoningEffortValue | undefined {
-  return resolveReasoningEffort(model, MODE_EFFORT_PRESETS[mode]);
+  return mode === "chat"
+    ? undefined
+    : resolveReasoningEffort(model, MODE_EFFORT_PRESETS[mode]);
 }

@@ -85,6 +85,27 @@ def test_group_filter_and_name_collision_fail_closed(installed):
         build_plugin_tools(loaded, reserved_names={tool.name})
 
 
+def test_chat_assembly_does_not_register_ordinary_plugin_actions(installed):
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.tools.tools import get_available_tools
+
+    _, plugin, _ = installed
+    action = replace(plugin.tools[0], name="run_workflow", group="web")
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test"):
+        registry.plugin(replace(plugin, tools=(action,)))
+    config = AppConfig(sandbox=SandboxConfig(use="test:Sandbox"))
+    loaded = registry.build()
+    (action_tool,) = build_plugin_tools(loaded)
+
+    def names(chat_mode):
+        return {tool.name for tool in get_available_tools(groups=["web"], app_config=config, extensions=loaded, include_mcp=False, chat_mode=chat_mode)}
+
+    assert action_tool.name not in names(True)
+    assert action_tool.name in names(False)
+
+
 def test_built_tools_carry_host_recorded_plugin_provenance(installed):
     """The tag is written at construction, from registry-validated values."""
     from deerflow.tools.tool_provenance import get_plugin_source, is_plugin_tool, resolve_tool_provenance

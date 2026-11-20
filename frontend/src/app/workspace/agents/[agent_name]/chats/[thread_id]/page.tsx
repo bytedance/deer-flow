@@ -71,16 +71,12 @@ import { useNotification } from "@/core/notification/hooks";
 import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { resolveThreadContext, selectThreadModel } from "@/core/settings/store";
-import { createThread } from "@/core/threads/api";
-import {
-  useThreadMetadata,
-  useThreadStream,
-  useThreadTokenUsage,
-} from "@/core/threads/hooks";
+import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
 import {
   selectContextUsage,
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
+import { useThreadInputMode } from "@/core/threads/use-thread-input-mode";
 import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -104,7 +100,7 @@ export default function AgentChatPage() {
   // the thread. `isWelcomeMode` controls only the centered welcome layout, so
   // it can flip immediately on submit without triggering eager history loads.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
-  const [settings, setSettings] = useThreadSettings(threadId);
+  const [preferences, setSettings] = useThreadSettings(threadId);
   const modelControl = useModelControl(
     `${user?.id ?? "anonymous"}:${agent_name}:${threadId}`,
     locale,
@@ -118,9 +114,21 @@ export default function AgentChatPage() {
     isNewThread || isMock ? undefined : threadId,
     { enabled: !isMock },
   );
-  const threadMetadata = useThreadMetadata(threadId, {
-    enabled: !isNewThread && !isMock,
+  const {
+    context,
+    mode,
+    changeMode,
+    prepareThread,
+    threadMetadata,
+    pending: modePending,
+    retryMode,
+  } = useThreadInputMode({
+    threadId,
+    preferred: preferences.context,
+    isNewThread,
     isMock,
+    userId: user?.id,
+    agentName: agent_name,
   });
   // A saved thread that exists on the server is being read while open:
   // clears its unread dot (sidebar and chats list) on every device.
@@ -210,7 +218,7 @@ export default function AgentChatPage() {
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
     assistantId: agent_name,
-    context: { ...settings.context, agent_name: agent_name },
+    context: { ...context, agent_name: agent_name },
     isMock,
     onSend: () => {
       setIsWelcomeMode(false);
@@ -276,7 +284,7 @@ export default function AgentChatPage() {
     () => () => {
       submissionEpochRef.current += 1;
     },
-    [agent_name, threadId, user?.id],
+    [agent_name, mode, threadId, user?.id],
   );
 
   const handleSubmit = useCallback(
@@ -286,20 +294,17 @@ export default function AgentChatPage() {
       if (submissionEpochRef.current !== submissionEpoch)
         throw new Error("thread-submission-stale");
       const modelInput = modelTaskInput(message.text, choice);
-      const runContext: Record<string, unknown> = { agent_name };
-      if (
+      const modelOnly =
         choice?.scope === "conversation" &&
         !modelInput.text &&
-        message.files.length === 0 &&
-        isNewThread
-      ) {
-        await createThread(threadId);
-        if (submissionEpochRef.current !== submissionEpoch)
-          throw new Error("thread-submission-stale");
-      }
+        message.files.length === 0;
+      await prepareThread(modelOnly);
+      if (submissionEpochRef.current !== submissionEpoch)
+        throw new Error("thread-submission-stale");
+      const runContext: Record<string, unknown> = { agent_name };
       if (choice?.model_name) {
         if (choice.scope === "task") {
-          if (settings.context.mode !== "ultra") {
+          if (mode !== "ultra") {
             toast.error(
               locale.startsWith("zh")
                 ? "当前未启用子任务，请先启用 Ultra 模式。"
@@ -345,11 +350,7 @@ export default function AgentChatPage() {
         );
         throw new Error("model-task-missing");
       }
-      if (
-        choice?.scope === "conversation" &&
-        !modelInput.text &&
-        message.files.length === 0
-      ) {
+      if (modelOnly) {
         if (isNewThread) {
           history.replaceState(
             null,
@@ -402,7 +403,8 @@ export default function AgentChatPage() {
       threadId,
       agent_name,
       prepareModelControl,
-      settings.context.mode,
+      prepareThread,
+      mode,
       locale,
       isNewThread,
       setThreadId,
@@ -474,7 +476,12 @@ export default function AgentChatPage() {
     agent !== null &&
     (agent.tool_groups == null || agent.tool_groups.includes("browser"));
   const browserEnabled =
-    !isNewThread && !isMock && browserControlEnabled && agentBrowserEnabled;
+    mode !== "chat" &&
+    !modePending &&
+    !isNewThread &&
+    !isMock &&
+    browserControlEnabled &&
+    agentBrowserEnabled;
   const { activeGoal, hasGoal, goalOutcome, setLocalGoal } = useActiveGoal(
     threadId,
     thread.values.goal,
@@ -503,7 +510,7 @@ export default function AgentChatPage() {
     <ThreadContext.Provider value={{ thread, isMock }}>
       <SidecarProvider
         parentThreadId={threadId}
-        context={{ ...settings.context, agent_name }}
+        context={{ ...preferences.context, agent_name }}
         isMock={isMock}
       >
         <ChatBox threadId={threadId} browserEnabled={browserEnabled}>
@@ -752,7 +759,7 @@ export default function AgentChatPage() {
                           ? "streaming"
                           : "ready"
                     }
-                    context={settings.context}
+                    context={context}
                     extraHeader={
                       isWelcomeMode &&
                       !hasGoal &&
@@ -769,11 +776,20 @@ export default function AgentChatPage() {
                       hasPendingApproval
                     }
                     inputLocked={hasPendingApproval}
+                    modePending={modePending}
+                    onRetryMode={retryMode}
                     onContextChange={(context, options) => {
-                      if (options?.automatic)
-                        resolveThreadContext(threadId, context);
-                      else setSettings("context", context);
+                      changeMode(
+                        context.mode,
+                        () => {
+                          if (options?.automatic)
+                            resolveThreadContext(threadId, context);
+                          else setSettings("context", context);
+                        },
+                        options?.automatic,
+                      );
                     }}
+                    onPrepareThread={prepareThread}
                     onGoalChange={setLocalGoal}
                     onSubmit={handleSubmit}
                     onBusySubmit={canSendInput ? sendInput : undefined}

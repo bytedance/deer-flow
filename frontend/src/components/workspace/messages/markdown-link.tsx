@@ -95,6 +95,8 @@ function isExternalUrl(href: string | undefined): boolean {
   return /^https?:\/\//.test(href);
 }
 
+export const TextOnlyMessageContext = createContext(false);
+
 /**
  * The current thread's artifact paths, provided by the message list. Inside
  * it, a link rendered with a `threadId` resolves relative destinations
@@ -124,6 +126,17 @@ export function createMarkdownLinkComponent(
     ...props
   }: AnchorHTMLAttributes<HTMLAnchorElement>) {
     const artifactPaths = useContext(MessageArtifactPathsContext);
+    const textOnly = useContext(TextOnlyMessageContext);
+    if (
+      textOnly &&
+      href &&
+      (isPotentialRelativeArtifactReference(href) ||
+        href.startsWith("sandbox:") ||
+        href.startsWith("/mnt/") ||
+        /\/api\/threads\/[^/]+\/(?:artifacts|uploads)(?:\/|$)/.test(href))
+    ) {
+      return <span className={props.className}>{props.children}</span>;
+    }
     if (/^#(?:user-content-)?knowledge-source-/.test(href ?? "")) {
       const id = retrievalSourceId(href);
       const source = knowledgeSources.find((item) => item.id === id);

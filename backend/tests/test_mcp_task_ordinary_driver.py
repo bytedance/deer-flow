@@ -107,6 +107,26 @@ async def test_personal_connection_scope_survives_submit_status_and_cancel() -> 
 
 
 @pytest.mark.asyncio
+async def test_chat_submission_keeps_poll_and_cancel_in_chat_and_returns_text_results() -> None:
+    artifact = {"uri": "file:///tmp/report.json", "mime_type": "application/json"}
+    caller = FakeCaller(
+        _result({"task_id": "remote-1", "status": "running"}),
+        _result({"task_id": "remote-1", "status": "completed", "result": "report", "result_artifact": artifact}),
+        _result({"task_id": "remote-1", "status": "cancelled", "result_artifact": artifact}),
+    )
+    request = _request()
+    driver = OrdinaryMcpTaskDriver(caller)
+    submission = await driver.submit(replace(request, driver_data={**request.driver_data, "chat_mode": True}))
+    reference = replace(_reference(), driver_data=submission.driver_data)
+    completed = await driver.get_status(reference)
+    cancelled = await driver.cancel(reference)
+
+    assert all(call["chat_mode"] for call in caller.calls)
+    assert completed.result == "report"
+    assert completed.result_artifact is cancelled.result_artifact is None
+
+
+@pytest.mark.asyncio
 async def test_unknown_task_connection_scope_fails_closed() -> None:
     driver = OrdinaryMcpTaskDriver(FakeCaller())
     reference = _reference()

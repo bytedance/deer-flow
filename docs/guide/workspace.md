@@ -1,5 +1,21 @@
 # Workspace UI
 
+## Chat mode
+
+Choose **Chat** from the mode selector in a default or custom-agent conversation
+for text replies. For example, asking the agent to create a file containing
+“你好” returns “你好” in the conversation. Chat accepts text input and skips
+the DeerFlow sandbox, Bash and file attachments.
+
+Selecting Chat applies to this conversation. A new conversation uses your
+ordinary mode preference or the model's usual default. While Chat is selected,
+the web app explicitly requests it with each new message.
+
+The selected agent keeps its model, instructions, memory settings and tool
+permissions. Agents with web search or authorized MCP tools can use them in
+Chat. MCP tools run with the permissions of their configured server. You can
+switch modes in the same conversation and revisit files from earlier turns.
+
 ## Token usage dashboard
 
 Open **Token usage** in the workspace sidebar (`/workspace/usage`) to review

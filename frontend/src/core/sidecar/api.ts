@@ -1,6 +1,7 @@
 import { getAPIClient } from "@/core/api";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import type { InputMode } from "@/core/models/reasoning";
 import type { AgentThread } from "@/core/threads";
 
 import type { SidecarContext } from "./context";
@@ -26,16 +27,18 @@ const inFlightCreates = new Map<string, Promise<AgentThread>>();
 export async function createSidecarThread({
   parentThreadId,
   context,
+  mode,
 }: {
   parentThreadId: string;
   context: SidecarContext | SidecarContext[];
+  mode?: InputMode;
 }): Promise<AgentThread> {
   const inFlight = inFlightCreates.get(parentThreadId);
   if (inFlight) {
     return inFlight;
   }
 
-  const request = createSidecarThreadRequest({ parentThreadId, context });
+  const request = createSidecarThreadRequest({ parentThreadId, context, mode });
   inFlightCreates.set(parentThreadId, request);
   try {
     return await request;
@@ -49,9 +52,11 @@ export async function createSidecarThread({
 async function createSidecarThreadRequest({
   parentThreadId,
   context,
+  mode,
 }: {
   parentThreadId: string;
   context: SidecarContext | SidecarContext[];
+  mode?: InputMode;
 }): Promise<AgentThread> {
   const response = await fetchWithAuth(`${getBackendBaseURL()}/api/threads`, {
     method: "POST",
@@ -59,7 +64,10 @@ async function createSidecarThreadRequest({
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      metadata: buildSidecarThreadMetadata(parentThreadId, context),
+      metadata: {
+        ...buildSidecarThreadMetadata(parentThreadId, context),
+        ...(mode === "chat" ? { mode } : {}),
+      },
     }),
   });
 

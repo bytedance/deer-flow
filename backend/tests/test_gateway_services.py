@@ -60,6 +60,549 @@ def _run_create_request(content="hello", **kwargs):
     )
 
 
+@pytest.fixture
+def mode_app():
+    from _router_auth_helpers import make_authed_test_app
+
+    from app.gateway.auth.models import User
+    from app.gateway.routers import runs, thread_runs
+
+    user = User(email="chat@example.com", password_hash="unused")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    request, run_store, threads = _make_start_run_persistence_context()
+    for name, value in vars(request.app.state).items():
+        setattr(app.state, name, value)
+    app.include_router(runs.router)
+    app.include_router(thread_runs.router)
+    return app, str(user.id), run_store, threads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("input_message", "other"),
+    [
+        ({"content": "read it", "additional_kwargs": {"files": [{"filename": "data.txt"}]}}, {}),
+        ({"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]}, {}),
+        ({"content": [{"type": "file", "file": {"file_id": "123"}}]}, {}),
+        ({"role": "tool", "tool_call_id": "lookup", "content": "Result", "artifact": {"resource_links": [{"name": "report.pdf", "uri": "https://example.org/report.pdf"}]}}, {}),
+        ({"role": "assistant", "content": [{"type": "thinking", "thinking": "Look up the source"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]}, {}),
+        ({"role": "user", "content": [{"type": "tool_use", "id": "lookup", "name": "web_search", "input": {}}]}, {}),
+        ({"content": "read it"}, {"context": {"attachments": [{"path": "/mnt/user-data/uploads/a"}]}}),
+        ({"content": "read it"}, {"config": {"configurable": {"files": ["a.txt"], "mode": "ultra"}}}),
+        ({"content": "read it"}, {"input": {"tool_artifacts": [{"handle": "existing.txt"}]}}),
+        ({"content": "read it"}, {"input": {"uploaded_files": [{"filename": "existing.txt"}]}}),
+    ],
+)
+async def test_chat_thread_rejects_run_attachments_before_admission(_stub_app_config, mode_app, input_message, other, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, run_store, threads = mode_app
+    await threads.create("text-only", user_id=owner, metadata={"mode": "chat"})
+    run_agent = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", run_agent)
+    body = {**other, "context": {**other.get("context", {}), "mode": "chat"}, "input": {"messages": [{"role": "user", **input_message}], **other.get("input", {})}}
+    body.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = "text-only"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for path in ("/api/threads/text-only/runs", "/api/runs/wait"):
+            denied = await client.post(path, json=body)
+            assert denied.status_code == 422, denied.text
+    assert not await run_store.list_by_thread("text-only", user_id=owner)
+    run_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_accepts_replayed_assistant_and_tool_protocol_blocks(_stub_app_config, mode_app, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, _, threads = mode_app
+    await threads.create("chat-replay", user_id=owner, metadata={"mode": "chat"})
+    messages = [
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "Looking up the source"}, {"type": "tool_use", "id": "lookup", "name": "web_search", "input": {"query": "spring"}}]},
+        {"role": "tool", "tool_call_id": "lookup", "content": [{"type": "json", "json": {"title": "Spring"}}]},
+        {"role": "user", "content": "Summarize the result"},
+    ]
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads/chat-replay/runs", json={"context": {"mode": "chat"}, "input": {"messages": messages}})
+    assert response.status_code == 200, response.text
+    record = await app.state.run_manager.get(response.json()["run_id"], user_id=owner)
+    await record.task
+    accepted = worker.await_args.kwargs["graph_input"]["messages"]
+    assert [message.content for message in accepted] == [message["content"] for message in messages]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context", [{}, {"mode": "flash"}], ids=["default", "explicit-flash"])
+async def test_thread_run_checks_the_owner_at_entry_and_once_at_admission(_stub_app_config, mode_app, monkeypatch, context):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, _, threads = mode_app
+    await threads.create("read-count", user_id=owner)
+    check = AsyncMock(wraps=threads.check_access)
+    get = AsyncMock(wraps=threads.get)
+    monkeypatch.setattr(threads, "check_access", check)
+    monkeypatch.setattr(threads, "get", get)
+    manager = app.state.run_manager
+    admit = manager.create_or_reject
+    admission_reads = []
+
+    async def count_at_admission(*args, **kwargs):
+        admission_reads.append(check.await_count + get.await_count)
+        return await admit(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "create_or_reject", count_at_admission)
+    monkeypatch.setattr(services, "run_agent", AsyncMock())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads/read-count/runs", json={"input": {"messages": [{"role": "user", "content": "hello"}]}, "context": context})
+    assert response.status_code == 200, response.text
+    await (await manager.get(response.json()["run_id"], user_id=owner)).task
+    assert admission_reads == [2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context", [{}, {"mode": "flash"}], ids=["default", "explicit-flash"])
+async def test_thread_run_cannot_recreate_a_thread_deleted_during_request(_stub_app_config, mode_app, monkeypatch, context):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, runs, threads = mode_app
+    await threads.create("deleted-during-request", user_id=owner)
+
+    async def delete_before_admission(request, *, thread_id, assistant_id):
+        await threads.delete(thread_id, user_id=owner)
+
+    monkeypatch.setattr(services, "ensure_checkpoint_history_seeded", delete_before_admission)
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads/deleted-during-request/runs", json={"input": {"messages": [{"role": "user", "content": "hello"}]}, "context": context})
+    assert response.status_code == 404, response.text
+    assert not await runs.list_by_thread("deleted-during-request", user_id=owner)
+    worker.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved_mode", ["flash", "chat"])
+async def test_mode_admission_recovers_the_owner_row_after_transient_storage_failure(_stub_app_config, mode_app, monkeypatch, saved_mode):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, _, threads = mode_app
+    await threads.create("mode-recovery", user_id=owner, metadata={"mode": saved_mode})
+    get_row = threads.get
+    reads = []
+
+    async def flaky_read(thread_id, **kwargs):
+        reads.append(kwargs)
+        if len(reads) == 1:
+            raise OSError("transient metadata read failure")
+        return await get_row(thread_id, **kwargs)
+
+    monkeypatch.setattr(threads, "get", flaky_read)
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads/mode-recovery/runs", json={"input": {"messages": [{"role": "user", "content": "Hello"}]}, "context": {"mode": None}})
+    assert response.status_code == 200, response.text
+    record = await app.state.run_manager.get(response.json()["run_id"], user_id=owner)
+    await record.task
+    assert worker.await_args.kwargs["config"].get("context", {}).get("mode") is None
+    assert (await threads.get("mode-recovery", user_id=owner))["metadata"].get("mode") == (None if saved_mode == "chat" else saved_mode)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("failure", "reads"), [(OSError("metadata unavailable"), 2), (ValueError("malformed row"), 1)])
+async def test_unknown_chat_mode_fails_closed_even_for_a_plain_text_run(_stub_app_config, mode_app, monkeypatch, failure, reads):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, _, threads = mode_app
+    await threads.create("unknown-mode", user_id=owner, metadata={"mode": "chat"})
+    lookup = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(threads, "get", lookup)
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads/unknown-mode/runs", json={"input": {"messages": [{"role": "user", "content": "Generate a file"}]}})
+    assert response.status_code == 503, response.text
+    assert lookup.await_count == reads
+    worker.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("section", [{"context": {"mode": "Chat"}}, {"config": {"configurable": {"mode": ["chat"]}}}, {"config": {"context": {"mode": "unknown"}}}])
+async def test_unknown_run_mode_is_rejected_before_start(_stub_app_config, mode_app, monkeypatch, section):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, run_store, threads = mode_app
+    await threads.create("mode-typo", user_id=owner)
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads/mode-typo/runs", json={**section, "input": {"messages": [{"role": "user", "content": "Generate a file"}]}})
+    assert response.status_code == 422, response.text
+    assert not await run_store.list_by_thread("mode-typo", user_id=owner)
+    worker.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_mode", ["chat", "flash"])
+async def test_unknown_saved_thread_mode_requires_a_recognized_selection(_stub_app_config, mode_app, monkeypatch, repair_mode):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, _, threads = mode_app
+    await threads.create("legacy-mode-typo", user_id=owner, metadata={"mode": "Chat"})
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    body = {"input": {"messages": [{"role": "user", "content": "Generate a file"}]}}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        blocked = await client.post("/api/threads/legacy-mode-typo/runs", json=body)
+        assert blocked.status_code == 409, blocked.text
+        worker.assert_not_awaited()
+        repaired = await client.post("/api/threads/legacy-mode-typo/runs", json={**body, "context": {"mode": repair_mode}})
+        assert repaired.status_code == 200, repaired.text
+    record = await app.state.run_manager.get(repaired.json()["run_id"], user_id=owner)
+    await record.task
+    assert worker.await_args.kwargs["config"]["context"]["mode"] == repair_mode
+    assert (await threads.get("legacy-mode-typo", user_id=owner))["metadata"]["mode"] == repair_mode
+
+
+@pytest.mark.asyncio
+async def test_explicit_run_selection_takes_precedence_over_previous_turns(_stub_app_config, mode_app, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+    from deerflow.runtime import RunStatus
+
+    app, owner, _, threads = mode_app
+    await threads.create("legacy-modes", user_id=owner)
+
+    async def complete(_bridge, manager, record, **_kwargs):
+        await manager.try_start(record.run_id)
+        await manager.set_status(record.run_id, RunStatus.success)
+
+    monkeypatch.setattr(services, "run_agent", complete)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for legacy, explicit, expected, saved in [
+            ("flash", None, "flash", None),
+            ("pro", None, "pro", None),
+            ("ultra", "chat", "chat", "chat"),
+            ("flash", None, "flash", "flash"),
+            ("flash", "thinking", "thinking", "flash"),
+            ("flash", "ultra", "ultra", "flash"),
+        ]:
+            body = {"input": {"messages": [{"role": "user", "content": "Hello"}]}, "config": {"configurable": {"mode": legacy}}}
+            if explicit:
+                body["context"] = {"mode": explicit}
+            response = await client.post("/api/threads/legacy-modes/runs", json=body)
+            assert response.status_code == 200, response.text
+            assert response.json()["metadata"]["mode"] == expected
+            assert (await threads.get("legacy-modes", user_id=owner))["metadata"].get("mode") == saved
+            record = await app.state.run_manager.get(response.json()["run_id"], user_id=owner)
+            await record.task
+
+
+@pytest.mark.asyncio
+async def test_ordinary_run_creates_thread_without_a_mode_preference(_stub_app_config, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.gateway import services
+
+    request, _, threads = _make_start_run_persistence_context()
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    record = await services.start_run(_run_create_request(context={"mode": "pro"}), "new-standard", request)
+    await record.task
+    assert record.metadata["mode"] == "pro"
+    assert worker.await_args.kwargs["config"]["context"]["mode"] == "pro"
+    assert "mode" not in (await threads.get("new-standard"))["metadata"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_source", [None, AUTH_SOURCE_INTERNAL])
+async def test_new_run_persists_selected_mode_and_stamps_accepted_message(_stub_app_config, monkeypatch, auth_source):
+    from fastapi import HTTPException
+
+    from app.gateway import services
+    from deerflow.runtime import RunStatus
+
+    request, run_store, threads = _make_start_run_persistence_context()
+    request.state.auth_source = auth_source
+    modes = []
+
+    async def complete(_bridge, manager, record, *, config, graph_input, **_kwargs):
+        modes.append((config.get("context", {}).get("mode"), config["configurable"].get("mode"), graph_input["messages"][-1].additional_kwargs.get("deerflow_mode")))
+        await manager.try_start(record.run_id)
+        await manager.set_status(record.run_id, RunStatus.success)
+
+    monkeypatch.setattr(services, "run_agent", complete)
+    first = await services.start_run(_run_create_request("one", context={"mode": "chat"}, config={"context": {"mode": "ultra"}}), "modes", request, idempotency_key="first")
+    assert (await threads.get("modes"))["metadata"]["mode"] == "chat"
+    await first.task
+    assert (await run_store.get(first.run_id))["kwargs"]["input"]["messages"][0]["additional_kwargs"]["deerflow_mode"] == "chat"
+    with pytest.raises(HTTPException) as changed:
+        await services.start_run(_run_create_request("one", context={"mode": "flash"}), "modes", request, idempotency_key="first")
+    assert changed.value.status_code == 409
+    assert (await threads.get("modes"))["metadata"]["mode"] == "chat"
+    ordinary = await services.start_run(_run_create_request([{"type": "text", "text": "two"}]), "modes", request)
+    await ordinary.task
+    assert ordinary.metadata.get("mode") is None
+    assert (await threads.get("modes"))["metadata"].get("mode") is None
+
+    normal = _run_create_request("three", context={"mode": "flash"})
+    normal.input["messages"][0]["additional_kwargs"] = {"deerflow_mode": "chat"}
+    switched = await services.start_run(normal, "modes", request)
+    assert (await threads.get("modes"))["metadata"].get("mode") is None
+    await switched.task
+    retry = await services.start_run(_run_create_request("one"), "modes", request, idempotency_key="first")
+    assert retry.run_id == first.run_id
+    assert (await threads.get("modes"))["metadata"].get("mode") is None
+    assert modes == [("chat", "chat", "chat"), (None, None, None), ("flash", "flash", None)]
+
+
+@pytest.mark.asyncio
+async def test_regenerate_recovers_chat_mode_after_switching_modes(_stub_app_config, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.gateway import services
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
+            }
+        )
+    )
+    request, _, threads = _make_start_run_persistence_context()
+    await threads.create("replay", metadata={"mode": "ultra"})
+    scope = {"version": 1, "mode": "disabled"}
+    source = HumanMessage(content="original", id="original", additional_kwargs={"deerflow_mode": "chat", "knowledge_scope": scope})
+    snapshot = SimpleNamespace(values={"messages": [source, AIMessage(content="answer", id="answer")]})
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, {})))
+    monkeypatch.setattr(services, "thread_mode", AsyncMock(side_effect=AssertionError("The source turn already requires Chat")))
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    admit_scope = Mock(wraps=services.admit_message_knowledge_scope)
+    monkeypatch.setattr(services, "admit_message_knowledge_scope", admit_scope)
+    body = _run_create_request("original", metadata={"regenerate_from_message_id": "answer"}, context={"mode": "ultra"})
+    run = await services.start_run(body, "replay", request, idempotency_key="regenerate")
+    await run.task
+    assert worker.await_args.kwargs["config"]["context"]["mode"] == "chat"
+    assert worker.await_args.kwargs["graph_input"]["messages"][0].additional_kwargs["deerflow_mode"] == "chat"
+    assert (await threads.get("replay"))["metadata"]["mode"] == "ultra"
+    snapshot.values["messages"] = [HumanMessage(id="next-turn", content="Later ordinary question")]
+    retry = await services.start_run(body, "replay", request, idempotency_key="regenerate")
+    assert retry.run_id == run.run_id
+    assert admit_scope.call_args.kwargs["recovery_scope"] == scope
+    assert worker.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_run_id", "later_status"),
+    [(None, "success"), ("original-chat", "success"), ("later-ordinary", "success"), ("later-ordinary", "interrupted")],
+)
+async def test_pruned_regenerate_target_cannot_borrow_a_later_ordinary_turn(_stub_app_config, monkeypatch, source_run_id, later_status):
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway import services
+    from deerflow.runtime.user_context import get_current_user
+
+    request, runs, threads = _make_start_run_persistence_context()
+    tid = "pruned-regenerate"
+    await threads.create(tid, metadata={"mode": "flash"})
+    for run_id, status, meta in [("original-chat", "interrupted", {"mode": "chat"}), ("later-ordinary", later_status, {})]:
+        await runs.put(run_id, thread_id=tid, user_id=str(get_current_user().id), status=status, metadata=meta)
+    newer = HumanMessage(id="later-question", content="ordinary", additional_kwargs={"run_id": "later-ordinary"})
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=SimpleNamespace(values={"messages": [newer]})))
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, {})))
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    metadata = {"regenerate_from_message_id": "pruned-answer"}
+    if source_run_id:
+        metadata["regenerate_from_run_id"] = source_run_id
+    with pytest.raises(HTTPException) as conflict:
+        await services.start_run(_run_create_request("original question", metadata=metadata), tid, request)
+    assert conflict.value.status_code == 409
+    worker.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("human_mode", "checkpoint_mode", "paused_mode", "thread_mode", "expected"),
+    [
+        ("chat", None, None, "flash", "chat"),
+        ("ordinary", None, None, "chat", None),
+        (None, "chat", None, "flash", "chat"),
+        (None, None, "chat", "flash", "chat"),
+        (None, None, "flash", "chat", None),
+        (None, None, None, "chat", "missing-source"),
+    ],
+)
+async def test_resume_uses_the_interrupted_turn_when_no_checkpoint_id_is_supplied(_stub_app_config, monkeypatch, human_mode, checkpoint_mode, paused_mode, thread_mode, expected):
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway import services
+    from app.gateway.run_models import RunCreateRequest
+    from deerflow.runtime.user_context import get_current_user
+
+    request, runs, threads = _make_start_run_persistence_context()
+    tid = "resume-opt-in"
+    await threads.create(tid, metadata={"mode": thread_mode})
+    messages = [] if human_mode is None else [HumanMessage(content="start", additional_kwargs={"deerflow_mode": "chat"} if human_mode == "chat" else {})]
+    await _seed_generic_resume_checkpoint(request.app.state.checkpointer, tid, messages=messages, mode=checkpoint_mode)
+    if paused_mode is not None:
+        await runs.put("paused-source", thread_id=tid, user_id=str(get_current_user().id), status="waiting_for_input", metadata={"mode": paused_mode})
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    body = RunCreateRequest(command={"resume": "continue"})
+    if expected == "missing-source":
+        with pytest.raises(HTTPException) as conflict:
+            await services.start_run(body, tid, request)
+        assert conflict.value.status_code == 409
+        worker.assert_not_awaited()
+    else:
+        resumed = await services.start_run(body, tid, request)
+        await resumed.task
+        assert resumed.metadata.get("mode") == expected
+        assert worker.await_args.kwargs["config"].get("context", {}).get("mode") == expected
+    assert (await threads.get(tid))["metadata"]["mode"] == thread_mode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_mode", "queued_mode", "selected", "expected"),
+    [("chat", "chat", "ultra", "chat"), ("ultra", "ultra", "chat", "ultra"), (None, "Chat", "chat", None), ("pro", "old-mode", "flash", None), ("chat", "old-mode", "pro", "chat")],
+)
+async def test_queued_dispatch_respects_chat_and_preserves_later_selection(_stub_app_config, mode_app, monkeypatch, source_mode, queued_mode, selected, expected):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    app, owner, run_store, threads = mode_app
+    monkeypatch.setattr("app.gateway.run_inputs.get_agent_runs", lambda _: object())
+    monkeypatch.setattr("app.gateway.run_inputs.get_current_user", AsyncMock(return_value=owner))
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    await threads.create("delayed", user_id=owner, metadata={"mode": selected})
+    await run_store.put("source", thread_id="delayed", user_id=owner, status="running", owner_worker_id="worker", metadata={"mode": source_mode} if source_mode else {})
+    inputs = RunInputs(run_store, "source", owner, "worker")
+    await inputs.submit("follow-up", "Continue", "queue", context={"mode": queued_mode})
+    await run_store.update_status("source", "success")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        retry_url = "/api/threads/delayed/runs/source/inputs/follow-up/retry"
+        response = await client.post(retry_url)
+        assert response.status_code == 200, response.text
+        again = await client.post(retry_url)
+        assert again.status_code == 200 and again.json()["run_id"] == response.json()["run_id"]
+    child = await app.state.run_manager.get(response.json()["run_id"], user_id=owner)
+    await child.task
+    assert child.metadata.get("mode") == expected
+    assert (await inputs.read())["items"][0]["status"] == "applied"
+    assert worker.await_count == 1
+    assert (await threads.get("delayed", user_id=owner))["metadata"]["mode"] == selected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("via_context", "mode", "revoked", "expected"),
+    [(False, "chat", False, "researcher"), (True, "chat", False, "researcher"), (True, "chat", True, None), (True, "flash", False, None)],
+)
+async def test_queue_on_unbound_thread_retains_admitted_chat_agent(_stub_app_config, mode_app, tmp_path, monkeypatch, via_context, mode, revoked, expected):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+    from deerflow.persistence.agents import get_agent_store
+    from deerflow.runtime import RunStatus
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    app, owner, run_store, threads = mode_app
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("app.gateway.run_inputs.get_agent_runs", lambda _: object())
+    monkeypatch.setattr("app.gateway.run_inputs.get_current_user", AsyncMock(return_value=owner))
+    agent_store = get_agent_store()
+    await asyncio.to_thread(agent_store.create, "researcher", {}, "Research", user_id=owner)
+    await threads.create("unbound", user_id=owner)
+    agents = []
+
+    async def complete(_bridge, manager, record, *, config, **_kwargs):
+        agents.append((config["context"].get("agent_name"), record.user_id))
+        await manager.try_start(record.run_id)
+        if len(agents) == 1:
+            await RunInputs(run_store, record.run_id, owner, manager.worker_id).submit("next", "Continue", "queue")
+        await manager.set_status(record.run_id, RunStatus.success)
+
+    monkeypatch.setattr(services, "run_agent", complete)
+    body = {"assistant_id": "lead_agent" if via_context else "researcher", "context": {"mode": mode}, "input": {"messages": [{"role": "user", "content": "Hello"}]}, "metadata": {"evidence_agent_id": "forged"}}
+    if via_context:
+        body["context"]["agent_name"] = "researcher"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        source = await client.post("/api/threads/unbound/runs", json=body)
+        assert source.status_code == 200, source.text
+        parent = await app.state.run_manager.get(source.json()["run_id"], user_id=owner)
+        await parent.task
+        assert parent.evidence_agent_id == "researcher"
+        if revoked:
+            await asyncio.to_thread(agent_store.delete, "researcher", user_id=owner)
+        child = await client.post(f"/api/threads/unbound/runs/{parent.run_id}/inputs/next/retry")
+        if revoked:
+            assert child.status_code == 422, child.text
+            assert agents == [("researcher", owner)]
+        else:
+            assert child.status_code == 200, child.text
+            run = await app.state.run_manager.get(child.json()["run_id"], user_id=owner)
+            await run.task
+            assert agents == [("researcher", owner), (expected, owner)]
+    assert (await threads.get("unbound", user_id=owner))["assistant_id"] is None
+
+
 def test_format_sse_basic():
     from app.gateway.services import format_sse
 
@@ -2766,7 +3309,9 @@ async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_ap
 
     metadata_started = asyncio.Event()
 
-    async def get_thread(_thread_id):
+    async def get_thread(_thread_id, **kwargs):
+        if "user_id" in kwargs:  # Admission reads the mode before detaching the metadata writer.
+            return None
         metadata_started.set()
         try:
             await asyncio.Event().wait()
@@ -2816,7 +3361,9 @@ async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_confi
     metadata_started = asyncio.Event()
     run_agent_called = asyncio.Event()
 
-    async def get_thread(_thread_id):
+    async def get_thread(_thread_id, **kwargs):
+        if "user_id" in kwargs:
+            return None
         metadata_started.set()
         await asyncio.Event().wait()
 
@@ -3333,7 +3880,7 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
-async def _seed_generic_resume_checkpoint(checkpointer, thread_id):
+async def _seed_generic_resume_checkpoint(checkpointer, thread_id, *, messages=None, mode=None):
     from langchain_core.messages import HumanMessage
     from langgraph.graph import MessagesState, StateGraph
     from langgraph.types import interrupt
@@ -3348,8 +3895,8 @@ async def _seed_generic_resume_checkpoint(checkpointer, thread_id):
     builder.set_finish_point("answer")
     graph = builder.compile(checkpointer=checkpointer)
     await graph.ainvoke(
-        {"messages": [HumanMessage(content="start")]},
-        {"configurable": {"thread_id": thread_id}},
+        {"messages": [HumanMessage(content="start")] if messages is None else messages},
+        {"configurable": {"thread_id": thread_id}, "metadata": {"mode": mode} if mode else {}},
     )
 
 
@@ -3408,7 +3955,11 @@ async def test_recover_knowledge_scope_skips_hidden_conversation_reference_messa
 
     from langchain_core.messages import AIMessage, HumanMessage
 
-    from app.gateway.services import _recover_run_knowledge_scope
+    from app.gateway.services import _recover_source_message_metadata
+    from deerflow.runtime.user_context import get_current_user
+
+    request, runs, _ = _make_start_run_persistence_context()
+    await runs.put("source-run", thread_id="thread-scope-recovery", user_id=str(get_current_user().id), status="interrupted")
 
     source_scope = {
         "version": 1,
@@ -3419,7 +3970,7 @@ async def test_recover_knowledge_scope_skips_hidden_conversation_reference_messa
         HumanMessage(
             id="user-source",
             content="Search only the selected dataset",
-            additional_kwargs={"knowledge_scope": source_scope},
+            additional_kwargs={"knowledge_scope": source_scope, "run_id": "source-run", "deerflow_mode": "chat"},
         ),
         HumanMessage(
             id="conversation-references",
@@ -3436,13 +3987,15 @@ async def test_recover_knowledge_scope_skips_hidden_conversation_reference_messa
         "app.gateway.services.build_thread_checkpoint_state_accessor",
         new=AsyncMock(return_value=(accessor, {})),
     ):
-        recovered = await _recover_run_knowledge_scope(
-            SimpleNamespace(),
+        recovered = await _recover_source_message_metadata(
+            request,
             thread_id="thread-scope-recovery",
             target_message_id=target_message_id,
+            **({"target_run_id": "source-run"} if target_message_id == "missing-assistant" else {}),
         )
 
-    assert recovered == source_scope
+    assert recovered["knowledge_scope"] == source_scope
+    assert recovered["deerflow_mode"] == "chat"
 
 
 @pytest.mark.parametrize("input_fields", [{}, {"input": None}, {"input": {}}], ids=["omitted", "null", "empty-object"])
@@ -3467,7 +4020,7 @@ async def test_static_resume_preserves_input_and_recovers_source_scope(_stub_app
         )
     )
     request = _make_start_run_request(RunManager(store=MemoryRunStore()))
-    recover_scope = AsyncMock(return_value=source_scope)
+    recover_scope = AsyncMock(return_value={"knowledge_scope": source_scope})
     captured = {}
 
     async def fake_run_agent(*_args, **kwargs):
@@ -3476,7 +4029,7 @@ async def test_static_resume_preserves_input_and_recovers_source_scope(_stub_app
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
-        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch("app.gateway.services._recover_source_message_metadata", new=recover_scope),
         patch("app.gateway.services._load_scope_agent_config", new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"], knowledge_scope={"version": 1, "mode": "selected", "dataset_ids": ["new-default"]}))),
     ):
         record = await start_run(RunCreateRequest(**input_fields, config={"configurable": checkpoint_fields}), "thread-static-scope", request)
@@ -3500,7 +4053,7 @@ async def test_static_resume_recovers_selected_checkpoint_scope(_stub_app_config
     from langchain_core.messages import HumanMessage
     from langgraph.checkpoint.memory import InMemorySaver
 
-    from app.gateway.services import _recover_run_knowledge_scope
+    from app.gateway.services import _recover_source_message_metadata
     from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 
     accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("scope", mode), InMemorySaver(), mode=mode)
@@ -3516,8 +4069,8 @@ async def test_static_resume_recovers_selected_checkpoint_scope(_stub_app_config
         return accessor, read_config
 
     with patch("app.gateway.services.build_thread_checkpoint_state_accessor", side_effect=build_accessor):
-        scope = await _recover_run_knowledge_scope(SimpleNamespace(), thread_id="scope-history", target_message_id=None, checkpoint_id=selected["configurable"]["checkpoint_id"])
-    assert scope == source_scope
+        scope = await _recover_source_message_metadata(SimpleNamespace(), thread_id="scope-history", target_message_id=None, checkpoint_id=selected["configurable"]["checkpoint_id"])
+    assert scope["knowledge_scope"] == source_scope
 
 
 @pytest.mark.parametrize(
@@ -3530,7 +4083,7 @@ async def test_static_resume_recovers_selected_checkpoint_scope(_stub_app_config
                 "mode": "selected",
                 "dataset_ids": ["dataset-current"],
             },
-            0,
+            1,
         ),
         (False, {"version": 1, "mode": "disabled"}, 1),
     ],
@@ -3598,7 +4151,7 @@ async def test_clarification_reply_scope_uses_current_selection_or_recovers_when
     )
     request = _make_start_run_request(RunManager(store=MemoryRunStore()))
     captured: dict[str, object] = {}
-    recover_scope = AsyncMock(return_value={"version": 1, "mode": "disabled"})
+    recover_scope = AsyncMock(return_value={"knowledge_scope": {"version": 1, "mode": "disabled"}})
 
     async def fake_run_agent(*_args, **kwargs):
         captured["graph_input"] = kwargs["graph_input"]
@@ -3606,7 +4159,7 @@ async def test_clarification_reply_scope_uses_current_selection_or_recovers_when
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
-        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch("app.gateway.services._recover_source_message_metadata", new=recover_scope),
         patch(
             "app.gateway.services._load_scope_agent_config",
             new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])),
@@ -3632,7 +4185,7 @@ async def test_clarification_reply_scope_uses_current_selection_or_recovers_when
                 "mode": "selected",
                 "dataset_ids": ["dataset-current"],
             },
-            0,
+            1,
         ),
         (
             False,
@@ -3700,13 +4253,7 @@ async def test_edit_replay_scope_uses_current_selection_or_recovers_when_omitted
     )
     request = _make_start_run_request(RunManager(store=MemoryRunStore()))
     captured: dict[str, object] = {}
-    recover_scope = AsyncMock(
-        return_value={
-            "version": 1,
-            "mode": "selected",
-            "dataset_ids": ["dataset-source"],
-        }
-    )
+    recover_scope = AsyncMock(return_value={"knowledge_scope": {"version": 1, "mode": "selected", "dataset_ids": ["dataset-source"]}})
 
     async def fake_run_agent(*_args, **kwargs):
         captured["graph_input"] = kwargs["graph_input"]
@@ -3714,7 +4261,7 @@ async def test_edit_replay_scope_uses_current_selection_or_recovers_when_omitted
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
-        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch("app.gateway.services._recover_source_message_metadata", new=recover_scope),
         patch(
             "app.gateway.services._load_scope_agent_config",
             new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])),
@@ -4425,14 +4972,19 @@ def test_start_run_project_resolution_failure_degrades_to_unassigned(_stub_app_c
     async def _scenario():
         request, _run_store, _thread_store = _make_start_run_persistence_context()
 
-        class _BoomThreadStore:
+        class _ThreadStore:
             async def get(self, thread_id, **kwargs):
-                raise RuntimeError("database is down")
+                return {"user_id": "u1", "metadata": {"deerflow_project_id": "p-1"}}
 
             async def check_access(self, thread_id, user_id, **kwargs):
                 return True
 
-        request.app.state.thread_store = _BoomThreadStore()
+        class _BoomProjectRepo:
+            async def get(self, project_id):
+                raise RuntimeError("project repository is down")
+
+        request.app.state.thread_store = _ThreadStore()
+        request.app.state.project_repo = _BoomProjectRepo()
         request.state = SimpleNamespace(auth_source="session", user=SimpleNamespace(id="u1", system_role="user"))
         body = SimpleNamespace(
             assistant_id="lead_agent",

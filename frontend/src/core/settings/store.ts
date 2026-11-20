@@ -121,6 +121,14 @@ function mergeSettingsSection<K extends keyof LocalSettings>(
       [key]: {
         ...current,
         ...value,
+        // Chat belongs to the selected conversation. Other conversations keep
+        // the account's ordinary mode and its associated reasoning effort.
+        ...(key === "context" && "mode" in value && value.mode === "chat"
+          ? {
+              mode: settings.context.mode,
+              reasoning_effort: settings.context.reasoning_effort,
+            }
+          : {}),
       },
     } as LocalSettings;
   }

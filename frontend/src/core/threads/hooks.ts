@@ -33,6 +33,7 @@ import type { Locale } from "../i18n/locale";
 import type { Translations } from "../i18n/locales";
 import {
   extractHitlApprovalRequests,
+  parseHumanInputResponse,
   type HitlApprovalRequest,
   type HitlApprovalResponse,
 } from "../messages/human-input";
@@ -233,6 +234,7 @@ export function buildHitlApprovalSubmitOptions({
     context: buildRunContext({
       settings,
       threadId,
+      inheritMode: true,
       extraContext,
       conversationReferences,
     }),
@@ -394,19 +396,21 @@ export function buildRunContext({
   locale,
   extraContext,
   conversationReferences,
+  inheritMode = false,
 }: {
   settings: LocalSettings["context"];
   threadId: string;
   locale?: Locale;
   extraContext?: Record<string, unknown>;
   conversationReferences?: string[];
+  inheritMode?: boolean;
 }): Record<string, unknown> {
   const ownedSettings = Object.fromEntries(
     Object.entries(settings).filter(
       ([key]) => key !== "conversation_references",
     ),
   );
-  return {
+  const runContext: Record<string, unknown> = {
     ...extraContext,
     ...ownedSettings,
     ...(typeof extraContext?.model_name === "string"
@@ -431,6 +435,13 @@ export function buildRunContext({
     ...(locale ? { locale } : {}),
     ...clientTimezoneContext(),
   };
+  // A card continues its source turn. Only a new turn selects a mode.
+  if (inheritMode) delete runContext.mode;
+  if (settings.mode === "chat") {
+    delete runContext.thinking_enabled;
+    delete runContext.reasoning_effort;
+  }
+  return runContext;
 }
 
 /**
@@ -3061,6 +3072,21 @@ export function useThreadStream({
       if (sendInFlightRef.current) {
         return;
       }
+      const isAnswer = !!parseHumanInputResponse(
+        options?.additionalKwargs?.human_input_response,
+      );
+      const isChat = context.mode === "chat" && !isAnswer;
+      const stagedFiles = options?.additionalKwargs?.files;
+      if (
+        (isChat || isAnswer) &&
+        (message.files?.length ||
+          (Array.isArray(stagedFiles) && stagedFiles.length))
+      ) {
+        throw new Error(t.inputBox.chatTextOnly);
+      }
+      const additionalKwargs = isChat
+        ? { ...options?.additionalKwargs, deerflow_mode: "chat" }
+        : options?.additionalKwargs;
       sendInFlightRef.current = true;
 
       const text = message.text.trim();
@@ -3117,7 +3143,7 @@ export function useThreadStream({
           id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
           additional_kwargs: buildHumanMessageAdditionalKwargs(
-            options?.additionalKwargs,
+            additionalKwargs,
             optimisticFiles,
           ),
         });
@@ -3188,7 +3214,7 @@ export function useThreadStream({
                     {
                       ...humanMessage,
                       additional_kwargs: buildHumanMessageAdditionalKwargs(
-                        options?.additionalKwargs,
+                        additionalKwargs,
                         uploadedFiles,
                       ),
                     },
@@ -3231,7 +3257,7 @@ export function useThreadStream({
           {
             messages: buildThreadSubmitMessages({
               text,
-              additionalKwargs: options?.additionalKwargs,
+              additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
               filesForSubmit: uploadedFiles,
               humanMessageId,
@@ -3248,6 +3274,7 @@ export function useThreadStream({
             },
             context: buildRunContext({
               settings: context,
+              inheritMode: isAnswer,
               threadId,
               locale,
               extraContext,
@@ -3274,6 +3301,7 @@ export function useThreadStream({
       thread,
       t.uploads.uploadingFiles,
       t.uploads.notReady,
+      t.inputBox.chatTextOnly,
       locale,
       context,
       queryClient,

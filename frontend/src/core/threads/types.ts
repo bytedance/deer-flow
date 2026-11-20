@@ -1,6 +1,6 @@
 import type { Message, Run, Thread } from "@langchain/langgraph-sdk";
 
-import type { ReasoningEffortValue } from "@/core/models/reasoning";
+import type { InputMode, ReasoningEffortValue } from "@/core/models/reasoning";
 
 import type { Todo } from "../todos";
 
@@ -88,7 +88,8 @@ export interface AgentClientContext {
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
   model_name: string | undefined;
-  thinking_enabled: boolean;
+  mode?: InputMode;
+  thinking_enabled?: boolean;
   is_plan_mode: boolean;
   subagent_enabled: boolean;
   reasoning_effort?: ReasoningEffortValue;

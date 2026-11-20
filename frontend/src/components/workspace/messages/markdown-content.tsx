@@ -27,7 +27,10 @@ import {
 } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
-import { createMarkdownLinkComponent } from "./markdown-link";
+import {
+  createMarkdownLinkComponent,
+  TextOnlyMessageContext,
+} from "./markdown-link";
 
 export type MarkdownContentProps = {
   content: string;
@@ -204,6 +207,15 @@ function StreamingCode({
   );
 }
 
+const TextOnlyLink = createMarkdownLinkComponent();
+function ChatImageLink({ src, alt }: ComponentProps<"img">) {
+  return typeof src === "string" && /^https?:\/\//i.test(src) ? (
+    <TextOnlyLink href={src}>{alt?.trim() ? alt : src}</TextOnlyLink>
+  ) : (
+    <span>{alt}</span>
+  );
+}
+
 /** Renders markdown content. */
 export function MarkdownContent({
   content,
@@ -213,6 +225,7 @@ export function MarkdownContent({
   remarkPlugins = streamdownPluginsWithoutRawHtml.remarkPlugins,
   components: componentsFromProps,
 }: MarkdownContentProps) {
+  const textOnly = useContext(TextOnlyMessageContext);
   const deferredContent = useDeferredValue(content);
   const targetContent = isLoading ? deferredContent : content;
   const { content: displayContent, isRevealing } = useSmoothStreamingContent(
@@ -238,6 +251,7 @@ export function MarkdownContent({
     const baseComponents = {
       a: createMarkdownLinkComponent(),
       ...componentsFromProps,
+      ...(textOnly ? { img: ChatImageLink } : {}),
     };
     if (!isStreamingRender) {
       return baseComponents;
@@ -247,7 +261,7 @@ export function MarkdownContent({
       code: componentsFromProps?.code ?? StreamingCode,
       pre: componentsFromProps?.pre ?? StreamingPre,
     };
-  }, [componentsFromProps, isStreamingRender]);
+  }, [componentsFromProps, isStreamingRender, textOnly]);
 
   if (!displayContent) return null;
 

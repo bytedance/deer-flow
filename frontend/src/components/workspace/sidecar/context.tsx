@@ -37,6 +37,7 @@ type SidecarContextValue = {
   setContext: (context: ThreadStreamOptions["context"]) => void;
   isMock?: boolean;
   sidecarThreadId: string | null;
+  restoring: boolean;
   setSidecarThreadId: (threadId: string | null) => void;
   restoreSidecarThread: (options?: {
     force?: boolean;
@@ -85,9 +86,11 @@ export function SidecarProvider({
   const [activeReferences, setActiveReferences] = useState<SidecarReference[]>(
     [],
   );
+  const [restoredParent, setRestoredParent] = useState<string | null>(null);
   const [sidecarThreadId, setSidecarThreadId] = useState<string | null>(null);
-  const [sidecarContext, setSidecarContext] =
-    useState<ThreadStreamOptions["context"]>(context);
+  const [sidecarContext, setSidecarContext] = useState<
+    ThreadStreamOptions["context"] | null
+  >(null);
   const [conversationQuotes, setConversationQuotes] = useState<
     SidecarReference[]
   >([]);
@@ -119,11 +122,11 @@ export function SidecarProvider({
     parentThreadIdRef.current = parentThreadId;
     setOpen(false);
     setActiveReferences([]);
-    setSidecarContext(context);
+    setSidecarContext(null);
     updateSidecarThreadId(null);
     setConversationQuotes([]);
     setArtifactEdit(null);
-  }, [context, parentThreadId, updateSidecarThreadId]);
+  }, [parentThreadId, updateSidecarThreadId]);
 
   const restoreSidecarThread = useCallback(
     async (options?: { force?: boolean }) => {
@@ -162,6 +165,8 @@ export function SidecarProvider({
         })
         .catch(() => null)
         .finally(() => {
+          if (parentThreadIdRef.current === parentThreadId)
+            setRestoredParent(parentThreadId);
           if (restoreRequestRef.current?.promise === promise) {
             restoreRequestRef.current = null;
           }
@@ -262,10 +267,11 @@ export function SidecarProvider({
       activeReferences,
       conversationQuotes,
       parentThreadId,
-      context: sidecarContext,
+      context: sidecarContext ?? context,
       setContext: setSidecarContext,
       isMock,
       sidecarThreadId,
+      restoring: !sidecarThreadId && restoredParent !== parentThreadId,
       setSidecarThreadId: updateSidecarThreadId,
       restoreSidecarThread,
       addContextToConversation,
@@ -294,7 +300,9 @@ export function SidecarProvider({
       parentThreadId,
       restoreSidecarThread,
       sidecarContext,
+      context,
       sidecarThreadId,
+      restoredParent,
       updateSidecarThreadId,
     ],
   );

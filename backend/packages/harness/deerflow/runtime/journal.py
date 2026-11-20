@@ -31,9 +31,10 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, message_chunk_to_message, messages_from_dict
 from langgraph.types import Command
 
+from deerflow.agents.chat_mode import CHAT_MODE_KEY, chat_message
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
 from deerflow.runtime.events.catalog import (
@@ -317,6 +318,7 @@ class RunJournal(BaseCallbackHandler):
         event_store: RunEventStore,
         *,
         track_token_usage: bool = True,
+        chat_mode: bool = False,
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
@@ -339,6 +341,7 @@ class RunJournal(BaseCallbackHandler):
         self._producer_lock = threading.Lock()
         self._pending_producer_callbacks = 0
         self._track_tokens = track_token_usage
+        self._chat_mode = chat_mode
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
@@ -410,6 +413,7 @@ class RunJournal(BaseCallbackHandler):
         # Convenience fields
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
+        self._capture_opening_human = True
         self._first_human_message_captured = False
         self._captured_run_inputs: set[str] = set()
         self._terminal_task_results: set[str] = set()
@@ -445,6 +449,21 @@ class RunJournal(BaseCallbackHandler):
 
     # -- Lifecycle callbacks --
 
+    def _history_message(self, message: BaseMessage) -> BaseMessage:
+        # Provider callbacks and interrupted streams reach the journal before
+        # the graph's response middleware, independently of the checkpoint.
+        if self._chat_mode:
+            return chat_message(message_chunk_to_message(message), mark_mode=True)
+        return message
+
+    def _captures_human(self, message: BaseMessage) -> bool:
+        if not self._chat_mode:
+            return True
+        # A resumed model call can replay a previous turn, including its
+        # steering inputs. Repersisting it here would relabel the original.
+        owner = message.additional_kwargs.get("run_id")
+        return owner == self.run_id or (owner is None and message.additional_kwargs.get(CHAT_MODE_KEY) == "chat")
+
     @staticmethod
     def _message_text(message: BaseMessage) -> str:
         """Extract displayable text from a message's mixed content shape."""
@@ -472,7 +491,7 @@ class RunJournal(BaseCallbackHandler):
     def on_chain_start(
         self,
         serialized: dict[str, Any],
-        inputs: dict[str, Any],
+        inputs: Any,
         *,
         run_id: UUID,
         parent_run_id: UUID | None = None,
@@ -482,6 +501,10 @@ class RunJournal(BaseCallbackHandler):
     ) -> None:
         caller = self._identify_caller(tags)
         if parent_run_id is None:
+            if self._chat_mode:
+                # A static or approval resume has no new opening user message.
+                # Its next model prompt can still contain a prior Chat turn.
+                self._capture_opening_human = isinstance(inputs, Mapping) and bool(inputs.get("messages"))
             # Root graph invocation — emit a single trace event for the run start.
             chain_name = (serialized or {}).get("name", "unknown")
             self._put(
@@ -557,11 +580,11 @@ class RunJournal(BaseCallbackHandler):
         if caller == "lead_agent":
             for batch in messages:
                 self._reconcile_consumed_tool_messages(batch)
-        if caller == "lead_agent" and not self._first_human_message_captured and messages:
+        if caller == "lead_agent" and self._capture_opening_human and not self._first_human_message_captured and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if _should_persist_human_input_message(m) and not m.additional_kwargs.get("run_input_id"):
-                        persisted_message = restore_original_human_message(m)
+                    if _should_persist_human_input_message(m) and not m.additional_kwargs.get("run_input_id") and self._captures_human(m):
+                        persisted_message = self._history_message(restore_original_human_message(m))
                         self.set_first_human_message(self._message_text(persisted_message))
                         self._put(
                             event_type=LLM_HUMAN_INPUT_EVENT.event_type,
@@ -578,8 +601,8 @@ class RunJournal(BaseCallbackHandler):
             for batch in messages:
                 for m in batch:
                     input_id = m.additional_kwargs.get("run_input_id")
-                    if input_id and input_id not in self._captured_run_inputs and isinstance(m, HumanMessage):
-                        persisted = restore_original_human_message(m)
+                    if input_id and input_id not in self._captured_run_inputs and isinstance(m, HumanMessage) and self._captures_human(m):
+                        persisted = self._history_message(restore_original_human_message(m))
                         self._put(event_type=LLM_HUMAN_INPUT_EVENT.event_type, category=LLM_HUMAN_INPUT_EVENT.category, content=persisted.model_dump(), metadata={"caller": caller})
                         self._record_message_summary(persisted, caller=caller)
                         self._captured_run_inputs.add(input_id)
@@ -611,7 +634,7 @@ class RunJournal(BaseCallbackHandler):
         for generation in response.generations:
             for gen in generation:
                 if hasattr(gen, "message"):
-                    messages.append(gen.message)
+                    messages.append(self._history_message(gen.message))
                 else:
                     logger.warning(f"on_llm_end {run_id}: generation has no message attribute: {gen}")
 
@@ -809,7 +832,7 @@ class RunJournal(BaseCallbackHandler):
                 # success path (e.g. present_files returns an error ToolMessage
                 # without touching state when validation fails), so its
                 # presence is the artifact-production signal (#4272 slice 1).
-                artifacts = cmd.update.get("artifacts")
+                artifacts = None if self._chat_mode else cmd.update.get("artifacts")
                 artifact_tool_names: set[str] = set()
                 for message in messages:
                     if isinstance(message, BaseMessage):
@@ -921,6 +944,7 @@ class RunJournal(BaseCallbackHandler):
         # same result identity even when a provider reuses its tool_call_id.
         if isinstance(message, ToolMessage) and not message.id:
             message.id = str(uuid4())
+        message = self._history_message(message)
         if isinstance(message, ToolMessage) and message.name == "task":
             from deerflow.subagents.status_contract import read_subagent_result_metadata
 
@@ -950,6 +974,7 @@ class RunJournal(BaseCallbackHandler):
     def record_steered_response(self, message: AIMessage) -> None:
         """Append the pre-execution correction without rewriting a feed row."""
         if not self._closed:
+            message = self._history_message(message)
             self._put(event_type=LLM_AI_RESPONSE_EVENT.event_type, category=LLM_AI_RESPONSE_EVENT.category, content=message.model_dump(), metadata={"caller": "lead_agent", "adjusted_by_input": True})
             self._record_message_summary(message, caller="lead_agent")
 
@@ -968,6 +993,7 @@ class RunJournal(BaseCallbackHandler):
             identity = self._message_identity(message)
             if identity is None or identity in self._persisted_ai_message_identities:
                 continue
+            message = self._history_message(message)
             if not self._message_text(message).strip():
                 continue
             self._put(

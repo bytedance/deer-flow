@@ -958,6 +958,7 @@ def require_permission(
     action: str,
     owner_check: bool = False,
     require_existing: bool = False,
+    thread_files: bool = False,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """Decorator that checks permission for resource:action.
 
@@ -974,6 +975,8 @@ def require_permission(
                           **destructive / mutating** routes (DELETE, PATCH,
                           state-update) so a deleted thread can't be re-targeted
                           by another user via the missing-row code path.
+        thread_files: Check the selected thread mode before file operations
+                      that could allocate a sandbox or materialize attachments.
 
     Usage:
         # Read-style: legacy untracked threads are allowed
@@ -1059,9 +1062,10 @@ def require_permission(
                 from app.gateway.deps import get_thread_store
 
                 thread_store = get_thread_store(request)
+                owner_id = str(auth.user.id)
                 allowed = await thread_store.check_access(
                     thread_id,
-                    str(auth.user.id),
+                    owner_id,
                     require_existing=require_existing,
                 )
                 if not allowed and getattr(auth.user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
@@ -1075,6 +1079,7 @@ def require_permission(
                     # middleware-stamped ``request.state.user``).
                     header_owner = (request.headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME) or "").strip()
                     if header_owner:
+                        owner_id = header_owner
                         allowed = await thread_store.check_access(
                             thread_id,
                             header_owner,
@@ -1085,6 +1090,13 @@ def require_permission(
                         status_code=404,
                         detail=f"Thread {thread_id} not found",
                     )
+                if (resource, action) == ("runs", "create") and require_existing:
+                    # start_run rechecks this same thread under its admission lock.
+                    request.state.owner_checked_run_thread = (thread_id, owner_id)
+                if thread_files:
+                    from app.gateway.thread_mode import require_thread_files
+
+                    await require_thread_files(thread_store, thread_id, user_id=owner_id)
 
             return await func(*args, **kwargs)
 

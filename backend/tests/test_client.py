@@ -5733,3 +5733,14 @@ class TestBugAgentInvalidationInconsistency:
 
         assert client._agent is None
         assert client._agent_config_key is None
+
+
+@pytest.mark.parametrize("method", ["chat", "stream"])
+def test_embedded_chat_mode_rejected_before_turn_setup(client, method):
+    with (
+        patch.object(client, "_get_runnable_config", side_effect=AssertionError("started turn setup")),
+        pytest.raises(ValueError, match="Chat mode.*Gateway"),
+    ):
+        result = getattr(client, method)("hello", mode="chat")
+        if method == "stream":
+            next(result)

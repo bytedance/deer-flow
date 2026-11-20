@@ -1450,3 +1450,40 @@ async def test_disabled_hitl_does_not_materialize_pending_approval_snapshot(mode
 
     assert record.status == RunStatus.success
     assert graph.post_stream_running_snapshots == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream_modes", [["messages-tuple"], ["messages-tuple", "updates"]])
+@pytest.mark.parametrize("config", [{"context": {"mode": "chat"}}, {"configurable": {"mode": "chat"}, "context": {"locale": "zh-CN"}}])
+async def test_chat_stream_delivers_text_without_media_or_workspace_scan(monkeypatch, stream_modes, config):
+    from langchain_core.messages import AIMessageChunk
+
+    manager = RunManager()
+    record = await manager.create("chat-stream")
+    bridge = _RecordingBridge()
+    scan = AsyncMock(return_value=None)
+    monkeypatch.setattr("deerflow.runtime.runs.worker.capture_workspace_snapshot", scan)
+    message = AIMessageChunk(id="streamed-answer", content=[{"type": "text", "text": "你好"}, {"type": "image", "base64": "bWVkaWE="}])
+
+    class StreamingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            for token in ("你", "好"):
+                pair = (message.model_copy(update={"content": [*message.content, token]}), {})
+                yield pair if stream_mode == "messages" else ("messages", pair)
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
+        agent_factory=lambda **_: StreamingAgent(),
+        graph_input={},
+        config=config,
+        stream_modes=stream_modes,
+    )
+    output = [payload for event, payload in bridge.events if event == "messages"]
+    assert "你好" in str(output)
+    assert "bWVkaWE=" not in str(output)
+    assert [pair[0].get("additional_kwargs", {}).get("deerflow_mode") for pair in output] == ["chat", None]
+    scan.assert_not_awaited()
+    assert record.status == RunStatus.success

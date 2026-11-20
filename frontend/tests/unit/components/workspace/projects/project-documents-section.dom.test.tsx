@@ -627,6 +627,11 @@ describe("ProjectDocumentsSection", () => {
           values: { title: "Active chat" },
         }),
         makeAgentThread({
+          thread_id: "text-only",
+          values: { title: "Text only" },
+          metadata: { mode: "chat" },
+        }),
+        makeAgentThread({
           thread_id: "thread-archived",
           values: { title: "Archived chat" },
           metadata: { deerflow_archived: true },
@@ -644,6 +649,7 @@ describe("ProjectDocumentsSection", () => {
     expect(mocks.infiniteThreadsParams).toMatchObject({ archived: false });
     expect(within(dialog).getByText("Active chat")).toBeDefined();
     expect(within(dialog).queryByText("Archived chat")).toBeNull();
+    expect(within(dialog).queryByText("Text only")).toBeNull();
     fireEvent.click(screen.getByTestId("attach-thread-load-more"));
     expect(mocks.fetchNextThreadsPage).toHaveBeenCalledTimes(1);
   });
