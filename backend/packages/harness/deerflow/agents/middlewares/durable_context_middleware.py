@@ -29,7 +29,7 @@ from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
 from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.task_continuity.state import normalize_task_history, normalize_task_notes
-from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES, delegation_key, find_delegation_key
+from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES, delegation_key, find_delegation_key, usable_delegation_entries
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
@@ -436,7 +436,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         pre_existing_message_ids = _runtime_pre_existing_message_ids(runtime)
         opening_index = _run_opening_human_index(state["messages"], run_id, pre_existing_message_ids) if run_id is not None else None
         messages = _current_run_messages(state["messages"], run_id, pre_existing_message_ids, opening_index)
-        existing = state.get("delegations") or []
+        stored = state.get("delegations") or []
+        existing = usable_delegation_entries(stored)
         delegations = _filter_changed_delegations(
             _with_run_id(extract_delegations(messages), run_id),
             existing,
@@ -445,7 +446,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id, opening_index)]
         elif run_id is not None:
             delegations = [*delegations, *_filter_changed_delegations(_delegations_answered_after_resume(state["messages"], messages, existing), existing)]
-        if delegations:
+        # An empty update still runs the reducer before a message-only turn renders the ledger.
+        if delegations or existing != stored:
             return {"delegations": delegations}
         return None
 

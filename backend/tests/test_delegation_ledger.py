@@ -1,5 +1,6 @@
 """Tests for the durable subagent delegation ledger."""
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
@@ -65,6 +66,26 @@ class TestMergeDelegations:
             [_entry("a", "in_progress"), "oops", {"status": "completed"}, {"id": "b"}],
             [_entry("c", "completed")],
         ) == [_entry("a", "in_progress"), _entry("c", "completed")]
+
+    @pytest.mark.parametrize(
+        "invalid_fields",
+        [
+            pytest.param({"status": []}, id="unhashable-status"),
+            pytest.param({"run_id": ["run-1"]}, id="unhashable-run-id"),
+            pytest.param({"dispatch_message_id": {"id": "msg-1"}}, id="unhashable-dispatch-id"),
+            pytest.param({"run_id": 0}, id="numeric-run-id"),
+            pytest.param({"dispatch_message_id": 0}, id="numeric-dispatch-id"),
+        ],
+    )
+    def test_merge_skips_invalid_checkpoint_entry(self, invalid_fields):
+        legacy = {"id": "legacy", "status": "completed"}
+        invalid = {"id": "bad", "status": "in_progress", **invalid_fields}
+        first = {"id": "call-1", "status": "completed", "run_id": "run-1", "dispatch_message_id": "msg-1"}
+        second = {**first, "dispatch_message_id": "msg-2"}
+
+        stored = [legacy, invalid, first]
+        assert merge_delegations(stored, [second]) == [legacy, first, second]
+        assert merge_delegations(stored, None) == [legacy, first]
 
     def test_same_id_preserves_original_created_at(self):
         existing = [_entry("a", "in_progress")]

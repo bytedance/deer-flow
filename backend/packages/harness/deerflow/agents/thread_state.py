@@ -210,7 +210,7 @@ _DELEGATION_LEDGER_MAX_ENTRIES = 50
 
 class DelegationEntry(TypedDict):
     id: str
-    run_id: NotRequired[str]
+    run_id: NotRequired[str | None]
     description: str
     subagent_type: str
     status: str
@@ -231,7 +231,7 @@ class DelegationEntry(TypedDict):
     # The AIMessage that issued the call. Tool-call ids are unique per response,
     # so a provider can reuse one in a later response of the same run; this keeps
     # each dispatch its own entry. Absent on entries written before it existed.
-    dispatch_message_id: NotRequired[str]
+    dispatch_message_id: NotRequired[str | None]
 
 
 type DelegationKey = tuple[str | None, str, str | None]
@@ -272,20 +272,29 @@ def find_delegation_key(keys: Sequence[DelegationKey], key: DelegationKey) -> De
 _DELEGATION_LEDGER_STATUSES = frozenset({"in_progress", *SUBAGENT_STATUS_VALUES})
 
 
-def _usable_delegation_entries(entries: Any) -> list[DelegationEntry]:
+def usable_delegation_entries(entries: Any) -> list[DelegationEntry]:
     """Drop channel values the ledger reducer cannot read.
 
     The gateway validates the full ledger shape at both caller-writable
     boundaries, but a checkpoint written before that validation, or by an
     older caller path, can still hold a non-list value, a non-object entry or
-    an entry without the identity key and status the reducer needs. Treating
-    those as absent keeps later genuine ledger writes working instead of
-    failing on the stored value; the reducer itself does not require the
-    renderer-only text fields.
+    an entry with an invalid identity key or status. Skipping those entries
+    lets later writes merge the valid records, including minimal entries
+    without the renderer-only text fields.
     """
     if not isinstance(entries, list):
         return []
-    return [entry for entry in entries if isinstance(entry, Mapping) and isinstance(entry.get("id"), str) and bool(entry.get("id")) and entry.get("status") in _DELEGATION_LEDGER_STATUSES]
+    return [
+        entry
+        for entry in entries
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("id"), str)
+        and entry["id"]
+        and isinstance(entry.get("status"), str)
+        and entry["status"] in _DELEGATION_LEDGER_STATUSES
+        and isinstance(entry.get("run_id"), str | None)
+        and isinstance(entry.get("dispatch_message_id"), str | None)
+    ]
 
 
 def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
@@ -298,8 +307,8 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
       the same run.
     - terminal status is never overwritten by a non-terminal status.
     """
-    existing_entries = _usable_delegation_entries(existing)
-    new_entries = _usable_delegation_entries(new)
+    existing_entries = usable_delegation_entries(existing)
+    new_entries = usable_delegation_entries(new)
     if not new_entries:
         return existing_entries
 
