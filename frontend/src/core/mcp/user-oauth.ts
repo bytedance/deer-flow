@@ -15,6 +15,7 @@ const connectionsResponse = z.object({
         "connected",
         "reconnect_required",
         "unavailable",
+        "removed",
       ]),
     }),
   ),

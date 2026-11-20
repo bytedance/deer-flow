@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import logging
 import re
 import secrets
 
@@ -17,6 +18,7 @@ from deerflow.config.extensions_config import MCP_USER_OAUTH_CALLBACK_PATH
 from deerflow.mcp import browser_oauth as oauth
 from deerflow.mcp.oauth_store import McpOAuthTokenKey, McpOAuthTokenStoreUnavailable, get_mcp_oauth_token_store
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/mcp/user-oauth", tags=["mcp"])
 _STATE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _LANDING = "/workspace/capabilities?tab=plugins&mcp_oauth={status}#my-mcp-connections"
@@ -77,6 +79,13 @@ async def list_connections(response: Response, owner: str = Depends(_owner)):
             except McpOAuthTokenStoreUnavailable:
                 state = "unavailable"
             result.append(Connection(server_key=name, display_name=name, status=state))
+        store = get_mcp_oauth_token_store()
+        if store is not None:
+            try:
+                saved = store.list_delegated_servers(owner)
+            except McpOAuthTokenStoreUnavailable:
+                raise HTTPException(503, "MCP authorization storage is unavailable.") from None
+            result.extend(Connection(server_key=name, display_name=name, status="removed") for name in saved if name not in servers)
         return result
 
     response.headers["Cache-Control"] = "no-store"
@@ -116,10 +125,9 @@ async def callback(request: Request, owner: str = Depends(_owner)):
             if attempt and code and len(code) <= 8192 and not request.query_params.get("error") and (issued_by is None or issued_by == attempt.context.issuer):
                 server = await _server(attempt.key.server_key)
                 ok = await oauth.finish_connection(attempt, server, code)
-        except Exception:
-            # Neither the provider's error description, code, state nor database errors
-            # belong in the Location header, the browser or a logged exception.
-            ok = False
+        except Exception as exc:
+            # Provider and storage exceptions may contain credentials.
+            logger.warning("MCP user OAuth callback failed (%s)", type(exc).__name__)
     response = RedirectResponse(_LANDING.format(status="connected" if ok else "failed"), status_code=303, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
     if cookie:
         response.delete_cookie(cookie, path=MCP_USER_OAUTH_CALLBACK_PATH, httponly=True, samesite="lax", secure=is_secure_request(request))
@@ -128,7 +136,6 @@ async def callback(request: Request, owner: str = Depends(_owner)):
 
 @router.delete("/{server_key}", status_code=204)
 async def disconnect(server_key: str, owner: str = Depends(_owner)):
-    await _server(server_key)
     try:
         await asyncio.to_thread(_store().disconnect_delegated, McpOAuthTokenKey.for_delegated(server_key, owner))
     except McpOAuthTokenStoreUnavailable:

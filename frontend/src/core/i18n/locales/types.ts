@@ -186,6 +186,7 @@ export interface Translations {
         disconnected: string;
         connected: string;
         reconnect_required: string;
+        removed: string;
         unavailable: string;
       };
     };

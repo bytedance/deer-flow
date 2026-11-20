@@ -873,7 +873,9 @@ or disconnect your account. Browsing and invoking the tools uses your upstream
 permissions. An existing conversation picks up the connection on the next
 run. Disconnect takes effect before the next dispatch, including in existing
 runs on another Gateway. A request already accepted by the remote server
-may finish. Foreground lead-agent chat supports these connections. Subagents,
+may finish. If an operator disables the server or removes its browser authorization
+configuration, you can still disconnect your saved grant in My MCP connections.
+Foreground lead-agent chat supports these connections. Subagents,
 scheduled runs, IM, and other background runs use their existing credential modes.
 
 This mode requires SQLite or PostgreSQL and the existing credentials key.

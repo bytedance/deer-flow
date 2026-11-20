@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
-from sqlalchemy import delete, or_, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
@@ -94,6 +94,13 @@ class SqlMcpOAuthTokenRepository:
                 grant_epoch=row.grant_epoch,
                 grant_context=row.grant_context,
             )
+
+    def list_delegated_servers(self, owner_user_id: str) -> list[str]:
+        """List the owner's grants, including those awaiting reconnect, without reading tokens."""
+        row = McpOAuthTokenRow
+        stmt = select(row.server_key).where(row.scope == "delegated", row.owner_user_id == owner_user_id, row.grant_context.is_not(None)).order_by(row.server_key)
+        with self._sf() as session:
+            return list(session.scalars(stmt))
 
     def begin_delegated(
         self,

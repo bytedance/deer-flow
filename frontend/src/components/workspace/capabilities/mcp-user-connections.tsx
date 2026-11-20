@@ -67,8 +67,9 @@ export function MCPUserConnections({
       ) : (
         <ul className="divide-y">
           {visible.map((item) => {
-            const connected = item.status === "connected";
-            const actionLabel = connected
+            const canDisconnect =
+              item.status === "connected" || item.status === "removed";
+            const actionLabel = canDisconnect
               ? copy.disconnect
               : item.status === "reconnect_required"
                 ? copy.reconnect
@@ -96,7 +97,7 @@ export function MCPUserConnections({
                       change.mutate(
                         {
                           serverKey: item.server_key,
-                          action: connected ? "disconnect" : "connect",
+                          action: canDisconnect ? "disconnect" : "connect",
                         },
                         {
                           onSuccess: (authorizationUrl) => {

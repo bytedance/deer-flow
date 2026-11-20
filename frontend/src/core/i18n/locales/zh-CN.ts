@@ -218,6 +218,7 @@ export const zhCN: Translations = {
         disconnected: "未连接",
         connected: "已连接",
         reconnect_required: "重新连接后即可使用此服务器。",
+        removed: "此服务器已停用用户授权。",
         unavailable: "连接不可用，请联系管理员。",
       },
     },

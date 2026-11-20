@@ -307,6 +307,9 @@ class McpOAuthTokenStore:
             raise McpOAuthTokenKeyUnavailable("The MCP browser grant cannot be decrypted") from None
         return DelegatedOAuthGrant(row.grant_epoch, row.version, DelegatedOAuthContext(**json.loads(row.grant_context)), token)
 
+    def list_delegated_servers(self, owner_user_id: str) -> list[str]:
+        return self._call("MCP browser connections", "list", lambda: self._repo.list_delegated_servers(owner_user_id))
+
     def delegated_needs_reconnect(self, key: McpOAuthTokenKey, *, fingerprint: str) -> bool:
         row = self._call(_server_subject(key), "read", lambda: self._repo.get("delegated", key.owner_user_id, key.server_key))
         return bool(row and row.config_fingerprint == fingerprint and row.grant_context is not None and row.access_token_enc is None)

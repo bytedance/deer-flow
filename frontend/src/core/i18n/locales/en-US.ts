@@ -231,6 +231,7 @@ export const enUS: Translations = {
         disconnected: "Not connected",
         connected: "Connected",
         reconnect_required: "Reconnect to use this server.",
+        removed: "User authorization is no longer enabled for this server.",
         unavailable: "Connection unavailable. Contact your administrator.",
       },
     },

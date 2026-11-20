@@ -28,6 +28,7 @@ from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, Syst
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
+from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_run_store, get_stream_bridge
@@ -2798,7 +2799,7 @@ async def start_run(
         if (
             user is not None
             and getattr(request.state, "auth_source", None) == AUTH_SOURCE_SESSION
-            and bool(getattr(request, "cookies", {}).get("access_token"))
+            and bool(getattr(request, "cookies", {}).get(ACCESS_TOKEN_COOKIE_NAME))
             and origin is None
             and admitted_origin == "interactive"
             and body.multitask_strategy != "enqueue"

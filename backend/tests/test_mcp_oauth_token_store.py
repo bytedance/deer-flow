@@ -772,3 +772,41 @@ def test_request_fingerprint_follows_token_request_parameters_not_the_chain():
         assert oauth_token_request_fingerprint(changed) != fingerprint, update
         assert oauth_config_fingerprint(changed) == oauth_config_fingerprint(base), "the refresh-token chain is unaffected"
     assert oauth_token_request_fingerprint(base.model_copy(update={"extra_token_params": {"resource": "https://api"}})) == fingerprint
+
+
+@pytest.mark.asyncio
+async def test_removed_server_grants_can_be_listed_and_disconnected_by_their_owner(session_factory, cipher, tmp_path, monkeypatch):
+    from fastapi import Response
+
+    from app.gateway.routers import mcp_user_oauth as router
+
+    path = tmp_path / "extensions_config.json"
+    path.write_text('{"mcpServers": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(path))
+    store = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=cipher)
+    set_mcp_oauth_token_store(store)
+    alice = McpOAuthTokenKey.for_delegated(SERVER, "alice")
+    bob = McpOAuthTokenKey.for_delegated(SERVER, "bob")
+    bob_only = McpOAuthTokenKey.for_delegated("bob-only", "bob")
+    for key in (alice, bob, bob_only):
+        state = f"{key.owner_user_id}:{key.server_key}"
+        _delegated_attempt(store, key, state)
+        attempt = store.consume_delegated(state, owner_user_id=key.owner_user_id, browser_binding="browser")
+        assert store.complete_delegated(attempt, access_token="access", refresh_token="refresh", expires_at=None)
+
+    rows = (await router.list_connections(Response(), owner="alice")).connections
+    assert [(row.server_key, row.status) for row in rows] == [(SERVER, "removed")]
+    assert (await router.disconnect(SERVER, owner="alice")).status_code == 204
+    assert (await router.list_connections(Response(), owner="alice")).connections == []
+    with session_factory() as session:
+        row = session.get(McpOAuthTokenRow, ("delegated", "alice", SERVER))
+        assert row.access_token_enc is None and row.refresh_token_enc is None
+    assert store.get_delegated(bob, fingerprint=REQUEST) is not None
+
+    # Revocation also fences a callback already exchanging its code.
+    _delegated_attempt(store, alice, "in-flight")
+    in_flight = store.consume_delegated("in-flight", owner_user_id="alice", browser_binding="browser")
+    assert (await router.disconnect(SERVER, owner="alice")).status_code == 204
+    assert not store.complete_delegated(in_flight, access_token="late", expires_at=None)
+    assert (await router.disconnect("unknown", owner="alice")).status_code == 204
+    assert all(row.server_key != "unknown" for row in _rows(session_factory))

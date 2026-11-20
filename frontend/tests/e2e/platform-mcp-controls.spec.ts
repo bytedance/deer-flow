@@ -143,11 +143,15 @@ test("a member connects and disconnects their own MCP account from Capability Ce
   const { state } = await mockConnections(page);
   state.role = "user";
   let status = "reconnect_required";
+  let retired = [
+    { server_key: "retired", display_name: "Retired tools", status: "removed" },
+  ];
   const calls: string[] = [];
   await page.route("**/api/mcp/user-oauth", (route) =>
     route.fulfill({
       json: {
         connections: [
+          ...retired,
           { server_key: "logs", display_name: "Log tools", status },
           {
             server_key: "unavailable",
@@ -176,6 +180,11 @@ test("a member connects and disconnects their own MCP account from Capability Ce
       },
     });
   });
+  await page.route("**/api/mcp/user-oauth/retired", (route) => {
+    expect(route.request().method()).toBe("DELETE");
+    retired = [];
+    return route.fulfill({ status: 204 });
+  });
   await page.route("**/api/mcp/user-oauth/logs", (route) => {
     calls.push(route.request().method());
     status = "disconnected";
@@ -198,6 +207,8 @@ test("a member connects and disconnects their own MCP account from Capability Ce
     mine.getByRole("button", { name: "Connect Log tools" }),
   ).toBeVisible();
   expect(calls).toEqual(["POST", "DELETE"]);
+  await mine.getByRole("button", { name: "Disconnect Retired tools" }).click();
+  await expect(mine.getByText("Retired tools")).toHaveCount(0);
 });
 
 test("a rejected platform toggle keeps the stored state and reports the error", async ({
