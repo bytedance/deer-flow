@@ -26,14 +26,7 @@ from deerflow.community.vefaas_sandbox import (
     VeFaaSSandboxProvider,
     sign_v4_headers,
 )
-from deerflow.community.vefaas_sandbox.provider import (
-    INSTANCE_ROUTING_HEADER,
-    META_KEY_PROVIDER,
-    META_KEY_SANDBOX_ID,
-    META_VAL_PROVIDER,
-    _validate_skills_root,
-    _VeFaaSShutdownIncompleteError,
-)
+from deerflow.community.vefaas_sandbox import provider as provider_mod
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox_provider import hold_sandbox_shutdown_ownership
@@ -255,8 +248,6 @@ def _install_provider(
     sandbox_overrides: dict[str, Any] | None = None,
     ready_result: bool = True,
 ) -> tuple[VeFaaSSandboxProvider, _FakeVeFaaSServer, list[_FakeAioSandbox]]:
-    import deerflow.community.vefaas_sandbox.provider as provider_mod
-
     fake_server = server or _FakeVeFaaSServer()
     mock_http = httpx.Client(transport=httpx.MockTransport(fake_server.handler))
     app_cfg = _make_app_config(tmp_path, sandbox_overrides=sandbox_overrides)
@@ -430,6 +421,21 @@ class TestVeFaaSClient:
         with pytest.raises(VeFaaSApiError):
             client.describe_sandbox("fn-1", "missing-id")
 
+        # Malformed/empty 2xx DescribeSandbox responses must fail closed rather than proving absence.
+        for bad_body in (
+            {"ResponseMetadata": {"RequestId": "req-empty"}, "Result": {}},
+            {"ResponseMetadata": {"RequestId": "req-no-id"}, "Result": {"Status": "Running"}},
+        ):
+            bad_client = VeFaaSClient(
+                endpoint="https://vefaas.ap-southeast-1.byteplusapi.com",
+                region="ap-southeast-1",
+                access_key="ak",
+                secret_key="sk",
+                httpx_client=httpx.Client(transport=httpx.MockTransport(lambda _r, body=bad_body: httpx.Response(200, json=body))),
+            )
+            with pytest.raises(VeFaaSApiError, match="valid sandbox record"):
+                bad_client.describe_sandbox("fn-1", "sb-1")
+
 
 # ── 3. Config Validation ─────────────────────────────────────────────────
 
@@ -454,10 +460,10 @@ class TestVeFaaSConfigValidation:
             )
 
     def test_rejects_unsafe_skills_roots(self) -> None:
-        assert _validate_skills_root("/mnt/skills") == "/mnt/skills"
+        assert provider_mod._validate_skills_root("/mnt/skills") == "/mnt/skills"
         for bad in ("/", "/etc", "/mnt/user-data", "/mnt/user-data/skills", "/mnt/skills/../etc"):
             with pytest.raises(ValueError):
-                _validate_skills_root(bad)
+                provider_mod._validate_skills_root(bad)
 
 
 # ── 4. Provider Lifecycle, Skills Sync, TOS Mount & Ownership ────────────
@@ -483,7 +489,7 @@ class TestVeFaaSSandboxProviderLifecycle:
             # Verify AioSandbox reused with unified domain + instance routing header + bearer token.
             aio = aio_instances[0]
             assert aio.base_url == "https://sandbox.ap-southeast-1.byteplus.example"
-            assert aio.request_headers[INSTANCE_ROUTING_HEADER] == "vefaas-sb-1"
+            assert aio.request_headers[provider_mod.INSTANCE_ROUTING_HEADER] == "vefaas-sb-1"
             assert aio.request_headers["Authorization"] == "Bearer apig-secret-tok"
             assert aio.lark_cli_broker is False
 
@@ -531,7 +537,7 @@ class TestVeFaaSSandboxProviderLifecycle:
         try:
             provider.acquire("t-tpl", user_id="u-1")
             assert aio_instances[0].base_url == "https://vefaas-sb-1.sandbox.example.com"
-            assert INSTANCE_ROUTING_HEADER not in aio_instances[0].request_headers
+            assert provider_mod.INSTANCE_ROUTING_HEADER not in aio_instances[0].request_headers
         finally:
             provider.shutdown()
 
@@ -577,15 +583,15 @@ class TestVeFaaSSandboxProviderLifecycle:
             "Status": "Running",
             "Pending": False,
             "Metadata": {
-                META_KEY_PROVIDER: META_VAL_PROVIDER,
-                META_KEY_SANDBOX_ID: sandbox_id,
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sandbox_id,
             },
         }
         provider, _, aio_instances = _install_provider(monkeypatch, tmp_path, server=server)
         try:
             acquired = provider.acquire("t-discover", user_id="u1")
             assert acquired == sandbox_id
-            assert aio_instances[0].request_headers[INSTANCE_ROUTING_HEADER] == "vefaas-existing-9"
+            assert aio_instances[0].request_headers[provider_mod.INSTANCE_ROUTING_HEADER] == "vefaas-existing-9"
             assert not any(a == "CreateSandbox" for a, _, _ in server.requests)
         finally:
             provider.shutdown()
@@ -667,7 +673,7 @@ class TestVeFaaSSandboxProviderLifecycle:
         provider, _, _ = _install_provider(monkeypatch, tmp_path, server=server)
 
         sandbox_id = provider.acquire("t-quar", user_id="u1")
-        with pytest.raises(_VeFaaSShutdownIncompleteError):
+        with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError):
             provider.shutdown()
 
         # Remote still alive -> quarantined and shutdown remains retryable.
@@ -677,6 +683,32 @@ class TestVeFaaSSandboxProviderLifecycle:
         server.describe_after_kill_keeps_running = False
         provider.shutdown()
         assert provider._shutdown_complete is True
+        assert server.sandboxes == {}
+
+    def test_failed_provisioning_rollback_blocks_shutdown_until_confirmed_absent(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        server = _FakeVeFaaSServer()
+        server.describe_after_kill_keeps_running = True
+        provider, _, _ = _install_provider(monkeypatch, tmp_path, server=server, ready_result=False)
+
+        expected_id = derive_sandbox_scope_token(user_id="u1", thread_id="t-rb-shutdown")
+        with pytest.raises(TimeoutError, match="did not become HTTP-ready"):
+            provider.acquire("t-rb-shutdown", user_id="u1")
+
+        # Rollback could not confirm absence -> retained for both quarantine and shutdown cleanup.
+        assert "vefaas-sb-1" in provider._quarantined_remote_ids.get(expected_id, set())
+        assert "vefaas-sb-1" in provider._pending_rollbacks
+
+        # First shutdown retries the rollback generation and stays incomplete while still running.
+        with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError):
+            provider.shutdown()
+        assert provider._shutdown_complete is False
+
+        # Once deletion is confirmed, retry shutdown clears rollback state and completes cleanly.
+        server.describe_after_kill_keeps_running = False
+        provider.shutdown()
+        assert provider._shutdown_complete is True
+        assert provider._pending_rollbacks == {}
+        assert provider._quarantined_remote_ids == {}
         assert server.sandboxes == {}
 
     def test_ownership_backend_error_rolls_back_fresh_sandbox(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -694,8 +726,6 @@ class TestVeFaaSSandboxProviderLifecycle:
             provider.shutdown()
 
     def test_host_shutdown_ownership_skips_signal_handlers(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import deerflow.community.vefaas_sandbox.provider as provider_mod
-
         installed_signals: list[int] = []
         monkeypatch.setattr(provider_mod.signal, "signal", lambda sig, _h: installed_signals.append(sig))
         provider, _, _ = _install_provider(monkeypatch, tmp_path)

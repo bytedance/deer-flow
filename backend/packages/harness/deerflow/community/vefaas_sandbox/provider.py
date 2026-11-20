@@ -150,6 +150,15 @@ class _TrackedVeFaaSSandbox:
     user_id: str | None
 
 
+@dataclass(frozen=True)
+class _PendingRollback:
+    """Failed provisioning generation retained for retryable teardown and shutdown."""
+
+    sandbox_id: str
+    remote_sandbox_id: str
+    release_ownership: bool
+
+
 @dataclass
 class _UploadBudget:
     """Aggregate file-count and byte ceiling for one tar upload pass."""
@@ -218,6 +227,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         self._warm_pool: dict[str, tuple[_TrackedVeFaaSSandbox, float]] = {}
         self._quarantined_remote_ids: dict[str, set[str]] = {}
         self._pending_destroys: dict[str, _TrackedVeFaaSSandbox] = {}
+        self._pending_rollbacks: dict[str, _PendingRollback] = {}
         self._destroying_remote_ids: set[str] = set()
         self._acquire_serializer: AcquireSerializer[str] = AcquireSerializer(thread_name_prefix="vefaas-sandbox-acquire-wait")
         self._idle_checker_stop = threading.Event()
@@ -633,7 +643,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             try:
                 signal.signal(sig, _handler)
             except (OSError, ValueError):
-                pass
+                # Signal registration is unsupported outside the main thread or in restricted runtimes.
+                logger.debug("Skipping %s handler registration for VeFaaSSandboxProvider", sig_name)
 
     # ── Acquisition ──────────────────────────────────────────────────────
 
@@ -905,20 +916,69 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             raise
 
     def _rollback_remote_sandbox(self, sandbox_id: str, remote_sandbox_id: str, *, release_ownership: bool) -> None:
-        function_id = self._config["function_id"]
-        try:
-            self._get_client().kill_sandbox(function_id, remote_sandbox_id)
-            if self._confirm_remote_absent(function_id, remote_sandbox_id):
-                if release_ownership:
-                    try:
-                        self._ownership.release(sandbox_id)
-                    except OwnershipBackendError:
-                        logger.warning("Failed to release ownership after veFaaS rollback for %s", sandbox_id)
-                return
-        except Exception as exc:
-            logger.warning("Failed to roll back veFaaS sandbox %s (remote=%s): %s", sandbox_id, remote_sandbox_id, self._redact(exc))
+        entry = _PendingRollback(
+            sandbox_id=sandbox_id,
+            remote_sandbox_id=remote_sandbox_id,
+            release_ownership=release_ownership,
+        )
+        self._cleanup_rollback(entry, reason="rollback")
+
+    def _cleanup_rollback(self, entry: _PendingRollback, *, reason: str) -> bool:
+        """Kill and confirm absence of a failed provisioning generation.
+
+        Returns ``True`` only once the remote instance is authoritatively absent
+        (and any owned lease released). Failed rollbacks remain queued in
+        ``_pending_rollbacks`` and ``_quarantined_remote_ids`` so background
+        retries and ``shutdown()`` keep retrying until deletion is confirmed.
+        """
+        sandbox_id = entry.sandbox_id
+        remote_id = entry.remote_sandbox_id
         with self._lock:
-            self._quarantined_remote_ids.setdefault(sandbox_id, set()).add(remote_sandbox_id)
+            self._pending_rollbacks[remote_id] = entry
+            if remote_id in self._destroying_remote_ids:
+                return False
+            self._destroying_remote_ids.add(remote_id)
+
+        confirmed = False
+        try:
+            function_id = self._config["function_id"]
+            self._get_client().kill_sandbox(function_id, remote_id)
+            if self._confirm_remote_absent(function_id, remote_id):
+                confirmed = True
+            else:
+                logger.warning(
+                    "veFaaS rollback sandbox %s (remote=%s) still present after KillSandbox (%s); keeping quarantine fence",
+                    sandbox_id,
+                    remote_id,
+                    reason,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to roll back veFaaS sandbox %s (remote=%s, %s): %s",
+                sandbox_id,
+                remote_id,
+                reason,
+                self._redact(exc),
+            )
+        finally:
+            if confirmed and entry.release_ownership:
+                try:
+                    self._ownership.release(sandbox_id)
+                except OwnershipBackendError as exc:
+                    logger.warning("Failed to release ownership after veFaaS rollback for %s: %s", sandbox_id, exc)
+                    confirmed = False
+            with self._lock:
+                self._destroying_remote_ids.discard(remote_id)
+                if confirmed:
+                    self._pending_rollbacks.pop(remote_id, None)
+                    bucket = self._quarantined_remote_ids.get(sandbox_id)
+                    if bucket is not None:
+                        bucket.discard(remote_id)
+                        if not bucket:
+                            self._quarantined_remote_ids.pop(sandbox_id, None)
+                else:
+                    self._quarantined_remote_ids.setdefault(sandbox_id, set()).add(remote_id)
+        return confirmed
 
     def _redact(self, value: object) -> str:
         text = redact_secret(value, self._config.get("secret_key"))
@@ -945,6 +1005,19 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         client = self._get_client()
         still_present: list[str] = []
         for remote_id in quarantined:
+            with self._lock:
+                pending_rollback = self._pending_rollbacks.get(remote_id)
+                pending_destroy = self._pending_destroys.get(remote_id)
+            if pending_rollback is not None:
+                if not self._cleanup_rollback(pending_rollback, reason="drain_quarantine"):
+                    still_present.append(remote_id)
+                continue
+            if pending_destroy is not None:
+                self._destroy_tracked(pending_destroy, reason="drain_quarantine")
+                with self._lock:
+                    if remote_id in self._quarantined_remote_ids.get(sandbox_id, set()):
+                        still_present.append(remote_id)
+                continue
             try:
                 client.kill_sandbox(function_id, remote_id)
                 if self._confirm_remote_absent(function_id, remote_id):
@@ -1011,8 +1084,11 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
     def _retry_pending_destroys(self) -> None:
         with self._lock:
             pending = list(self._pending_destroys.values())
+            pending_rollbacks = list(self._pending_rollbacks.values())
         for tracked in pending:
             self._destroy_tracked(tracked, reason="retry_destroy")
+        for rollback in pending_rollbacks:
+            self._cleanup_rollback(rollback, reason="retry_rollback")
 
     # ── Upload-based file restoration & per-agent skills isolation ───────
 
@@ -1290,6 +1366,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 active = list(self._sandboxes.values())
                 warm = [entry for entry, _ in self._warm_pool.values()]
                 pending = list(self._pending_destroys.values())
+                pending_rollbacks = list(self._pending_rollbacks.values())
                 self._sandboxes.clear()
                 self._warm_pool.clear()
                 self._thread_sandboxes.clear()
@@ -1297,9 +1374,11 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             unique = {entry.remote_sandbox_id: entry for entry in active + warm + pending}
             for tracked in unique.values():
                 self._destroy_tracked(tracked, reason="shutdown")
+            for rollback in pending_rollbacks:
+                self._cleanup_rollback(rollback, reason="shutdown")
 
             with self._lock:
-                still_pending = len(self._pending_destroys)
+                still_pending = len(self._pending_destroys) + len(self._pending_rollbacks)
                 if still_pending or not threads_stopped:
                     raise _VeFaaSShutdownIncompleteError(f"veFaaS shutdown incomplete: {still_pending} teardown(s) pending, threads_stopped={threads_stopped}; retry shutdown")
                 self._shutdown_complete = True

@@ -418,7 +418,10 @@ class VeFaaSClient:
             )
         except VeFaaSSandboxNotFoundError:
             return None
-        return _parse_record(result, fallback_function_id=function_id)
+        record = _parse_record(result, fallback_function_id=function_id)
+        if record is None:
+            raise VeFaaSApiError(f"veFaaS DescribeSandbox response for {sandbox_id} did not include a valid sandbox record")
+        return record
 
     def list_sandboxes(
         self,
