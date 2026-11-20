@@ -1039,25 +1039,24 @@ async def test_managed_worker_restart_reconciles_the_persisted_task(worker_gatew
     assert finished["assignment"]["thread_id"] == thread
     assert finished["execution"]["turn"] == (2 if previous_outcome == "shutdown" else 1)
     assert (finished["execution"]["run_id"] != run_id) is (previous_outcome == "shutdown")
+    if previous_outcome == "orphan-no-checkpoint":
+        assert finished["execution"]["status"] == "error"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("denial", ["permission", "revoked"])
-async def test_managed_worker_admission_distinguishes_permission_loss_from_revocation(worker_gateway, host, monkeypatch, denial):
+@pytest.mark.parametrize("denial", ["runs:create", "threads:write", "revoked"])
+async def test_managed_worker_admission_waits_for_restored_authorization(worker_gateway, monkeypatch, denial):
     client, runs, state, _, owner = worker_gateway
     service = state.coordination_workers
-    task = await service.repo.create(owner, request_id="pending-admission", objective="wait")
+    task = await service.repo.create(owner, request_id="pending-admission", objective="continue")
     task_id = task["id"]
     grant = service._new_grant(runs.capture_authority())
     turn = await service.repo.prepare(owner, task_id, "lead_agent", initial_grant=grant)
     authorized, grant_id = await service.authority(owner, task_id)
-    if denial == "permission":
-        _, request, _ = host
-        monkeypatch.setattr(
-            "app.gateway.extension_agent_runs.resolve_route_permissions",
-            AsyncMock(return_value=[permission for permission in request.state.auth.permissions if permission != "runs:create"]),
-        )
-    else:
+    permissions = grant["authority"]["permissions"]
+    policy = AsyncMock(return_value=[permission for permission in permissions if permission != denial])
+    monkeypatch.setattr("app.gateway.extension_agent_runs.resolve_route_permissions", policy)
+    if denial == "revoked":
         await service.repo.set_grant(owner, task_id, None)
 
     driver = service.watch(authorized, owner, task_id, grant_id)
@@ -1068,19 +1067,21 @@ async def test_managed_worker_admission_distinguishes_permission_loss_from_revoc
     view = (await client.get(url)).raise_for_status().json()
     assert view["execution"]["id"] == turn[1]["id"]
     assert view["execution"]["run_id"] is None
-    if denial == "permission":
-        assert view["task"]["status"] == "failed"
-        assert view["execution"]["status"] == "admission_failed"
-        assert view["authorization_required"] is False
-        await service.recover_once()
-        assert (owner, task_id) not in service._drivers
-    else:
-        assert view["task"]["status"] == "running"
-        assert view["execution"]["status"] == "admitting"
-        assert view["authorization_required"] is True
+    assert view["task"]["status"] == "running"
+    assert view["execution"]["status"] == "admitting"
+    assert view["authorization_required"] is True
+    await service.recover_once()
+    assert (owner, task_id) not in service._drivers
+
+    policy.return_value = permissions
+    if denial == "revoked":
         assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
-        await service.recover_once()
-        await _wait_for_worker(client, task_id, "execution", "status", "running")
+    else:
+        assert (await service.repo.grant(owner, task_id))["id"] == grant_id
+    await service.recover_once()
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert finished["authorization_required"] is False
+    assert finished["execution"]["id"] == turn[1]["id"]
 
 
 @pytest.mark.asyncio

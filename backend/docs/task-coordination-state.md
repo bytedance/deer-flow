@@ -109,14 +109,14 @@ On startup and periodically, the Gateway reconciles open tasks with grants.
 It observes live Runs, records results from committed terminal Run evidence,
 and retries frozen admissions with their original idempotency key. A Run
 interrupted by Gateway shutdown can continue from a pending checkpoint written
-by that Run. If the Run stopped before saving a checkpoint, the Gateway settles
-the task from the Run's durable outcome. Pending approvals still require an
+by that Run. When the checkpoint is missing, the Gateway settles the execution
+from the Run's durable outcome. Pending approvals still require an
 explicit response. Recovery also continues work already fenced for cancellation.
 
 The task view reports `authorization_required` when an open task lacks a
-valid grant, including older tasks created before the grant migration.
-An admission denied by current permissions with a valid grant records
-`admission_failed`. A revoked or replaced grant leaves the turn pending.
+valid grant or its current permissions no longer cover the work. Recovery
+waits for permission to return and can then continue with the same grant if
+it remains valid. Older tasks created before the migration need a grant.
 An authorized owner can renew with `PUT /api/coordination/tasks/{task_id}/authorization`
 or revoke with `DELETE /api/coordination/tasks/{task_id}/authorization`.
 The Grant table stores only authority metadata and the binding generation.

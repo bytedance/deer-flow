@@ -45,14 +45,11 @@ async def bind_admitted_worker(session, thread_id, owner_id, key, run_id, *, gra
     grant = await session.get(Grant, task_id)
     # Old tasks and older Gateways have no grant. Once a grant is installed,
     # only its current generation may admit the next Run under the tree lock.
-    if grant is not None and not await _current_grant_matches(session, owner_id, grant, grant_id):
-        raise ConflictError("Task run authorization is no longer current")
+    if grant is not None:
+        if grant.id != grant_id or grant.expires_at <= time() or not await grant_owner_matches(session, owner_id, grant.authority) or not await channel_binding_matches(session, owner_id, grant.channel, lock=True):
+            raise ConflictError("Task run authorization is no longer current")
     execution.run_id = run_id
     execution.status = "running"
-
-
-async def _current_grant_matches(session, owner, grant, grant_id):
-    return grant is not None and grant.id == grant_id and grant.expires_at > time() and await grant_owner_matches(session, owner, grant.authority) and await channel_binding_matches(session, owner, grant.channel, lock=True)
 
 
 async def grant_owner_matches(session, owner, authority):
@@ -279,7 +276,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                 )
             )
 
-    async def settle(self, owner, task_id, execution_id, run_id, status, artifacts, *, expected_grant_id=None):
+    async def settle(self, owner, task_id, execution_id, run_id, status, artifacts):
         async with self._write() as session:
             task = await self._lock_tree(session, owner, task_id)
             execution = await session.get(Execution, execution_id)
@@ -287,10 +284,6 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                 return
             if task.status != TaskStatus.RUNNING or task.execution_epoch != execution.epoch:
                 return
-            if expected_grant_id is not None:
-                current = await session.get(Grant, task_id)
-                if not await _current_grant_matches(session, owner, current, expected_grant_id):
-                    return
             for path, digest, content in artifacts:
                 session.add(Artifact(id=uuid4().hex, execution_id=execution.id, path=path, sha256=digest, size=len(content), content=content))
             if status == "waiting_for_input":

@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 CANCEL_RESPONSE_TIMEOUT = 5
 RECOVERY_INTERVAL = 10
 GRANT_LIFETIME = 24 * 60 * 60
-WORKER_PERMISSIONS = {"runs:create", "runs:read", "runs:cancel", "threads:read", "threads:write"}
+WORKER_RUN_PERMISSIONS = frozenset({"runs:create", "runs:read", "threads:read", "threads:write"})
+WORKER_CANCEL_PERMISSIONS = frozenset({"runs:read", "runs:cancel"})
+WORKER_PERMISSIONS = WORKER_RUN_PERMISSIONS | WORKER_CANCEL_PERMISSIONS
 
 
 class CoordinationWorkers:
@@ -90,7 +92,7 @@ class CoordinationWorkers:
         task = await self.repo.create(owner, request_id=f"im:{request_key}", objective=objective)
         return await self.dispatch(runs, owner, task["id"], assistant_id, channel={"id": connection["id"], "updated_at": connection["updated_at"]})
 
-    async def authority(self, owner, task_id):
+    async def authority(self, owner, task_id, *, cancelling=False):
         grant = await self.repo.grant(owner, task_id)
         if grant is None:
             raise AgentRunError(403, "Task requires authorization")
@@ -100,7 +102,13 @@ class CoordinationWorkers:
             if current is None or current["id"] != grant["id"]:
                 raise AgentRunError(403, "Task authorization was revoked")
 
-        runs = await self._host.restore_delegated_authority(user_id=owner, grant=grant["authority"], validator=validate, plugin_namespace="native-coordination")
+        runs = await self._host.restore_delegated_authority(
+            user_id=owner,
+            grant=grant["authority"],
+            validator=validate,
+            plugin_namespace="native-coordination",
+            required_permissions=WORKER_CANCEL_PERMISSIONS if cancelling else WORKER_RUN_PERMISSIONS,
+        )
         return runs, grant["id"]
 
     async def authorize(self, runs, owner, task_id):
@@ -110,9 +118,10 @@ class CoordinationWorkers:
     async def view(self, owner, task_id):
         view = await self.repo.view(owner, task_id)
         required = False
-        if view["task"]["status"] in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.CANCELLING):
+        status = view["task"]["status"]
+        if status in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.CANCELLING):
             try:
-                await self.authority(owner, task_id)
+                await self.authority(owner, task_id, cancelling=status == TaskStatus.CANCELLING)
             except AgentRunError as exc:
                 if exc.status_code != 403:
                     raise
@@ -128,7 +137,7 @@ class CoordinationWorkers:
                 if (job := jobs.get(key)) is not None and not job.done():
                     continue
                 try:
-                    runs, grant_id = await self.authority(owner, task_id)
+                    runs, grant_id = await self.authority(owner, task_id, cancelling=status == TaskStatus.CANCELLING)
                 except AgentRunError as exc:
                     if exc.status_code != 403:
                         raise
@@ -158,17 +167,6 @@ class CoordinationWorkers:
             except AgentRunError as exc:
                 if exc.status_code in (400, 404, 422):
                     await self.repo.settle(owner, task_id, execution["id"], None, "admission_failed", [])
-                elif exc.status_code == 403:
-                    # A denied operation can be terminal only while its grant is
-                    # still usable. Revocation or renewal leaves the turn pending.
-                    try:
-                        _, current_grant_id = await self.authority(owner, task_id)
-                    except AgentRunError as grant_error:
-                        if grant_error.status_code != 403:
-                            raise
-                    else:
-                        if current_grant_id == grant_id:
-                            await self.repo.settle(owner, task_id, execution["id"], None, "admission_failed", [], expected_grant_id=grant_id)
                 raise
         return execution["run_id"]
 

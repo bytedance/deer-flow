@@ -100,6 +100,7 @@ class GatewayAgentRunsHost:
         grant: dict,
         validator: Callable[[], Awaitable[None]] | None = None,
         plugin_namespace: str | None = None,
+        required_permissions: frozenset[str] = frozenset(),
     ):
         """Restore a persisted delegated grant (e.g. workflow recovery) with its ceiling.
 
@@ -109,6 +110,8 @@ class GatewayAgentRunsHost:
         this handle performs. Restoring re-loads the user row and fails closed
         on a changed token_version, needs_setup or a disabled account, exactly
         like ``restore_batch_authority``; it never creates fresh authority.
+        Callers can preflight required permissions against the grant and current
+        policy. Host operations still revalidate permissions at use.
         """
         source, version, permissions = grant.get("source"), grant.get("token_version"), grant.get("permissions")
         if source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED) or type(version) is not int or not isinstance(permissions, list) or any(not isinstance(value, str) for value in permissions):
@@ -116,12 +119,17 @@ class GatewayAgentRunsHost:
         user = get_auth_disabled_user() if source == AUTH_SOURCE_AUTH_DISABLED and is_auth_disabled() else await self.load_user(user_id) if source == AUTH_SOURCE_SESSION and self.load_user is not None else None
         if user is None or str(user.id) != user_id or user.token_version != version or user.needs_setup or getattr(user, "disabled", False):
             raise AgentRunError(403, "Delegated authorization revoked")
+        granted_permissions = frozenset(permissions)
+        if required_permissions:
+            current_permissions = await resolve_route_permissions(user, is_internal=False)
+            if not required_permissions.issubset(granted_permissions.intersection(current_permissions)):
+                raise AgentRunError(403, "Delegated authorization lacks required permissions")
         return _BoundAgentRuns(
             self,
             user_id,
             version,
             source,
-            frozenset(permissions),
+            granted_permissions,
             plugin_namespace=plugin_namespace,
             origin=make_origin("extension", namespace=plugin_namespace),
             delegation_validator=validator,
@@ -422,7 +430,7 @@ class _BoundAgentRuns:
         except AgentRunError as exc:
             if exc.status_code != 404:
                 raise
-            # A run can stop before persisting its first checkpoint.
+            # A stopped Run can have no readable checkpoint after restart.
             return None
 
     async def coordination_artifacts(self, *, thread_id, run_id):
