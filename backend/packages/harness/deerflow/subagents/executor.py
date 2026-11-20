@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
@@ -187,8 +188,12 @@ class SubagentResult:
     _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
     # Set by ``_aexecute`` once the execution owns a capacity slot. The
     # delegating wrappers wait on it before starting the execution clock, so
-    # queue wait is bounded only by ``queue_timeout_seconds``.
+    # queue wait is bounded only by ``queue_timeout_seconds``. The timestamp
+    # records the clock start itself: the wrapper may not be scheduled until
+    # ``_aexecute`` yields, and that scheduling gap belongs to the execution
+    # budget.
     _admission_event: asyncio.Event | None = field(default=None, init=False, repr=False, compare=False)
+    _admitted_at_monotonic: float | None = field(default=None, init=False, repr=False, compare=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -1796,9 +1801,13 @@ class SubagentExecutor:
                 ):
                     if admission_event is not None:
                         # A slot is owned from here on, so the execution clock
-                        # starts now. The durable-batch principal revalidation
-                        # below runs inside it too: a resolver that never
-                        # returns must still end the delegation.
+                        # starts now. The timestamp, not the wrapper's wakeup,
+                        # defines the deadline: synchronous work below can delay
+                        # the supervisor without extending the budget. The
+                        # durable-batch principal revalidation below runs inside
+                        # it too: a resolver that never returns must still end
+                        # the delegation.
+                        result._admitted_at_monotonic = time.monotonic()
                         admission_event.set()
                     if self._principal_resolver is not None:
                         # Durable work can wait behind ordinary subagents after
@@ -2359,14 +2368,23 @@ class SubagentExecutor:
 
         The capacity controller already bounds queue wait with
         ``queue_timeout_seconds``; the execution clock must start only once a
-        slot is granted. Completion is accepted in place of admission so
-        executions supplied by wrappers that never signal admission still
-        return normally.
+        slot is granted. That start is recorded on the result at admission, not
+        when this watcher is scheduled: synchronous work between the two still
+        consumes the execution budget. Completion is accepted in place of
+        admission so executions supplied by wrappers that never signal
+        admission still return normally.
 
         Returns the outcome and whether a timed-out execution was detached to
         the background supervisor for teardown.
         """
         admission_waiter = asyncio.create_task(admitted.wait())
+        execution_finished_at: float | None = None
+
+        def _record_execution_finished(_task: asyncio.Task[SubagentResult]) -> None:
+            nonlocal execution_finished_at
+            execution_finished_at = time.monotonic()
+
+        execution_task.add_done_callback(_record_execution_finished)
         try:
             done, _ = await asyncio.wait(
                 {execution_task, admission_waiter},
@@ -2384,12 +2402,21 @@ class SubagentExecutor:
                     # to schedule the waiter's cancellation on.
                     pass
 
-        done, _ = await asyncio.wait(
-            {execution_task},
-            timeout=self.config.timeout_seconds,
-        )
-        if execution_task in done:
-            return execution_task.result(), False
+        admitted_at = result._admitted_at_monotonic
+        if admitted_at is None:
+            deadline = None
+            remaining = self.config.timeout_seconds
+        else:
+            deadline = admitted_at + self.config.timeout_seconds
+            remaining = deadline - time.monotonic()
+
+        if remaining > 0:
+            await asyncio.wait({execution_task}, timeout=remaining)
+
+        if execution_task.done():
+            finished_by_deadline = deadline is None or execution_finished_at is None or execution_finished_at <= deadline
+            if finished_by_deadline:
+                return execution_task.result(), False
 
         # Publish the configured hard timeout without waiting for
         # cancellation-resistant stream cleanup. The detached execution still
@@ -2434,6 +2461,7 @@ class SubagentExecutor:
         parent_context = _copy_isolated_subagent_context()
         admitted = asyncio.Event()
         result_holder._admission_event = admitted
+        result_holder._admitted_at_monotonic = None
 
         async def run_with_admission_timeout() -> SubagentResult:
             execution_task = asyncio.create_task(
@@ -2460,6 +2488,7 @@ class SubagentExecutor:
                 raise
             finally:
                 result_holder._admission_event = None
+                result_holder._admitted_at_monotonic = None
 
         try:
             future = _submit_to_isolated_loop_in_context(parent_context, run_with_admission_timeout)
@@ -2491,8 +2520,9 @@ class SubagentExecutor:
         finally:
             # Also covers a wrapper that never started (submit failure or a
             # synchronous raise before its own cleanup), so a reused holder
-            # cannot inherit a stale, already-set admission signal.
+            # cannot inherit a stale, already-set admission signal or clock.
             result_holder._admission_event = None
+            result_holder._admitted_at_monotonic = None
 
     def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
@@ -2591,6 +2621,7 @@ class SubagentExecutor:
                 return result
             admitted = asyncio.Event()
             result._admission_event = admitted
+            result._admitted_at_monotonic = None
             execution_task = None
             execution_detached = False
             try:
@@ -2640,6 +2671,7 @@ class SubagentExecutor:
                 return result
             finally:
                 result._admission_event = None
+                result._admitted_at_monotonic = None
                 if not execution_detached:
                     _mark_background_execution_done(execution_id, result)
 

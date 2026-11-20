@@ -8263,3 +8263,83 @@ class TestExecutionTimeoutStartsAtAdmission:
         finally:
             module.request_cancel_background_task(execution_id)
             module.force_cleanup_background_task(execution_id)
+
+    @pytest.mark.anyio
+    async def test_admission_gap_counts_against_the_execution_timeout(self, classes, base_config, monkeypatch):
+        """Synchronous work after admission must not extend the execution clock.
+
+        The admission signal is set immediately before the principal resolver
+        is awaited. Blocking the loop there keeps the supervisor from running
+        until the budget is already spent; the deadline must therefore come
+        from the admission timestamp, not from the supervisor's wakeup.
+        """
+        from dataclasses import replace
+
+        from deerflow.authz.provider import Principal
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+
+        async def blocking_resolver():
+            time.sleep(0.4)
+            return Principal(user_id="alice", role="user")
+
+        async def never_reached_stream(*args, **kwargs):
+            yield {"messages": [classes["AIMessage"](content="should not run")]}
+
+        executor = classes["SubagentExecutor"](
+            config=replace(base_config, timeout_seconds=0.2),
+            tools=[],
+            thread_id="admission-gap",
+            user_id="alice",
+            execution_capacity=self._capacity(),
+            principal_resolver=blocking_resolver,
+        )
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=never_reached_stream)))
+
+        execution_id = executor.execute_async("block after admission")
+        result = module.get_background_task_result(execution_id)
+        try:
+            assert result is not None
+            assert result.execution_done_event.wait(timeout=5)
+            assert result.status is classes["SubagentStatus"].TIMED_OUT
+            assert result.error == "Execution timed out after 0.2 seconds"
+        finally:
+            module.request_cancel_background_task(execution_id)
+            module.force_cleanup_background_task(execution_id)
+
+    def test_sync_admission_gap_counts_against_the_execution_timeout(self, classes, base_config, monkeypatch):
+        """The synchronous wrapper uses the same admission deadline."""
+        from dataclasses import replace
+
+        from deerflow.authz.provider import Principal
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+
+        async def blocking_resolver():
+            time.sleep(0.4)
+            return Principal(user_id="alice", role="user")
+
+        async def never_reached_stream(*args, **kwargs):
+            yield {"messages": [classes["AIMessage"](content="should not run")]}
+
+        executor = classes["SubagentExecutor"](
+            config=replace(base_config, timeout_seconds=0.2),
+            tools=[],
+            thread_id="sync-admission-gap",
+            user_id="alice",
+            execution_capacity=self._capacity(),
+            principal_resolver=blocking_resolver,
+        )
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=never_reached_stream)))
+
+        result = executor.execute("block after admission")
+
+        assert result.status is classes["SubagentStatus"].FAILED
+        assert result.error == ""  # Preserve the synchronous timeout result.
+        assert result.execution_done_event.wait(timeout=5)
