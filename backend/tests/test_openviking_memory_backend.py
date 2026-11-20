@@ -2227,3 +2227,129 @@ def test_gateway_memory_config_response_masks_multi_user_secrets() -> None:
     serialized = parsed.model_dump_json()
     for secret in ("alice-plaintext-secret", "BOB_OV_KEY", "vault-api-secret", "vault-client-secret", "vault-bearer-token"):
         assert secret not in serialized
+
+
+def test_memory_target_uris_supports_home_alias() -> None:
+    from deerflow.agents.memory.backends.openviking.session import _memory_target_uris
+
+    assert _memory_target_uris("research") == [
+        "viking://user/memories",
+        "viking://user/peers/research/memories",
+    ]
+    assert _memory_target_uris("research", use_home_alias=True) == [
+        "viking://~/memories",
+        "viking://~/peers/research/memories",
+    ]
+
+
+class _FakeInvalidURIError(Exception):
+    code = "INVALID_URI"
+
+
+def test_get_context_falls_back_to_home_alias_and_caches_for_subsequent_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    import deerflow.agents.memory.backends.openviking.openviking_manager as module
+
+    class _CompatRetriever(_Retriever):
+        def invoke(self, query: str) -> list[Document]:
+            result = super().invoke(query)
+            if self.target_uri[0] == "viking://user/memories":
+                raise _FakeInvalidURIError("Invalid URI: viking://user/memories (Use 'viking://~/memories' for the current user)")
+            return result
+
+    orig_loader = module._load_official_integration
+
+    def _loader_with_compat() -> dict[str, Any]:
+        loaded = orig_loader()
+        loaded["OpenVikingRetriever"] = _CompatRetriever
+        return loaded
+
+    monkeypatch.setattr(module, "_load_official_integration", _loader_with_compat)
+    manager = _manager(tmp_path, monkeypatch, failure_policy={"read": "raise"})
+
+    context = manager.get_context("alice", agent_name="research", thread_id="thread-1")
+    assert context == "- [preferences] Prefers concise answers."
+    assert [c["target_uri"] for c in manager._retriever.calls] == [
+        ["viking://user/memories", "viking://user/peers/research/memories"],
+        ["viking://~/memories", "viking://~/peers/research/memories"],
+    ]
+
+    # Sticky cache: subsequent get_context and search skip legacy URIs altogether.
+    hits = manager.search("concise", user_id="alice", agent_name="research")
+    assert len(hits) == 1
+    assert manager._retriever.calls[2]["target_uri"] == [
+        "viking://~/memories",
+        "viking://~/peers/research/memories",
+    ]
+
+
+def test_search_falls_back_to_home_alias_when_first_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    import deerflow.agents.memory.backends.openviking.openviking_manager as module
+
+    class _CompatRetriever(_Retriever):
+        def invoke(self, query: str) -> list[Document]:
+            result = super().invoke(query)
+            if self.target_uri[0] == "viking://user/memories":
+                raise _FakeInvalidURIError("Use 'viking://~/memories'")
+            return result
+
+    orig_loader = module._load_official_integration
+
+    def _loader_with_compat() -> dict[str, Any]:
+        loaded = orig_loader()
+        loaded["OpenVikingRetriever"] = _CompatRetriever
+        return loaded
+
+    monkeypatch.setattr(module, "_load_official_integration", _loader_with_compat)
+    manager = _manager(tmp_path, monkeypatch, failure_policy={"read": "raise"})
+
+    hits = manager.search("concise", user_id="alice")
+    assert len(hits) == 1
+    assert [c["target_uri"] for c in manager._retriever.calls] == [
+        ["viking://user/memories", "viking://user/peers/deerflow/memories"],
+        ["viking://~/memories", "viking://~/peers/deerflow/memories"],
+    ]
+
+
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda: _FakeInvalidURIError("Invalid URI: arbitrary syntax error"),
+        lambda: RuntimeError("transient connection drop"),
+    ],
+)
+def test_non_home_alias_errors_do_not_retry_or_flip_uri_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    exc_factory: Any,
+) -> None:
+    import deerflow.agents.memory.backends.openviking.openviking_manager as module
+
+    class _FailingRetriever(_Retriever):
+        def invoke(self, query: str) -> list[Document]:
+            super().invoke(query)
+            raise exc_factory()
+
+    orig_loader = module._load_official_integration
+
+    def _loader() -> dict[str, Any]:
+        loaded = orig_loader()
+        loaded["OpenVikingRetriever"] = _FailingRetriever
+        return loaded
+
+    monkeypatch.setattr(module, "_load_official_integration", _loader)
+    manager = _manager(tmp_path, monkeypatch, failure_policy={"read": "raise"})
+
+    with pytest.raises(MemoryReadError):
+        manager.get_context("alice")
+
+    assert len(manager._retriever.calls) == 1
+    assert manager._use_home_alias_uris is False

@@ -54,12 +54,13 @@ def _session_id(
     return f"df_{digest[:48]}"
 
 
-def _memory_target_uris(peer_id: str) -> list[str]:
+def _memory_target_uris(peer_id: str, *, use_home_alias: bool = False) -> list[str]:
     """Return the self and current-peer memory roots for a request."""
 
+    prefix = "viking://~" if use_home_alias else "viking://user"
     return [
-        "viking://user/memories",
-        f"viking://user/peers/{peer_id}/memories",
+        f"{prefix}/memories",
+        f"{prefix}/peers/{peer_id}/memories",
     ]
 
 
