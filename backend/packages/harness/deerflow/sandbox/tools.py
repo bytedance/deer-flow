@@ -59,7 +59,7 @@ from deerflow.sandbox.read_file_contract import (
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
 )
-from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
@@ -2937,7 +2937,7 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 
 @tool("bash", parse_docstring=True)
-def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
+def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | ToolMessage:
     """Execute a bash command in the configured execution environment.
 
 
@@ -3020,10 +3020,11 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 env=local_env,
                 timeout=command_timeout,
             )
-            return _truncate_bash_output(
+            content = _truncate_bash_output(
                 mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
                 max_chars,
             )
+            return _bash_command_result(runtime, output, content)
         ensure_thread_directories_exist(runtime)
         command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
         command = user_prefix + (identity_prefix or "") + command
@@ -3036,19 +3037,15 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         except Exception:
             max_chars = 20000
             command_timeout = None
-        return _truncate_bash_output(
-            mask_secret_values(
-                _execute_bash_command(
-                    sandbox,
-                    command,
-                    runtime=runtime,
-                    env=injected_env,
-                    timeout=command_timeout,
-                ),
-                injected_env,
-            ),
-            max_chars,
+        output = _execute_bash_command(
+            sandbox,
+            command,
+            runtime=runtime,
+            env=injected_env,
+            timeout=command_timeout,
         )
+        content = _truncate_bash_output(mask_secret_values(output, injected_env), max_chars)
+        return _bash_command_result(runtime, output, content)
     except SandboxError as e:
         return mask_secret_values(f"Error: {e}", redaction_env)
     except PermissionError as e:
@@ -3057,7 +3054,33 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction_env)
 
 
-async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
+def _bash_command_result(runtime: Runtime, output: str, content: str) -> str | ToolMessage:
+    """Stamp provider execution state before stdout can be interpreted as an error."""
+    call_id = getattr(runtime, "tool_call_id", None)
+    if not isinstance(output, CommandOutput) or not isinstance(call_id, str) or not call_id:
+        # Legacy providers retain their existing error envelopes; direct Python
+        # callers without a tool-call ID retain their string return contract.
+        return content
+    status = "error" if output.exit_code != 0 else "success"
+    return ToolMessage(
+        content=content,
+        name="bash",
+        tool_call_id=call_id,
+        status=status,
+        additional_kwargs={
+            "deerflow_tool_meta": {
+                "status": status,
+                "exit_code": output.exit_code,
+                "error_type": "unknown" if status == "error" else None,
+                "recoverable_by_model": True,
+                "recommended_next_action": "try_alternative" if status == "error" else "continue",
+                "source": "tool_return",
+            }
+        },
+    )
+
+
+async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str | ToolMessage:
     return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description)
 
 

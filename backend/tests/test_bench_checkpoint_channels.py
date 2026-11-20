@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.benchmark
+
 
 def _load_module():
     path = Path(__file__).resolve().parents[1] / "scripts/benchmark/checkpoint/bench_channels.py"
