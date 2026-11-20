@@ -1,0 +1,1926 @@
+"""WeChat channel — connects to iLink via long-polling."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import hashlib
+import json
+import logging
+import math
+import mimetypes
+import secrets
+import shutil
+import tempfile
+import time
+from collections.abc import Mapping
+from contextlib import suppress
+from enum import IntEnum
+from functools import partial
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote, urlparse
+
+import httpx
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from app.channels.allowed_users import parse_allowed_users
+from app.channels.base import Channel, ChannelUnavailable
+from app.channels.commands import is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
+from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
+from app.channels.message_bus import INBOUND_FILE_CLEANUP_KEY, InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, cleanup_inbound_files
+from deerflow.utils.atomic_write import publish_bytes_atomically
+from deerflow.utils.file_io import await_drained
+
+logger = logging.getLogger(__name__)
+_monotonic = time.monotonic
+
+
+class MessageItemType(IntEnum):
+    NONE = 0
+    TEXT = 1
+    IMAGE = 2
+    VOICE = 3
+    FILE = 4
+    VIDEO = 5
+
+
+class UploadMediaType(IntEnum):
+    IMAGE = 1
+    VIDEO = 2
+    FILE = 3
+    VOICE = 4
+
+
+def _build_ilink_client_version(version: str) -> str:
+    parts = [part.strip() for part in version.split(".")]
+
+    def _part(index: int) -> int:
+        if index >= len(parts):
+            return 0
+        try:
+            return max(0, min(int(parts[index] or 0), 0xFF))
+        except ValueError:
+            return 0
+
+    major = _part(0)
+    minor = _part(1)
+    patch = _part(2)
+    return str((major << 16) | (minor << 8) | patch)
+
+
+def _build_wechat_uin() -> str:
+    return base64.b64encode(str(secrets.randbits(32)).encode("utf-8")).decode("utf-8")
+
+
+def _md5_hex(content: bytes) -> str:
+    return hashlib.md5(content).hexdigest()
+
+
+def _read_outbound_bytes(path: Path, max_bytes: int) -> bytes | None:
+    """Return the payload, or ``None`` if it exceeds a positive cap; preserve read errors."""
+    # Own both the extra-byte read and rejection so no caller can send a truncated prefix.
+    with path.open("rb") as stream:
+        content = stream.read(max_bytes + 1 if max_bytes > 0 else -1)
+    if max_bytes > 0 and len(content) > max_bytes:
+        return None
+    return content
+
+
+def _encrypted_size_for_aes_128_ecb(plaintext_size: int) -> int:
+    if plaintext_size < 0:
+        raise ValueError("plaintext_size must be non-negative")
+    return ((plaintext_size // 16) + 1) * 16
+
+
+def _validate_aes_128_key(key: bytes) -> None:
+    if len(key) != 16:
+        raise ValueError("AES-128-ECB requires a 16-byte key")
+
+
+def _encrypt_aes_128_ecb(content: bytes, key: bytes) -> bytes:
+    _validate_aes_128_key(key)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(content) + padder.finalize()
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    encryptor = cipher.encryptor()
+    return encryptor.update(padded) + encryptor.finalize()
+
+
+def _decrypt_aes_128_ecb(content: bytes, key: bytes) -> bytes:
+    _validate_aes_128_key(key)
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(content) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    return unpadder.update(padded) + unpadder.finalize()
+
+
+def _safe_media_filename(prefix: str, extension: str, message_id: str | None = None, index: int | None = None) -> str:
+    safe_ext = extension if extension.startswith(".") else f".{extension}" if extension else ""
+    safe_msg = (message_id or "msg").replace("/", "_").replace("\\", "_")
+    suffix = f"-{index}" if index is not None else ""
+    return f"{prefix}-{safe_msg}{suffix}{safe_ext}"
+
+
+def _build_cdn_upload_url(cdn_base_url: str, upload_param: str, filekey: str) -> str:
+    return f"{cdn_base_url.rstrip('/')}/upload?encrypted_query_param={quote(upload_param, safe='')}&filekey={quote(filekey, safe='')}"
+
+
+def _encode_outbound_media_aes_key(aes_key: bytes) -> str:
+    return base64.b64encode(aes_key.hex().encode("utf-8")).decode("utf-8")
+
+
+def _media_url_host(url: str) -> str:
+    """Best-effort host extraction for logging; never raises, never logs the URL.
+
+    CDN URLs can carry access tokens in their query strings, so only the host
+    is surfaced in skip warnings.
+    """
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _media_download_error_summary(exc: BaseException) -> str:
+    """Sanitized exception summary for inbound-media download failures.
+
+    httpx exceptions format the full request URL into their message —
+    ``HTTPStatusError`` includes the path and query, i.e. the CDN download
+    credentials — so only the class name and explicitly safe fields are ever
+    surfaced; the raw exception must not reach a ``logger.exception`` site
+    (the polling loop's per-message handler would render its traceback).
+    """
+    summary = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        summary = f"{summary} ({exc.response.status_code})"
+    return summary
+
+
+def _detect_image_extension_and_mime(content: bytes) -> tuple[str, str] | None:
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png", "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return ".jpg", "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif", "image/gif"
+    if len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    if content.startswith(b"BM"):
+        return ".bmp", "image/bmp"
+    return None
+
+
+def _parse_wechat_user_id(entry: Any) -> str | None:
+    """A valid iLink user ID from a string or numeric scalar, else ``None``.
+
+    A finite integer-valued float uses its integer text, so YAML ``12345.0``
+    matches the sender ``12345``. Fractional and non-finite floats are not IDs.
+    A numeric string is kept as written: ``"12345.0"`` does not become ``12345``.
+    """
+    if isinstance(entry, bool):
+        # bool is an int subclass: reject booleans before the numeric branch.
+        return None
+    if isinstance(entry, float):
+        if not math.isfinite(entry) or not entry.is_integer():
+            return None
+        entry = int(entry)
+    if isinstance(entry, int):
+        return str(entry)
+    if isinstance(entry, str):
+        text = entry.strip()
+        return text or None
+    return None
+
+
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse iLink IDs without splitting a scalar string into multiple IDs."""
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=_parse_wechat_user_id,
+        logger=logger,
+        channel_name="WeChat",
+        expected_id="a valid iLink user ID",
+        warn_on_scalar_separators=True,
+    )
+
+
+class WechatChannel(Channel):
+    """WeChat iLink bot channel using long-polling.
+
+    Configuration keys (in ``config.yaml`` under ``channels.wechat``):
+        - ``bot_token``: iLink bot token used for authenticated API calls.
+        - ``qrcode_login_enabled``: (optional) Allow first-time QR bootstrap when ``bot_token`` is missing.
+        - ``base_url``: (optional) iLink API base URL.
+        - ``allowed_users``: (optional) List of allowed iLink user IDs, or a single
+          ID. Empty = allow all; a configured value with no valid ID denies everyone.
+          Integer-valued numbers are stored as integer text. A mapping is not a list of IDs.
+        - ``allowed_media_hosts``: (optional) Extra host suffixes inbound media URLs may
+          be downloaded from, in addition to the platform CDN defaults. Default: ``qq.com``.
+        - ``polling_timeout``: (optional) Long-poll timeout in seconds. Default: 35.
+        - ``state_dir``: (optional) Directory used to persist the long-poll cursor.
+    """
+
+    DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
+    DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
+    DEFAULT_CHANNEL_VERSION = "1.0"
+    DEFAULT_POLLING_TIMEOUT = 35.0
+    DEFAULT_RETRY_DELAY = 5.0
+    DEFAULT_QRCODE_POLL_INTERVAL = 2.0
+    DEFAULT_QRCODE_POLL_TIMEOUT = 180.0
+    DEFAULT_QRCODE_BOT_TYPE = 3
+    DEFAULT_QRCODE_STATUS_TIMEOUT = 30.0
+    # Browser QR login allows a small cushion over the channel polling timeout.
+    DEFAULT_QRCODE_ADMIN_STATUS_TIMEOUT = DEFAULT_QRCODE_STATUS_TIMEOUT + 5.0
+    DEFAULT_API_TIMEOUT = 15.0
+    DEFAULT_CONFIG_TIMEOUT = 10.0
+    DEFAULT_CDN_TIMEOUT = 30.0
+    DEFAULT_IMAGE_DOWNLOAD_DIRNAME = "downloads"
+    DEFAULT_ALLOWED_MEDIA_HOST_SUFFIXES = ("qq.com",)
+    DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+    DEFAULT_MAX_OUTBOUND_IMAGE_BYTES = 20 * 1024 * 1024
+    DEFAULT_MAX_INBOUND_FILE_BYTES = 50 * 1024 * 1024
+    DEFAULT_MAX_OUTBOUND_FILE_BYTES = 50 * 1024 * 1024
+    DEFAULT_ALLOWED_FILE_EXTENSIONS = frozenset(
+        {
+            ".txt",
+            ".md",
+            ".pdf",
+            ".csv",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".xml",
+            ".html",
+            ".log",
+            ".zip",
+            ".doc",
+            ".docx",
+            ".xls",
+            ".xlsx",
+            ".ppt",
+            ".pptx",
+            ".rtf",
+            ".py",
+            ".js",
+            ".ts",
+            ".tsx",
+            ".jsx",
+            ".java",
+            ".go",
+            ".rs",
+            ".c",
+            ".cpp",
+            ".h",
+            ".hpp",
+            ".sql",
+            ".sh",
+            ".bat",
+            ".ps1",
+            ".toml",
+            ".ini",
+            ".conf",
+        }
+    )
+    DEFAULT_ALLOWED_FILE_MIME_TYPES = frozenset(
+        {
+            "application/pdf",
+            "application/json",
+            "application/xml",
+            "application/zip",
+            "application/x-zip-compressed",
+            "application/x-yaml",
+            "application/yaml",
+            "text/csv",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/rtf",
+        }
+    )
+
+    def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
+        super().__init__(name="wechat", bus=bus, config=config)
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._poll_task: asyncio.Task | None = None
+        self._client: httpx.AsyncClient | None = None
+        self._auth_lock = asyncio.Lock()
+
+        self._base_url = str(config.get("base_url") or self.DEFAULT_BASE_URL).rstrip("/")
+        self._cdn_base_url = str(config.get("cdn_base_url") or self.DEFAULT_CDN_BASE_URL).rstrip("/")
+        self._channel_version = str(config.get("channel_version") or self.DEFAULT_CHANNEL_VERSION)
+        self._polling_timeout = self._coerce_float(config.get("polling_timeout"), self.DEFAULT_POLLING_TIMEOUT)
+        self._retry_delay = self._coerce_float(config.get("polling_retry_delay"), self.DEFAULT_RETRY_DELAY)
+        self._qrcode_poll_interval = self._coerce_float(config.get("qrcode_poll_interval"), self.DEFAULT_QRCODE_POLL_INTERVAL)
+        self._qrcode_poll_timeout = self._coerce_float(config.get("qrcode_poll_timeout"), self.DEFAULT_QRCODE_POLL_TIMEOUT)
+        self._qrcode_login_enabled = bool(config.get("qrcode_login_enabled", False))
+        self._qrcode_bot_type = self._coerce_int(config.get("qrcode_bot_type"), self.DEFAULT_QRCODE_BOT_TYPE)
+        self._ilink_app_id = str(config.get("ilink_app_id") or "").strip()
+        self._route_tag = str(config.get("route_tag") or "").strip()
+        self._respect_server_longpoll_timeout = bool(config.get("respect_server_longpoll_timeout", True))
+        self._max_inbound_image_bytes = self._coerce_int(config.get("max_inbound_image_bytes"), self.DEFAULT_MAX_IMAGE_BYTES)
+        self._max_outbound_image_bytes = self._coerce_int(config.get("max_outbound_image_bytes"), self.DEFAULT_MAX_OUTBOUND_IMAGE_BYTES)
+        self._max_inbound_file_bytes = self._coerce_int(config.get("max_inbound_file_bytes"), self.DEFAULT_MAX_INBOUND_FILE_BYTES)
+        self._max_outbound_file_bytes = self._coerce_int(config.get("max_outbound_file_bytes"), self.DEFAULT_MAX_OUTBOUND_FILE_BYTES)
+        self._allowed_file_extensions = self._coerce_str_set(config.get("allowed_file_extensions"), self.DEFAULT_ALLOWED_FILE_EXTENSIONS)
+        self._allowed_media_hosts = self._coerce_host_suffixes(config.get("allowed_media_hosts"))
+        self._allowed_users: frozenset[str] | None = _parse_allowed_users(config.get("allowed_users"))
+        self._bot_token = str(config.get("bot_token") or "").strip()
+        self._ilink_bot_id = str(config.get("ilink_bot_id") or "").strip() or None
+        self._auth_state: dict[str, Any] = {}
+        self._server_longpoll_timeout_seconds: float | None = None
+
+        self._get_updates_buf = ""
+        self._context_tokens_by_chat: dict[str, str] = {}
+        self._context_tokens_by_thread: dict[str, str] = {}
+
+        self._state_dir = self._resolve_state_dir(config.get("state_dir"))
+        self._cursor_path = self._state_dir / "wechat-getupdates.json" if self._state_dir else None
+        self._auth_path = self._state_dir / "wechat-auth.json" if self._state_dir else None
+        # NOTE: persisted state (auth token + cursor) is intentionally NOT loaded
+        # here. ChannelService._start_channel() constructs the channel directly
+        # on the async path, so filesystem IO in __init__ would block the event
+        # loop (the strict blocking-IO gate raises BlockingError on os.stat).
+        # State is loaded in start() via asyncio.to_thread instead.
+
+    async def start(self) -> None:
+        if self._running:
+            return
+
+        # Load persisted state off the event loop before the bot_token check
+        # below: a token restored from the auth file must be visible here so
+        # the qrcode-login fallback isn't taken unnecessarily. __init__ defers
+        # this load precisely so construction stays IO-free on the async path.
+        await asyncio.to_thread(self._load_state)
+
+        if not self._bot_token and not self._qrcode_login_enabled:
+            logger.error("WeChat channel requires bot_token or qrcode_login_enabled")
+            return
+
+        self._main_loop = asyncio.get_running_loop()
+        if self._state_dir:
+            await asyncio.to_thread(self._state_dir.mkdir, parents=True, exist_ok=True)
+
+        await self._ensure_client()
+        self._running = True
+        self.bus.subscribe_outbound(self._on_outbound)
+        self._poll_task = self._main_loop.create_task(self._poll_loop())
+        logger.info("WeChat channel started")
+
+    async def stop(self) -> None:
+        self._running = False
+        self.bus.unsubscribe_outbound(self._on_outbound)
+
+        if self._poll_task:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            self._poll_task = None
+
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+        logger.info("WeChat channel stopped")
+
+    async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
+        text = msg.text.strip()
+        if not text:
+            return
+
+        if not self._bot_token and not await self._ensure_authenticated():
+            logger.warning("[WeChat] unable to authenticate before sending chat=%s", msg.chat_id)
+            return
+
+        context_token = self._resolve_context_token(msg)
+        if not context_token:
+            logger.warning("[WeChat] missing context_token for chat=%s, dropping outbound message", msg.chat_id)
+            return
+
+        await self._send_text_message(
+            chat_id=msg.chat_id,
+            context_token=context_token,
+            text=text,
+            client_id_prefix="deerflow",
+            max_retries=_max_retries,
+        )
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Notifications need the owner's current binding, not a chat cache."""
+        await self.send_notification_for_owner(owner_user_id=None, target=target, text_markdown=text_markdown)
+
+    async def send_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        self._require_notification_transport()
+        if not owner_user_id or self._connection_repo is None:
+            raise RuntimeError("WeChat notifications require an owner-bound private conversation")
+        connection = await self._notification_binding(owner_user_id, target)
+        try:
+            credentials = await self._connection_repo.get_credentials(connection["id"])
+        except Exception as exc:
+            raise ChannelUnavailable("WeChat notification context lookup is unavailable") from exc
+        extra = credentials.get("extra") if isinstance(credentials, dict) else None
+        context = extra.get("wechat_notification_context") if isinstance(extra, dict) else None
+        token = context.get("context_token") if isinstance(context, dict) else None
+        if not isinstance(token, str) or not token.strip() or context.get("chat_id") != target or context.get("bot_token_sha256") != hashlib.sha256(self._bot_token.encode()).hexdigest():
+            raise RuntimeError("WeChat notification needs fresh context; send the bot a private message first")
+        current = await self._notification_binding(owner_user_id, target)
+        if current["id"] != connection["id"]:
+            raise RuntimeError("WeChat notification identity is no longer connected")
+        self._require_notification_transport()
+        payload = self._text_message_payload(chat_id=target, context_token=token, text=text_markdown, client_id_prefix="deerflow-notification")
+        try:
+            # The outbox owns retries; do not call the chat reply retry helper.
+            data = await self._request_json("/ilink/bot/sendmessage", payload, require_object=True)
+        except httpx.TransportError as exc:
+            raise ChannelUnavailable("WeChat notification transport is unavailable") from exc
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"WeChat notification rejected: HTTP {exc.response.status_code}") from None
+        # iLink permits omitted success codes, but malformed codes are not ACKs.
+        if any(code is not None and (type(code) not in (int, float) or code != 0) for code in (data.get("ret"), data.get("errcode"))):
+            # The provider's free-form errmsg can echo context credentials.
+            raise RuntimeError("WeChat notification was not acknowledged by iLink")
+
+    def _require_notification_transport(self) -> None:
+        if not self.is_running or not self._bot_token or self._client is None or self._client.is_closed:
+            raise ChannelUnavailable("WeChat channel is not connected")
+
+    async def _notification_binding(self, owner_user_id: str, target: str) -> dict[str, Any]:
+        try:
+            connection = await self._connection_repo.find_connection_by_external_identity(provider=self.name, external_account_id=target, workspace_id=target)
+        except Exception as exc:
+            raise ChannelUnavailable("WeChat notification binding lookup is unavailable") from exc
+        if (
+            not connection
+            or not connection.get("id")
+            or connection.get("owner_user_id") != owner_user_id
+            or connection.get("provider") != self.name
+            or connection.get("status") != "connected"
+            or connection.get("external_account_id") != target
+            or connection.get("workspace_id") != target
+        ):
+            raise RuntimeError("WeChat notification identity is no longer connected")
+        return connection
+
+    async def _remember_notification_context(self, *, connection_id: str, owner_user_id: str, chat_id: str, context_token: str) -> None:
+        if not context_token or not self._bot_token:
+            return
+        try:
+            await self._connection_repo.store_connection_context(
+                connection_id,
+                owner_user_id=owner_user_id,
+                provider=self.name,
+                external_account_id=chat_id,
+                workspace_id=chat_id,
+                extra={"wechat_notification_context": {"chat_id": chat_id, "context_token": context_token, "bot_token_sha256": hashlib.sha256(self._bot_token.encode()).hexdigest()}},
+            )
+        except Exception as exc:
+            # A context write failure must not drop an otherwise valid chat turn.
+            logger.warning("[WeChat] notification context was not persisted: %s", type(exc).__name__)
+
+    async def _send_text_message(
+        self,
+        *,
+        chat_id: str,
+        context_token: str,
+        text: str,
+        client_id_prefix: str,
+        max_retries: int,
+    ) -> None:
+        payload = self._text_message_payload(chat_id=chat_id, context_token=context_token, text=text, client_id_prefix=client_id_prefix)
+
+        async def send_message() -> None:
+            data = await self._request_json("/ilink/bot/sendmessage", payload)
+            self._ensure_success(data, "sendmessage")
+
+        await self._send_with_retry(
+            send_message,
+            max_retries=max_retries,
+            log_prefix="[WeChat]",
+        )
+
+    def _text_message_payload(self, *, chat_id: str, context_token: str, text: str, client_id_prefix: str) -> dict[str, Any]:
+        return {
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": chat_id,
+                "client_id": f"{client_id_prefix}_{int(time.time() * 1000)}_{secrets.token_hex(2)}",
+                "message_type": 2,
+                "message_state": 2,
+                "context_token": context_token,
+                "item_list": [
+                    {
+                        "type": int(MessageItemType.TEXT),
+                        "text_item": {"text": text},
+                    }
+                ],
+            },
+            "base_info": self._base_info(),
+        }
+
+    async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if attachment.is_image:
+            return await self._send_image_attachment(msg, attachment)
+        return await self._send_file_attachment(msg, attachment)
+
+    async def _send_image_attachment(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if self._max_outbound_image_bytes > 0 and attachment.size > self._max_outbound_image_bytes:
+            logger.warning("[WeChat] outbound image too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
+            return False
+
+        if not self._bot_token and not await self._ensure_authenticated():
+            logger.warning("[WeChat] unable to authenticate before sending image chat=%s", msg.chat_id)
+            return False
+
+        context_token = self._resolve_context_token(msg)
+        if not context_token:
+            logger.warning("[WeChat] missing context_token for image chat=%s", msg.chat_id)
+            return False
+
+        try:
+            plaintext = await asyncio.to_thread(_read_outbound_bytes, attachment.actual_path, self._max_outbound_image_bytes)
+        except OSError:
+            logger.exception("[WeChat] failed to read outbound image %s", attachment.actual_path)
+            return False
+
+        if plaintext is None:
+            logger.warning("[WeChat] outbound image exceeds %d bytes read limit, skipping: %s", self._max_outbound_image_bytes, attachment.filename)
+            return False
+
+        aes_key = secrets.token_bytes(16)
+        filekey = _safe_media_filename("wechat-upload", attachment.actual_path.suffix or ".bin", message_id=msg.thread_id)
+        upload_request = self._build_upload_request(
+            filekey=filekey,
+            media_type=UploadMediaType.IMAGE,
+            to_user_id=msg.chat_id,
+            plaintext=plaintext,
+            aes_key=aes_key,
+            no_need_thumb=True,
+        )
+
+        try:
+            upload_data = await self._request_json(
+                "/ilink/bot/getuploadurl",
+                {
+                    **upload_request,
+                    "base_info": self._base_info(),
+                },
+            )
+            self._ensure_success(upload_data, "getuploadurl")
+
+            upload_full_url = self._extract_upload_full_url(upload_data)
+            upload_param = self._extract_upload_param(upload_data)
+            upload_method = "POST"
+            if not upload_full_url:
+                if not upload_param:
+                    logger.warning("[WeChat] getuploadurl returned no upload URL for image %s", attachment.filename)
+                    return False
+                upload_full_url = _build_cdn_upload_url(self._cdn_base_url, upload_param, filekey)
+
+            encrypted = _encrypt_aes_128_ecb(plaintext, aes_key)
+            download_param = await self._upload_cdn_bytes(
+                upload_full_url,
+                encrypted,
+                content_type=attachment.mime_type,
+                method=upload_method,
+            )
+            if download_param:
+                upload_data = dict(upload_data)
+                upload_data["upload_param"] = download_param
+
+            image_item = self._build_outbound_image_item(upload_data, aes_key, ciphertext_size=len(encrypted))
+            send_payload = {
+                "msg": {
+                    "from_user_id": "",
+                    "to_user_id": msg.chat_id,
+                    "client_id": f"deerflow_img_{int(time.time() * 1000)}",
+                    "message_type": 2,
+                    "message_state": 2,
+                    "context_token": context_token,
+                    "item_list": [
+                        {
+                            "type": int(MessageItemType.IMAGE),
+                            "image_item": image_item,
+                        }
+                    ],
+                },
+                "base_info": self._base_info(),
+            }
+            response = await self._request_json("/ilink/bot/sendmessage", send_payload)
+            self._ensure_success(response, "sendmessage")
+            return True
+        except Exception:
+            logger.exception("[WeChat] failed to send image attachment %s", attachment.filename)
+            return False
+
+    async def _send_file_attachment(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if not self._is_allowed_file_type(attachment.filename, attachment.mime_type):
+            logger.warning("[WeChat] outbound file type blocked, skipping: %s (%s)", attachment.filename, attachment.mime_type)
+            return False
+
+        if self._max_outbound_file_bytes > 0 and attachment.size > self._max_outbound_file_bytes:
+            logger.warning("[WeChat] outbound file too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
+            return False
+
+        if not self._bot_token and not await self._ensure_authenticated():
+            logger.warning("[WeChat] unable to authenticate before sending file chat=%s", msg.chat_id)
+            return False
+
+        context_token = self._resolve_context_token(msg)
+        if not context_token:
+            logger.warning("[WeChat] missing context_token for file chat=%s", msg.chat_id)
+            return False
+
+        try:
+            plaintext = await asyncio.to_thread(_read_outbound_bytes, attachment.actual_path, self._max_outbound_file_bytes)
+        except OSError:
+            logger.exception("[WeChat] failed to read outbound file %s", attachment.actual_path)
+            return False
+
+        if plaintext is None:
+            logger.warning("[WeChat] outbound file exceeds %d bytes read limit, skipping: %s", self._max_outbound_file_bytes, attachment.filename)
+            return False
+
+        aes_key = secrets.token_bytes(16)
+        filekey = _safe_media_filename("wechat-file-upload", attachment.actual_path.suffix or ".bin", message_id=msg.thread_id)
+        upload_request = self._build_upload_request(
+            filekey=filekey,
+            media_type=UploadMediaType.FILE,
+            to_user_id=msg.chat_id,
+            plaintext=plaintext,
+            aes_key=aes_key,
+            no_need_thumb=True,
+        )
+
+        try:
+            upload_data = await self._request_json(
+                "/ilink/bot/getuploadurl",
+                {
+                    **upload_request,
+                    "base_info": self._base_info(),
+                },
+            )
+            self._ensure_success(upload_data, "getuploadurl")
+
+            upload_full_url = self._extract_upload_full_url(upload_data)
+            upload_param = self._extract_upload_param(upload_data)
+            upload_method = "POST"
+            if not upload_full_url:
+                if not upload_param:
+                    logger.warning("[WeChat] getuploadurl returned no upload URL for file %s", attachment.filename)
+                    return False
+                upload_full_url = _build_cdn_upload_url(self._cdn_base_url, upload_param, filekey)
+
+            encrypted = _encrypt_aes_128_ecb(plaintext, aes_key)
+            download_param = await self._upload_cdn_bytes(
+                upload_full_url,
+                encrypted,
+                content_type=attachment.mime_type,
+                method=upload_method,
+            )
+            if download_param:
+                upload_data = dict(upload_data)
+                upload_data["upload_param"] = download_param
+
+            file_item = self._build_outbound_file_item(upload_data, aes_key, attachment.filename, plaintext)
+            send_payload = {
+                "msg": {
+                    "from_user_id": "",
+                    "to_user_id": msg.chat_id,
+                    "client_id": f"deerflow_file_{int(time.time() * 1000)}",
+                    "message_type": 2,
+                    "message_state": 2,
+                    "context_token": context_token,
+                    "item_list": [
+                        {
+                            "type": int(MessageItemType.FILE),
+                            "file_item": file_item,
+                        }
+                    ],
+                },
+                "base_info": self._base_info(),
+            }
+            response = await self._request_json("/ilink/bot/sendmessage", send_payload)
+            self._ensure_success(response, "sendmessage")
+            return True
+        except Exception:
+            logger.exception("[WeChat] failed to send file attachment %s", attachment.filename)
+            return False
+
+    async def _poll_loop(self) -> None:
+        while self._running:
+            try:
+                if not await self._ensure_authenticated():
+                    await asyncio.sleep(self._retry_delay)
+                    continue
+
+                data = await self._request_json(
+                    "/ilink/bot/getupdates",
+                    {
+                        "get_updates_buf": self._get_updates_buf,
+                        "base_info": self._base_info(),
+                    },
+                    timeout=max(self._current_longpoll_timeout_seconds() + 5.0, 10.0),
+                )
+
+                ret = data.get("ret", 0)
+                if ret not in (0, None):
+                    errcode = data.get("errcode")
+                    if errcode == -14:
+                        await await_drained(self._persist_expired_auth())
+                        break
+                    logger.warning(
+                        "[WeChat] getupdates returned ret=%s errcode=%s errmsg=%s",
+                        ret,
+                        errcode,
+                        data.get("errmsg"),
+                    )
+                    await asyncio.sleep(self._retry_delay)
+                    continue
+
+                self._update_longpoll_timeout(data)
+
+                # Each message is isolated in its own try/except: one message that
+                # fails to process (e.g. an attachment that fails to decrypt) must
+                # not abort the whole batch and strand every message after it.
+                for raw_message in data.get("msgs", []):
+                    try:
+                        await self._handle_update(raw_message)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        message_id = raw_message.get("message_id") or raw_message.get("msg_id") if isinstance(raw_message, dict) else None
+                        logger.exception(
+                            "[WeChat] failed to handle inbound message message_id=%s; skipping it and continuing with the rest of the batch",
+                            message_id,
+                        )
+
+                # The cursor is advanced only after the whole batch has been
+                # attempted (not before the loop above), so a hard crash mid-batch
+                # leaves it unmoved -- the worst case on restart is re-fetching and
+                # re-processing this batch, not silently skipping past messages
+                # that were never actually handled.
+                next_buf = data.get("get_updates_buf")
+                if isinstance(next_buf, str) and next_buf != self._get_updates_buf:
+                    self._get_updates_buf = next_buf
+                    await await_drained(asyncio.to_thread(self._save_state))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[WeChat] polling loop failed")
+                await asyncio.sleep(self._retry_delay)
+
+    async def _persist_expired_auth(self) -> None:
+        """Persist both expiry writes under the auth lock; the poller drains this whole operation."""
+        async with self._auth_lock:
+            self._bot_token = ""
+            self._get_updates_buf = ""
+            await asyncio.to_thread(self._save_state)
+            await self._save_auth_state_drained(status="expired", bot_token="")
+            logger.error("[WeChat] bot token expired; scan again or update bot_token and restart the channel")
+            self._running = False
+
+    async def _handle_update(self, raw_message: Any) -> None:
+        if not isinstance(raw_message, dict):
+            return
+        if raw_message.get("message_type") != 1:
+            return
+
+        chat_id = str(raw_message.get("from_user_id") or raw_message.get("ilink_user_id") or "").strip()
+        if not chat_id:
+            return
+
+        text = self._extract_text(raw_message)
+        context_token = str(raw_message.get("context_token") or "").strip()
+
+        # Handle the connect code before applying allowed_users so a browser-initiated
+        # bind can bootstrap an external identity that is not yet whitelisted.
+        connect_code = self._pending_connect_code(text)
+        if connect_code:
+            if raw_message.get("group_id"):
+                await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("private_chat_only"))
+                return
+            handled = await self._bind_connection_from_connect_code(
+                chat_id=chat_id,
+                context_token=context_token,
+                code=connect_code,
+            )
+            if handled:
+                return
+
+        if not self._check_user(chat_id):
+            return
+
+        files = await self._extract_inbound_files(raw_message)
+        published = False
+        try:
+            if not text and not files:
+                return
+
+            thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+
+            if context_token:
+                self._context_tokens_by_chat[chat_id] = context_token
+                if thread_ts:
+                    self._context_tokens_by_thread[thread_ts] = context_token
+
+            inbound = self._make_inbound(
+                chat_id=chat_id,
+                user_id=chat_id,
+                text=text,
+                msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
+                thread_ts=thread_ts,
+                files=files,
+                metadata={
+                    "context_token": context_token,
+                    "ilink_user_id": chat_id,
+                    "message_id": str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip(),
+                    "ref_msg": self._extract_ref_message(raw_message),
+                    "raw_message": raw_message,
+                },
+            )
+            inbound.topic_id = None
+            inbound = await self._attach_connection_identity(inbound)
+            if context_token and not raw_message.get("group_id") and inbound.connection_id and inbound.owner_user_id:
+                await self._remember_notification_context(connection_id=inbound.connection_id, owner_user_id=inbound.owner_user_id, chat_id=chat_id, context_token=context_token)
+            # The iLink poll loop processes updates sequentially on the Gateway
+            # loop, so no provider-side task needs a pre-handoff reservation.
+            published = await self._publish_inbound_or_drop(inbound)
+        finally:
+            if not published:
+                await cleanup_inbound_files(files)
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="wechat",
+            workspace_id=inbound.chat_id,
+        )
+
+    async def _bind_connection_from_connect_code(self, *, chat_id: str, context_token: str, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
+        if state is None:
+            await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("invalid_code"))
+            return True
+
+        if not chat_id:
+            await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
+            return True
+
+        connection = await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="wechat",
+            external_account_id=chat_id,
+            workspace_id=chat_id,
+            status="connected",
+        )
+        await self._remember_notification_context(connection_id=connection["id"], owner_user_id=state["owner_user_id"], chat_id=chat_id, context_token=context_token)
+        await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
+        return True
+
+    async def _send_connection_reply(self, chat_id: str, context_token: str, text: str) -> None:
+        if not context_token:
+            return
+        await self._send_text_message(
+            chat_id=chat_id,
+            context_token=context_token,
+            text=text,
+            client_id_prefix="deerflow-connect",
+            max_retries=1,
+        )
+
+    async def _ensure_authenticated(self) -> bool:
+        async with self._auth_lock:
+            if self._bot_token:
+                return True
+
+            await asyncio.to_thread(self._load_auth_state)
+            if self._bot_token:
+                return True
+
+            if not self._qrcode_login_enabled:
+                return False
+
+            try:
+                auth_state = await self._bind_via_qrcode()
+            except Exception:
+                logger.exception("[WeChat] QR code binding failed")
+                return False
+            return bool(auth_state.get("bot_token"))
+
+    async def request_login_qrcode(self) -> dict[str, Any]:
+        """Request QR payload without changing the running channel's credentials."""
+        return await self._request_public_get_json("/ilink/bot/get_bot_qrcode", params={"bot_type": self._qrcode_bot_type})
+
+    async def request_login_status(self, qrcode: str, *, timeout: float | None = None, verify_code: str | None = None) -> dict[str, Any]:
+        params = {"qrcode": qrcode}
+        if verify_code:
+            params["verify_code"] = verify_code
+        return await self._request_public_get_json(
+            "/ilink/bot/get_qrcode_status",
+            params=params,
+            timeout=self.DEFAULT_QRCODE_STATUS_TIMEOUT if timeout is None else timeout,
+        )
+
+    async def _save_auth_state_drained(
+        self,
+        *,
+        status: str,
+        bot_token: str | None = None,
+        ilink_bot_id: str | None = None,
+        qrcode: str | None = None,
+        qrcode_img_content: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist auth state before propagating caller cancellation.
+
+        The write is a small local state-file update and is intentionally drained
+        while _auth_lock is held so cancellation cannot expose an in-memory
+        credential before its durable state settles.
+        """
+        return await await_drained(
+            asyncio.to_thread(
+                self._save_auth_state,
+                status=status,
+                bot_token=bot_token,
+                ilink_bot_id=ilink_bot_id,
+                qrcode=qrcode,
+                qrcode_img_content=qrcode_img_content,
+            )
+        )
+
+    async def _bind_via_qrcode(self) -> dict[str, Any]:
+        qrcode_data = await self.request_login_qrcode()
+        qrcode = str(qrcode_data.get("qrcode") or "").strip()
+        if not qrcode:
+            raise RuntimeError("iLink get_bot_qrcode did not return qrcode")
+
+        qrcode_img_content = str(qrcode_data.get("qrcode_img_content") or "").strip()
+        logger.warning("[WeChat] QR login required. qrcode=%s", qrcode)
+        if qrcode_img_content:
+            logger.warning("[WeChat] qrcode_img_content=%s", qrcode_img_content)
+
+        await self._save_auth_state_drained(
+            status="pending",
+            qrcode=qrcode,
+            qrcode_img_content=qrcode_img_content or None,
+        )
+
+        deadline = _monotonic() + max(self._qrcode_poll_timeout, 1.0)
+        while True:
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                break
+            try:
+                async with asyncio.timeout(remaining):
+                    status_data = await self.request_login_status(
+                        qrcode,
+                        timeout=min(remaining, self.DEFAULT_QRCODE_STATUS_TIMEOUT),
+                    )
+            except TimeoutError:
+                break
+            status = str(status_data.get("status") or "").strip().lower()
+            if status == "confirmed":
+                token = str(status_data.get("bot_token") or "").strip()
+                if not token:
+                    raise RuntimeError("iLink QR confirmation succeeded without bot_token")
+                self._bot_token = token
+                ilink_bot_id = str(status_data.get("ilink_bot_id") or "").strip() or None
+                if ilink_bot_id:
+                    self._ilink_bot_id = ilink_bot_id
+
+                return await self._save_auth_state_drained(
+                    status="confirmed",
+                    bot_token=token,
+                    ilink_bot_id=self._ilink_bot_id,
+                    qrcode=qrcode,
+                    qrcode_img_content=qrcode_img_content or None,
+                )
+
+            if status in {"expired", "canceled", "cancelled", "invalid", "failed"}:
+                await self._save_auth_state_drained(
+                    status=status,
+                    qrcode=qrcode,
+                    qrcode_img_content=qrcode_img_content or None,
+                )
+                raise RuntimeError(f"iLink QR code flow ended with status={status}")
+
+            await asyncio.sleep(max(self._qrcode_poll_interval, 0.1))
+
+        await self._save_auth_state_drained(
+            status="timeout",
+            qrcode=qrcode,
+            qrcode_img_content=qrcode_img_content or None,
+        )
+        raise TimeoutError("Timed out waiting for WeChat QR confirmation")
+
+    async def _request_json(self, path: str, payload: dict[str, Any], *, timeout: float | None = None, require_object: bool = False) -> dict[str, Any]:
+        client = await self._ensure_client()
+        response = await client.post(
+            f"{self._base_url}{path}",
+            json=payload,
+            headers=self._auth_headers(),
+            timeout=timeout or self.DEFAULT_API_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if require_object and not isinstance(data, dict):
+            raise RuntimeError("iLink response is not a JSON object")
+        return data if isinstance(data, dict) else {}
+
+    async def _request_public_get_json(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        client = await self._ensure_client()
+        response = await client.get(
+            f"{self._base_url}{path}",
+            params=params,
+            headers=self._public_headers(),
+            timeout=timeout or self.DEFAULT_CONFIG_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            timeout = max(self._polling_timeout + 5.0, 10.0)
+            self._client = httpx.AsyncClient(timeout=timeout)
+        return self._client
+
+    def _resolve_context_token(self, msg: OutboundMessage) -> str | None:
+        metadata_token = msg.metadata.get("context_token")
+        if isinstance(metadata_token, str) and metadata_token.strip():
+            return metadata_token.strip()
+        if msg.thread_ts and msg.thread_ts in self._context_tokens_by_thread:
+            return self._context_tokens_by_thread[msg.thread_ts]
+        return self._context_tokens_by_chat.get(msg.chat_id)
+
+    def _check_user(self, user_id: str) -> bool:
+        if self._allowed_users is None:
+            return True
+        return user_id in self._allowed_users
+
+    def _current_longpoll_timeout_seconds(self) -> float:
+        if self._respect_server_longpoll_timeout and self._server_longpoll_timeout_seconds is not None:
+            return self._server_longpoll_timeout_seconds
+        return self._polling_timeout
+
+    def _update_longpoll_timeout(self, data: Mapping[str, Any]) -> None:
+        if not self._respect_server_longpoll_timeout:
+            return
+        timeout_ms = self._coerce_float(data.get("longpolling_timeout_ms"), 0.0)
+        if 1_000 <= timeout_ms <= 300_000:
+            self._server_longpoll_timeout_seconds = timeout_ms / 1000.0
+
+    def _base_info(self) -> dict[str, str]:
+        return {"channel_version": self._channel_version}
+
+    def _common_headers(self) -> dict[str, str]:
+        headers = {
+            "iLink-App-ClientVersion": _build_ilink_client_version(self._channel_version),
+            "X-WECHAT-UIN": _build_wechat_uin(),
+        }
+        if self._ilink_app_id:
+            headers["iLink-App-Id"] = self._ilink_app_id
+        if self._route_tag:
+            headers["SKRouteTag"] = self._route_tag
+        return headers
+
+    def _public_headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            **self._common_headers(),
+        }
+
+    def _auth_headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._bot_token}",
+            "AuthorizationType": "ilink_bot_token",
+            **self._common_headers(),
+        }
+        return headers
+
+    @staticmethod
+    def _extract_cdn_full_url(media: Mapping[str, Any] | None) -> str | None:
+        if not isinstance(media, Mapping):
+            return None
+        full_url = media.get("full_url")
+        return full_url.strip() if isinstance(full_url, str) and full_url.strip() else None
+
+    @staticmethod
+    def _extract_upload_full_url(upload_data: Mapping[str, Any] | None) -> str | None:
+        if not isinstance(upload_data, Mapping):
+            return None
+        upload_full_url = upload_data.get("upload_full_url")
+        return upload_full_url.strip() if isinstance(upload_full_url, str) and upload_full_url.strip() else None
+
+    @staticmethod
+    def _extract_upload_param(upload_data: Mapping[str, Any] | None) -> str | None:
+        if not isinstance(upload_data, Mapping):
+            return None
+        upload_param = upload_data.get("upload_param")
+        return upload_param.strip() if isinstance(upload_param, str) and upload_param.strip() else None
+
+    def _build_upload_request(
+        self,
+        *,
+        filekey: str,
+        media_type: UploadMediaType,
+        to_user_id: str,
+        plaintext: bytes,
+        aes_key: bytes,
+        thumb_plaintext: bytes | None = None,
+        no_need_thumb: bool = False,
+    ) -> dict[str, Any]:
+        _validate_aes_128_key(aes_key)
+        payload: dict[str, Any] = {
+            "filekey": filekey,
+            "media_type": int(media_type),
+            "to_user_id": to_user_id,
+            "rawsize": len(plaintext),
+            "rawfilemd5": _md5_hex(plaintext),
+            "filesize": _encrypted_size_for_aes_128_ecb(len(plaintext)),
+            "aeskey": aes_key.hex(),
+        }
+        if thumb_plaintext is not None:
+            payload.update(
+                {
+                    "thumb_rawsize": len(thumb_plaintext),
+                    "thumb_rawfilemd5": _md5_hex(thumb_plaintext),
+                    "thumb_filesize": _encrypted_size_for_aes_128_ecb(len(thumb_plaintext)),
+                }
+            )
+        elif no_need_thumb:
+            payload["no_need_thumb"] = True
+        return payload
+
+    @staticmethod
+    def _stream_cap_for(plaintext_limit: int) -> int | None:
+        """Translate a plaintext size limit into the ciphertext stream cap.
+
+        ``max_inbound_image_bytes`` / ``max_inbound_file_bytes`` bound the
+        DECRYPTED payload, but ``_download_cdn_bytes`` measures what is still
+        encrypted — AES-128-ECB with PKCS#7 padding, up to one 16-byte block
+        larger. Capping the stream at the plaintext limit would reject a
+        boundary-sized valid attachment purely for its padding, so the cap is
+        the padded size of exactly-limit plaintext. ``None``/non-positive
+        limits keep the stream uncapped, matching the ``> 0`` checks.
+        """
+        if plaintext_limit <= 0:
+            return None
+        return _encrypted_size_for_aes_128_ecb(plaintext_limit)
+
+    async def _download_cdn_bytes(self, url: str, *, timeout: float | None = None, max_bytes: int | None = None) -> bytes | None:
+        """Stream one media download, aborting in flight once it exceeds *max_bytes*.
+
+        The bytes are buffered in memory before being decrypted and persisted,
+        so an oversized attachment must be refused before it is fully read, not
+        after (mirrors ``DingTalkChannel._download_by_code``). The transfer is
+        kept undecoded — identity requested, unexpected Content-Encoding
+        refused before reading, ``aiter_raw`` used — because the transparent
+        decoder allocates the full decompressed body before yielding, which
+        would blow past the cap for a compressed response. Returns ``None``
+        when the download was aborted by the cap or rejected for its
+        encoding; other HTTP-level failures raise for the caller's
+        per-message error handling.
+        """
+        client = await self._ensure_client()
+        chunks: list[bytes] = []
+        total = 0
+        async with client.stream(
+            "GET",
+            url,
+            timeout=timeout or self.DEFAULT_CDN_TIMEOUT,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
+            response.raise_for_status()
+            encoding = (response.headers.get("content-encoding") or "").strip().lower()
+            if encoding and encoding != "identity":
+                logger.warning(
+                    "[WeChat] inbound media response uses Content-Encoding %r, aborting before decode",
+                    encoding,
+                )
+                return None
+            async for chunk in response.aiter_raw():
+                total += len(chunk)
+                if max_bytes is not None and max_bytes > 0 and total > max_bytes:
+                    logger.warning("[WeChat] inbound media download exceeds %d bytes, aborting before full read", max_bytes)
+                    return None
+                chunks.append(chunk)
+        return b"".join(chunks)
+
+    async def _upload_cdn_bytes(
+        self,
+        url: str,
+        content: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        timeout: float | None = None,
+        method: str = "PUT",
+    ) -> str | None:
+        client = await self._ensure_client()
+        request_kwargs = {
+            "content": content,
+            "headers": {"Content-Type": content_type},
+            "timeout": timeout or self.DEFAULT_CDN_TIMEOUT,
+        }
+        if method.upper() == "POST":
+            response = await client.post(url, **request_kwargs)
+        else:
+            response = await client.put(url, **request_kwargs)
+        response.raise_for_status()
+        return response.headers.get("x-encrypted-param")
+
+    def _build_outbound_image_item(
+        self,
+        upload_data: Mapping[str, Any],
+        aes_key: bytes,
+        *,
+        ciphertext_size: int,
+    ) -> dict[str, Any]:
+        encoded_aes_key = _encode_outbound_media_aes_key(aes_key)
+        media: dict[str, Any] = {
+            "aes_key": encoded_aes_key,
+            "encrypt_type": 1,
+        }
+        upload_param = upload_data.get("upload_param")
+        if isinstance(upload_param, str) and upload_param.strip():
+            media["encrypt_query_param"] = upload_param.strip()
+
+        return {
+            "media": media,
+            "mid_size": ciphertext_size,
+        }
+
+    def _build_outbound_file_item(
+        self,
+        upload_data: Mapping[str, Any],
+        aes_key: bytes,
+        filename: str,
+        plaintext: bytes,
+    ) -> dict[str, Any]:
+        media: dict[str, Any] = {
+            "aes_key": _encode_outbound_media_aes_key(aes_key),
+            "encrypt_type": 1,
+        }
+        upload_param = upload_data.get("upload_param")
+        if isinstance(upload_param, str) and upload_param.strip():
+            media["encrypt_query_param"] = upload_param.strip()
+        return {
+            "media": media,
+            "file_name": filename,
+            "md5": _md5_hex(plaintext),
+            "len": str(len(plaintext)),
+        }
+
+    def _download_dir(self) -> Path | None:
+        if not self._state_dir:
+            return None
+        return self._state_dir / self.DEFAULT_IMAGE_DOWNLOAD_DIRNAME
+
+    async def _extract_inbound_files(self, raw_message: Mapping[str, Any]) -> list[dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        item_list = raw_message.get("item_list")
+        if not isinstance(item_list, list):
+            return files
+
+        message_id = str(raw_message.get("message_id") or raw_message.get("msg_id") or raw_message.get("client_id") or "msg")
+
+        try:
+            for index, item in enumerate(item_list):
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("type") == int(MessageItemType.IMAGE):
+                    image_file = await self._extract_image_file(item, message_id=message_id, index=index)
+                    if image_file:
+                        files.append(image_file)
+                elif item.get("type") == int(MessageItemType.FILE):
+                    file_info = await self._extract_file_item(item, message_id=message_id, index=index)
+                    if file_info:
+                        files.append(file_info)
+        except (Exception, asyncio.CancelledError):
+            await cleanup_inbound_files(files)
+            raise
+        return files
+
+    async def _extract_image_file(self, item: Mapping[str, Any], *, message_id: str, index: int) -> dict[str, Any] | None:
+        image_item = item.get("image_item")
+        if not isinstance(image_item, Mapping):
+            return None
+
+        media = image_item.get("media")
+        if not isinstance(media, Mapping):
+            return None
+
+        full_url = self._extract_cdn_full_url(media)
+        if not full_url:
+            logger.warning("[WeChat] inbound image missing full_url, skipping message_id=%s", message_id)
+            return None
+        if not self._is_allowed_media_url(full_url):
+            logger.warning("[WeChat] inbound image URL host is not allowed, skipping message_id=%s host=%s", message_id, _media_url_host(full_url))
+            return None
+
+        aes_key = self._resolve_media_aes_key(item, image_item, media)
+        if not aes_key:
+            logger.warning(
+                "[WeChat] inbound image missing aes key, skipping message_id=%s diagnostics=%s",
+                message_id,
+                self._describe_media_key_state(item=item, item_payload=image_item, media=media),
+            )
+            return None
+
+        # The configured limit bounds the PLAINTEXT, but the stream caps the
+        # CIPHERTEXT, which PKCS#7 padding makes up to a full block larger — a
+        # boundary-sized valid attachment must not be rejected for its padding.
+        # The exact post-decryption check below remains the authority.
+        try:
+            encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_image_bytes))
+        except httpx.HTTPError as exc:
+            # The URL-bearing exception must not escape to the polling loop's
+            # logger.exception; the attachment is dropped and the message
+            # continues, same as the other skip paths above.
+            logger.warning(
+                "[WeChat] inbound image download failed, skipping message_id=%s host=%s error=%s",
+                message_id,
+                _media_url_host(full_url),
+                _media_download_error_summary(exc),
+            )
+            return None
+        if encrypted is None:
+            # Neutral on purpose: None covers both the in-flight cap abort
+            # and the Content-Encoding refusal, and _download_cdn_bytes has
+            # already logged the accurate reason for either — asserting a
+            # size limit here would contradict the encoding line (the
+            # manager's reader callers use the same neutral shape).
+            logger.warning("[WeChat] inbound image skipped by download guard, message_id=%s", message_id)
+            return None
+        decrypted = _decrypt_aes_128_ecb(encrypted, aes_key)
+        if self._max_inbound_image_bytes > 0 and len(decrypted) > self._max_inbound_image_bytes:
+            logger.warning("[WeChat] inbound image exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
+            return None
+
+        detected_image = _detect_image_extension_and_mime(decrypted)
+        image_extension = detected_image[0] if detected_image else ".jpg"
+        filename = _safe_media_filename("wechat-image", image_extension, message_id=message_id, index=index)
+        staged_file = await self._stage_inbound_file(filename, decrypted)
+        if staged_file is None:
+            return None
+
+        mime_type = detected_image[1] if detected_image else mimetypes.guess_type(filename)[0] or "image/jpeg"
+        return {
+            "type": "image",
+            **staged_file,
+            "size": len(decrypted),
+            "mime_type": mime_type,
+            "source": "wechat",
+            "message_item_type": int(MessageItemType.IMAGE),
+            "full_url": full_url,
+        }
+
+    async def _extract_file_item(self, item: Mapping[str, Any], *, message_id: str, index: int) -> dict[str, Any] | None:
+        file_item = item.get("file_item")
+        if not isinstance(file_item, Mapping):
+            return None
+
+        media = file_item.get("media")
+        if not isinstance(media, Mapping):
+            return None
+
+        full_url = self._extract_cdn_full_url(media)
+        if not full_url:
+            logger.warning("[WeChat] inbound file missing full_url, skipping message_id=%s", message_id)
+            return None
+        if not self._is_allowed_media_url(full_url):
+            logger.warning("[WeChat] inbound file URL host is not allowed, skipping message_id=%s host=%s", message_id, _media_url_host(full_url))
+            return None
+
+        aes_key = self._resolve_media_aes_key(item, file_item, media)
+        if not aes_key:
+            logger.warning(
+                "[WeChat] inbound file missing aes key, skipping message_id=%s diagnostics=%s",
+                message_id,
+                self._describe_media_key_state(item=item, item_payload=file_item, media=media),
+            )
+            return None
+
+        filename = self._normalize_inbound_filename(file_item.get("file_name"), default_prefix="wechat-file", message_id=message_id, index=index)
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        if not self._is_allowed_file_type(filename, mime_type):
+            logger.warning("[WeChat] inbound file type blocked, skipping message_id=%s filename=%s", message_id, filename)
+            return None
+
+        # Plaintext limit vs ciphertext cap: see the image path above.
+        try:
+            encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_file_bytes))
+        except httpx.HTTPError as exc:
+            # See the image path: the URL-bearing exception must not escape
+            # to the polling loop's logger.exception.
+            logger.warning(
+                "[WeChat] inbound file download failed, skipping message_id=%s host=%s error=%s",
+                message_id,
+                _media_url_host(full_url),
+                _media_download_error_summary(exc),
+            )
+            return None
+        if encrypted is None:
+            # Same neutral shape as the image path: the accurate reason (cap
+            # abort vs Content-Encoding refusal) is logged inside
+            # _download_cdn_bytes; asserting one here can contradict it.
+            logger.warning("[WeChat] inbound file skipped by download guard, message_id=%s", message_id)
+            return None
+        decrypted = _decrypt_aes_128_ecb(encrypted, aes_key)
+        if self._max_inbound_file_bytes > 0 and len(decrypted) > self._max_inbound_file_bytes:
+            logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
+            return None
+
+        staged_file = await self._stage_inbound_file(filename, decrypted)
+        if staged_file is None:
+            return None
+
+        return {
+            "type": "file",
+            **staged_file,
+            "size": len(decrypted),
+            "mime_type": mime_type,
+            "source": "wechat",
+            "message_item_type": int(MessageItemType.FILE),
+            "full_url": full_url,
+        }
+
+    async def _stage_inbound_file(self, filename: str, content: bytes) -> dict[str, Any] | None:
+        staged_file: dict[str, Any] = {}
+
+        def stage() -> None:
+            path = self._stage_downloaded_file(filename, content)
+            if path is not None:
+                staged_file.update({"filename": path.name, "path": str(path), INBOUND_FILE_CLEANUP_KEY: partial(shutil.rmtree, path.parent)})
+
+        try:
+            # Drain the write before releasing its directory, even if cancelled
+            # before the worker has returned the new path to the event loop.
+            await await_drained(asyncio.to_thread(stage))
+        except (Exception, asyncio.CancelledError):
+            await cleanup_inbound_files([staged_file])
+            raise
+        return staged_file or None
+
+    def _stage_downloaded_file(self, filename: str, content: bytes) -> Path | None:
+        if not filename or filename in {".", ".."} or Path(filename).name != filename or "/" in filename or "\\" in filename or "\x00" in filename:
+            logger.warning("[WeChat] unsafe inbound staging filename, dropping media file")
+            return None
+        download_dir = self._download_dir()
+        if download_dir is None:
+            # Silent None here made an attachment vanish with no log line —
+            # the same observability gap as a mislabeled skip reason.
+            logger.warning("[WeChat] no state directory configured, dropping staged inbound media file %s", filename)
+            return None
+        staging_dir = None
+        try:
+            download_dir.mkdir(parents=True, exist_ok=True)
+            # Keep the display name while giving each attachment exclusive
+            # storage until the manager has consumed the published message.
+            staging_dir = Path(tempfile.mkdtemp(prefix="inbound-", dir=download_dir))
+            path = staging_dir / filename
+            path.write_bytes(content)
+            return path
+        except OSError:
+            logger.exception("[WeChat] failed to persist inbound media file %s", filename)
+            if staging_dir is not None:
+                try:
+                    shutil.rmtree(staging_dir)
+                except OSError:
+                    logger.warning("[WeChat] failed to clean up staged inbound media file %s", filename, exc_info=True)
+            return None
+
+    @staticmethod
+    def _decode_base64_aes_key(value: str) -> bytes | None:
+        candidate = value.strip()
+        if not candidate:
+            return None
+
+        def _normalize_decoded(decoded: bytes) -> bytes | None:
+            try:
+                _validate_aes_128_key(decoded)
+                return decoded
+            except ValueError:
+                pass
+
+            try:
+                decoded_text = decoded.decode("utf-8").strip().strip('"').strip("'")
+            except UnicodeDecodeError:
+                return None
+
+            if not decoded_text:
+                return None
+
+            try:
+                key = bytes.fromhex(decoded_text)
+                _validate_aes_128_key(key)
+                return key
+            except ValueError:
+                return None
+
+        padded = candidate + ("=" * (-len(candidate) % 4))
+        decoders = (
+            lambda: base64.b64decode(padded, validate=True),
+            lambda: base64.urlsafe_b64decode(padded),
+        )
+        for decoder in decoders:
+            try:
+                key = _normalize_decoded(decoder())
+                if key is not None:
+                    return key
+            except (ValueError, TypeError, binascii.Error):
+                continue
+        return None
+
+    @classmethod
+    def _parse_aes_key_candidate(cls, value: Any, *, prefer_hex: bool) -> bytes | None:
+        if isinstance(value, bytes):
+            try:
+                _validate_aes_128_key(value)
+                return value
+            except ValueError:
+                return None
+
+        if isinstance(value, bytearray):
+            return cls._parse_aes_key_candidate(bytes(value), prefer_hex=prefer_hex)
+
+        if not isinstance(value, str) or not value.strip():
+            return None
+
+        raw = value.strip()
+        parsers = (
+            (lambda: bytes.fromhex(raw), lambda key: _validate_aes_128_key(key)),
+            (lambda: cls._decode_base64_aes_key(raw), None),
+        )
+        if not prefer_hex:
+            parsers = (parsers[1], parsers[0])
+
+        for decoder, validator in parsers:
+            try:
+                key = decoder()
+                if key is None:
+                    continue
+                if validator is not None:
+                    validator(key)
+                return key
+            except ValueError:
+                continue
+        return None
+
+    @classmethod
+    def _resolve_media_aes_key(cls, *payloads: Mapping[str, Any]) -> bytes | None:
+        for payload in payloads:
+            if not isinstance(payload, Mapping):
+                continue
+            for key_name in ("aeskey", "aes_key_hex"):
+                key = cls._parse_aes_key_candidate(payload.get(key_name), prefer_hex=True)
+                if key:
+                    return key
+            for key_name in ("aes_key", "aesKey", "encrypt_key", "encryptKey"):
+                key = cls._parse_aes_key_candidate(payload.get(key_name), prefer_hex=False)
+                if key:
+                    return key
+            media = payload.get("media")
+            if isinstance(media, Mapping):
+                key = cls._resolve_media_aes_key(media)
+                if key:
+                    return key
+        return None
+
+    @staticmethod
+    def _describe_media_key_state(
+        *,
+        item: Mapping[str, Any] | None,
+        item_payload: Mapping[str, Any] | None,
+        media: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        def _interesting(mapping: Mapping[str, Any] | None) -> dict[str, Any]:
+            if not isinstance(mapping, Mapping):
+                return {}
+            details: dict[str, Any] = {}
+            for key in (
+                "aeskey",
+                "aes_key",
+                "aesKey",
+                "aes_key_hex",
+                "encrypt_key",
+                "encryptKey",
+                "encrypt_query_param",
+                "encrypt_type",
+                "full_url",
+                "file_name",
+            ):
+                if key not in mapping:
+                    continue
+                value = mapping.get(key)
+                if isinstance(value, str):
+                    details[key] = f"str(len={len(value.strip())})"
+                elif value is not None:
+                    details[key] = type(value).__name__
+                else:
+                    details[key] = None
+            return details
+
+        return {
+            "item": _interesting(item),
+            "item_payload": _interesting(item_payload),
+            "media": _interesting(media),
+        }
+
+    @staticmethod
+    def _extract_ref_message(raw_message: Mapping[str, Any]) -> dict[str, Any] | None:
+        item_list = raw_message.get("item_list")
+        if not isinstance(item_list, list):
+            return None
+        for item in item_list:
+            if not isinstance(item, Mapping):
+                continue
+            ref_msg = item.get("ref_msg")
+            if isinstance(ref_msg, Mapping):
+                return dict(ref_msg)
+        return None
+
+    def _is_allowed_file_type(self, filename: str, mime_type: str) -> bool:
+        suffix = Path(filename).suffix.lower()
+        if self._allowed_file_extensions and suffix not in self._allowed_file_extensions:
+            return False
+        if mime_type.startswith("text/"):
+            return True
+        return mime_type in self.DEFAULT_ALLOWED_FILE_MIME_TYPES
+
+    @staticmethod
+    def _normalize_inbound_filename(raw_filename: Any, *, default_prefix: str, message_id: str, index: int) -> str:
+        if isinstance(raw_filename, str) and raw_filename.strip():
+            candidate = Path(raw_filename.strip()).name
+            if candidate:
+                return candidate
+        return _safe_media_filename(default_prefix, ".bin", message_id=message_id, index=index)
+
+    def _ensure_success(self, data: dict[str, Any], operation: str) -> None:
+        ret = data.get("ret", 0)
+        if ret in (0, None):
+            return
+        errcode = data.get("errcode")
+        errmsg = data.get("errmsg") or data.get("msg") or "unknown error"
+        raise RuntimeError(f"iLink {operation} failed: ret={ret} errcode={errcode} errmsg={errmsg}")
+
+    def _load_state(self) -> None:
+        self._load_auth_state()
+        if not self._cursor_path or not self._cursor_path.exists():
+            return
+        try:
+            data = json.loads(self._cursor_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            logger.warning("[WeChat] failed to read cursor state from %s", self._cursor_path)
+            return
+        cursor = data.get("get_updates_buf")
+        if isinstance(cursor, str):
+            self._get_updates_buf = cursor
+
+    def _save_state(self) -> None:
+        if not self._cursor_path:
+            return
+        try:
+            self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            # Publish through the shared helper: it fsyncs the staged bytes
+            # before the rename (so a machine crash cannot leave a truncated
+            # cursor behind) and re-applies an existing file's mode.
+            publish_bytes_atomically(self._cursor_path, json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2).encode("utf-8"))
+        except OSError:
+            logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
+
+    def _load_auth_state(self) -> None:
+        if not self._auth_path:
+            return
+        cleanup_stale_credential_staging(self._auth_path)
+        if not self._auth_path.exists():
+            return
+        try:
+            data = json.loads(self._auth_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            logger.warning("[WeChat] failed to read auth state from %s", self._auth_path)
+            return
+        if not isinstance(data, dict):
+            return
+        self._auth_state = dict(data)
+
+        if not self._bot_token:
+            token = data.get("bot_token")
+            if isinstance(token, str) and token.strip():
+                self._bot_token = token.strip()
+
+        if not self._ilink_bot_id:
+            ilink_bot_id = data.get("ilink_bot_id")
+            if isinstance(ilink_bot_id, str) and ilink_bot_id.strip():
+                self._ilink_bot_id = ilink_bot_id.strip()
+
+    def _save_auth_state(
+        self,
+        *,
+        status: str,
+        bot_token: str | None = None,
+        ilink_bot_id: str | None = None,
+        qrcode: str | None = None,
+        qrcode_img_content: str | None = None,
+    ) -> dict[str, Any]:
+        data = dict(self._auth_state)
+        data["status"] = status
+        data["updated_at"] = int(time.time())
+
+        if bot_token is not None:
+            if bot_token:
+                data["bot_token"] = bot_token
+            else:
+                data.pop("bot_token", None)
+        elif self._bot_token:
+            data["bot_token"] = self._bot_token
+
+        resolved_ilink_bot_id = ilink_bot_id if ilink_bot_id is not None else self._ilink_bot_id
+        if resolved_ilink_bot_id:
+            data["ilink_bot_id"] = resolved_ilink_bot_id
+
+        if qrcode is not None:
+            data["qrcode"] = qrcode
+        if qrcode_img_content is not None:
+            data["qrcode_img_content"] = qrcode_img_content
+
+        self._auth_state = data
+        if self._auth_path:
+            try:
+                self._auth_path.parent.mkdir(parents=True, exist_ok=True)
+                # Write through a 0o600 temp file and atomically rename so the
+                # iLink bot_token is never briefly readable at umask defaults
+                # (mirrors ChannelRuntimeConfigStore._save). NamedTemporaryFile
+                # uses mkstemp, which creates the file at 0o600 from the start.
+                fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._auth_path.parent, prefix=credential_staging_prefix(self._auth_path), suffix=".tmp", delete=False)
+                try:
+                    json.dump(data, fd, ensure_ascii=False, indent=2)
+                    fd.close()
+                    Path(fd.name).replace(self._auth_path)
+                except BaseException:
+                    # Cleanup is best-effort: a failing close or unlink must not take
+                    # the original persist error with it, and the unlink is still
+                    # attempted after a failed close.
+                    try:
+                        fd.close()
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to close temporary WeChat auth state file %s", fd.name, exc_info=True)
+                    try:
+                        Path(fd.name).unlink(missing_ok=True)
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to remove temporary WeChat auth state file %s", fd.name, exc_info=True)
+                    raise
+            except OSError:
+                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path, exc_info=True)
+            else:
+                # Hardening only; the destination already inherits 0o600 from the
+                # temp file. A chmod failure on filesystems without POSIX perms
+                # must not masquerade as a persist failure.
+                try:
+                    self._auth_path.chmod(0o600)
+                except OSError:
+                    logger.debug("[WeChat] unable to chmod auth state at %s", self._auth_path, exc_info=True)
+        return data
+
+    @staticmethod
+    def _extract_text(raw_message: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for item in raw_message.get("item_list", []):
+            if not isinstance(item, dict) or item.get("type") != int(MessageItemType.TEXT):
+                continue
+            text_item = item.get("text_item")
+            if not isinstance(text_item, dict):
+                continue
+            text = text_item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        return "\n".join(parts)
+
+    @staticmethod
+    def _resolve_state_dir(raw_state_dir: Any) -> Path | None:
+        if not isinstance(raw_state_dir, str) or not raw_state_dir.strip():
+            return None
+        return Path(raw_state_dir).expanduser()
+
+    @staticmethod
+    def _coerce_float(value: Any, default: float) -> float:
+        try:
+            parsed = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return default
+        return parsed if math.isfinite(parsed) and parsed > 0 else default
+
+    @staticmethod
+    def _coerce_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _coerce_str_set(value: Any, default: frozenset[str]) -> set[str]:
+        """Normalize a configured extension allowlist, falling back to *default*.
+
+        A bare string is the single entry it names — the same shape
+        ``_coerce_host_suffixes`` accepts one line below — so
+        ``allowed_file_extensions: .pdf`` restricts the channel instead of
+        silently widening back to the default allowlist. Non-string entries are
+        reported and skipped rather than stringified into bogus members such as
+        ``.123``, every fallback to *default* is logged, and a scalar string
+        that looks like several entries warns the way ``_parse_allowed_users``
+        does: this set gates which files the Gateway may read, so a configured
+        restriction that changes shape without a trace is a posture change the
+        operator cannot see.
+        """
+        if value is None:
+            return set(default)
+        if isinstance(value, str):
+            if "," in value or any(char.isspace() for char in value.strip()):
+                logger.warning("[WeChat] allowed_file_extensions is a scalar string containing separators; treating it as one literal extension. Use a YAML list for multiple extensions")
+            values: list[Any] = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = list(value)
+        else:
+            logger.warning("[WeChat] ignoring allowed_file_extensions %r: expected a string or a list of strings, using the %d built-in extensions instead", value, len(default))
+            return set(default)
+        normalized: set[str] = set()
+        for entry in values:
+            if not isinstance(entry, str):
+                logger.warning("[WeChat] ignoring allowed_file_extensions entry %r: expected a file extension string", entry)
+                continue
+            text = entry.strip().lower()
+            if text:
+                normalized.add(text if text.startswith(".") else f".{text}")
+        if not normalized:
+            logger.warning("[WeChat] allowed_file_extensions %r lists no usable extension, using the %d built-in extensions instead", value, len(default))
+        return normalized or set(default)
+
+    def _coerce_host_suffixes(self, value: Any) -> frozenset[str]:
+        """Resolve the inbound-media host allowlist: operator suffixes plus defaults.
+
+        The configured ``cdn_base_url`` host is always admitted so a custom CDN
+        endpoint keeps working without touching ``allowed_media_hosts``.
+        Entries are host suffixes; a leading ``*.`` (a natural DNS habit) is
+        stripped so ``*.example.com`` behaves exactly like ``example.com``
+        instead of silently never matching.
+        """
+        if isinstance(value, str):
+            values: list[Any] = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = list(value)
+        else:
+            values = []
+        suffixes: set[str] = set()
+        for item in values:
+            text = str(item).strip().lower().lstrip(".")
+            if text.startswith("*."):
+                text = text[2:]
+            if text:
+                suffixes.add(text)
+        suffixes.update(self.DEFAULT_ALLOWED_MEDIA_HOST_SUFFIXES)
+        cdn_host = urlparse(self._cdn_base_url).hostname
+        if cdn_host:
+            suffixes.add(cdn_host.strip().lower().lstrip("."))
+        return frozenset(suffixes)
+
+    def _is_allowed_media_url(self, url: str) -> bool:
+        """Gate inbound media fetches to the platform CDN domains.
+
+        ``full_url`` is message-payload data relayed by the platform; like the
+        DingTalk channel's ``download_code``, it is treated as untrusted input.
+        The fetch runs on the Gateway host network, so an unrestricted URL
+        would let a crafted message point it at loopback/private services.
+        Matching is dot-boundary aware, so ``notqq.com`` or
+        ``qq.com.evil.io`` never match a ``qq.com`` suffix.
+        """
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in self._allowed_media_hosts)

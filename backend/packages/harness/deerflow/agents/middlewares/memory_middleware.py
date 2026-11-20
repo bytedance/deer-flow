@@ -1,86 +1,160 @@
 """Middleware for memory mechanism."""
 
-import re
-from typing import Any, override
+import asyncio
+import logging
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
-from deerflow.agents.memory.queue import get_memory_queue
+from deerflow.agents.human_input import HUMAN_INPUT_RESPONSE_KEY
+from deerflow.agents.memory import get_memory_manager
+from deerflow.agents.memory.locale import with_memory_locale
+from deerflow.agents.middlewares.pii_redaction_middleware import _make_redactor, _redact_content, _Redactor
 from deerflow.config.memory_config import get_memory_config
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
+from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+if TYPE_CHECKING:
+    from deerflow.config.memory_config import MemoryConfig
+
+logger = logging.getLogger(__name__)
+
+
+def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionConfig | None) -> list:
+    """Redact a conversation payload queued for memory extraction (#3190 vector 5).
+
+    Shared by MemoryMiddleware's enqueue boundary and the compaction-triggered
+    ``memory_flush_hook``: placeholders are value-derived, so the same identity
+    renders the same token across the batch, across enqueues, and across
+    seams. Changed messages are copied; unchanged/disabled messages are
+    shared with the caller. Queue consumers must not mutate them. Structured
+    tool-call arguments are covered too — backends like OpenViking retain the full
+    message object, including parsed/invalid calls (and invalid-call errors)
+    and provider-raw/legacy arguments in ``additional_kwargs``. Text-bearing provenance metadata is covered as
+    well: UploadsMiddleware preserves the raw user turn in
+    ``original_user_content``, and clarification replies keep the raw answer
+    in ``human_input_response.value`` — DeerMem reads that mapping — so a
+    redacted ``content`` alone would still leak either one to the memory
+    backend.
+    """
+    if pii_redaction_config is None or not pii_redaction_config.enabled:
+        return list(messages)
+
+    redactor = _make_redactor(pii_redaction_config)
+
+    redacted = []
+    for message in messages:
+        updates: dict = {}
+        content, changed = _redact_content(message.content, redactor)
+        if changed:
+            updates["content"] = content
+        for field in ("tool_calls", "invalid_tool_calls"):
+            tool_calls = getattr(message, field, None)
+            if tool_calls:
+                rewritten = []
+                calls_changed = False
+                for call in tool_calls:
+                    rewritten_call, call_changed = _redact_tool_call(call, redactor)
+                    rewritten.append(rewritten_call)
+                    calls_changed = calls_changed or call_changed
+                if calls_changed:
+                    updates[field] = rewritten
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict):
+            new_additional_kwargs = additional_kwargs
+            for field in ("tool_calls", "function_call"):
+                if additional_kwargs.get(field):
+                    rewritten, arguments_changed = _redact_strings(additional_kwargs[field], redactor)
+                    if arguments_changed:
+                        new_additional_kwargs = {**new_additional_kwargs, field: rewritten}
+            original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+            if isinstance(original_content, str) and original_content:
+                redacted_original = redactor.redact(original_content)
+                if redacted_original != original_content:
+                    new_additional_kwargs = {**new_additional_kwargs, ORIGINAL_USER_CONTENT_KEY: redacted_original}
+            human_input = additional_kwargs.get(HUMAN_INPUT_RESPONSE_KEY)
+            if isinstance(human_input, Mapping) and isinstance(human_input.get("value"), str) and human_input["value"]:
+                redacted_value = redactor.redact(human_input["value"])
+                if redacted_value != human_input["value"]:
+                    new_additional_kwargs = {**new_additional_kwargs, HUMAN_INPUT_RESPONSE_KEY: {**human_input, "value": redacted_value}}
+            if new_additional_kwargs is not additional_kwargs:
+                updates["additional_kwargs"] = new_additional_kwargs
+        redacted.append(message.model_copy(update=updates) if updates else message)
+    return redacted
+
+
+def _redact_tool_call(call: dict, redactor: _Redactor) -> tuple[dict, bool]:
+    """Redact arguments and invalid-call error text without changing call identity."""
+    rewritten = dict(call)
+    changed = False
+    for field in ("args", "error"):
+        value = rewritten.get(field)
+        if value is not None:
+            rewritten[field], field_changed = _redact_strings(value, redactor)
+            changed = changed or field_changed
+    return rewritten, changed
+
+
+def _redact_strings(value: object, redactor: _Redactor) -> tuple[object, bool]:
+    """Redact string leaves/keys and track changes without comparing trees.
+
+    Tool arguments can carry user data in mapping keys (e.g.
+    ``{"contacts": {"alice@example.com": "manager"}}``), so string keys are
+    redacted along with values. Two distinct raw keys redacting to the same
+    token would require a sha256 collision; if a redacted key does equal
+    another key already present in the rebuilt dict, the entries merge —
+    accepted, since at 128 bits that only happens for identical identities.
+    """
+    if isinstance(value, str):
+        redacted = redactor.redact(value)
+        return redacted, redacted != value
+    if not isinstance(value, (dict, list)):
+        return value, False
+
+    changed = False
+    rebuilt = {} if isinstance(value, dict) else []
+    stack = [(value, iter(value.items()) if isinstance(value, dict) else enumerate(value), rebuilt)]
+    ancestors = {id(value)}
+    while stack:
+        source, items, target = stack[-1]
+        try:
+            key, item = next(items)
+        except StopIteration:
+            ancestors.remove(id(source))
+            stack.pop()
+            continue
+
+        new_key = redactor.redact(key) if isinstance(key, str) else key
+        if isinstance(key, str):
+            changed = changed or new_key != key
+        if isinstance(item, str):
+            rewritten = redactor.redact(item)
+            changed = changed or rewritten != item
+        elif isinstance(item, (dict, list)):
+            if id(item) in ancestors:
+                raise ValueError("Cyclic tool arguments are not supported JSON")
+            rewritten = {} if isinstance(item, dict) else []
+            ancestors.add(id(item))
+            stack.append((item, iter(item.items()) if isinstance(item, dict) else enumerate(item), rewritten))
+        else:
+            rewritten = item
+        if isinstance(target, dict):
+            target[new_key] = rewritten
+        else:
+            target.append(rewritten)
+    return rebuilt, changed
 
 
 class MemoryMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     pass
-
-
-def _filter_messages_for_memory(messages: list[Any]) -> list[Any]:
-    """Filter messages to keep only user inputs and final assistant responses.
-
-    This filters out:
-    - Tool messages (intermediate tool call results)
-    - AI messages with tool_calls (intermediate steps, not final responses)
-    - The <uploaded_files> block injected by UploadsMiddleware into human messages
-      (file paths are session-scoped and must not persist in long-term memory).
-      The user's actual question is preserved; only turns whose content is entirely
-      the upload block (nothing remains after stripping) are dropped along with
-      their paired assistant response.
-
-    Only keeps:
-    - Human messages (with the ephemeral upload block removed)
-    - AI messages without tool_calls (final assistant responses), unless the
-      paired human turn was upload-only and had no real user text.
-
-    Args:
-        messages: List of all conversation messages.
-
-    Returns:
-        Filtered list containing only user inputs and final assistant responses.
-    """
-    _UPLOAD_BLOCK_RE = re.compile(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", re.IGNORECASE)
-
-    filtered = []
-    skip_next_ai = False
-    for msg in messages:
-        msg_type = getattr(msg, "type", None)
-
-        if msg_type == "human":
-            content = getattr(msg, "content", "")
-            if isinstance(content, list):
-                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-            content_str = str(content)
-            if "<uploaded_files>" in content_str:
-                # Strip the ephemeral upload block; keep the user's real question.
-                stripped = _UPLOAD_BLOCK_RE.sub("", content_str).strip()
-                if not stripped:
-                    # Nothing left — the entire turn was upload bookkeeping;
-                    # skip it and the paired assistant response.
-                    skip_next_ai = True
-                    continue
-                # Rebuild the message with cleaned content so the user's question
-                # is still available for memory summarisation.
-                from copy import copy
-
-                clean_msg = copy(msg)
-                clean_msg.content = stripped
-                filtered.append(clean_msg)
-                skip_next_ai = False
-            else:
-                filtered.append(msg)
-                skip_next_ai = False
-        elif msg_type == "ai":
-            tool_calls = getattr(msg, "tool_calls", None)
-            if not tool_calls:
-                if skip_next_ai:
-                    skip_next_ai = False
-                    continue
-                filtered.append(msg)
-        # Skip tool messages and AI messages with tool_calls
-
-    return filtered
 
 
 class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
@@ -95,55 +169,102 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     state_schema = MemoryMiddlewareState
 
-    def __init__(self, agent_name: str | None = None):
+    def __init__(
+        self,
+        agent_name: str | None = None,
+        *,
+        memory_config: "MemoryConfig | None" = None,
+        pii_redaction_config: PiiRedactionConfig | None = None,
+    ):
         """Initialize the MemoryMiddleware.
 
         Args:
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            memory_config: Explicit memory config. When omitted, legacy global
+                config fallback is used.
+            pii_redaction_config: When enabled, the queued conversation payload
+                is redacted at the enqueue boundary (#3190 vector 5) — request-scoped
+                redaction leaves originals in thread state, and the buffered payload
+                is durable, so the extraction model's input and the persisted facts
+                would otherwise carry raw PII.
         """
         super().__init__()
         self._agent_name = agent_name
+        self._memory_config = memory_config
+        self._pii_redaction_config = pii_redaction_config
 
-    @override
-    def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
-        """Queue conversation for memory update after agent completes.
-
-        Args:
-            state: The current agent state.
-            runtime: The runtime context.
-
-        Returns:
-            None (no state changes needed from this middleware).
-        """
-        config = get_memory_config()
+    def _resolve_add_args(self, state: MemoryMiddlewareState, runtime: Runtime) -> tuple[str, list, str, str] | None:
+        """Resolve one write request without invoking the manager."""
+        config = self._memory_config or get_memory_config()
         if not config.enabled:
             return None
 
-        # Get thread ID from runtime context
+        # Get thread ID from runtime context first, then fall back to LangGraph's configurable metadata
         thread_id = runtime.context.get("thread_id") if runtime.context else None
+        if thread_id is None:
+            config_data = get_config()
+            thread_id = config_data.get("configurable", {}).get("thread_id")
         if not thread_id:
-            print("MemoryMiddleware: No thread_id in context, skipping memory update")
+            logger.debug("No thread_id in context, skipping memory update")
             return None
 
         # Get messages from state
         messages = state.get("messages", [])
         if not messages:
-            print("MemoryMiddleware: No messages in state, skipping memory update")
+            logger.debug("No messages in state, skipping memory update")
             return None
 
-        # Filter to only keep user inputs and final assistant responses
-        filtered_messages = _filter_messages_for_memory(messages)
+        # Capture user_id at enqueue time while the request context is still alive.
+        # threading.Timer fires on a different thread where ContextVar values are not
+        # propagated, so we must store user_id explicitly in ConversationContext.
+        user_id = resolve_runtime_user_id(runtime)
+        # The memory update fires on a threading.Timer thread that inherits no
+        # ContextVars, so the id is captured here, while the request context is
+        # still alive, and carried as data. The runtime context is authoritative
+        # (worker._bind_trace_id always fills it); the ambient fallback covers
+        # embedded callers driving the agent outside a Gateway run.
+        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        trace_id = resolve_trace_id(runtime_context.get(DEERFLOW_TRACE_METADATA_KEY))
 
-        # Only queue if there's meaningful conversation
-        # At minimum need one user message and one assistant response
-        user_messages = [m for m in filtered_messages if getattr(m, "type", None) == "human"]
-        assistant_messages = [m for m in filtered_messages if getattr(m, "type", None) == "ai"]
+        return thread_id, with_memory_locale(self._redact_queued_messages(messages), runtime.context), user_id, trace_id
 
-        if not user_messages or not assistant_messages:
+    def _redact_queued_messages(self, messages: list) -> list:
+        """Redact the conversation payload queued for extraction (#3190 vector 5)."""
+        return redact_queued_messages(messages, self._pii_redaction_config)
+
+    @override
+    def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        """Queue conversation for memory update after agent completes."""
+        add_args = self._resolve_add_args(state, runtime)
+        if add_args is None:
             return None
+        thread_id, messages, user_id, trace_id = add_args
 
-        # Queue the filtered conversation for memory update
-        queue = get_memory_queue()
-        queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name)
+        # Hand raw messages to the manager; the backend filters to user + final-AI
+        # turns, validates, detects correction/reinforcement, and enqueues.
+        get_memory_manager().add(
+            thread_id,
+            messages,
+            agent_name=self._agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
 
+        return None
+
+    @override
+    async def aafter_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        """Use the manager's async boundary on LangGraph's async execution path."""
+        add_args = self._resolve_add_args(state, runtime)
+        if add_args is None:
+            return None
+        thread_id, messages, user_id, trace_id = add_args
+        manager = await asyncio.to_thread(get_memory_manager)
+        await manager.aadd(
+            thread_id,
+            messages,
+            agent_name=self._agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
         return None

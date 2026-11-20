@@ -1,0 +1,1218 @@
+"""Tests for create_deerflow_agent SDK entry point."""
+
+from typing import get_type_hints
+from unittest.mock import MagicMock, patch
+
+import pytest
+from langchain.agents import AgentState
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+from langgraph.channels import DeltaChannel
+from langgraph.checkpoint.memory import InMemorySaver
+
+from deerflow.agents.factory import create_deerflow_agent
+from deerflow.agents.features import Next, Prev, RuntimeFeatures
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.thread_state import DeltaThreadState, ThreadState
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.subagents import SubagentRuntime
+
+
+def _make_mock_model():
+    return MagicMock(name="mock_model")
+
+
+class _FakeModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools, **kwargs):  # type: ignore[override]
+        return self
+
+
+class _CustomState(AgentState):
+    custom_value: str
+
+
+def _make_mock_tool(name: str = "my_tool"):
+    tool = MagicMock(name=name)
+    tool.name = name
+    return tool
+
+
+# ---------------------------------------------------------------------------
+# 1. Minimal creation — only model
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_minimal_creation(mock_create_agent):
+    mock_create_agent.return_value = MagicMock(name="compiled_graph")
+    model = _make_mock_model()
+
+    result = create_deerflow_agent(model)
+
+    mock_create_agent.assert_called_once()
+    assert result is mock_create_agent.return_value
+    call_kwargs = mock_create_agent.call_args[1]
+    assert call_kwargs["model"] is model
+    assert call_kwargs["system_prompt"] is None
+    assert call_kwargs["state_schema"] is ThreadState
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_delta_creation_selects_delta_state_and_copies_middleware(mock_create_agent):
+    mock_create_agent.return_value = MagicMock(name="compiled_graph")
+    middleware = ViewImageMiddleware()
+    original_schema = middleware.state_schema
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        middleware=[middleware],
+        checkpoint_channel_mode="delta",
+    )
+
+    call_kwargs = mock_create_agent.call_args.kwargs
+    assert call_kwargs["state_schema"] is DeltaThreadState
+    assert call_kwargs["middleware"][0] is not middleware
+    assert middleware.state_schema is original_schema
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_custom_state_schema_is_preserved_in_full_mode_and_adapted_in_delta_mode(mock_create_agent):
+    mock_create_agent.return_value = MagicMock(name="compiled_graph")
+
+    create_deerflow_agent(_make_mock_model(), state_schema=_CustomState)
+    assert mock_create_agent.call_args.kwargs["state_schema"] is _CustomState
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        state_schema=_CustomState,
+        checkpoint_channel_mode="delta",
+    )
+    adapted = mock_create_agent.call_args.kwargs["state_schema"]
+    hints = get_type_hints(adapted, include_extras=True)
+    assert "custom_value" in hints
+    assert any(isinstance(item, DeltaChannel) for item in hints["messages"].__metadata__)
+
+
+def test_delta_checkpointer_combination_is_rejected_before_any_persistence():
+    """Mixed-mode corruption guard: delta + checkpointer must fail loudly at
+    construction, before any state is read or written through the ungated graph."""
+    saver = InMemorySaver()
+    with pytest.raises(ValueError, match="checkpoint_channel_mode='delta'"):
+        create_deerflow_agent(
+            _FakeModel(responses=[AIMessage(content="ok")]),
+            checkpoint_channel_mode="delta",
+            checkpointer=saver,
+        )
+    assert list(saver.list(None)) == []
+
+
+def test_compiled_factory_graph_selects_full_and_delta_message_channels():
+    full_graph = create_deerflow_agent(
+        _FakeModel(responses=[AIMessage(id="full-response", content="done")]),
+    )
+    delta_graph = create_deerflow_agent(
+        _FakeModel(responses=[AIMessage(id="delta-response", content="done")]),
+        checkpoint_channel_mode="delta",
+    )
+
+    assert type(full_graph.channels["messages"]).__name__ == "BinaryOperatorAggregate"
+    assert isinstance(delta_graph.channels["messages"], DeltaChannel)
+
+
+# ---------------------------------------------------------------------------
+# 2. With tools
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_with_tools(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    model = _make_mock_model()
+    tool = _make_mock_tool("search")
+
+    create_deerflow_agent(model, tools=[tool])
+
+    call_kwargs = mock_create_agent.call_args[1]
+    tool_names = [t.name for t in call_kwargs["tools"]]
+    assert "search" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# 3. With system_prompt
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_with_system_prompt(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    prompt = "You are a helpful assistant."
+
+    create_deerflow_agent(_make_mock_model(), system_prompt=prompt)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    assert call_kwargs["system_prompt"] == prompt
+
+
+# ---------------------------------------------------------------------------
+# 4. Features mode — auto-assemble middleware chain
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_features_mode(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    feat = RuntimeFeatures(sandbox=True, auto_title=True)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    assert len(middleware) > 0
+    mw_types = [type(m).__name__ for m in middleware]
+    assert "ThreadDataMiddleware" in mw_types
+    assert "SandboxMiddleware" in mw_types
+    assert "TitleMiddleware" in mw_types
+    assert "ClarificationMiddleware" in mw_types
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_factory_threads_pii_redaction_config(mock_create_agent):
+    """#5577 review: the SDK-path wiring must not silently drop the knob —
+    both MemoryMiddleware and DurableContextMiddleware carry the config."""
+    mock_create_agent.return_value = MagicMock()
+    pii = PiiRedactionConfig(enabled=True, token_secret="sdk-path-pii-redaction-secret")
+
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(memory=True), pii_redaction_config=pii)
+
+    middleware = mock_create_agent.call_args[1]["middleware"]
+    memory_mw = next(m for m in middleware if type(m).__name__ == "MemoryMiddleware")
+    durable_mw = next(m for m in middleware if type(m).__name__ == "DurableContextMiddleware")
+    pii_mw = next(m for m in middleware if type(m).__name__ == "PiiRedactionMiddleware")
+    assert memory_mw._pii_redaction_config is pii
+    assert durable_mw._pii_redaction_config is pii
+
+    # Model-call regression: the assembled SDK chain actually redacts user
+    # content at the model boundary (round-10 review).
+    class _Req:
+        def __init__(self, messages):
+            self.messages = list(messages)
+
+        def override(self, **kwargs):
+            copy = object.__new__(type(self))
+            copy.messages = kwargs.get("messages", self.messages)
+            return copy
+
+    captured = {}
+    pii_mw.wrap_model_call(_Req([HumanMessage("reach alice@example.com")]), lambda req: captured.update(messages=req.messages) or "r")
+    assert "alice@example.com" not in str(captured["messages"][0].content)
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_factory_defaults_to_redaction_off(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(memory=True))
+
+    middleware = mock_create_agent.call_args[1]["middleware"]
+    memory_mw = next(m for m in middleware if type(m).__name__ == "MemoryMiddleware")
+    assert memory_mw._pii_redaction_config is None
+
+
+# ---------------------------------------------------------------------------
+# 5. Middleware full takeover
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_middleware_takeover(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    custom_mw = MagicMock(name="custom_middleware")
+    custom_mw.name = "custom"
+
+    create_deerflow_agent(_make_mock_model(), middleware=[custom_mw])
+
+    call_kwargs = mock_create_agent.call_args[1]
+    assert call_kwargs["middleware"] == [custom_mw]
+
+
+# ---------------------------------------------------------------------------
+# 6. Conflict — middleware + features raises ValueError
+# ---------------------------------------------------------------------------
+def test_middleware_and_features_conflict():
+    with pytest.raises(ValueError, match="Cannot specify both"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            middleware=[MagicMock()],
+            features=RuntimeFeatures(),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 7. Vision feature auto-injects view_image_tool when thread data is available
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_vision_injects_view_image_tool(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    feat = RuntimeFeatures(vision=True, sandbox=True)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    tool_names = [t.name for t in call_kwargs["tools"]]
+    assert "view_image" in tool_names
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_vision_without_sandbox_does_not_inject_view_image_tool(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    feat = RuntimeFeatures(vision=True, sandbox=False)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    tool_names = [t.name for t in call_kwargs["tools"]]
+    assert "view_image" not in tool_names
+
+
+def test_view_image_middleware_preserves_viewed_images_reducer():
+    middleware_hints = get_type_hints(ViewImageMiddleware.state_schema, include_extras=True)
+    thread_hints = get_type_hints(ThreadState, include_extras=True)
+
+    assert middleware_hints["viewed_images"] == thread_hints["viewed_images"]
+
+
+# ---------------------------------------------------------------------------
+# 8. Subagent feature auto-injects task_tool
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_subagent_injects_task_tool(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    feat = RuntimeFeatures(subagent=True, sandbox=False)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    tool_names = [t.name for t in call_kwargs["tools"]]
+    assert "task" in tool_names
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_explicit_subagent_runtime_aligns_factory_middleware_and_tools(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    submitter = MagicMock()
+    runtime = SubagentRuntime(
+        SubagentRuntimeConfig(max_running=7),
+        max_total_per_run=12,
+        batch_submitter=submitter,
+    )
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(subagent=True, sandbox=False),
+        subagent_runtime=runtime,
+    )
+
+    call_kwargs = mock_create_agent.call_args.kwargs
+    limit = next(middleware for middleware in call_kwargs["middleware"] if type(middleware).__name__ == "SubagentLimitMiddleware")
+    assert limit.max_concurrent == 7
+    assert limit.max_total == 12
+    tool_names = {tool.name for tool in call_kwargs["tools"]}
+    assert {"task", "batch_task", "batch_status", "cancel_batch", "read_batch_result"} <= tool_names
+
+
+def test_explicit_subagent_runtime_requires_the_subagent_feature() -> None:
+    runtime = SubagentRuntime(SubagentRuntimeConfig(max_running=4))
+
+    with pytest.raises(ValueError, match="subagent_runtime.*features.subagent"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(subagent=False, sandbox=False),
+            subagent_runtime=runtime,
+        )
+
+
+def test_factory_rejects_configured_batch_runtime_before_worker_start() -> None:
+    runtime = SubagentRuntime(
+        SubagentRuntimeConfig(max_running=4),
+        batch_repository=MagicMock(),
+        batch_config=SubagentBatchesConfig(enabled=True),
+        app_config=MagicMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="await subagent_runtime.start"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(subagent=True, sandbox=False),
+            subagent_runtime=runtime,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. Middleware ordering — ClarificationMiddleware always last
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_clarification_always_last(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    feat = RuntimeFeatures(sandbox=True, memory=True, vision=True)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    last_mw = middleware[-1]
+    assert type(last_mw).__name__ == "ClarificationMiddleware"
+
+
+# ---------------------------------------------------------------------------
+# 10. RuntimeFeatures default values
+# ---------------------------------------------------------------------------
+def test_agent_features_defaults():
+    f = RuntimeFeatures()
+    assert f.sandbox is True
+    assert f.memory is False
+    assert f.summarization is False
+    assert f.subagent is False
+    assert f.vision is False
+    assert f.auto_title is False
+    assert f.guardrail is False
+    assert f.loop_detection is True
+
+
+# ---------------------------------------------------------------------------
+# 11. Tool deduplication — user-provided tools take priority
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_tool_deduplication(mock_create_agent):
+    """If user provides a tool with the same name as an auto-injected one, no duplicate."""
+    mock_create_agent.return_value = MagicMock()
+    user_clarification = _make_mock_tool("ask_clarification")
+
+    create_deerflow_agent(_make_mock_model(), tools=[user_clarification], features=RuntimeFeatures(sandbox=False))
+
+    call_kwargs = mock_create_agent.call_args[1]
+    names = [t.name for t in call_kwargs["tools"]]
+    assert names.count("ask_clarification") == 1
+    # The first one should be the user-provided tool
+    assert call_kwargs["tools"][0] is user_clarification
+
+
+# ---------------------------------------------------------------------------
+# 12. Sandbox disabled — no ThreadData/Uploads/Sandbox middleware
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_sandbox_disabled(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    feat = RuntimeFeatures(sandbox=False)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "ThreadDataMiddleware" not in mw_types
+    assert "UploadsMiddleware" not in mw_types
+    assert "SandboxMiddleware" not in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 13. Checkpointer passed through
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_checkpointer_passthrough(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    cp = MagicMock(name="checkpointer")
+
+    create_deerflow_agent(_make_mock_model(), checkpointer=cp)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    assert call_kwargs["checkpointer"] is cp
+
+
+# ---------------------------------------------------------------------------
+# 14. Custom AgentMiddleware instance replaces default
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_custom_middleware_replaces_default(mock_create_agent):
+    """Passing an AgentMiddleware instance uses it directly instead of the built-in default."""
+    from langchain.agents.middleware import AgentMiddleware
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyMemoryMiddleware(AgentMiddleware):
+        pass
+
+    custom_memory = MyMemoryMiddleware()
+    feat = RuntimeFeatures(sandbox=False, memory=custom_memory)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    assert custom_memory in middleware
+    # Should NOT have the default MemoryMiddleware
+    mw_types = [type(m).__name__ for m in middleware]
+    assert "MemoryMiddleware" not in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 15. Custom sandbox middleware replaces the 3-middleware group
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_custom_sandbox_replaces_group(mock_create_agent):
+    """Passing an AgentMiddleware for sandbox replaces ThreadData+Uploads+Sandbox with one."""
+    from langchain.agents.middleware import AgentMiddleware
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MySandbox(AgentMiddleware):
+        pass
+
+    custom_sb = MySandbox()
+    feat = RuntimeFeatures(sandbox=custom_sb)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    assert custom_sb in middleware
+    mw_types = [type(m).__name__ for m in middleware]
+    assert "ThreadDataMiddleware" not in mw_types
+    assert "UploadsMiddleware" not in mw_types
+    assert "SandboxMiddleware" not in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 16. Always-on error handling middlewares are present
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_always_on_error_handling(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    feat = RuntimeFeatures(sandbox=False)
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    assert "DanglingToolCallMiddleware" in mw_types
+    assert "ToolErrorHandlingMiddleware" in mw_types
+    tool_error_middleware = next(m for m in middleware if type(m).__name__ == "ToolErrorHandlingMiddleware")
+    assert tool_error_middleware._app_config is None
+
+
+# ---------------------------------------------------------------------------
+# 17. Vision with custom middleware follows thread-data availability
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_vision_custom_middleware_without_sandbox_does_not_inject_tool(mock_create_agent):
+    """Custom vision middleware without thread data does not get view_image_tool auto-injected."""
+    from langchain.agents.middleware import AgentMiddleware
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyVision(AgentMiddleware):
+        pass
+
+    feat = RuntimeFeatures(sandbox=False, vision=MyVision())
+
+    create_deerflow_agent(_make_mock_model(), features=feat)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    tool_names = [t.name for t in call_kwargs["tools"]]
+    assert "view_image" not in tool_names
+
+
+# ===========================================================================
+# @Next / @Prev decorators and extra_middleware insertion
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 18. @Next decorator sets _next_anchor
+# ---------------------------------------------------------------------------
+def test_next_decorator():
+    from langchain.agents.middleware import AgentMiddleware
+
+    class Anchor(AgentMiddleware):
+        pass
+
+    @Next(Anchor)
+    class MyMW(AgentMiddleware):
+        pass
+
+    assert MyMW._next_anchor is Anchor
+
+
+# ---------------------------------------------------------------------------
+# 19. @Prev decorator sets _prev_anchor
+# ---------------------------------------------------------------------------
+def test_prev_decorator():
+    from langchain.agents.middleware import AgentMiddleware
+
+    class Anchor(AgentMiddleware):
+        pass
+
+    @Prev(Anchor)
+    class MyMW(AgentMiddleware):
+        pass
+
+    assert MyMW._prev_anchor is Anchor
+
+
+# ---------------------------------------------------------------------------
+# 20. extra_middleware with @Next inserts after anchor
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_extra_next_inserts_after_anchor(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    mock_create_agent.return_value = MagicMock()
+
+    @Next(DanglingToolCallMiddleware)
+    class MyAudit(AgentMiddleware):
+        pass
+
+    audit = MyAudit()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False),
+        extra_middleware=[audit],
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    dangling_idx = mw_types.index("DanglingToolCallMiddleware")
+    audit_idx = mw_types.index("MyAudit")
+    assert audit_idx == dangling_idx + 1
+
+
+# ---------------------------------------------------------------------------
+# 21. extra_middleware with @Prev inserts before anchor
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_extra_prev_inserts_before_anchor(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+    mock_create_agent.return_value = MagicMock()
+
+    @Prev(ClarificationMiddleware)
+    class MyFilter(AgentMiddleware):
+        pass
+
+    filt = MyFilter()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False),
+        extra_middleware=[filt],
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    clar_idx = mw_types.index("ClarificationMiddleware")
+    filt_idx = mw_types.index("MyFilter")
+    assert filt_idx == clar_idx - 1
+
+
+# ---------------------------------------------------------------------------
+# 22. Unanchored extra_middleware goes before ClarificationMiddleware
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_extra_unanchored_before_clarification(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyPlain(AgentMiddleware):
+        pass
+
+    plain = MyPlain()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False),
+        extra_middleware=[plain],
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    assert mw_types[-1] == "ClarificationMiddleware"
+    assert mw_types[-2] == "MyPlain"
+
+
+# ---------------------------------------------------------------------------
+# 23. Conflict: two extras @Next same anchor → ValueError
+# ---------------------------------------------------------------------------
+def test_extra_conflict_same_next_target():
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    @Next(DanglingToolCallMiddleware)
+    class MW1(AgentMiddleware):
+        pass
+
+    @Next(DanglingToolCallMiddleware)
+    class MW2(AgentMiddleware):
+        pass
+
+    with pytest.raises(ValueError, match="Conflict"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False),
+            extra_middleware=[MW1(), MW2()],
+        )
+
+
+# ---------------------------------------------------------------------------
+# 24. Conflict: two extras @Prev same anchor → ValueError
+# ---------------------------------------------------------------------------
+def test_extra_conflict_same_prev_target():
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+    @Prev(ClarificationMiddleware)
+    class MW1(AgentMiddleware):
+        pass
+
+    @Prev(ClarificationMiddleware)
+    class MW2(AgentMiddleware):
+        pass
+
+    with pytest.raises(ValueError, match="Conflict"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False),
+            extra_middleware=[MW1(), MW2()],
+        )
+
+
+# ---------------------------------------------------------------------------
+# 25. Both @Next and @Prev on same class → ValueError
+# ---------------------------------------------------------------------------
+def test_extra_both_next_and_prev_error():
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    class MW(AgentMiddleware):
+        pass
+
+    MW._next_anchor = DanglingToolCallMiddleware
+    MW._prev_anchor = ClarificationMiddleware
+
+    with pytest.raises(ValueError, match="both @Next and @Prev"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False),
+            extra_middleware=[MW()],
+        )
+
+
+# ---------------------------------------------------------------------------
+# 26. Cross-external anchoring: extra anchors to another extra
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_extra_cross_external_anchoring(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    mock_create_agent.return_value = MagicMock()
+
+    @Next(DanglingToolCallMiddleware)
+    class First(AgentMiddleware):
+        pass
+
+    @Next(First)
+    class Second(AgentMiddleware):
+        pass
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False),
+        extra_middleware=[Second(), First()],  # intentionally reversed
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    dangling_idx = mw_types.index("DanglingToolCallMiddleware")
+    first_idx = mw_types.index("First")
+    second_idx = mw_types.index("Second")
+    assert first_idx == dangling_idx + 1
+    assert second_idx == first_idx + 1
+
+
+# ---------------------------------------------------------------------------
+# 27. Unresolvable anchor → ValueError
+# ---------------------------------------------------------------------------
+def test_extra_unresolvable_anchor():
+    from langchain.agents.middleware import AgentMiddleware
+
+    class Ghost(AgentMiddleware):
+        pass
+
+    @Next(Ghost)
+    class MW(AgentMiddleware):
+        pass
+
+    with pytest.raises(ValueError, match="Cannot resolve"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False),
+            extra_middleware=[MW()],
+        )
+
+
+# ---------------------------------------------------------------------------
+# 28. extra_middleware + middleware (full takeover) → ValueError
+# ---------------------------------------------------------------------------
+def test_extra_with_middleware_takeover_conflict():
+    with pytest.raises(ValueError, match="full takeover"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            middleware=[MagicMock()],
+            extra_middleware=[MagicMock()],
+        )
+
+
+# ===========================================================================
+# LoopDetection, TodoMiddleware, GuardrailMiddleware
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 29. LoopDetectionMiddleware is always present
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_loop_detection_always_present(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False))
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "LoopDetectionMiddleware" in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 30. LoopDetection before Clarification
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_loop_detection_before_clarification(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False))
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    loop_idx = mw_types.index("LoopDetectionMiddleware")
+    clar_idx = mw_types.index("ClarificationMiddleware")
+    assert loop_idx < clar_idx
+    # The read-time sanitizer owns the slot immediately before Clarification.
+    assert mw_types[clar_idx - 1] == "ModelContentCompatibilityMiddleware"
+    assert loop_idx == clar_idx - 2
+
+
+# ---------------------------------------------------------------------------
+# 30b. loop_detection=False skips LoopDetectionMiddleware
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_loop_detection_disabled(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, loop_detection=False),
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "LoopDetectionMiddleware" not in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 30c. loop_detection=<custom AgentMiddleware> replaces the default
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_loop_detection_custom_middleware(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware as AM
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyLoopDetection(AM):
+        pass
+
+    custom = MyLoopDetection()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, loop_detection=custom),
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    assert custom in middleware
+    mw_types = [type(m).__name__ for m in middleware]
+    # Default LoopDetectionMiddleware must not also appear.
+    assert "LoopDetectionMiddleware" not in mw_types
+    # Custom replacement sits after TokenBudgetMiddleware's slot, with only the
+    # read-time sanitizer between it and ClarificationMiddleware.
+    assert mw_types[-1] == "ClarificationMiddleware"
+    assert mw_types[-2] == "ModelContentCompatibilityMiddleware"
+    assert mw_types[-3] == "MyLoopDetection"
+
+
+# ---------------------------------------------------------------------------
+# 31. plan_mode=True adds TodoMiddleware
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_plan_mode_adds_todo_middleware(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False), plan_mode=True)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "TodoMiddleware" in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 32. plan_mode=False (default) — no TodoMiddleware
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_plan_mode_default_no_todo(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False))
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "TodoMiddleware" not in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 33. summarization=True without model → ValueError
+# ---------------------------------------------------------------------------
+def test_summarization_true_raises():
+    with pytest.raises(ValueError, match="requires a custom AgentMiddleware"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False, summarization=True),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 34. guardrail=True without built-in → ValueError
+# ---------------------------------------------------------------------------
+def test_guardrail_true_raises():
+    with pytest.raises(ValueError, match="requires a custom AgentMiddleware"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False, guardrail=True),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 34. guardrail with custom AgentMiddleware replaces default
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_guardrail_custom_middleware(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware as AM
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyGuardrail(AM):
+        pass
+
+    custom = MyGuardrail()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, guardrail=custom),
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    assert custom in middleware
+    mw_types = [type(m).__name__ for m in middleware]
+    assert "GuardrailMiddleware" not in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 35. guardrail=False (default) — no GuardrailMiddleware
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_guardrail_default_off(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False))
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "GuardrailMiddleware" not in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 36. Full chain order matches make_lead_agent (all features on)
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_full_chain_order(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware as AM
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyGuardrail(AM):
+        pass
+
+    class MySummarization(AM):
+        pass
+
+    feat = RuntimeFeatures(
+        sandbox=True,
+        memory=True,
+        summarization=MySummarization(),
+        subagent=True,
+        vision=True,
+        auto_title=True,
+        guardrail=MyGuardrail(),
+    )
+    create_deerflow_agent(_make_mock_model(), features=feat, plan_mode=True)
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+
+    expected_order = [
+        "ThreadDataMiddleware",
+        "UploadsMiddleware",
+        "SandboxMiddleware",
+        "DanglingToolCallMiddleware",
+        "MyGuardrail",
+        "ToolErrorHandlingMiddleware",
+        "DurableContextMiddleware",
+        "SystemMessageCoalescingMiddleware",
+        "MySummarization",
+        "TodoMiddleware",
+        "TitleMiddleware",
+        "MemoryMiddleware",
+        "ViewImageMiddleware",
+        "SubagentLimitMiddleware",
+        "LoopDetectionMiddleware",
+        "ModelContentCompatibilityMiddleware",
+        "ClarificationMiddleware",
+    ]
+    assert mw_types == expected_order
+
+
+# ---------------------------------------------------------------------------
+# 37. @Next(ClarificationMiddleware) does not break tail invariant
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_next_clarification_preserves_tail_invariant(mock_create_agent):
+    """Even with @Next(ClarificationMiddleware), Clarification stays last."""
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+    mock_create_agent.return_value = MagicMock()
+
+    @Next(ClarificationMiddleware)
+    class AfterClar(AgentMiddleware):
+        pass
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False),
+        extra_middleware=[AfterClar()],
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    assert mw_types[-1] == "ClarificationMiddleware"
+    assert "AfterClar" in mw_types
+
+
+# ---------------------------------------------------------------------------
+# 38. @Next(X) + @Prev(X) on same anchor from different extras → ValueError
+# ---------------------------------------------------------------------------
+def test_extra_opposite_direction_same_anchor_conflict():
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    @Next(DanglingToolCallMiddleware)
+    class AfterDangling(AgentMiddleware):
+        pass
+
+    @Prev(DanglingToolCallMiddleware)
+    class BeforeDangling(AgentMiddleware):
+        pass
+
+    with pytest.raises(ValueError, match="cross-anchoring"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False),
+            extra_middleware=[AfterDangling(), BeforeDangling()],
+        )
+
+
+# ===========================================================================
+# Input validation and error message hardening
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 39. @Next with non-AgentMiddleware anchor → TypeError
+# ---------------------------------------------------------------------------
+def test_next_bad_anchor_type():
+    with pytest.raises(TypeError, match="AgentMiddleware subclass"):
+
+        @Next(str)  # type: ignore[arg-type]
+        class MW:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# 40. @Prev with non-AgentMiddleware anchor → TypeError
+# ---------------------------------------------------------------------------
+def test_prev_bad_anchor_type():
+    with pytest.raises(TypeError, match="AgentMiddleware subclass"):
+
+        @Prev(42)  # type: ignore[arg-type]
+        class MW:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# 41. extra_middleware with non-AgentMiddleware item → TypeError
+# ---------------------------------------------------------------------------
+def test_extra_middleware_bad_type():
+    with pytest.raises(TypeError, match="AgentMiddleware instances"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False),
+            extra_middleware=[object()],  # type: ignore[list-item]
+        )
+
+
+# ---------------------------------------------------------------------------
+# 42. Circular dependency among extras → clear error message
+# ---------------------------------------------------------------------------
+def test_extra_circular_dependency():
+    from langchain.agents.middleware import AgentMiddleware
+
+    class MW_A(AgentMiddleware):
+        pass
+
+    class MW_B(AgentMiddleware):
+        pass
+
+    MW_A._next_anchor = MW_B  # type: ignore[attr-defined]
+    MW_B._next_anchor = MW_A  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="Circular dependency"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False),
+            extra_middleware=[MW_A(), MW_B()],
+        )
+
+
+# ===========================================================================
+# Delegation ledger and compacted summary in a factory-built graph
+# ===========================================================================
+
+
+class _RecordingFakeModel(_FakeModel):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        object.__setattr__(self, "received", [])
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.received.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+@tool("task")
+def _fake_task(description: str, prompt: str, subagent_type: str) -> str:
+    """Fake task tool."""
+    return f"Task Succeeded. Result: {description}"
+
+
+def _task_turn(call_id: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "task", "args": {"description": call_id, "prompt": "do it", "subagent_type": "general-purpose"}, "id": call_id, "type": "tool_call"}],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 43. The per-run subagent total holds across model turns
+# ---------------------------------------------------------------------------
+def test_subagent_total_per_run_holds_across_model_turns():
+    model = _FakeModel(responses=[_task_turn("call-1"), _task_turn("call-2"), _task_turn("call-3"), AIMessage(content="done")])
+    runtime = SubagentRuntime(SubagentRuntimeConfig(max_running=3), max_total_per_run=2)
+    graph = create_deerflow_agent(
+        model,
+        tools=[_fake_task],
+        features=RuntimeFeatures(subagent=True, sandbox=False),
+        subagent_runtime=runtime,
+    )
+
+    result = graph.invoke({"messages": [HumanMessage(content="delegate three pieces of work")]}, context={"run_id": "run-1"})
+
+    ran = [message.tool_call_id for message in result["messages"] if isinstance(message, ToolMessage) and message.name == "task"]
+    assert ran == ["call-1", "call-2"]
+
+
+# ---------------------------------------------------------------------------
+# 44. The model still sees the summary after summarization compacts history
+# ---------------------------------------------------------------------------
+def test_summarization_feature_keeps_the_summary_in_model_requests():
+    summarizer = DeerFlowSummarizationMiddleware(
+        model=_FakeModel(responses=[AIMessage(content="compressed summary")]),
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+    )
+    model = _RecordingFakeModel(responses=[AIMessage(content="one"), AIMessage(content="two"), AIMessage(content="three")])
+    graph = create_deerflow_agent(
+        model,
+        system_prompt="You are a test agent.",
+        features=RuntimeFeatures(summarization=summarizer, sandbox=False),
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "factory-summary"}}
+
+    for text in ("first", "second", "third"):
+        result = graph.invoke({"messages": [HumanMessage(content=text)]}, config)
+
+    assert result["summary_text"] == "compressed summary"
+    assert "first" not in [message.content for message in result["messages"]]
+    request = model.received[-1]
+    assert any("compressed summary" in str(message.content) for message in request)
+    # The durable-context authority contract must not reach the provider as a second SystemMessage.
+    assert [index for index, message in enumerate(request) if isinstance(message, SystemMessage)] == [0]
+    assert "You are a test agent." in request[0].content
+
+
+# ---------------------------------------------------------------------------
+# 45. token_budget=True enforces the default budget
+# ---------------------------------------------------------------------------
+def test_token_budget_true_enforces_the_default_budget():
+    @tool("bash")
+    def bash(command: str) -> str:
+        """Run a fake shell command."""
+        return "ok"
+
+    over_budget = AIMessage(
+        content="",
+        tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call-1", "type": "tool_call"}],
+        usage_metadata={"input_tokens": 250_000, "output_tokens": 0, "total_tokens": 250_000},
+    )
+    graph = create_deerflow_agent(
+        _FakeModel(responses=[over_budget, AIMessage(content="done")]),
+        tools=[bash],
+        features=RuntimeFeatures(token_budget=True, sandbox=False),
+    )
+    context = {"run_id": "run-1"}
+
+    result = graph.invoke({"messages": [HumanMessage(content="go")]}, context=context)
+
+    assert not any(isinstance(message, ToolMessage) for message in result["messages"])
+    assert "TOKEN BUDGET EXCEEDED" in result["messages"][-1].content
+    assert context["stop_reason"] == "token_capped"

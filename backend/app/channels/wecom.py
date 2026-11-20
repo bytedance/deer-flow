@@ -1,0 +1,873 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import inspect
+import logging
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, cast
+
+from app.channels.base import Channel, ChannelUnavailable, attachment_delivery_text
+from app.channels.commands import is_known_channel_command, strip_leading_mentions
+from app.channels.connection_identity import attach_connection_identity
+from app.channels.message_bus import (
+    InboundMessage,
+    InboundMessageType,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
+from app.channels.notification_groups import notification_group_display_name, wecom_notification_group_chat_id
+
+logger = logging.getLogger(__name__)
+
+# Exceptions that mean the transport failed, not the message. ``websockets``
+# is the SDK's socket layer and forwards its close exception unchanged
+# through ``send_message``; it is not an OSError subclass.
+_TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError)
+try:
+    from websockets.exceptions import ConnectionClosed as _WsConnectionClosed
+except Exception:  # pragma: no cover - absent only when the SDK itself is missing
+    pass
+else:
+    _TRANSPORT_EXCEPTIONS = (*_TRANSPORT_EXCEPTIONS, _WsConnectionClosed)
+
+# The SDK surfaces a platform rejection of a sent frame (non-zero ``errcode``
+# in the ACK) as ``RuntimeError`` with this prefix, from the same call that
+# raises ``RuntimeError`` for a closed socket. The prefix is what tells a
+# verdict about the message apart from a transport failure.
+_WECOM_ACK_REJECTION_PREFIX = "Reply ack error"
+
+
+def _group_workspace_id(aibotid: str | None, chatid: str) -> str:
+    return f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
+
+
+def _file_md5(path: str) -> str:
+    md5_hasher = hashlib.md5()
+    with open(path, "rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            md5_hasher.update(chunk)
+    return md5_hasher.hexdigest()
+
+
+def _open_binary(path: str):
+    return open(path, "rb")
+
+
+# The WeCom bot protocol caps message content at 20480 UTF-8 bytes, for both
+# passive stream replies and active markdown pushes.
+_WECOM_MAX_CONTENT_BYTES = 20480
+_TRUNCATION_MARKER = "\n\n... (truncated)"
+# One push must not flood the chat with an unbounded run of messages: keep the
+# first few chunks and collapse the rest into one truncated tail.
+_WECOM_MAX_CHUNK_BATCH = 10
+
+
+def _clip_to_byte_limit(text: str, limit: int) -> str:
+    """Clip text to a UTF-8 byte budget, never splitting a character."""
+    if len(text.encode("utf-8")) <= limit:
+        return text
+    budget = limit - len(_TRUNCATION_MARKER.encode("utf-8"))
+    clipped = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    return clipped + _TRUNCATION_MARKER
+
+
+def _split_for_byte_limit(text: str, limit: int) -> list[str]:
+    """Split text into chunks within the UTF-8 byte limit.
+
+    Prefers newline boundaries so markdown structure survives the split.
+    The batch cap applies inside the loop, so a pathological text is never
+    fully split just to be discarded.
+    """
+    if len(text.encode("utf-8")) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining.encode("utf-8")) > limit:
+        if len(chunks) >= _WECOM_MAX_CHUNK_BATCH - 1:
+            logger.warning(
+                "WeCom push of %d bytes exceeds %d messages, capping the batch",
+                len(text.encode("utf-8")),
+                _WECOM_MAX_CHUNK_BATCH,
+            )
+            chunks.append(_clip_to_byte_limit(remaining, limit))
+            return chunks
+        window = remaining.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+        cut = window.rfind("\n")
+        if cut <= 0:
+            cut = len(window)
+        else:
+            # Keep the delimiter on this chunk's tail: the sequential messages
+            # must round-trip to the original text exactly.
+            cut += 1
+        if cut == 0:
+            # limit is narrower than one whole character; take it anyway so
+            # the loop always advances.
+            cut = 1
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+class WeComChannel(Channel):
+    def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
+        super().__init__(name="wecom", bus=bus, config=config)
+        self._bot_id: str | None = None
+        self._bot_secret: str | None = None
+        self._ws_client = None
+        self._ws_task: asyncio.Task | None = None
+        self._ws_shutdown_task: asyncio.Future[Any] | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._ws_frames: dict[str, dict[str, Any]] = {}
+        self._ws_stream_ids: dict[str, str] = {}
+        # Optimistic until the SDK reports a disconnect: start() hands us a
+        # live client that is connecting/reconnecting. Cleared on disconnect
+        # and restored after a successful send so proactive push can park
+        # without burning the outbox retry budget during a transport outage.
+        self._ws_transport_up = False
+        self._ws_send_locks: dict[str, asyncio.Lock] = {}
+        self._ws_send_lock_users: dict[str, int] = {}
+        self._ws_send_locks_guard = asyncio.Lock()
+        self._working_message = "Working on it..."
+        raw_hosts = config.get("allowed_media_hosts")
+        if isinstance(raw_hosts, str):
+            host_values: list[Any] = [raw_hosts]
+        elif isinstance(raw_hosts, (list, tuple, set, frozenset)):
+            host_values = list(raw_hosts)
+        else:
+            host_values = []
+        # Host suffixes; a leading ``*.`` is stripped so ``*.example.com`` and
+        # ``example.com`` behave identically (mirrors WechatChannel._coerce_host_suffixes).
+        normalized_hosts: set[str] = set()
+        for host in host_values:
+            text = str(host).strip().lower().lstrip(".")
+            if text.startswith("*."):
+                text = text[2:]
+            if text:
+                normalized_hosts.add(text)
+        self._allowed_media_host_suffixes = frozenset(normalized_hosts)
+
+    @property
+    def allowed_media_host_suffixes(self) -> frozenset[str]:
+        """Operator host suffixes the manager-side inbound-media gate merges in.
+
+        ``channels.wecom.allowed_media_hosts``: extra host suffixes inbound
+        media URLs may be downloaded from, on top of the built-in ``qq.com``
+        family and the pinned WeCom COS bucket shape. Gives deployments that
+        proxy or mirror WeCom media an escape hatch that does not require
+        widening the hard-coded pattern for everyone.
+        """
+        return self._allowed_media_host_suffixes
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
+
+    def _clear_ws_context(self, thread_ts: str | None) -> None:
+        if not thread_ts:
+            return
+        self._ws_frames.pop(thread_ts, None)
+        self._ws_stream_ids.pop(thread_ts, None)
+
+    async def _send_ws_upload_command(self, req_id: str, body: dict[str, Any], cmd: str) -> dict[str, Any]:
+        if not self._ws_client:
+            raise RuntimeError("WeCom WebSocket client is not available")
+
+        ws_manager = getattr(self._ws_client, "_ws_manager", None)
+        send_reply = getattr(ws_manager, "send_reply", None)
+        if not callable(send_reply):
+            raise RuntimeError("Installed wecom-aibot-python-sdk does not expose the WebSocket media upload API expected by DeerFlow. Use wecom-aibot-python-sdk==0.1.6 or update the adapter.")
+
+        send_reply_async = cast(Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]], send_reply)
+        return await send_reply_async(req_id, body, cmd)
+
+    async def start(self) -> None:
+        async with self._lifecycle_lock:
+            if self._running:
+                return
+
+            bot_id = self.config.get("bot_id")
+            bot_secret = self.config.get("bot_secret")
+            working_message = self.config.get("working_message")
+
+            self._bot_id = bot_id if isinstance(bot_id, str) and bot_id else None
+            self._bot_secret = bot_secret if isinstance(bot_secret, str) and bot_secret else None
+            self._working_message = working_message if isinstance(working_message, str) and working_message else "Working on it..."
+
+            if not self._bot_id or not self._bot_secret:
+                logger.error("WeCom channel requires bot_id and bot_secret")
+                return
+
+            try:
+                from aibot import WSClient, WSClientOptions
+            except ImportError:
+                logger.error("wecom-aibot-python-sdk is not installed. Install it with: uv add wecom-aibot-python-sdk")
+                return
+            else:
+                self._ws_client = WSClient(WSClientOptions(bot_id=self._bot_id, secret=self._bot_secret, logger=logger))
+                self._ws_client.on("message.text", self._on_ws_text)
+                self._ws_client.on("message.mixed", self._on_ws_mixed)
+                self._ws_client.on("message.image", self._on_ws_image)
+                self._ws_client.on("message.file", self._on_ws_file)
+                self._ws_client.on("error", self._on_ws_error)
+                self._ws_client.on("disconnected", self._on_ws_disconnected)
+                self._ws_task = asyncio.create_task(self._ws_client.connect())
+                self._ws_task.add_done_callback(self._on_ws_task_done)
+
+                self._ws_transport_up = True
+                self._running = True
+                self.bus.subscribe_outbound(self._on_outbound)
+            logger.info("WeCom channel started")
+
+    def _on_ws_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.error(
+            "WeCom WebSocket connection task failed: %s. Check that the network/proxy allows wss://openws.work.weixin.qq.com and that bot_id/bot_secret are valid.",
+            exc,
+        )
+
+    def _on_ws_error(self, error: Any) -> None:
+        logger.error("WeCom WebSocket error: %s", error)
+
+    def _on_ws_disconnected(self, *args: Any) -> None:
+        self._ws_transport_up = False
+        detail = f" ({args[0]})" if args else ""
+        logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
+
+    def _begin_ws_shutdown(self, ws_client: Any) -> asyncio.Future[Any] | None:
+        ws_manager = getattr(ws_client, "_ws_manager", None)
+        async_disconnect = getattr(ws_manager, "_async_disconnect", None)
+        stop_heartbeat = getattr(ws_manager, "_stop_heartbeat", None)
+        clear_pending_messages = getattr(ws_manager, "_clear_pending_messages", None)
+
+        if inspect.iscoroutinefunction(async_disconnect) and callable(stop_heartbeat) and callable(clear_pending_messages):
+            # wecom-aibot-python-sdk 1.0.2 makes disconnect() synchronous and
+            # discards the task created for _async_disconnect(). Perform its
+            # synchronous bookkeeping here so DeerFlow can own and await the
+            # actual SDK shutdown operation without scheduling a duplicate.
+            try:
+                if hasattr(ws_client, "_started"):
+                    ws_client._started = False
+                ws_manager._is_manual_close = True
+                stop_heartbeat()
+                clear_pending_messages("Connection manually closed")
+            except Exception:
+                logger.exception("Failed to prepare WeCom WebSocket shutdown")
+            return asyncio.create_task(async_disconnect())
+
+        try:
+            result = ws_client.disconnect()
+        except Exception:
+            logger.exception("Failed to request WeCom WebSocket disconnect")
+            return None
+        if inspect.isawaitable(result):
+            return asyncio.ensure_future(result)
+        return None
+
+    async def stop(self) -> None:
+        async with self._lifecycle_lock:
+            self._running = False
+            self._ws_transport_up = False
+            self.bus.unsubscribe_outbound(self._on_outbound)
+            ws_client = self._ws_client
+            ws_task = self._ws_task
+            if ws_task and not ws_task.done():
+                ws_task.cancel()
+
+            shutdown_task = None
+            try:
+                shutdown_task = self._begin_ws_shutdown(ws_client) if ws_client else None
+                self._ws_shutdown_task = shutdown_task
+                tasks = [task for task in (ws_task, shutdown_task) if task is not None]
+                drain_future = asyncio.gather(*tasks, return_exceptions=True) if tasks else None
+                if drain_future is not None:
+                    try:
+                        await asyncio.shield(drain_future)
+                    except asyncio.CancelledError:
+                        # Caller cancellation still propagates, but only after
+                        # the channel-owned tasks have completed their cleanup.
+                        await drain_future
+                        raise
+            finally:
+                if self._ws_task is ws_task:
+                    self._ws_task = None
+                if self._ws_client is ws_client:
+                    self._ws_client = None
+                if self._ws_shutdown_task is shutdown_task:
+                    self._ws_shutdown_task = None
+                self._ws_frames.clear()
+                self._ws_stream_ids.clear()
+            logger.info("WeCom channel stopped")
+
+    async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
+        if self._ws_client:
+            await self._send_ws(msg, _max_retries=_max_retries)
+            return
+        logger.warning("[WeCom] send called but WebSocket client is not available")
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Proactively push markdown to a bound WeCom identity (issue #4254).
+
+        Goes through ``WSClient.send_message`` (no inbound frame required)
+        and waits for the platform ACK, so an ACK-less call is never treated
+        as success.
+
+        Transport / not-connected failures raise :class:`ChannelUnavailable`
+        so the outbox parks without consuming retries. Platform rejections
+        count against the budget: the SDK reports a non-zero ``errcode`` as
+        ``RuntimeError("Reply ack error: ...")`` from ``send_message`` itself,
+        so they are told apart from its transport ``RuntimeError`` by that
+        prefix. The ``errcode`` check on a returned ACK dict below is kept as
+        a guard for an SDK that returns the frame instead of raising.
+        """
+        if not self._running or not self._ws_client:
+            raise ChannelUnavailable("WeCom channel is not connected")
+        # Ask the SDK first when it already knows the socket is closed: that
+        # fails fast and skips the retry/sleep storm. The except branch below
+        # still parks a closed socket the SDK only discovers during the send.
+        if getattr(self._ws_client, "is_connected", True) is False:
+            self._ws_transport_up = False
+            raise ChannelUnavailable("WeCom websocket is not connected")
+        body = {"msgtype": "markdown", "markdown": {"content": text_markdown}}
+
+        async def _send_once() -> Any:
+            return await self._ws_client.send_message(target, body)
+
+        try:
+            if self._ws_transport_up:
+                ack = await self._send_with_retry(
+                    _send_once,
+                    max_retries=3,
+                    log_prefix="[WeCom]",
+                    operation_name="notification send",
+                )
+            else:
+                # Known disconnect: one probe so a silent SDK reconnect can
+                # recover, without the 3× retry/sleep storm burning shutdown
+                # and poll time while the socket is still down.
+                ack = await _send_once()
+        except ChannelUnavailable:
+            raise
+        except RuntimeError as exc:
+            if str(exc).startswith(_WECOM_ACK_REJECTION_PREFIX):
+                # The platform answered and said no (bad chatid, user out of
+                # range, ...). The frame went out and the ACK came back on
+                # this socket, so the transport is up; the rejection itself
+                # counts like any other deterministic failure.
+                self._ws_transport_up = True
+                raise
+            # Everything else the SDK raises as RuntimeError is transport-side:
+            # a socket that is not open, a connection dropped while an ACK was
+            # pending. Park the outbox row until the SDK reconnects instead of
+            # charging the delivery a counted attempt per poll for a fault
+            # that is not its own.
+            self._ws_transport_up = False
+            raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
+        except _TRANSPORT_EXCEPTIONS as exc:
+            # Dead/flapping transport, including the socket layer's own close
+            # exception, which the SDK forwards unchanged. Same treatment.
+            self._ws_transport_up = False
+            raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
+        errcode = None
+        if isinstance(ack, dict):
+            errcode = ack.get("errcode")
+            ack_body = ack.get("body")
+            if errcode is None and isinstance(ack_body, dict):
+                errcode = ack_body.get("errcode")
+        if errcode not in (None, 0):
+            raise RuntimeError(f"WeCom send_message rejected with errcode={errcode}")
+        self._ws_transport_up = True
+
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Deliver to an explicit WeCom group connection owned by ``owner_user_id``."""
+        if not owner_user_id or self._connection_repo is None:
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable")
+        target_id = target.strip() if isinstance(target, str) else ""
+        if not target_id or target_id != target:
+            raise RuntimeError("WeCom group notification target is empty")
+        try:
+            connections = await self._connection_repo.list_connections(owner_user_id)
+        except Exception as exc:
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable") from exc
+        if not isinstance(connections, (list, tuple)):
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable")
+        bot_id = self._bot_id or (str(self.config.get("bot_id") or "").strip() or None)
+        for connection in connections:
+            if connection.get("id") != target_id or connection.get("owner_user_id") != owner_user_id:
+                continue
+            chatid = wecom_notification_group_chat_id(
+                provider=connection.get("provider"),
+                status=connection.get("status"),
+                workspace_id=connection.get("workspace_id"),
+                metadata=connection.get("metadata"),
+                bot_id=bot_id,
+            )
+            if chatid is not None:
+                await self.send_notification(target=chatid, text_markdown=text_markdown)
+                return
+        raise RuntimeError("WeCom group notification destination is no longer connected")
+
+    async def _on_outbound(self, msg: OutboundMessage) -> None:
+        if msg.channel_name != self.name:
+            return
+
+        await super()._on_outbound(msg)
+        if msg.is_final:
+            self._clear_ws_context(msg.thread_ts)
+
+    async def _send_attachment_feedback(self, msg: OutboundMessage, failed: list[ResolvedAttachment]) -> None:
+        if not msg.thread_ts or msg.thread_ts not in self._ws_frames:
+            # send() without a frame uses the proactive API. A failed upload
+            # must not silently switch from the original reply to that path.
+            logger.warning("[WeCom] attachment feedback unavailable: reply context expired")
+            return
+        # The final stream is already finished. Reply with text on the same
+        # inbound frame instead of reopening that stream or pushing elsewhere.
+        try:
+            text = _clip_to_byte_limit(attachment_delivery_text(msg, failed), _WECOM_MAX_CONTENT_BYTES)
+            await self._ws_client.reply(self._ws_frames[msg.thread_ts], {"msgtype": "text", "text": {"content": text}})
+        except Exception:
+            logger.exception("[WeCom] failed to send attachment delivery feedback")
+
+    async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if not self._ws_client:
+            return False
+        if not msg.thread_ts:
+            return False
+        frame = self._ws_frames.get(msg.thread_ts)
+        if not frame:
+            return False
+
+        media_type = "image" if attachment.is_image else "file"
+        # aibot media upload limits: image 10 MB, voice 2 MB, video 10 MB,
+        # file 20 MB (https://developer.work.weixin.qq.com/document/path/101917).
+        # The image cap used to be 2 MB — the voice limit — which dropped every
+        # 2-10 MB image before it was uploaded.
+        size_limit = 10 * 1024 * 1024 if attachment.is_image else 20 * 1024 * 1024
+        if attachment.size > size_limit:
+            logger.warning(
+                "[WeCom] %s too large (%d bytes), skipping: %s",
+                media_type,
+                attachment.size,
+                attachment.filename,
+            )
+            return False
+
+        try:
+            media_id = await self._upload_media_ws(
+                media_type=media_type,
+                filename=attachment.filename,
+                path=str(attachment.actual_path),
+                size=attachment.size,
+            )
+            if not media_id:
+                return False
+
+            body = {media_type: {"media_id": media_id}, "msgtype": media_type}
+            await self._ws_client.reply(frame, body)
+            logger.debug("[WeCom] %s sent via ws: %s", media_type, attachment.filename)
+            return True
+        except Exception:
+            logger.exception("[WeCom] failed to upload/send file via ws: %s", attachment.filename)
+            return False
+
+    async def _on_ws_text(self, frame: dict[str, Any]) -> None:
+        body = frame.get("body", {}) or {}
+        text = ((body.get("text") or {}).get("content") or "").strip()
+        quote = (((body.get("quote") or {}).get("text") or {}).get("content") or "").strip()
+        if not text and not quote:
+            return
+        await self._publish_ws_inbound(frame, text + (f"\nQuote message: {quote}" if quote else ""))
+
+    async def _on_ws_mixed(self, frame: dict[str, Any]) -> None:
+        body = frame.get("body", {}) or {}
+        mixed = body.get("mixed") or {}
+        items = mixed.get("msg_item") or []
+        parts: list[str] = []
+        files: list[dict[str, Any]] = []
+        for item in items:
+            item_type = (item or {}).get("msgtype")
+            if item_type == "text":
+                content = (((item or {}).get("text") or {}).get("content") or "").strip()
+                if content:
+                    parts.append(content)
+            elif item_type in ("image", "file"):
+                payload = (item or {}).get(item_type) or {}
+                url = payload.get("url")
+                aeskey = payload.get("aeskey")
+                if isinstance(url, str) and url:
+                    files.append(
+                        {
+                            "type": item_type,
+                            "url": url,
+                            "aeskey": (aeskey if isinstance(aeskey, str) and aeskey else None),
+                        }
+                    )
+        text = "\n\n".join(parts).strip()
+        if not text and not files:
+            return
+        if not text:
+            text = "（receive image/file）"
+        await self._publish_ws_inbound(frame, text, files=files)
+
+    async def _on_ws_image(self, frame: dict[str, Any]) -> None:
+        body = frame.get("body", {}) or {}
+        image = body.get("image") or {}
+        url = image.get("url")
+        aeskey = image.get("aeskey")
+        if not isinstance(url, str) or not url:
+            return
+        await self._publish_ws_inbound(
+            frame,
+            "（receive image ）",
+            files=[
+                {
+                    "type": "image",
+                    "url": url,
+                    "aeskey": aeskey if isinstance(aeskey, str) and aeskey else None,
+                }
+            ],
+        )
+
+    async def _on_ws_file(self, frame: dict[str, Any]) -> None:
+        body = frame.get("body", {}) or {}
+        file_obj = body.get("file") or {}
+        url = file_obj.get("url")
+        aeskey = file_obj.get("aeskey")
+        if not isinstance(url, str) or not url:
+            return
+        await self._publish_ws_inbound(
+            frame,
+            "（receive file）",
+            files=[
+                {
+                    "type": "file",
+                    "url": url,
+                    "aeskey": aeskey if isinstance(aeskey, str) and aeskey else None,
+                }
+            ],
+        )
+
+    async def _publish_ws_inbound(
+        self,
+        frame: dict[str, Any],
+        text: str,
+        *,
+        files: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if not self._ws_client:
+            return
+        try:
+            from aibot import generate_req_id
+        except Exception:
+            return
+
+        body = frame.get("body", {}) or {}
+        msg_id = body.get("msgid")
+        if not msg_id:
+            return
+
+        user_id = (body.get("from") or {}).get("userid")
+
+        connect_code = self._pending_connect_code(text)
+        if connect_code:
+            handled = await self._bind_connection_from_connect_code(
+                frame=frame,
+                user_id=str(user_id or ""),
+                code=connect_code,
+            )
+            if handled:
+                return
+
+        # WeCom group chats deliver "@bot /new" with the mention left in the text
+        # (Slack/Discord strip their own bot mention upstream). Skip a leading
+        # mention only for the command path so ordinary chat keeps any @mentions
+        # intact for the agent; the stripped form also flows into the inbound so
+        # ChannelManager._handle_command parses the bare command. Mirrors
+        # DingTalkChannel / FeishuChannel.
+        #
+        # This drops *any* leading mention, not only the bot's: WeCom text
+        # mentions carry display names, so the frame's `aibotid` cannot be
+        # matched against them and "@alice /status" is indistinguishable from
+        # "@bot /status". Feishu and DingTalk accept the same tradeoff;
+        # test_member_mention_before_a_command_also_classifies pins it.
+        command_text = strip_leading_mentions(text)
+        inbound_type = InboundMessageType.COMMAND if is_known_channel_command(command_text) else InboundMessageType.CHAT
+        if inbound_type is InboundMessageType.COMMAND:
+            text = command_text
+        inbound_metadata: dict[str, Any] = {
+            "aibotid": body.get("aibotid"),
+            "chattype": body.get("chattype"),
+            "message_id": msg_id,
+        }
+        if body.get("chatid") is not None:
+            inbound_metadata["chatid"] = body.get("chatid")
+        # A group's conversation is the group, a private chat's the sender.
+        # Keyed by sender alone, a member's private chat and every group they
+        # wrote in shared one thread wherever no group connection kept them apart.
+        group_chatid = str(body.get("chatid") or "").strip() if body.get("chattype") == "group" else ""
+        inbound = self._make_inbound(
+            chat_id=group_chatid or user_id,
+            user_id=user_id,
+            text=text,
+            msg_type=inbound_type,
+            thread_ts=msg_id,
+            files=files or [],
+            metadata=inbound_metadata,
+        )
+        inbound.topic_id = user_id  # one thread per member in each conversation
+
+        stream_id = generate_req_id("stream")
+        self._ws_frames[msg_id] = frame
+        self._ws_stream_ids[msg_id] = stream_id
+
+        reservation = self._reserve_inbound(inbound)
+        if reservation is None:
+            self._ws_frames.pop(msg_id, None)
+            self._ws_stream_ids.pop(msg_id, None)
+            return
+        try:
+            try:
+                await self._ws_client.reply_stream(frame, stream_id, self._working_message, False)
+            except Exception:
+                pass
+
+            inbound = await self._attach_connection_identity(inbound)
+            if group_chatid:
+                await self._carry_over_sender_keyed_group_thread(inbound, group_chatid)
+            self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            reservation.release()
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        aibotid = str(inbound.metadata.get("aibotid") or "").strip() or None
+        chattype = inbound.metadata.get("chattype")
+        chatid = str(inbound.metadata.get("chatid") or "").strip() or None
+        if chattype == "group":
+            if not chatid or self._connection_repo is None:
+                return inbound
+            workspace_id = _group_workspace_id(aibotid, chatid)
+            inbound = await attach_connection_identity(inbound, repo=self._connection_repo, provider="wecom", workspace_id=workspace_id, fallback_without_workspace=False)
+            if inbound.connection_id:
+                return inbound
+            # Pre-group-target versions stored group bindings under the bot ID,
+            # without chatid. Preserve that existing chat identity, but never
+            # let a new private binding authorize an unbound group.
+            legacy = await self._connection_repo.find_connection_by_external_identity(provider="wecom", external_account_id=inbound.user_id, workspace_id=aibotid)
+            metadata = legacy.get("metadata") if isinstance(legacy, Mapping) else None
+            if isinstance(metadata, Mapping) and metadata.get("chattype") == "group" and "chatid" not in metadata and metadata.get("aibotid") == aibotid:
+                inbound.connection_id = legacy["id"]
+                inbound.owner_user_id = legacy["owner_user_id"]
+                inbound.workspace_id = legacy.get("workspace_id")
+            return inbound
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="wecom",
+            workspace_id=aibotid,
+            fallback_without_workspace=True,
+        )
+
+    async def _carry_over_sender_keyed_group_thread(self, inbound: InboundMessage, chatid: str) -> None:
+        """Rebind a group connection's thread from the sender key it used to have.
+
+        Group messages were once keyed like private ones (``userid``, ``userid``).
+        A group connection belongs to one group, so its thread under that key is
+        this group's and moves to the group key once. A legacy group binding
+        spans every group of the bot; its old thread is left behind rather than
+        continued in whichever group writes first.
+        """
+        repo = self._connection_repo
+        if repo is None or not inbound.connection_id or not inbound.owner_user_id:
+            return
+        aibotid = str(inbound.metadata.get("aibotid") or "").strip() or None
+        if inbound.workspace_id != _group_workspace_id(aibotid, chatid):
+            return
+        if await repo.get_thread_id(inbound.connection_id, inbound.chat_id, inbound.topic_id) is not None:
+            return
+        previous = await repo.get_thread_id(inbound.connection_id, inbound.user_id, inbound.user_id)
+        if previous is None:
+            return
+        await repo.claim_thread_id(
+            connection_id=inbound.connection_id,
+            owner_user_id=inbound.owner_user_id,
+            provider=self.name,
+            external_conversation_id=inbound.chat_id,
+            external_topic_id=inbound.topic_id,
+            thread_id=previous,
+        )
+
+    async def _bind_connection_from_connect_code(self, *, frame: dict[str, Any], user_id: str, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="wecom", state=code)
+        if state is None:
+            await self._send_connection_reply(frame, await self._connect_reply_text("invalid_code"))
+            return True
+
+        if not user_id:
+            await self._send_connection_reply(frame, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
+            return True
+
+        body = frame.get("body", {}) or {}
+        aibotid = str(body.get("aibotid") or "").strip() or None
+        chattype = body.get("chattype")
+        workspace_name: str | None = None
+        if chattype == "group":
+            chatid = str(body.get("chatid") or "").strip()
+            if not chatid:
+                await self._send_connection_reply(frame, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
+                return True
+            workspace_id = _group_workspace_id(aibotid, chatid)
+            raw_group_name = str(body.get("chatname") or body.get("group_name") or "").strip()
+            workspace_name = notification_group_display_name(state.get("metadata")) or raw_group_name[:256] or None
+            metadata: dict[str, Any] = {
+                "aibotid": aibotid,
+                "chattype": "group",
+                "chatid": chatid,
+            }
+        else:
+            workspace_id = aibotid
+            metadata = {
+                "aibotid": workspace_id,
+                "chattype": chattype,
+            }
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="wecom",
+            external_account_id=user_id,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            metadata=metadata,
+            status="connected",
+        )
+        await self._send_connection_reply(frame, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
+        return True
+
+    async def _send_connection_reply(self, frame: dict[str, Any], text: str) -> None:
+        if not self._ws_client:
+            return
+        await self._ws_client.reply(frame, {"msgtype": "text", "text": {"content": text}})
+
+    async def _send_ws(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
+        if not self._ws_client:
+            return
+        try:
+            from aibot import generate_req_id
+        except Exception:
+            generate_req_id = None
+
+        if msg.thread_ts and msg.thread_ts in self._ws_frames:
+            frame = self._ws_frames[msg.thread_ts]
+            stream_id = self._ws_stream_ids.get(msg.thread_ts)
+            if not stream_id and generate_req_id:
+                stream_id = generate_req_id("stream")
+                self._ws_stream_ids[msg.thread_ts] = stream_id
+            if not stream_id:
+                return
+
+            await self._send_with_retry(
+                lambda: self._ws_client.reply_stream(frame, stream_id, _clip_to_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES), bool(msg.is_final)),
+                max_retries=_max_retries,
+                log_prefix="[WeCom]",
+                operation_name="stream send",
+            )
+            return
+
+        # No replyable frame (e.g. a scheduled-task push): a stream reply is one
+        # stream per reply and cannot split mid-way, but this path can, so the
+        # full text goes out as sequential markdown messages. Each send awaits,
+        # so hold a per-chat lock across the whole batch: manager workers run
+        # concurrently, and two long pushes to the same chat would otherwise
+        # interleave chunks (A1, B1, A2, B2) and break the sequential contract.
+        async with self._ws_send_locks_guard:
+            lock = self._ws_send_locks.setdefault(msg.chat_id, asyncio.Lock())
+            self._ws_send_lock_users[msg.chat_id] = self._ws_send_lock_users.get(msg.chat_id, 0) + 1
+        try:
+            async with lock:
+                for chunk in _split_for_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES):
+                    body = {"msgtype": "markdown", "markdown": {"content": chunk}}
+                    await self._send_with_retry(
+                        lambda body=body: self._ws_client.send_message(msg.chat_id, body),
+                        max_retries=_max_retries,
+                        log_prefix="[WeCom]",
+                    )
+        finally:
+            async with self._ws_send_locks_guard:
+                self._ws_send_lock_users[msg.chat_id] -= 1
+                # Reclaim only while nobody else is queued on this chat's lock;
+                # the guard serializes the check so a waiter can never end up
+                # holding a fresh lock for a chat whose batch is mid-flight.
+                if self._ws_send_lock_users[msg.chat_id] == 0:
+                    self._ws_send_lock_users.pop(msg.chat_id, None)
+                    self._ws_send_locks.pop(msg.chat_id, None)
+
+    async def _upload_media_ws(
+        self,
+        *,
+        media_type: str,
+        filename: str,
+        path: str,
+        size: int,
+    ) -> str | None:
+        if not self._ws_client:
+            return None
+        try:
+            from aibot import generate_req_id
+        except Exception:
+            return None
+
+        chunk_size = 512 * 1024
+        total_chunks = (size + chunk_size - 1) // chunk_size
+        if total_chunks < 1 or total_chunks > 100:
+            logger.warning("[WeCom] invalid total_chunks=%d for %s", total_chunks, filename)
+            return None
+
+        md5 = await asyncio.to_thread(_file_md5, path)
+
+        init_req_id = generate_req_id("aibot_upload_media_init")
+        init_body = {
+            "type": media_type,
+            "filename": filename,
+            "total_size": int(size),
+            "total_chunks": int(total_chunks),
+            "md5": md5,
+        }
+        init_ack = await self._send_ws_upload_command(init_req_id, init_body, "aibot_upload_media_init")
+        upload_id = (init_ack.get("body") or {}).get("upload_id")
+        if not upload_id:
+            logger.warning("[WeCom] upload init returned no upload_id: %s", init_ack)
+            return None
+
+        file_obj = await asyncio.to_thread(_open_binary, path)
+        try:
+            for idx in range(total_chunks):
+                data = await asyncio.to_thread(file_obj.read, chunk_size)
+                if not data:
+                    break
+                chunk_req_id = generate_req_id("aibot_upload_media_chunk")
+                chunk_body = {
+                    "upload_id": upload_id,
+                    "chunk_index": int(idx),
+                    "base64_data": base64.b64encode(data).decode("utf-8"),
+                }
+                await self._send_ws_upload_command(chunk_req_id, chunk_body, "aibot_upload_media_chunk")
+        finally:
+            await asyncio.to_thread(file_obj.close)
+
+        finish_req_id = generate_req_id("aibot_upload_media_finish")
+        finish_ack = await self._send_ws_upload_command(finish_req_id, {"upload_id": upload_id}, "aibot_upload_media_finish")
+        media_id = (finish_ack.get("body") or {}).get("media_id")
+        if not media_id:
+            logger.warning("[WeCom] upload finish returned no media_id: %s", finish_ack)
+            return None
+        return media_id

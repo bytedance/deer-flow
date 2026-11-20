@@ -64,8 +64,34 @@ def test_load_acp_config_none_clears_agents():
 def test_acp_agent_config_defaults():
     cfg = ACPAgentConfig(command="my-agent", description="My agent")
     assert cfg.args == []
+    assert cfg.env == {}
     assert cfg.model is None
     assert cfg.auto_approve_permissions is False
+
+
+def test_acp_agent_config_env_literal():
+    cfg = ACPAgentConfig(command="my-agent", description="desc", env={"OPENAI_API_KEY": "sk-test"})
+    assert cfg.env == {"OPENAI_API_KEY": "sk-test"}
+
+
+def test_acp_agent_config_env_default_is_empty():
+    cfg = ACPAgentConfig(command="my-agent", description="desc")
+    assert cfg.env == {}
+
+
+def test_load_acp_config_preserves_env():
+    load_acp_config_from_dict(
+        {
+            "codex": {
+                "command": "codex-acp",
+                "args": [],
+                "description": "Codex CLI",
+                "env": {"OPENAI_API_KEY": "$OPENAI_API_KEY", "FOO": "bar"},
+            }
+        }
+    )
+    cfg = get_acp_agents()["codex"]
+    assert cfg.env == {"OPENAI_API_KEY": "$OPENAI_API_KEY", "FOO": "bar"}
 
 
 def test_acp_agent_config_with_model():
@@ -77,6 +103,38 @@ def test_acp_agent_config_auto_approve_permissions():
     """P1.2: auto_approve_permissions can be explicitly enabled."""
     cfg = ACPAgentConfig(command="my-agent", description="desc", auto_approve_permissions=True)
     assert cfg.auto_approve_permissions is True
+
+
+def test_acp_agent_config_timeout_seconds_default():
+    """Default mirrors subagents.timeout_seconds (1800s = 30 min) so an ACP agent
+    subprocess that hangs after initialize/new_session cannot block the tool call
+    (and therefore the whole agent turn) indefinitely."""
+    cfg = ACPAgentConfig(command="my-agent", description="desc")
+    assert cfg.timeout_seconds == 1800
+
+
+def test_acp_agent_config_timeout_seconds_override():
+    cfg = ACPAgentConfig(command="my-agent", description="desc", timeout_seconds=45)
+    assert cfg.timeout_seconds == 45
+
+
+def test_acp_agent_config_timeout_seconds_rejects_non_positive():
+    with pytest.raises(ValidationError):
+        ACPAgentConfig(command="my-agent", description="desc", timeout_seconds=0)
+
+
+def test_load_acp_config_preserves_timeout_seconds():
+    load_acp_config_from_dict(
+        {
+            "codex": {
+                "command": "codex-acp",
+                "args": [],
+                "description": "Codex CLI",
+                "timeout_seconds": 60,
+            }
+        }
+    )
+    assert get_acp_agents()["codex"].timeout_seconds == 60
 
 
 def test_acp_agent_config_missing_command_raises():

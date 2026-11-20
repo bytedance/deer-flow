@@ -1,0 +1,5 @@
+metric,before,after
+lead_model_calls,6,5
+tool_executions,4,4
+goal_evaluator_calls,2,1
+goal_continuations,1,0

@@ -1,23 +1,70 @@
 "use client";
 
-import { BotIcon, MessagesSquare } from "lucide-react";
+import {
+  SearchIcon,
+  BotIcon,
+  CalendarClock,
+  MessagesSquare,
+  BlocksIcon,
+  ChartColumn,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 import {
   SidebarGroup,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  useSidebar,
 } from "@/components/ui/sidebar";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { useAgentsApiEnabled } from "@/core/agents";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useI18n } from "@/core/i18n/hooks";
+import { OPEN_SEARCH_EVENT } from "@/core/search/api";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
+  const { enabled: agentsEnabled } = useAgentsApiEnabled();
+  const { user } = useAuth();
+  const { setOpenMobile } = useSidebar();
+  const [shortcut, setShortcut] = useState("⌘K");
+  useEffect(() => {
+    setShortcut(navigator.userAgent.includes("Mac") ? "⌘K" : "Ctrl K");
+  }, []);
+  const usageEnabled =
+    !!user &&
+    hasPermission(user, PERMISSIONS.RUNS_READ) &&
+    !isStaticWebsiteOnly();
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            onClick={() => {
+              setOpenMobile(false);
+              window.dispatchEvent(new Event(OPEN_SEARCH_EVENT));
+            }}
+            aria-label={t.workspaceSearch.open}
+            tooltip={t.workspaceSearch.title}
+            className="text-muted-foreground"
+          >
+            <SearchIcon />
+            <span>{t.workspaceSearch.open}</span>
+            <kbd aria-hidden className="ml-auto text-xs">
+              {shortcut}
+            </kbd>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
         <SidebarMenuItem>
           <SidebarMenuButton isActive={pathname === "/workspace/chats"} asChild>
             <Link className="text-muted-foreground" href="/workspace/chats">
@@ -27,13 +74,85 @@ export function WorkspaceNavChatList() {
           </SidebarMenuButton>
         </SidebarMenuItem>
         <SidebarMenuItem>
+          {agentsEnabled ? (
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/agents")}
+              asChild
+            >
+              <Link className="text-muted-foreground" href="/workspace/agents">
+                <BotIcon />
+                <span>{t.sidebar.agents}</span>
+              </Link>
+            </SidebarMenuButton>
+          ) : (
+            // Disabled: aria-disabled drives the sidebar CVA to suppress
+            // pointer events on the button, so wrap it in a hoverable span
+            // that still surfaces the "feature not enabled" tooltip for mouse
+            // users. The button stays in the tab order (no tabIndex={-1}) and
+            // is wired via aria-describedby to a visually-hidden reason, so
+            // keyboard and screen-reader users also learn why it is disabled.
+            <Tooltip>
+              <TooltipTrigger asChild>
+                {/* cursor-not-allowed lives on the span (the element that
+                    still receives pointer events), not the inert button. */}
+                <span className="block w-full cursor-not-allowed">
+                  <SidebarMenuButton
+                    className="text-muted-foreground/50"
+                    aria-disabled
+                    aria-describedby="agents-disabled-reason"
+                  >
+                    <BotIcon />
+                    <span>{t.sidebar.agents}</span>
+                  </SidebarMenuButton>
+                  <span id="agents-disabled-reason" className="sr-only">
+                    {t.sidebar.agentsDisabledTooltip}
+                  </span>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                {t.sidebar.agentsDisabledTooltip}
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </SidebarMenuItem>
+        <SidebarMenuItem>
           <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/agents")}
+            isActive={pathname.startsWith("/workspace/scheduled-tasks")}
             asChild
           >
-            <Link className="text-muted-foreground" href="/workspace/agents">
-              <BotIcon />
-              <span>{t.sidebar.agents}</span>
+            <Link
+              className="text-muted-foreground"
+              href="/workspace/scheduled-tasks"
+            >
+              <CalendarClock />
+              <span>{t.sidebar.scheduledTasks}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        {usageEnabled && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/usage")}
+              asChild
+            >
+              <Link className="text-muted-foreground" href="/workspace/usage">
+                <ChartColumn />
+                <span>{t.usage.title}</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            isActive={pathname.startsWith("/workspace/capabilities")}
+            asChild
+          >
+            <Link
+              className="text-muted-foreground"
+              href="/workspace/capabilities"
+            >
+              <BlocksIcon />
+              <span>{t.capabilities.title}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

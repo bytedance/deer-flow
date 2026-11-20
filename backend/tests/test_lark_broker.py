@@ -1,0 +1,702 @@
+"""Tests for the Lark CLI sandbox credential broker (Pattern B, issue #4338)."""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import textwrap
+import time
+import urllib.request
+from http.client import HTTPConnection
+from pathlib import Path
+
+import pytest
+
+from deerflow.integrations import lark_broker
+from deerflow.integrations.lark_broker import BrokerConfig, run_lark_cli, serve
+
+# Several tests execute the broker's POSIX artifacts directly: the fake
+# ``lark-cli`` binary, the shim, and the launcher are ``#!`` scripts (the real
+# ones target POSIX sandbox images), and Windows CreateProcess cannot execute a
+# shebang script (WinError 193 / ENOEXEC). CI runs on Linux and keeps the
+# coverage; Windows dev hosts skip these instead of hard-failing.
+_skip_windows = pytest.mark.skipif(
+    os.name == "nt",
+    reason="spawns '#!' scripts (fake lark-cli / shim / launcher) that only a POSIX host can execute",
+)
+
+
+def _fake_lark_cli(tmp_path: Path) -> str:
+    """A stub 'lark-cli' that echoes argv, stdin, and the credential env.
+
+    Lets tests assert argv fidelity, stdin round-trip, and that the broker (not
+    the caller) controls LARKSUITE_CLI_CONFIG_DIR / DATA_DIR.
+    """
+    script = tmp_path / "fake-lark-cli"
+    script.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json, os, sys
+            sys.stderr.write("ERR:" + " ".join(sys.argv[1:]) + "\\n")
+            print(json.dumps({
+                "argv": sys.argv[1:],
+                "stdin": sys.stdin.read(),
+                "config_dir": os.environ.get("LARKSUITE_CLI_CONFIG_DIR"),
+                "data_dir": os.environ.get("LARKSUITE_CLI_DATA_DIR"),
+            }))
+            sys.exit(7 if "--boom" in sys.argv else 0)
+            """
+        ),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+def _config(tmp_path: Path, port: int = 0) -> BrokerConfig:
+    return BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="/broker/only/config",
+        data_dir="/broker/only/data",
+        port=port,
+    )
+
+
+# ── run_lark_cli (in-process, no server) ───────────────────────────────────
+
+
+@_skip_windows
+def test_run_lark_cli_forwards_argv_stdin_and_credential_env(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    result = run_lark_cli(config, ["auth", "status", "--json"], b"piped-input")
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout.decode())
+    assert payload["argv"] == ["auth", "status", "--json"]
+    assert payload["stdin"] == "piped-input"
+    # The broker, not the caller, owns the credential paths.
+    assert payload["config_dir"] == "/broker/only/config"
+    assert payload["data_dir"] == "/broker/only/data"
+    assert result.stderr == b"ERR:auth status --json\n"
+
+
+@_skip_windows
+def test_run_lark_cli_propagates_exit_code(tmp_path: Path) -> None:
+    result = run_lark_cli(_config(tmp_path), ["do", "--boom"], b"")
+    assert result.exit_code == 7
+
+
+@_skip_windows
+def test_run_lark_cli_never_shell_interprets_args(tmp_path: Path) -> None:
+    # A shell metacharacter must reach the binary as one literal arg, not run a
+    # second command (shell=False, argv list).
+    result = run_lark_cli(_config(tmp_path), ["value; touch /tmp/pwned"], b"")
+    payload = json.loads(result.stdout.decode())
+    assert payload["argv"] == ["value; touch /tmp/pwned"]
+    assert not Path("/tmp/pwned").exists()
+
+
+def test_run_lark_cli_missing_binary_returns_127(tmp_path: Path) -> None:
+    config = BrokerConfig(lark_cli_path=str(tmp_path / "nope"), config_dir="c", data_dir="d")
+    result = run_lark_cli(config, ["x"], b"")
+    assert result.exit_code == 127
+
+
+# ── HTTP server ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def broker_server(tmp_path: Path):
+    server = serve(_config(tmp_path, port=0))
+    import threading
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[0], server.server_address[1]
+    try:
+        yield host, port
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def _post_exec(host: str, port: int, body: dict) -> tuple[int, dict]:
+    conn = HTTPConnection(host, port, timeout=10)
+    data = json.dumps(body).encode()
+    conn.request("POST", "/v1/exec", body=data, headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    parsed = json.loads(resp.read().decode())
+    conn.close()
+    return resp.status, parsed
+
+
+@_skip_windows
+def test_exec_endpoint_round_trips(broker_server) -> None:
+    host, port = broker_server
+    status, body = _post_exec(host, port, {"args": ["ping"], "stdin_b64": base64.b64encode(b"hi").decode()})
+    assert status == 200
+    assert body["exit_code"] == 0
+    payload = json.loads(base64.b64decode(body["stdout_b64"]).decode())
+    assert payload["argv"] == ["ping"]
+    assert payload["stdin"] == "hi"
+
+
+def test_exec_endpoint_logs_each_call(broker_server, caplog, monkeypatch) -> None:
+    """The HTTP log contract does not depend on a POSIX CLI executable."""
+    monkeypatch.setattr(lark_broker, "run_lark_cli", lambda *_args: lark_broker.ExecResult(0, b"", b"", False))
+    host, port = broker_server
+    with caplog.at_level(logging.INFO, logger=lark_broker.__name__):
+        status, _ = _post_exec(host, port, {"args": ["ping"]})
+    assert status == 200
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(re.search(r"lark-cli exec argc=1 exit=0 in \d+\.\d+s", message) for message in messages)
+
+
+def test_exec_endpoint_logs_never_include_argument_values(broker_server, caplog, monkeypatch) -> None:
+    """Neither short secrets nor document bodies may enter server-side logs."""
+    received = []
+
+    def run_cli(_config, args, stdin):
+        received.append((args, stdin))
+        return lark_broker.ExecResult(0, b"", b"", False)
+
+    monkeypatch.setattr(lark_broker, "run_lark_cli", run_cli)
+    host, port = broker_server
+    long_arg = "x" * 500
+    args = ["im", "+messages-send", "--content", "synthetic-private-body", "--token=SYNTHETIC_SECRET", long_arg]
+    with caplog.at_level(logging.INFO, logger=lark_broker.__name__):
+        status, _ = _post_exec(host, port, {"args": args})
+    assert status == 200
+    assert received == [(args, b"")]
+    messages = [record.getMessage() for record in caplog.records if "lark-cli exec" in record.getMessage()]
+    assert messages
+    assert "argc=6" in messages[0]
+    assert "synthetic-private-body" not in messages[0]
+    assert "SYNTHETIC_SECRET" not in messages[0]
+    assert "x" * 200 not in messages[0]
+
+
+@_skip_windows
+def test_exec_endpoint_ignores_client_supplied_credential_paths(broker_server) -> None:
+    host, port = broker_server
+    # Even if a malicious client tries to smuggle env-like args, the broker sets
+    # the credential dirs itself; the stub reports the broker-owned values.
+    status, body = _post_exec(host, port, {"args": ["whoami"]})
+    assert status == 200
+    payload = json.loads(base64.b64decode(body["stdout_b64"]).decode())
+    assert payload["config_dir"] == "/broker/only/config"
+    assert payload["data_dir"] == "/broker/only/data"
+
+
+def test_exec_endpoint_rejects_invalid_body(broker_server) -> None:
+    host, port = broker_server
+    status, body = _post_exec(host, port, {"args": "not-a-list"})
+    assert status == 400
+
+
+def test_health_endpoint(broker_server) -> None:
+    host, port = broker_server
+    with urllib.request.urlopen(f"http://{host}:{port}/v1/health", timeout=5) as resp:
+        assert json.loads(resp.read().decode())["ok"] is True
+
+
+def test_exec_endpoint_returns_500_json_on_unexpected_error(broker_server, monkeypatch) -> None:
+    """An unexpected exec error must return a structured 500, not close the
+    connection with no body (which the shim would see as an opaque transport
+    failure)."""
+    host, port = broker_server
+
+    def _boom(*_args, **_kwargs):
+        raise PermissionError("simulated exec failure")
+
+    monkeypatch.setattr(lark_broker, "run_lark_cli", _boom)
+    status, body = _post_exec(host, port, {"args": ["auth", "status"]})
+    assert status == 500
+    assert body["error"]
+
+
+# ── Shim script ─────────────────────────────────────────────────────────────
+
+
+@_skip_windows
+def test_shim_forwards_and_replays_exit_code(broker_server, tmp_path: Path) -> None:
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    completed = subprocess.run(
+        [sys.executable, str(shim), "do", "--boom"],
+        input=b"",
+        capture_output=True,
+        env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+        timeout=30,
+    )
+    assert completed.returncode == 7
+    assert b"ERR:do --boom" in completed.stderr
+
+
+def test_shim_fails_loudly_when_broker_unreachable(tmp_path: Path) -> None:
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+    completed = subprocess.run(
+        [sys.executable, str(shim), "auth", "status"],
+        input=b"",
+        capture_output=True,
+        # Nothing is listening here.
+        env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: "http://127.0.0.1:1"},
+        timeout=30,
+    )
+    assert completed.returncode != 0
+    assert b"broker unreachable" in completed.stderr
+
+
+@_skip_windows
+def test_shim_terminal_stdin_needs_no_command_wrapper(broker_server, tmp_path: Path) -> None:
+    """The legacy AIO shell is a PTY, which the shim already treats as no input."""
+    import pty
+
+    host, port = broker_server
+    shim = tmp_path / "lark-cli-shim.py"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    master, slave = pty.openpty()
+    try:
+        # Keep the terminal open throughout execution: there is no EOF to read.
+        completed = subprocess.run(
+            [sys.executable, str(shim), "auth", "status"],
+            stdin=slave,
+            capture_output=True,
+            env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+            timeout=5,
+        )
+    finally:
+        os.close(slave)
+        os.close(master)
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["stdin"] == ""
+
+
+@_skip_windows
+def test_shim_open_pipe_stdin_fails_without_executing(broker_server, tmp_path: Path, monkeypatch) -> None:
+    """An open pipe could be a delayed producer; never execute with guessed input."""
+    executions = []
+    monkeypatch.setattr(lark_broker, "run_lark_cli", lambda *args: executions.append(args) or lark_broker.ExecResult(0, b"", b"", False))
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "auth", "status"],
+        stdin=subprocess.PIPE,  # held open by the parent, never written: no EOF ever arrives
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+            "DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS": "0.2",
+        },
+    )
+    try:
+        # Do not use communicate(): it would close stdin and mask the bug.
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("shim blocked waiting for EOF on a session-held stdin pipe")
+    stdout = proc.stdout.read()
+    stderr = proc.stderr.read()
+    proc.stdin.close()
+    assert proc.returncode == 124, stderr
+    assert stdout == b""
+    assert b"stdin" in stderr and b"EOF" in stderr
+    assert executions == []
+
+
+@_skip_windows
+def test_shim_piped_stdin_still_forwarded(broker_server, tmp_path: Path) -> None:
+    """`echo x | lark-cli ...` must still pass stdin through to the broker."""
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    completed = subprocess.run(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        input=b"streamed-input",
+        capture_output=True,
+        env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+        timeout=30,
+    )
+    assert completed.returncode == 0
+    payload = json.loads(completed.stdout.decode())
+    assert payload["stdin"] == "streamed-input"
+
+
+@_skip_windows
+def test_shim_drip_fed_stdin_round_trips(broker_server, tmp_path: Path) -> None:
+    """A slow producer writing in chunks below the idle window keeps its input."""
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+    )
+    try:
+        for piece in (b"streamed", b"-", b"input"):
+            proc.stdin.write(piece)
+            proc.stdin.flush()
+            time.sleep(0.3)  # each pause stays below the default tail window
+        proc.stdin.close()
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("shim stalled on drip-fed stdin")
+    stdout = proc.stdout.read()
+    stderr = proc.stderr.read()
+    assert proc.returncode == 0, stderr
+    payload = json.loads(stdout.decode())
+    assert payload["stdin"] == "streamed-input"
+    assert b"warning" not in stderr
+
+
+@_skip_windows
+def test_shim_idle_stdin_fails_without_executing_partial_input(broker_server, tmp_path: Path, monkeypatch) -> None:
+    """Never submit a partial document when a producer pauses before EOF."""
+    executions = []
+    monkeypatch.setattr(lark_broker, "run_lark_cli", lambda *args: executions.append(args) or lark_broker.ExecResult(0, b"", b"", False))
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+            "DEERFLOW_LARK_BROKER_STDIN_TAIL_SECONDS": "0.3",
+        },
+    )
+    proc.stdin.write(b"first-chunk")
+    proc.stdin.flush()
+    try:
+        # The producer never writes again and never closes: the tail window fires.
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("shim stalled on an idle stdin pipe")
+    stdout = proc.stdout.read()
+    stderr = proc.stderr.read()
+    proc.stdin.close()
+    assert proc.returncode == 124, stderr
+    assert stdout == b""
+    assert b"stdin" in stderr and b"EOF" in stderr
+    assert executions == []
+
+
+@_skip_windows
+@pytest.mark.parametrize("window", ["DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS", "DEERFLOW_LARK_BROKER_STDIN_TAIL_SECONDS"])
+@pytest.mark.parametrize("value", ["inf", "1e309", "nan", "-1", "junk"])
+def test_shim_invalid_stdin_window_preserves_input(broker_server, tmp_path: Path, window: str, value: str) -> None:
+    """Invalid operator settings fall back rather than discarding valid input."""
+    host, port = broker_server
+    shim = tmp_path / "shim.py"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        input=b"complete-input",
+        capture_output=True,
+        env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}", window: value},
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["stdin"] == "complete-input"
+
+
+@_skip_windows
+def test_shim_delayed_first_byte_within_window_is_preserved(broker_server, tmp_path: Path) -> None:
+    """An explicit larger grace window supports producers with startup latency."""
+    host, port = broker_server
+    shim = tmp_path / "shim.py"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+            "DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS": "5",
+        },
+    )
+    try:
+        time.sleep(2.4)
+        stdout, stderr = proc.communicate(input=b"delayed-complete-input", timeout=30)
+        assert proc.returncode == 0, stderr
+        assert json.loads(stdout)["stdin"] == "delayed-complete-input"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate()
+
+
+@_skip_windows
+def test_shim_large_file_input_is_preserved(broker_server, tmp_path: Path) -> None:
+    host, port = broker_server
+    shim = tmp_path / "shim.py"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    contents = "文档内容\n" * 16000
+    input_file = tmp_path / "input.txt"
+    input_file.write_text(contents, encoding="utf-8")
+    with input_file.open("rb") as stdin:
+        completed = subprocess.run(
+            [sys.executable, str(shim), "docs", "+fetch"],
+            stdin=stdin,
+            capture_output=True,
+            env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+            timeout=30,
+        )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["stdin"] == contents
+
+
+def test_install_shim_writes_runtime_layout(tmp_path: Path) -> None:
+    """install-shim mode stages the same bin/lark-cli + marker layout Pattern A
+    uses, marked kind=shim so the runtime validator tolerates absent binaries.
+
+    bin/lark-cli is now the POSIX-sh launcher and the Python body lives beside it
+    as bin/lark-cli-shim.py, so broker mode does not hard-depend on a resolvable
+    #!/usr/bin/env python3 shebang.
+    """
+    dest = tmp_path / "runtime"
+    launcher = lark_broker.install_shim(str(dest), version="v1.0.65")
+
+    assert Path(launcher) == dest / "bin" / "lark-cli"
+    launcher_text = (dest / "bin" / "lark-cli").read_text(encoding="utf-8")
+    assert launcher_text.startswith("#!/bin/sh")
+    # The shim body's absolute path is baked into the launcher (not derived from
+    # $0, which is the bare command name when run off PATH).
+    shim_body = dest / "bin" / lark_broker.LARK_CLI_BROKER_SHIM_FILENAME
+    assert str(shim_body) in launcher_text
+    assert lark_broker._LARK_CLI_BROKER_SHIM_PATH_PLACEHOLDER not in launcher_text
+    assert os.access(dest / "bin" / "lark-cli", os.X_OK)
+    assert shim_body.read_text(encoding="utf-8") == lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT
+    assert os.access(shim_body, os.X_OK)
+    marker = json.loads((dest / ".deerflow-lark-cli-runtime.json").read_text())
+    assert marker == {"version": "v1.0.65", "kind": "shim"}
+
+
+@_skip_windows
+def test_launcher_resolves_python_and_forwards(broker_server, tmp_path: Path) -> None:
+    """The /bin/sh launcher finds python3 on PATH and execs the shim body."""
+    host, port = broker_server
+    dest = tmp_path / "runtime"
+    lark_broker.install_shim(str(dest), version="v1.0.65")
+    launcher = dest / "bin" / "lark-cli"
+
+    # A PATH that has the python from this test runner so the launcher resolves it.
+    py_dir = str(Path(sys.executable).parent)
+    completed = subprocess.run(
+        [str(launcher), "do", "--boom"],
+        input=b"",
+        capture_output=True,
+        env={
+            "PATH": py_dir + os.pathsep + "/usr/bin:/bin",
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+        },
+        timeout=30,
+    )
+    assert completed.returncode == 7
+    assert b"ERR:do --boom" in completed.stderr
+
+
+@_skip_windows
+def test_launcher_can_pin_interpreter_via_env(broker_server, tmp_path: Path) -> None:
+    """DEERFLOW_LARK_BROKER_PYTHON pins the interpreter for images with no python3
+    on PATH (the launcher must not silently ENOEXEC)."""
+    host, port = broker_server
+    dest = tmp_path / "runtime"
+    lark_broker.install_shim(str(dest), version="v1.0.65")
+    launcher = dest / "bin" / "lark-cli"
+
+    completed = subprocess.run(
+        [str(launcher), "ping"],
+        input=b"",
+        capture_output=True,
+        # Deliberately no python on PATH; the pin is the only way to resolve it.
+        env={
+            "PATH": "/nonexistent",
+            lark_broker.LARK_BROKER_PYTHON_ENV: sys.executable,
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+        },
+        timeout=30,
+    )
+    assert completed.returncode == 0
+
+
+@_skip_windows
+def test_launcher_fails_loudly_without_python(tmp_path: Path) -> None:
+    """With no python interpreter resolvable, the launcher exits 127 with an
+    actionable message rather than an opaque ENOEXEC."""
+    dest = tmp_path / "runtime"
+    lark_broker.install_shim(str(dest), version="v1.0.65")
+    launcher = dest / "bin" / "lark-cli"
+
+    completed = subprocess.run(
+        [str(launcher), "auth", "status"],
+        input=b"",
+        capture_output=True,
+        env={"PATH": "/nonexistent"},
+        timeout=30,
+    )
+    assert completed.returncode == 127
+    assert b"Python 3 interpreter" in completed.stderr
+
+
+# ── cwd is not forwarded (command surface only, no sandbox file I/O) ─────────
+
+
+def test_exec_payload_omits_cwd(tmp_path: Path) -> None:
+    """The shim must not forward cwd: the broker can't see the sandbox FS, so a
+    dead cwd field would imply support that does not exist."""
+    assert '"cwd"' not in lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT
+    assert "os.getcwd()" not in lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT
+
+
+# ── subcommand denylist (issue #4338 hardening) ──────────────────────────────
+
+
+def test_parse_deny_subcommands() -> None:
+    assert lark_broker.parse_deny_subcommands(None) == ()
+    assert lark_broker.parse_deny_subcommands("") == ()
+    assert lark_broker.parse_deny_subcommands("config show, auth token") == (
+        ("config", "show"),
+        ("auth", "token"),
+    )
+    # Blank entries are dropped.
+    assert lark_broker.parse_deny_subcommands("config show, ,") == (("config", "show"),)
+
+
+def test_denied_subcommand_is_refused_before_spawning_binary(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="/broker/only/config",
+        data_dir="/broker/only/data",
+        deny_subcommands=(("config", "show"),),
+    )
+    result = run_lark_cli(config, ["config", "show", "--json"], b"")
+    assert result.exit_code == 126
+    assert b"disabled in broker mode" in result.stderr
+    # The stub echoes argv on stdout; a refused call never runs it.
+    assert result.stdout == b""
+
+
+def test_denied_subcommand_matches_through_leading_flags(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="c",
+        data_dir="d",
+        deny_subcommands=(("config", "show"),),
+    )
+    # Options interleaved with the subcommand path are skipped when matching.
+    result = run_lark_cli(config, ["--json", "config", "show"], b"")
+    assert result.exit_code == 126
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--profile", "work", "config", "show"],
+        ["config", "--profile", "work", "show"],
+        ["--profile", "work", "config", "--profile", "work", "show", "--json"],
+    ],
+)
+def test_denied_subcommand_matches_through_separate_option_values(tmp_path: Path, args: list[str]) -> None:
+    # ``--profile`` is lark-cli's root value flag; lark-cli 1.0.65 runs
+    # ``config show`` for every shape above. The broker cannot tell which
+    # options take a value, so a value passed as its own token must not hide the
+    # denied path, whether it sits before the path or between its tokens.
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="c",
+        data_dir="d",
+        deny_subcommands=(("config", "show"),),
+    )
+    result = run_lark_cli(config, args, b"")
+    assert result.exit_code == 126
+    assert result.stdout == b""
+
+
+def test_denied_subcommand_requires_rule_tokens_in_order() -> None:
+    deny = (("config", "show"),)
+    assert lark_broker._denied_subcommand(deny, ["show", "config"]) is None
+    assert lark_broker._denied_subcommand(deny, ["config", "list"]) is None
+
+
+def test_exec_endpoint_refuses_denied_subcommand_behind_option_value(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="c",
+        data_dir="d",
+        port=0,
+        deny_subcommands=(("config", "show"),),
+    )
+    server = serve(config)
+    import threading
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body = _post_exec(*server.server_address[:2], {"args": ["--profile", "work", "config", "show"]})
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+    assert status == 200
+    assert body["exit_code"] == 126
+    assert body["stdout_b64"] == ""
+
+
+@_skip_windows
+def test_allowed_subcommand_still_runs_with_denylist(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="c",
+        data_dir="d",
+        deny_subcommands=(("config", "show"),),
+    )
+    result = run_lark_cli(config, ["auth", "status"], b"")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout.decode())
+    assert payload["argv"] == ["auth", "status"]
+
+
+@pytest.mark.parametrize("name", ["DEERFLOW_LARK_BROKER_PORT", "DEERFLOW_LARK_BROKER_TIMEOUT"])
+def test_config_from_env_treats_blank_numbers_as_unset(monkeypatch, name) -> None:
+    monkeypatch.delenv("DEERFLOW_LARK_BROKER_PORT", raising=False)
+    monkeypatch.delenv("DEERFLOW_LARK_BROKER_TIMEOUT", raising=False)
+    monkeypatch.setenv(name, "")
+
+    config = lark_broker._config_from_env()
+
+    assert config.port == lark_broker.LARK_BROKER_DEFAULT_PORT
+    assert config.timeout_seconds == lark_broker.LARK_BROKER_DEFAULT_TIMEOUT_SECONDS

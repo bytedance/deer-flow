@@ -17,20 +17,46 @@ PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
 
+case "$PORT" in
+    ''|*[!0-9]*)
+        echo "Port must be a numeric TCP port: $PORT" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "Port must be between 1 and 65535: $PORT" >&2
+    exit 1
+fi
+
 elapsed=0
 interval=1
 
 is_port_listening() {
-    # HTTP check (fast, no macOS lsof hang)
-    if command -v curl >/dev/null 2>&1; then
-        if curl -sf --max-time 1 "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
+    if command -v powershell.exe >/dev/null 2>&1; then
+        if WAIT_FOR_PORT_PORT="$PORT" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference='SilentlyContinue'; \$Port = [int]\$env:WAIT_FOR_PORT_PORT; if (Get-NetTCPConnection -LocalPort \$Port -State Listen) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
             return 0
         fi
     fi
 
-    # TCP check via bash built-in (no lsof needed)
-    if bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" >/dev/null 2>&1; then
-        return 0
+    # A loopback TCP connect instead of lsof, which can spin indefinitely on macOS (#1400).
+    local host
+    for host in 127.0.0.1 ::1; do
+        if (exec 3<>"/dev/tcp/$host/$PORT") 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn "( sport = :$PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
+            return 0
+        fi
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${PORT}$"; then
+            return 0
+        fi
     fi
 
     return 1

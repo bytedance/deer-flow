@@ -1,47 +1,64 @@
-"use client";
+import "katex/dist/katex.min.css";
+import "streamdown/styles.css";
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
-import { Toaster } from "sonner";
+import { redirect } from "next/navigation";
 
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { CommandPalette } from "@/components/workspace/command-palette";
-import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
-import { getLocalSettings, useLocalSettings } from "@/core/settings";
+import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
+import { WorkspaceLoginRedirect } from "@/components/workspace/workspace-login-redirect";
+import { AuthProvider } from "@/core/auth/AuthProvider";
+import { getServerSideUser } from "@/core/auth/server";
+import { ACCOUNT_DISABLED_LOGIN_URL, assertNever } from "@/core/auth/types";
+import { I18nProvider } from "@/core/i18n/context";
+import { detectLocaleServer } from "@/core/i18n/server";
 
-const queryClient = new QueryClient();
+import { WorkspaceContent } from "./workspace-content";
 
-export default function WorkspaceLayout({
+export const dynamic = "force-dynamic";
+
+export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const [settings, setSettings] = useLocalSettings();
-  const [open, setOpen] = useState(false); // SSR default: open (matches server render)
-  useLayoutEffect(() => {
-    // Runs synchronously before first paint on the client — no visual flash
-    setOpen(!getLocalSettings().layout.sidebar_collapsed);
-  }, []);
-  useEffect(() => {
-    setOpen(!settings.layout.sidebar_collapsed);
-  }, [settings.layout.sidebar_collapsed]);
-  const handleOpenChange = useCallback(
-    (open: boolean) => {
-      setOpen(open);
-      setSettings("layout", { sidebar_collapsed: !open });
-    },
-    [setSettings],
-  );
-  return (
-    <QueryClientProvider client={queryClient}>
-      <SidebarProvider
-        className="h-screen"
-        open={open}
-        onOpenChange={handleOpenChange}
-      >
-        <WorkspaceSidebar />
-        <SidebarInset className="min-w-0">{children}</SidebarInset>
-      </SidebarProvider>
-      <CommandPalette />
-      <Toaster position="top-center" />
-    </QueryClientProvider>
-  );
+  const locale = await detectLocaleServer();
+  const result = await getServerSideUser();
+
+  let content: React.ReactNode;
+
+  switch (result.tag) {
+    case "authenticated":
+      content = (
+        <AuthProvider initialUser={result.user}>
+          <WorkspaceContent>{children}</WorkspaceContent>
+        </AuthProvider>
+      );
+      break;
+    case "needs_setup":
+      redirect("/setup");
+    case "system_setup_required":
+      redirect("/setup");
+    case "unauthenticated":
+      // Not redirect(): a layout cannot read the request URL, so the browser
+      // carries the page it is on into `next`.
+      content = <WorkspaceLoginRedirect />;
+      break;
+    case "account_disabled":
+      // The login page renders the disabled-account reason from the error
+      // param instead of a plain sign-in form the user cannot complete.
+      redirect(ACCOUNT_DISABLED_LOGIN_URL);
+    case "gateway_unavailable":
+      // GatewayOfflineFallback supplies the AuthProvider; WorkspaceContent
+      // already mounts the banner inside its sidebar layout, so renderBanner
+      // stays false here to avoid double-mounting.
+      content = (
+        <GatewayOfflineFallback>
+          <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
+        </GatewayOfflineFallback>
+      );
+      break;
+    case "config_error":
+      throw new Error(result.message);
+    default:
+      assertNever(result);
+  }
+
+  return <I18nProvider initialLocale={locale}>{content}</I18nProvider>;
 }

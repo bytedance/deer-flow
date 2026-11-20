@@ -1,39 +1,81 @@
+import os
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from deerflow.config.reload_boundary import format_field_description
+from deerflow.config.runtime_paths import project_root, resolve_path
+from deerflow.config.sandbox_config import normalize_container_path
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+
+
+def _legacy_skills_candidates() -> tuple[Path, ...]:
+    """Return source-tree skills locations for monorepo compatibility."""
+    backend_dir = Path(__file__).resolve().parents[4]
+    repo_root = backend_dir.parent
+    return (repo_root / "skills",)
 
 
 class SkillsConfig(BaseModel):
     """Configuration for skills system"""
 
+    use: str = Field(
+        default="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        description="Class path of the SkillStorage implementation.",
+    )
     path: str | None = Field(
         default=None,
-        description="Path to skills directory. If not specified, defaults to ../skills relative to backend directory",
+        description=("Path to skills directory. If not specified, defaults to `skills` under the caller project root, falling back to the legacy repo-root location for monorepo compatibility."),
     )
     container_path: str = Field(
-        default="/mnt/skills",
-        description="Path where skills are mounted in the sandbox container",
+        default=DEFAULT_SKILLS_CONTAINER_PATH,
+        description=format_field_description(
+            "skills.container_path",
+            field_doc="Path where skills are mounted in the sandbox container.",
+        ),
+    )
+
+    @field_validator("container_path")
+    @classmethod
+    def _normalize_container_path(cls, value: str) -> str:
+        # _is_skills_path() compares the configured prefix as-is, so a
+        # trailing slash would make every gated skills access fail with a
+        # confusing PermissionError; share the mounts' normalization.
+        return normalize_container_path(value)
+
+    deferred_discovery: bool = Field(
+        default=False,
+        description=("When enabled, skill metadata is not injected into the system prompt. Instead, only skill names appear in <skill_index> and the LLM discovers details on demand via the describe_skill tool."),
     )
 
     def get_skills_path(self) -> Path:
         """
         Get the resolved skills directory path.
 
-        Returns:
-            Path to the skills directory
+        Resolution order:
+            1. Explicit ``path`` field
+            2. ``DEER_FLOW_SKILLS_PATH`` environment variable
+            3. ``skills`` under the caller project root (``project_root()``)
+            4. Legacy repo-root candidates for monorepo compatibility (``_legacy_skills_candidates``)
+
+        When none of (3) or (4) exist on disk, the project-root default is returned so callers
+        can still surface a stable "no skills" location without raising.
         """
         if self.path:
-            # Use configured path (can be absolute or relative)
-            path = Path(self.path)
-            if not path.is_absolute():
-                # If relative, resolve from current working directory
-                path = Path.cwd() / path
-            return path.resolve()
-        else:
-            # Default: ../skills relative to backend directory
-            from deerflow.skills.loader import get_skills_root_path
+            # Use configured path (can be absolute or relative to project root)
+            return resolve_path(self.path)
+        if env_path := os.getenv("DEER_FLOW_SKILLS_PATH"):
+            return resolve_path(env_path)
 
-            return get_skills_root_path()
+        project_default = project_root() / "skills"
+        if project_default.is_dir():
+            return project_default
+
+        for candidate in _legacy_skills_candidates():
+            if candidate.is_dir():
+                return candidate
+
+        return project_default
 
     def get_skill_container_path(self, skill_name: str, category: str = "public") -> str:
         """

@@ -1,0 +1,391 @@
+"""Unit tests for the Exa community tools."""
+
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.fixture
+def mock_app_config():
+    """Mock the app config to return tool configurations."""
+    with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+        tool_config = MagicMock()
+        tool_config.model_extra = {
+            "max_results": 5,
+            "search_type": "auto",
+            "contents_max_characters": 1000,
+            "api_key": "test-api-key",
+        }
+        mock_config.return_value.get_tool_config.return_value = tool_config
+        yield mock_config
+
+
+@pytest.fixture
+def mock_exa_client():
+    """Mock the Exa client."""
+    with patch("deerflow.community.exa.tools.Exa") as mock_exa_cls:
+        mock_client = MagicMock()
+        mock_exa_cls.return_value = mock_client
+        yield mock_client
+
+
+class TestWebSearchTool:
+    def test_basic_search(self, mock_app_config, mock_exa_client):
+        """Test basic web search returns normalized results."""
+        mock_result_1 = MagicMock()
+        mock_result_1.title = "Test Title 1"
+        mock_result_1.url = "https://example.com/1"
+        mock_result_1.highlights = ["This is a highlight about the topic."]
+
+        mock_result_2 = MagicMock()
+        mock_result_2.title = "Test Title 2"
+        mock_result_2.url = "https://example.com/2"
+        mock_result_2.highlights = ["First highlight.", "Second highlight."]
+
+        mock_response = MagicMock()
+        mock_response.results = [mock_result_1, mock_result_2]
+        mock_exa_client.search.return_value = mock_response
+
+        from deerflow.community.exa.tools import web_search_tool
+
+        result = web_search_tool.invoke({"query": "test query"})
+        parsed = json.loads(result)
+
+        assert len(parsed) == 2
+        assert parsed[0]["title"] == "Test Title 1"
+        assert parsed[0]["url"] == "https://example.com/1"
+        assert parsed[0]["snippet"] == "This is a highlight about the topic."
+        assert parsed[1]["snippet"] == "First highlight.\nSecond highlight."
+
+        mock_exa_client.search.assert_called_once_with(
+            "test query",
+            type="auto",
+            num_results=5,
+            contents={"highlights": {"max_characters": 1000}},
+        )
+
+    def test_search_with_custom_config(self, mock_exa_client):
+        """Test search respects custom configuration values."""
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            tool_config = MagicMock()
+            tool_config.model_extra = {
+                "max_results": 10,
+                "search_type": "neural",
+                "contents_max_characters": 2000,
+                "api_key": "test-key",
+            }
+            mock_config.return_value.get_tool_config.return_value = tool_config
+
+            mock_response = MagicMock()
+            mock_response.results = []
+            mock_exa_client.search.return_value = mock_response
+
+            from deerflow.community.exa.tools import web_search_tool
+
+            web_search_tool.invoke({"query": "neural search"})
+
+            mock_exa_client.search.assert_called_once_with(
+                "neural search",
+                type="neural",
+                num_results=10,
+                contents={"highlights": {"max_characters": 2000}},
+            )
+
+    def test_search_with_no_highlights(self, mock_app_config, mock_exa_client):
+        """Test search handles results with no highlights."""
+        mock_result = MagicMock()
+        mock_result.title = "No Highlights"
+        mock_result.url = "https://example.com/empty"
+        mock_result.highlights = None
+
+        mock_response = MagicMock()
+        mock_response.results = [mock_result]
+        mock_exa_client.search.return_value = mock_response
+
+        from deerflow.community.exa.tools import web_search_tool
+
+        result = web_search_tool.invoke({"query": "test"})
+        parsed = json.loads(result)
+
+        assert parsed[0]["snippet"] == ""
+
+    def test_search_empty_results(self, mock_app_config, mock_exa_client):
+        """Test search with no results returns empty list."""
+        mock_response = MagicMock()
+        mock_response.results = []
+        mock_exa_client.search.return_value = mock_response
+
+        from deerflow.community.exa.tools import web_search_tool
+
+        result = web_search_tool.invoke({"query": "nothing"})
+        parsed = json.loads(result)
+
+        assert parsed == []
+
+    def test_search_error_handling(self, mock_app_config, mock_exa_client):
+        """Test search returns error string on exception."""
+        mock_exa_client.search.side_effect = Exception("API rate limit exceeded")
+
+        from deerflow.community.exa.tools import web_search_tool
+
+        result = web_search_tool.invoke({"query": "error"})
+
+        assert result == "Error: API rate limit exceeded"
+
+    def test_search_accepts_env_var_string_limits(self):
+        """``$VAR`` config references resolve to strings; exa-py rejects a string num_results."""
+        from exa_py import Exa
+
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"max_results": "10", "contents_max_characters": "2000", "api_key": "test-key"}
+            mock_config.return_value.get_tool_config.return_value = tool_config
+
+            sent = {}
+
+            def fake_request(self, endpoint, data=None, *args, **kwargs):
+                sent.update(data or {})
+                return {"results": [], "requestId": "req"}
+
+            # The real SDK does the type check, so only its HTTP layer is replaced.
+            with patch.object(Exa, "request", fake_request):
+                from deerflow.community.exa.tools import web_search_tool
+
+                result = web_search_tool.invoke({"query": "test query"})
+
+        assert json.loads(result) == []
+        assert sent["numResults"] == 10
+        assert sent["contents"] == {"highlights": {"maxCharacters": 2000}}
+
+    @pytest.mark.parametrize("raw", [None, "", "many", "3.5", 3.5, 10.0, True, False, 0, -2, "-2"])
+    def test_search_invalid_limits_fall_back_to_defaults(self, mock_exa_client, raw):
+        """An unusable value warns and keeps the default instead of failing the search."""
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"max_results": raw, "contents_max_characters": raw, "api_key": "test-key"}
+            mock_config.return_value.get_tool_config.return_value = tool_config
+            mock_exa_client.search.return_value = MagicMock(results=[])
+
+            from deerflow.community.exa.tools import web_search_tool
+
+            result = web_search_tool.invoke({"query": "test query"})
+
+        assert json.loads(result) == []
+        mock_exa_client.search.assert_called_once_with(
+            "test query",
+            type="auto",
+            num_results=5,
+            contents={"highlights": {"max_characters": 1000}},
+        )
+
+
+class TestWebFetchTool:
+    def test_basic_fetch(self, mock_app_config, mock_exa_client):
+        """Test basic web fetch returns formatted content."""
+        mock_result = MagicMock()
+        mock_result.title = "Fetched Page"
+        mock_result.text = "This is the page content."
+
+        mock_response = MagicMock()
+        mock_response.results = [mock_result]
+        mock_exa_client.get_contents.return_value = mock_response
+
+        from deerflow.community.exa.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# Fetched Page\n\nThis is the page content."
+        mock_exa_client.get_contents.assert_called_once_with(
+            ["https://example.com"],
+            text={"max_characters": 4096},
+        )
+
+    def test_fetch_no_title(self, mock_app_config, mock_exa_client):
+        """Test fetch with missing title uses 'Untitled'."""
+        mock_result = MagicMock()
+        mock_result.title = None
+        mock_result.text = "Content without title."
+
+        mock_response = MagicMock()
+        mock_response.results = [mock_result]
+        mock_exa_client.get_contents.return_value = mock_response
+
+        from deerflow.community.exa.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result.startswith("# Untitled\n\n")
+
+    def test_fetch_no_results(self, mock_app_config, mock_exa_client):
+        """Test fetch with no results returns error."""
+        mock_response = MagicMock()
+        mock_response.results = []
+        mock_exa_client.get_contents.return_value = mock_response
+
+        from deerflow.community.exa.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com/404"})
+
+        assert result == "Error: No results found"
+
+    def test_fetch_error_handling(self, mock_app_config, mock_exa_client):
+        """Test fetch returns error string on exception."""
+        mock_exa_client.get_contents.side_effect = Exception("Connection timeout")
+
+        from deerflow.community.exa.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "Error: Connection timeout"
+
+    def test_fetch_reads_web_fetch_config(self, mock_exa_client):
+        """Test that web_fetch_tool reads 'web_fetch' config, not 'web_search'."""
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"api_key": "exa-fetch-key"}
+            mock_config.return_value.get_tool_config.return_value = tool_config
+
+            mock_result = MagicMock()
+            mock_result.title = "Page"
+            mock_result.text = "Content."
+            mock_response = MagicMock()
+            mock_response.results = [mock_result]
+            mock_exa_client.get_contents.return_value = mock_response
+
+            from deerflow.community.exa.tools import web_fetch_tool
+
+            web_fetch_tool.invoke({"url": "https://example.com"})
+
+            mock_config.return_value.get_tool_config.assert_any_call("web_fetch")
+
+    def test_fetch_uses_independent_api_key(self, mock_exa_client):
+        """Test mixed-provider config: web_fetch uses its own api_key, not web_search's."""
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            with patch("deerflow.community.exa.tools.Exa") as mock_exa_cls:
+                mock_exa_cls.return_value = mock_exa_client
+                fetch_config = MagicMock()
+                fetch_config.model_extra = {"api_key": "exa-fetch-key"}
+
+                def get_tool_config(name):
+                    if name == "web_fetch":
+                        return fetch_config
+                    return None
+
+                mock_config.return_value.get_tool_config.side_effect = get_tool_config
+
+                mock_result = MagicMock()
+                mock_result.title = "Page"
+                mock_result.text = "Content."
+                mock_response = MagicMock()
+                mock_response.results = [mock_result]
+                mock_exa_client.get_contents.return_value = mock_response
+
+                from deerflow.community.exa.tools import web_fetch_tool
+
+                web_fetch_tool.invoke({"url": "https://example.com"})
+
+                mock_exa_cls.assert_called_once_with(api_key="exa-fetch-key")
+
+    def test_fetch_truncates_long_content(self, mock_app_config, mock_exa_client):
+        """Test fetch truncates content to 4096 characters."""
+        mock_result = MagicMock()
+        mock_result.title = "Long Page"
+        mock_result.text = "x" * 5000
+
+        mock_response = MagicMock()
+        mock_response.results = [mock_result]
+        mock_exa_client.get_contents.return_value = mock_response
+
+        from deerflow.community.exa.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        # "# Long Page\n\n" is 14 chars, content truncated to 4096
+        content_after_header = result.split("\n\n", 1)[1]
+        assert len(content_after_header) == 4096
+
+
+@pytest.fixture(autouse=True)
+def _no_exa_base_url_env(monkeypatch):
+    monkeypatch.delenv("EXA_BASE_URL", raising=False)
+
+
+def _patch_tool_config(extra):
+    patcher = patch("deerflow.community.exa.tools.get_app_config")
+    mock_config = patcher.start()
+    tool_config = MagicMock()
+    tool_config.model_extra = extra
+    mock_config.return_value.get_tool_config.return_value = tool_config
+    return patcher
+
+
+class TestBaseUrl:
+    def _search(self, extra):
+        patcher = _patch_tool_config(extra)
+        try:
+            with patch("deerflow.community.exa.tools.Exa") as mock_exa_cls:
+                mock_exa_cls.return_value.search.return_value = MagicMock(results=[])
+                from deerflow.community.exa.tools import web_search_tool
+
+                result = web_search_tool.invoke({"query": "q"})
+                return result, mock_exa_cls
+        finally:
+            patcher.stop()
+
+    def test_default_endpoint_when_unset(self):
+        result, mock_exa_cls = self._search({"api_key": "k"})
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k")
+
+    def test_tool_base_url_is_passed_to_sdk_without_trailing_slash(self, monkeypatch):
+        monkeypatch.setenv("EXA_BASE_URL", "https://env.example")
+        result, mock_exa_cls = self._search({"api_key": "k", "base_url": "  https://exa-compatible.example/api/  "})
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://exa-compatible.example/api")
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", 123])
+    def test_env_base_url_is_used_when_tool_value_missing(self, monkeypatch, raw):
+        monkeypatch.setenv("EXA_BASE_URL", "https://env.example/")
+        extra = {"api_key": "k"} if raw is None else {"api_key": "k", "base_url": raw}
+        result, mock_exa_cls = self._search(extra)
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://env.example")
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["api.example.com", "ftp://api.example.com", "https://", "https://api.example.com?x=1", "https://api.example.com/#", "https://api.example.com:99999"],
+    )
+    def test_invalid_base_url_returns_error_without_value(self, raw):
+        result, mock_exa_cls = self._search({"api_key": "k", "base_url": raw})
+        assert result.startswith("Error: Invalid Exa base_url/EXA_BASE_URL")
+        assert raw not in result
+        mock_exa_cls.assert_not_called()
+
+    def _fetch(self, extra):
+        patcher = _patch_tool_config(extra)
+        try:
+            with patch("deerflow.community.exa.tools.Exa") as mock_exa_cls:
+                mock_exa_cls.return_value.get_contents.return_value = MagicMock(results=[MagicMock(title="Page", text="Body")])
+                from deerflow.community.exa.tools import web_fetch_tool
+
+                result = web_fetch_tool.invoke({"url": "https://example.com"})
+                return result, mock_exa_cls
+        finally:
+            patcher.stop()
+
+    def test_fetch_refuses_private_backend_without_isolation_confirmation(self):
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "http://127.0.0.1:8080"})
+        assert result.startswith("Error:")
+        assert "network_isolation_confirmed" in result
+        mock_exa_cls.assert_not_called()
+
+    def test_fetch_allows_private_backend_with_isolation_confirmed(self):
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "http://127.0.0.1:8080", "network_isolation_confirmed": "true"})
+        assert result == "# Page\n\nBody"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="http://127.0.0.1:8080")
+
+    def test_fetch_allows_public_backend(self):
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "https://93.184.216.34"})
+        assert result == "# Page\n\nBody"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://93.184.216.34")

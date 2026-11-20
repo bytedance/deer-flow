@@ -111,16 +111,16 @@ Open Issues: 196 (ongoing maintenance and feature development)
 
 ### Key Metrics
 
-| Metric | Value | Assessment |
-|--------|-------|------------|
-| GitHub Stars | 19,531 | Exceptional popularity for research framework |
-| Forks | 2,452 | Strong community adoption and potential derivatives |
-| Contributors | 88 | Healthy open-source development ecosystem |
-| Open Issues | 196 | Active maintenance and feature development |
-| Primary Language | Python (1.29MB) | Main development language with extensive libraries |
-| Secondary Language | TypeScript (503KB) | Modern web UI implementation |
-| Repository Age | ~9 months | Rapid development and feature expansion |
-| License | MIT | Permissive open-source licensing |
+| Metric             | Value              | Assessment                                          |
+| ------------------ | ------------------ | --------------------------------------------------- |
+| GitHub Stars       | 19,531             | Exceptional popularity for research framework       |
+| Forks              | 2,452              | Strong community adoption and potential derivatives |
+| Contributors       | 88                 | Healthy open-source development ecosystem           |
+| Open Issues        | 196                | Active maintenance and feature development          |
+| Primary Language   | Python (1.29MB)    | Main development language with extensive libraries  |
+| Secondary Language | TypeScript (503KB) | Modern web UI implementation                        |
+| Repository Age     | ~9 months          | Rapid development and feature expansion             |
+| License            | MIT                | Permissive open-source licensing                    |
 
 ---
 
@@ -128,18 +128,18 @@ Open Issues: 196 (ongoing maintenance and feature development)
 
 ### Feature Comparison
 
-| Feature | DeerFlow | OpenAI Deep Research | LangChain OpenDeepResearch |
-|---------|-----------|----------------------|----------------------------|
-| Multi-Agent Architecture | ✅ | ❌ | ✅ |
-| Local LLM Support | ✅ | ❌ | ✅ |
-| MCP Integration | ✅ | ❌ | ❌ |
-| Web Search Engines | Multiple (5+) | Limited | Limited |
-| Code Execution | ✅ Python REPL | Limited | ✅ |
-| Podcast Generation | ✅ | ❌ | ❌ |
-| Presentation Creation | ✅ | ❌ | ❌ |
-| Private Knowledgebase | ✅ (6+ options) | Limited | Limited |
-| Human-in-the-Loop | ✅ | Limited | ✅ |
-| Open Source | ✅ MIT | ❌ | ✅ Apache 2.0 |
+| Feature                  | DeerFlow        | OpenAI Deep Research | LangChain OpenDeepResearch |
+| ------------------------ | --------------- | -------------------- | -------------------------- |
+| Multi-Agent Architecture | ✅              | ❌                   | ✅                         |
+| Local LLM Support        | ✅              | ❌                   | ✅                         |
+| MCP Integration          | ✅              | ❌                   | ❌                         |
+| Web Search Engines       | Multiple (5+)   | Limited              | Limited                    |
+| Code Execution           | ✅ Python REPL  | Limited              | ✅                         |
+| Podcast Generation       | ✅              | ❌                   | ❌                         |
+| Presentation Creation    | ✅              | ❌                   | ❌                         |
+| Private Knowledgebase    | ✅ (6+ options) | Limited              | Limited                    |
+| Human-in-the-Loop        | ✅              | Limited              | ✅                         |
+| Open Source              | ✅ MIT          | ❌                   | ✅ Apache 2.0              |
 
 ### Market Positioning
 
@@ -217,6 +217,7 @@ DeerFlow occupies a unique position in the deep research framework landscape by 
 ## Confidence Assessment
 
 **High Confidence (90%+) Claims:**
+
 - DeerFlow was created by ByteDance and open-sourced under MIT license in May 2025
 - The framework implements multi-agent architecture using LangGraph and LangChain
 - Current GitHub metrics: 19,531 stars, 2,452 forks, 88 contributors, 196 open issues
@@ -224,11 +225,13 @@ DeerFlow occupies a unique position in the deep research framework landscape by 
 - Includes features for podcast generation, presentation creation, and human collaboration
 
 **Medium Confidence (70-89%) Claims:**
+
 - Specific performance benchmarks compared to proprietary alternatives
 - Detailed breakdown of enterprise adoption rates and use cases
 - Exact resource requirements for various deployment scenarios
 
 **Lower Confidence (50-69%) Claims:**
+
 - Future development roadmap beyond DeerFlow 2.0 transition
 - Specific enterprise customer implementations and case studies
 - Detailed comparison with emerging competitors not yet widely documented

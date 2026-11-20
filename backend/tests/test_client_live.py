@@ -1,9 +1,14 @@
-"""Live integration tests for DeerFlowClient with real API.
+"""Live integration tests for DeerFlowClient with real external APIs.
 
 These tests require a working config.yaml with valid API credentials.
-They are skipped in CI and must be run explicitly:
+They can incur API costs and create local sandboxes, artifacts, or files.
+They are skipped in CI and default test runs and must be run explicitly:
 
-    PYTHONPATH=. uv run pytest tests/test_client_live.py -v -s
+    make test-live
+
+For direct pytest invocation, set the explicit opt-in flag:
+
+    DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. uv run pytest tests/test_client_live.py -v -s
 """
 
 import json
@@ -13,11 +18,19 @@ from pathlib import Path
 import pytest
 
 from deerflow.client import DeerFlowClient, StreamEvent
+from deerflow.sandbox.security import is_host_bash_allowed
+from deerflow.uploads.manager import PathTraversalError
 
-# Skip entire module in CI or when no config.yaml exists
+pytestmark = pytest.mark.live
+
+_LIVE_TEST_OPT_IN = "DEER_FLOW_RUN_LIVE_TESTS"
+
+# Skip the entire module unless every live-test precondition is satisfied.
 _skip_reason = None
 if os.environ.get("CI"):
     _skip_reason = "Live tests skipped in CI"
+elif os.environ.get(_LIVE_TEST_OPT_IN) != "1":
+    _skip_reason = f"Set {_LIVE_TEST_OPT_IN}=1 to run live tests with real external APIs"
 elif not Path(__file__).resolve().parents[2].joinpath("config.yaml").exists():
     _skip_reason = "No config.yaml found — live tests require valid API credentials"
 
@@ -99,6 +112,9 @@ class TestLiveStreaming:
 class TestLiveToolUse:
     def test_agent_uses_bash_tool(self, client):
         """Agent uses bash tool when asked to run a command."""
+        if not is_host_bash_allowed():
+            pytest.skip("Host bash is disabled for LocalSandboxProvider in the active config")
+
         events = list(client.stream("Use the bash tool to run: echo 'LIVE_TEST_OK'. Then tell me the output."))
 
         types = [e.type for e in events]
@@ -321,5 +337,5 @@ class TestLiveErrorResilience:
             client.get_artifact("t", "invalid/path")
 
     def test_path_traversal_blocked(self, client):
-        with pytest.raises(PermissionError):
+        with pytest.raises(PathTraversalError):
             client.delete_upload("t", "../../etc/passwd")

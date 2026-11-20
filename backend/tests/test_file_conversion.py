@@ -1,0 +1,583 @@
+"""Tests for file_conversion utilities (PR1: pymupdf4llm + asyncio.to_thread; PR2: extract_outline)."""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import sys
+import threading
+from types import ModuleType
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from deerflow.utils.file_conversion import (
+    _MIN_CHARS_PER_PAGE,
+    MAX_OUTLINE_ENTRIES,
+    _do_convert,
+    _get_pdf_converter,
+    _pymupdf_output_too_sparse,
+    convert_file_to_markdown,
+    extract_outline,
+)
+
+
+def _make_pymupdf_mock(page_count: int) -> ModuleType:
+    """Return a fake *pymupdf* module whose ``open()`` reports *page_count* pages."""
+    mock_doc = MagicMock()
+    mock_doc.__len__ = MagicMock(return_value=page_count)
+    fake_pymupdf = ModuleType("pymupdf")
+    fake_pymupdf.open = MagicMock(return_value=mock_doc)  # type: ignore[attr-defined]
+    return fake_pymupdf
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+# ---------------------------------------------------------------------------
+# _pymupdf_output_too_sparse
+# ---------------------------------------------------------------------------
+
+
+class TestPymupdfOutputTooSparse:
+    """Check the chars-per-page sparsity heuristic."""
+
+    def test_dense_text_pdf_not_sparse(self, tmp_path):
+        """Normal text PDF: many chars per page → not sparse."""
+        pdf = tmp_path / "dense.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        # 10 pages × 10 000 chars → 1000/page ≫ threshold
+        with patch.dict(sys.modules, {"pymupdf": _make_pymupdf_mock(page_count=10)}):
+            result = _pymupdf_output_too_sparse("x" * 10_000, pdf)
+        assert result is False
+
+    def test_image_based_pdf_is_sparse(self, tmp_path):
+        """Image-based PDF: near-zero chars per page → sparse."""
+        pdf = tmp_path / "image.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        # 612 chars / 31 pages ≈ 19.7/page < _MIN_CHARS_PER_PAGE (50)
+        with patch.dict(sys.modules, {"pymupdf": _make_pymupdf_mock(page_count=31)}):
+            result = _pymupdf_output_too_sparse("x" * 612, pdf)
+        assert result is True
+
+    def test_fallback_when_pymupdf_unavailable(self, tmp_path):
+        """When pymupdf is not installed, fall back to absolute 200-char threshold."""
+        pdf = tmp_path / "broken.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        # Remove pymupdf from sys.modules so the `import pymupdf` inside the
+        # function raises ImportError, triggering the absolute-threshold fallback.
+        with patch.dict(sys.modules, {"pymupdf": None}):
+            sparse = _pymupdf_output_too_sparse("x" * 100, pdf)
+            not_sparse = _pymupdf_output_too_sparse("x" * 300, pdf)
+
+        assert sparse is True
+        assert not_sparse is False
+
+    def test_exactly_at_threshold_is_not_sparse(self, tmp_path):
+        """Chars-per-page == threshold is treated as NOT sparse (boundary inclusive)."""
+        pdf = tmp_path / "boundary.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        # 2 pages × _MIN_CHARS_PER_PAGE chars = exactly at threshold
+        with patch.dict(sys.modules, {"pymupdf": _make_pymupdf_mock(page_count=2)}):
+            result = _pymupdf_output_too_sparse("x" * (_MIN_CHARS_PER_PAGE * 2), pdf)
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _do_convert — routing logic
+# ---------------------------------------------------------------------------
+
+
+class TestDoConvert:
+    """Verify that _do_convert routes to the right sub-converter."""
+
+    def test_non_pdf_always_uses_markitdown(self, tmp_path):
+        """DOCX / XLSX / PPTX always go through MarkItDown regardless of setting."""
+        docx = tmp_path / "report.docx"
+        docx.write_bytes(b"PK fake docx")
+
+        with patch(
+            "deerflow.utils.file_conversion._convert_with_markitdown",
+            return_value="# Markdown from MarkItDown",
+        ) as mock_md:
+            result = _do_convert(docx, "auto")
+
+        mock_md.assert_called_once_with(docx)
+        assert result == "# Markdown from MarkItDown"
+
+    def test_pdf_auto_uses_pymupdf4llm_when_dense(self, tmp_path):
+        """auto mode: use pymupdf4llm output when it's dense enough."""
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        dense_text = "# Heading\n" + "word " * 2000  # clearly dense
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value=dense_text,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._pymupdf_output_too_sparse",
+                return_value=False,
+            ),
+            patch("deerflow.utils.file_conversion._convert_with_markitdown") as mock_md,
+        ):
+            result = _do_convert(pdf, "auto")
+
+        mock_md.assert_not_called()
+        assert result == dense_text
+
+    def test_pdf_auto_falls_back_when_sparse(self, tmp_path):
+        """auto mode: fall back to MarkItDown when pymupdf4llm output is sparse."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value="x" * 612,  # 19.7 chars/page for 31-page doc
+            ),
+            patch(
+                "deerflow.utils.file_conversion._pymupdf_output_too_sparse",
+                return_value=True,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._convert_with_markitdown",
+                return_value="OCR result via MarkItDown",
+            ) as mock_md,
+        ):
+            result = _do_convert(pdf, "auto")
+
+        mock_md.assert_called_once_with(pdf)
+        assert result == "OCR result via MarkItDown"
+
+    def test_pdf_explicit_pymupdf4llm_skips_sparsity_check(self, tmp_path):
+        """'pymupdf4llm' mode: use output as-is even if sparse."""
+        pdf = tmp_path / "explicit.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        sparse_text = "x" * 10  # very short
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value=sparse_text,
+            ),
+            patch("deerflow.utils.file_conversion._convert_with_markitdown") as mock_md,
+        ):
+            result = _do_convert(pdf, "pymupdf4llm")
+
+        mock_md.assert_not_called()
+        assert result == sparse_text
+
+    def test_pdf_explicit_markitdown_skips_pymupdf4llm(self, tmp_path):
+        """'markitdown' mode: never attempt pymupdf4llm."""
+        pdf = tmp_path / "force_md.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch("deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm") as mock_pymu,
+            patch(
+                "deerflow.utils.file_conversion._convert_with_markitdown",
+                return_value="MarkItDown result",
+            ),
+        ):
+            result = _do_convert(pdf, "markitdown")
+
+        mock_pymu.assert_not_called()
+        assert result == "MarkItDown result"
+
+    def test_pdf_auto_falls_back_when_pymupdf4llm_not_installed(self, tmp_path):
+        """auto mode: if pymupdf4llm is not installed, use MarkItDown directly."""
+        pdf = tmp_path / "no_pymupdf.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value=None,  # None signals not installed
+            ),
+            patch(
+                "deerflow.utils.file_conversion._convert_with_markitdown",
+                return_value="MarkItDown fallback",
+            ) as mock_md,
+        ):
+            result = _do_convert(pdf, "auto")
+
+        mock_md.assert_called_once_with(pdf)
+        assert result == "MarkItDown fallback"
+
+
+class TestGetPdfConverter:
+    def test_reads_dict_backed_uploads_config(self):
+        cfg = MagicMock()
+        cfg.uploads = {"pdf_converter": "markitdown"}
+
+        with patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg):
+            assert _get_pdf_converter() == "markitdown"
+
+    def test_reads_attribute_backed_uploads_config(self):
+        cfg = MagicMock()
+        cfg.uploads = MagicMock(pdf_converter="pymupdf4llm")
+
+        with patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg):
+            assert _get_pdf_converter() == "pymupdf4llm"
+
+    def test_invalid_value_falls_back_to_auto(self):
+        cfg = MagicMock()
+        cfg.uploads = {"pdf_converter": "not-a-real-converter"}
+
+        with patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg):
+            assert _get_pdf_converter() == "auto"
+
+
+class TestConvertFileToMarkdown:
+    @pytest.mark.parametrize("file_size", [100, 1024 * 1024, 1024 * 1024 + 1], ids=["small", "former-threshold", "large"])
+    def test_conversion_runs_off_loop_for_every_file_size(self, tmp_path, file_size):
+        """Compressed byte size cannot bound a document's parsing time."""
+        source = tmp_path / "report.xlsx"
+        source.write_bytes(b"x" * file_size)
+        loop_thread = threading.get_ident()
+        worker_threads = []
+        request_context = contextvars.ContextVar("conversion_request_context")
+        token = request_context.set("upload-request")
+
+        def convert(path, converter):
+            worker_threads.append(threading.get_ident())
+            assert path == source
+            assert converter == "auto"
+            assert request_context.get() == "upload-request"
+            return "# Converted document"
+
+        try:
+            with (
+                patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+                patch("deerflow.utils.file_conversion._do_convert", side_effect=convert),
+            ):
+                md_path = _run(convert_file_to_markdown(source))
+        finally:
+            request_context.reset(token)
+
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != loop_thread, "document parsing occupied the calling event-loop thread"
+        assert md_path == source.with_suffix(".md")
+        assert md_path.read_text(encoding="utf-8") == "# Converted document"
+
+    def test_returns_none_on_conversion_error(self, tmp_path):
+        """If conversion raises, return None without propagating the exception."""
+        pdf = tmp_path / "broken.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        worker_threads = []
+        loop_thread = threading.get_ident()
+
+        def fail_conversion(*_args):
+            worker_threads.append(threading.get_ident())
+            raise RuntimeError("conversion failed")
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch("deerflow.utils.file_conversion._do_convert", side_effect=fail_conversion),
+        ):
+            result = _run(convert_file_to_markdown(pdf))
+
+        assert result is None
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != loop_thread
+        assert not pdf.with_suffix(".md").exists()
+
+    def test_writes_utf8_markdown_file(self, tmp_path):
+        """Generated .md file is written with UTF-8 encoding."""
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        chinese_content = "# 中文报告\n\n这是测试内容。"
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch(
+                "deerflow.utils.file_conversion._do_convert",
+                return_value=chinese_content,
+            ),
+        ):
+            md_path = _run(convert_file_to_markdown(pdf))
+
+        assert md_path is not None
+        assert md_path.read_text(encoding="utf-8") == chinese_content
+
+
+# ---------------------------------------------------------------------------
+# extract_outline
+# ---------------------------------------------------------------------------
+
+
+class TestExtractOutline:
+    """Tests for extract_outline()."""
+
+    def test_empty_file_returns_empty(self, tmp_path):
+        """Empty markdown file yields no outline entries."""
+        md = tmp_path / "empty.md"
+        md.write_text("", encoding="utf-8")
+        assert extract_outline(md) == []
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        """Non-existent path returns [] without raising."""
+        assert extract_outline(tmp_path / "nonexistent.md") == []
+
+    def test_standard_markdown_headings(self, tmp_path):
+        """# / ## / ### headings are all recognised."""
+        md = tmp_path / "doc.md"
+        md.write_text(
+            "# Chapter One\n\nSome text.\n\n## Section 1.1\n\nMore text.\n\n### Sub 1.1.1\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        assert len(outline) == 3
+        assert outline[0] == {"title": "Chapter One", "line": 1}
+        assert outline[1] == {"title": "Section 1.1", "line": 5}
+        assert outline[2] == {"title": "Sub 1.1.1", "line": 9}
+
+    def test_bold_sec_item_heading(self, tmp_path):
+        """**ITEM N. TITLE** lines in SEC filings are recognised."""
+        md = tmp_path / "10k.md"
+        md.write_text(
+            "Cover page text.\n\n**ITEM 1. BUSINESS**\n\nBody.\n\n**ITEM 1A. RISK FACTORS**\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        assert len(outline) == 2
+        assert outline[0] == {"title": "ITEM 1. BUSINESS", "line": 3}
+        assert outline[1] == {"title": "ITEM 1A. RISK FACTORS", "line": 7}
+
+    def test_bold_part_heading(self, tmp_path):
+        """**PART I** / **PART II** headings are recognised."""
+        md = tmp_path / "10k.md"
+        md.write_text("**PART I**\n\n**PART II**\n\n**PART III**\n", encoding="utf-8")
+        outline = extract_outline(md)
+        assert len(outline) == 3
+        titles = [e["title"] for e in outline]
+        assert "PART I" in titles
+        assert "PART II" in titles
+        assert "PART III" in titles
+
+    def test_sec_cover_page_boilerplate_excluded(self, tmp_path):
+        """Address lines and short cover boilerplate must NOT appear in outline."""
+        md = tmp_path / "8k.md"
+        md.write_text(
+            "## **UNITED STATES SECURITIES AND EXCHANGE COMMISSION**\n\n**WASHINGTON, DC 20549**\n\n**CURRENT REPORT**\n\n**SIGNATURES**\n\n**TESLA, INC.**\n\n**ITEM 2.02. RESULTS OF OPERATIONS**\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        titles = [e["title"] for e in outline]
+        # Cover-page boilerplate should be excluded
+        assert "WASHINGTON, DC 20549" not in titles
+        assert "CURRENT REPORT" not in titles
+        assert "SIGNATURES" not in titles
+        assert "TESLA, INC." not in titles
+        # Real SEC heading must be included
+        assert "ITEM 2.02. RESULTS OF OPERATIONS" in titles
+
+    def test_chinese_headings_via_standard_markdown(self, tmp_path):
+        """Chinese annual report headings emitted as # by pymupdf4llm are captured."""
+        md = tmp_path / "annual.md"
+        md.write_text(
+            "# 第一节 公司简介\n\n内容。\n\n## 第三节 管理层讨论与分析\n\n分析内容。\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        assert len(outline) == 2
+        assert outline[0]["title"] == "第一节 公司简介"
+        assert outline[1]["title"] == "第三节 管理层讨论与分析"
+
+    def test_outline_capped_at_max_entries(self, tmp_path):
+        """When truncated, result has MAX_OUTLINE_ENTRIES real entries + 1 sentinel."""
+        lines = [f"# Heading {i}" for i in range(MAX_OUTLINE_ENTRIES + 10)]
+        md = tmp_path / "long.md"
+        md.write_text("\n".join(lines), encoding="utf-8")
+        outline = extract_outline(md)
+        # Last entry is the truncation sentinel
+        assert outline[-1] == {"truncated": True}
+        # Visible entries are exactly MAX_OUTLINE_ENTRIES
+        visible = [e for e in outline if not e.get("truncated")]
+        assert len(visible) == MAX_OUTLINE_ENTRIES
+
+    def test_no_truncation_sentinel_when_under_limit(self, tmp_path):
+        """Short documents produce no sentinel entry."""
+        lines = [f"# Heading {i}" for i in range(5)]
+        md = tmp_path / "short.md"
+        md.write_text("\n".join(lines), encoding="utf-8")
+        outline = extract_outline(md)
+        assert len(outline) == 5
+        assert not any(e.get("truncated") for e in outline)
+
+    def test_no_truncation_sentinel_at_exact_limit(self, tmp_path):
+        """A document with exactly MAX_OUTLINE_ENTRIES headings is not truncated."""
+        lines = [f"# Heading {i}" for i in range(MAX_OUTLINE_ENTRIES)]
+        md = tmp_path / "exact.md"
+        md.write_text("\n".join(lines), encoding="utf-8")
+        outline = extract_outline(md)
+        assert len(outline) == MAX_OUTLINE_ENTRIES
+        assert not any(e.get("truncated") for e in outline)
+
+    def test_blank_lines_and_whitespace_ignored(self, tmp_path):
+        """Blank lines between headings do not produce empty entries."""
+        md = tmp_path / "spaced.md"
+        md.write_text("\n\n# Title One\n\n\n\n# Title Two\n\n", encoding="utf-8")
+        outline = extract_outline(md)
+        assert len(outline) == 2
+        assert all(e["title"] for e in outline)
+
+    def test_inline_bold_not_confused_with_heading(self, tmp_path):
+        """Mid-sentence bold text must not be mistaken for a heading."""
+        md = tmp_path / "prose.md"
+        md.write_text(
+            "This sentence has **bold words** inside it.\n\nAnother with **MULTIPLE CAPS** inline.\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        assert outline == []
+
+    def test_split_bold_heading_academic_paper(self, tmp_path):
+        """**<num>** **<title>** lines from academic papers are recognised (Style 3)."""
+        md = tmp_path / "paper.md"
+        md.write_text(
+            "## **Attention Is All You Need**\n\n**1** **Introduction**\n\nBody text.\n\n**2** **Background**\n\nMore text.\n\n**3.1** **Encoder and Decoder Stacks**\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        titles = [e["title"] for e in outline]
+        assert "1 Introduction" in titles
+        assert "2 Background" in titles
+        assert "3.1 Encoder and Decoder Stacks" in titles
+
+    def test_split_bold_year_columns_excluded(self, tmp_path):
+        """Financial table headers like **2023** **2022** **2021** are NOT headings."""
+        md = tmp_path / "annual.md"
+        md.write_text(
+            "# Financial Summary\n\n**2023** **2022** **2021**\n\nRevenue 100 90 80\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        titles = [e["title"] for e in outline]
+        # Only the # heading should appear, not the year-column row
+        assert titles == ["Financial Summary"]
+
+    def test_adjacent_bold_spans_merged_in_markdown_heading(self, tmp_path):
+        """** ** artefacts inside a # heading are merged into clean plain text."""
+        md = tmp_path / "sec.md"
+        md.write_text(
+            "## **UNITED STATES** **SECURITIES AND EXCHANGE COMMISSION**\n\nBody text.\n",
+            encoding="utf-8",
+        )
+        outline = extract_outline(md)
+        assert len(outline) == 1
+        # Title must be clean — no ** ** artefacts
+        assert outline[0]["title"] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"
+
+
+# ---------------------------------------------------------------------------
+# Off-loop stat/write-back: cancellation drain and executor re-entrancy
+# (review follow-ups on the uploads conversion PR)
+# ---------------------------------------------------------------------------
+
+
+def test_cancelled_conversion_drains_write_and_removes_partial(tmp_path, monkeypatch):
+    """Cancel must not abandon the in-flight write, and must clean the partial file.
+
+    ``run_file_io`` awaits ``run_in_executor``, so a plain await would unwind
+    while the worker is still writing; the drained write delivers the
+    cancellation only after the worker settled, and the handler then removes
+    the partial output so repeated cancelled conversions cannot leave large
+    hidden staging files behind.
+    """
+    import threading
+    from pathlib import Path
+
+    started = threading.Event()
+    cancel_issued = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    real_write_text = Path.write_text
+
+    def _blocking_write_text(self, data, encoding=None):
+        started.set()
+        release.wait(timeout=10)
+        result = real_write_text(self, data, encoding=encoding)
+        done.set()
+        return result
+
+    # Seed the source BEFORE installing the patch, so the setup write is not
+    # captured by _blocking_write_text (which would pre-set started/done).
+    src = tmp_path / "doc.txt"
+    out = tmp_path / "doc.md"
+    src.write_text("hello")
+
+    # Isolate write cancellation from parser imports and conversion latency.
+    monkeypatch.setattr("deerflow.utils.file_conversion._do_convert", lambda _path, _converter: "hello")
+    monkeypatch.setattr(Path, "write_text", _blocking_write_text)
+
+    async def _scenario():
+        task = asyncio.create_task(convert_file_to_markdown(src, output_path=out))
+        assert await asyncio.to_thread(started.wait, 10), "the write worker never started"
+        task.cancel()
+        # Release the worker only after the cancel is in flight, so the
+        # ordering (cancel first, then the write settles) is forced and the
+        # assertion below cannot pass by racing the releaser.
+        cancel_issued.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # The drain invariant: the cancellation is delivered only after
+            # the in-flight write settled. A plain run_file_io await cancels
+            # immediately and leaves the worker running.
+            return done.is_set()
+        return "not-cancelled"
+
+    releaser = threading.Thread(target=lambda: (started.wait(10), cancel_issued.wait(10), release.set()), daemon=True)
+    releaser.start()
+    try:
+        settled = asyncio.run(_scenario())
+    finally:
+        release.set()
+        releaser.join(10)
+
+    assert settled is True, "cancellation was delivered before the in-flight write drained"
+    assert done.wait(timeout=10), "the write worker never settled"
+    assert not out.exists(), "partial output left behind after a cancelled conversion"
+
+
+def test_conversion_inside_file_io_worker_runs_nested_offload_inline(tmp_path, monkeypatch):
+    """A conversion started inside a file-IO worker must not re-enter the pool.
+
+    Project-document conversion runs its worker body through ``run_file_io``
+    and that body calls ``asyncio.run(convert_file_to_markdown(...))``, whose
+    own stat/write offloads used to submit to the same bounded executor —
+    deadlocking once every worker is busy (deterministically with a single
+    configured worker). ``run_file_io`` now runs nested calls inline in the
+    worker thread; this pins that behavior by thread identity.
+    """
+    import threading
+
+    from deerflow.utils import file_io
+
+    observed: dict[str, object] = {}
+
+    def _nested() -> str:
+        observed["nested_thread"] = threading.current_thread()
+        return "ok"
+
+    def _worker_body() -> str:
+        observed["worker_thread"] = threading.current_thread()
+        return asyncio.run(file_io.run_file_io(_nested))
+
+    assert asyncio.run(file_io.run_file_io(_worker_body)) == "ok"
+    assert observed["nested_thread"] is observed["worker_thread"], "nested run_file_io from inside a file-io worker must run inline; submitting to the same bounded executor can deadlock conversion"

@@ -1,5 +1,28 @@
+export interface MemoryFact {
+  id: string;
+  content: string;
+  category: string;
+  confidence: number;
+  createdAt: string;
+  source: string;
+  [key: string]: unknown;
+}
+
+export interface MemoryFactInput {
+  content: string;
+  category: string;
+  confidence: number;
+}
+
+export interface MemoryFactPatchInput {
+  content?: string;
+  category?: string;
+  confidence?: number;
+}
+
 export interface UserMemory {
   version: string;
+  revision?: number;
   lastUpdated: string;
   user: {
     workContext: {
@@ -11,6 +34,10 @@ export interface UserMemory {
       updatedAt: string;
     };
     topOfMind: {
+      summary: string;
+      updatedAt: string;
+    };
+    cognitiveStyle: {
       summary: string;
       updatedAt: string;
     };
@@ -29,12 +56,5 @@ export interface UserMemory {
       updatedAt: string;
     };
   };
-  facts: {
-    id: string;
-    content: string;
-    category: string;
-    confidence: number;
-    createdAt: string;
-    source: string;
-  }[];
+  facts: MemoryFact[];
 }

@@ -1,0 +1,23 @@
+{
+  "scope": "controlled production-middleware integration; synthetic input; summary intentionally drops exact codes",
+  "cases": [
+    {
+      "case": 0,
+      "model": "qwen3.8-flash-next",
+      "passed": false,
+      "error_type": "APIConnectionError"
+    },
+    {
+      "case": 1,
+      "model": "qwen3.8-flash-next",
+      "passed": false,
+      "error_type": "APIConnectionError"
+    },
+    {
+      "case": 2,
+      "model": "qwen3.8-flash-next",
+      "passed": false,
+      "error_type": "APIConnectionError"
+    }
+  ]
+}

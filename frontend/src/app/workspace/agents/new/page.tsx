@@ -1,8 +1,16 @@
 "use client";
 
-import { ArrowLeftIcon, BotIcon, CheckCircleIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  BotIcon,
+  CheckCircleIcon,
+  InfoIcon,
+  MoreHorizontalIcon,
+  SaveIcon,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import {
   PromptInput,
@@ -10,55 +18,135 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ArtifactsProvider } from "@/components/workspace/artifacts";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
-import { checkAgentName, getAgent } from "@/core/agents/api";
+import {
+  AgentNameCheckError,
+  AgentsApiDisabledError,
+  checkAgentName,
+  getAgent,
+} from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
-import { useThreadStream } from "@/core/threads/hooks";
+import {
+  buildHumanInputResponseText,
+  type HumanInputRequest,
+  type HumanInputResponse,
+} from "@/core/messages/human-input";
+import { safeLocalStorage } from "@/core/settings/local";
+import { getToolResultStatus, useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
+import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 type Step = "name" | "chat";
+type SetupAgentStatus = "idle" | "requested" | "completed";
 
 const NAME_RE = /^[A-Za-z0-9-]+$/;
+const SAVE_HINT_STORAGE_KEY = "deerflow.agent-create.save-hint-seen";
+const AGENT_READ_RETRY_DELAYS_MS = [200, 500, 1_000, 2_000];
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function getAgentWithRetry(agentName: string) {
+  for (const delay of [0, ...AGENT_READ_RETRY_DELAYS_MS]) {
+    if (delay > 0) {
+      await wait(delay);
+    }
+
+    try {
+      return await getAgent(agentName);
+    } catch {
+      // Retry until the write settles or the attempts are exhausted.
+    }
+  }
+
+  return null;
+}
 
 export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
 
-  // ── Step 1: name form ──────────────────────────────────────────────────────
   const [step, setStep] = useState<Step>("name");
   const [nameInput, setNameInput] = useState("");
   const [nameError, setNameError] = useState("");
   const [isCheckingName, setIsCheckingName] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agent, setAgent] = useState<Agent | null>(null);
-  // ── Step 2: chat ───────────────────────────────────────────────────────────
+  const [showSaveHint, setShowSaveHint] = useState(false);
+  const [setupAgentStatus, setSetupAgentStatus] =
+    useState<SetupAgentStatus>("idle");
 
-  // Stable thread ID — all turns belong to the same thread
+  // Each Save or later setup result supersedes earlier read-back callbacks.
+  const saveAttempt = useRef(0);
+  useEffect(
+    () => () => {
+      saveAttempt.current += 1;
+    },
+    [],
+  );
+
   const threadId = useMemo(() => uuid(), []);
 
-  const [thread, sendMessage] = useThreadStream({
-    threadId: step === "chat" ? threadId : undefined,
+  const { thread, sendMessage } = useThreadStream({
+    threadId: undefined,
     context: {
       mode: "flash",
       is_bootstrap: true,
     },
-    onToolEnd({ name }) {
-      if (name !== "setup_agent" || !agentName) return;
-      getAgent(agentName)
-        .then((fetched) => setAgent(fetched))
-        .catch(() => {
-          // agent write may not be flushed yet — ignore silently
-        });
+    onFinish(state) {
+      if (agent || setupAgentStatus !== "requested") {
+        return;
+      }
+      const attempt = ++saveAttempt.current;
+      const resultStatus = getToolResultStatus(state.messages, "setup_agent");
+      if (!agentName || resultStatus === "pending") {
+        setSetupAgentStatus("idle");
+        return;
+      }
+      if (resultStatus === "error") {
+        setSetupAgentStatus("idle");
+        toast.error(t.agents.agentSaveFailed);
+        return;
+      }
+      void getAgentWithRetry(agentName).then((fetched) => {
+        if (saveAttempt.current !== attempt) {
+          return;
+        }
+        if (fetched) {
+          setSetupAgentStatus("completed");
+          setAgent(fetched);
+          return;
+        }
+
+        setSetupAgentStatus("idle");
+        toast.error(t.agents.agentCreatedPendingRefresh);
+      });
     },
   });
-
-  // ── Handlers ───────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (typeof window === "undefined" || step !== "chat") {
+      return;
+    }
+    if (safeLocalStorage.getItem(SAVE_HINT_STORAGE_KEY) === "1") {
+      return;
+    }
+    setShowSaveHint(true);
+    safeLocalStorage.setItem(SAVE_HINT_STORAGE_KEY, "1");
+  }, [step]);
 
   const handleConfirmName = useCallback(async () => {
     const trimmed = nameInput.trim();
@@ -67,6 +155,7 @@ export default function NewAgentPage() {
       setNameError(t.agents.nameStepInvalidError);
       return;
     }
+
     setNameError("");
     setIsCheckingName(true);
     try {
@@ -75,30 +164,68 @@ export default function NewAgentPage() {
         setNameError(t.agents.nameStepAlreadyExistsError);
         return;
       }
-    } catch {
-      setNameError(t.agents.nameStepCheckError);
+    } catch (err) {
+      if (err instanceof AgentsApiDisabledError) {
+        setNameError(t.agents.nameStepApiDisabledError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "backend_unreachable"
+      ) {
+        setNameError(t.agents.nameStepNetworkError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "request_failed"
+      ) {
+        // Surface the backend-provided detail (e.g. validation error) when
+        // one is present, wrapped in a localised prefix so zh-CN users
+        // don't see a bare English string next to the surrounding Chinese
+        // UI. Falls back to the generic localised fallback when the backend
+        // sent no detail — `err.message` is unreliable for this branch
+        // because `checkAgentName` substitutes a generated fallback string
+        // ("Failed to check agent name: ${statusText}") when `detail` is
+        // missing, so testing `err.message` would always be truthy and the
+        // generated fallback would leak through.
+        setNameError(
+          err.detail
+            ? t.agents.nameStepCheckErrorWithDetail.replace(
+                "{detail}",
+                err.detail,
+              )
+            : t.agents.nameStepCheckError,
+        );
+      } else {
+        setNameError(t.agents.nameStepCheckError);
+      }
       return;
     } finally {
       setIsCheckingName(false);
     }
+
     setAgentName(trimmed);
     setStep("chat");
-    await sendMessage(threadId, {
-      text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
-      files: [],
-    });
+    await sendMessage(
+      threadId,
+      {
+        text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
+        files: [],
+      },
+      { agent_name: trimmed },
+    );
   }, [
     nameInput,
     sendMessage,
-    threadId,
-    t.agents.nameStepBootstrapMessage,
-    t.agents.nameStepInvalidError,
     t.agents.nameStepAlreadyExistsError,
+    t.agents.nameStepApiDisabledError,
+    t.agents.nameStepNetworkError,
+    t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
+    t.agents.nameStepCheckErrorWithDetail,
+    t.agents.nameStepInvalidError,
+    threadId,
   ]);
 
   const handleNameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !isIMEComposing(e)) {
       e.preventDefault();
       void handleConfirmName();
     }
@@ -114,25 +241,119 @@ export default function NewAgentPage() {
         { agent_name: agentName },
       );
     },
-    [thread.isLoading, sendMessage, threadId, agentName],
+    [agentName, sendMessage, thread.isLoading, threadId],
   );
 
-  // ── Shared header ──────────────────────────────────────────────────────────
+  const handleSubmitHumanInput = useCallback(
+    async (request: HumanInputRequest, response: HumanInputResponse) => {
+      if (!agentName) {
+        return false;
+      }
+
+      let sent = false;
+      await sendMessage(
+        threadId,
+        {
+          text: buildHumanInputResponseText(request, response),
+          files: [],
+        },
+        { agent_name: agentName },
+        {
+          additionalKwargs: {
+            hide_from_ui: true,
+            human_input_response: response,
+          },
+          onSent: () => {
+            sent = true;
+          },
+        },
+      );
+      return sent;
+    },
+    [agentName, sendMessage, threadId],
+  );
+
+  const handleSaveAgent = useCallback(async () => {
+    if (
+      !agentName ||
+      agent ||
+      thread.isLoading ||
+      setupAgentStatus !== "idle"
+    ) {
+      return;
+    }
+
+    const attempt = ++saveAttempt.current;
+    setSetupAgentStatus("requested");
+    setShowSaveHint(false);
+    try {
+      await sendMessage(
+        threadId,
+        { text: t.agents.saveCommandMessage, files: [] },
+        { agent_name: agentName },
+        { additionalKwargs: { hide_from_ui: true } },
+      );
+      if (saveAttempt.current === attempt) {
+        toast.success(t.agents.saveRequested);
+      }
+    } catch (error) {
+      if (saveAttempt.current !== attempt) {
+        return;
+      }
+      saveAttempt.current += 1;
+      setSetupAgentStatus("idle");
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    agent,
+    agentName,
+    sendMessage,
+    setupAgentStatus,
+    t.agents.saveCommandMessage,
+    t.agents.saveRequested,
+    thread.isLoading,
+    threadId,
+  ]);
 
   const header = (
-    <header className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        onClick={() => router.push("/workspace/agents")}
-      >
-        <ArrowLeftIcon className="h-4 w-4" />
-      </Button>
-      <h1 className="text-sm font-semibold">{t.agents.createPageTitle}</h1>
+    <header className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3">
+      <div className="flex items-center gap-3">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={() => router.push("/workspace/agents")}
+        >
+          <ArrowLeftIcon className="h-4 w-4" />
+        </Button>
+        <h1 className="text-sm font-semibold">{t.agents.createPageTitle}</h1>
+      </div>
+
+      {step === "chat" ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-sm" aria-label={t.agents.more}>
+              <MoreHorizontalIcon className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onSelect={() => void handleSaveAgent()}
+              disabled={[
+                Boolean(agent),
+                thread.isLoading,
+                setupAgentStatus !== "idle",
+              ].some(Boolean)}
+            >
+              <SaveIcon className="h-4 w-4" />
+              {setupAgentStatus === "requested"
+                ? t.agents.saving
+                : t.agents.save}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
     </header>
   );
-
-  // ── Step 1: name form ──────────────────────────────────────────────────────
 
   if (step === "name") {
     return (
@@ -166,9 +387,9 @@ export default function NewAgentPage() {
                 onKeyDown={handleNameKeyDown}
                 className={cn(nameError && "border-destructive")}
               />
-              {nameError && (
+              {nameError ? (
                 <p className="text-destructive text-sm">{nameError}</p>
-              )}
+              ) : null}
               <Button
                 className="w-full"
                 onClick={() => void handleConfirmName()}
@@ -183,8 +404,6 @@ export default function NewAgentPage() {
     );
   }
 
-  // ── Step 2: chat ───────────────────────────────────────────────────────────
-
   return (
     <ThreadContext.Provider value={{ thread }}>
       <ArtifactsProvider>
@@ -192,20 +411,31 @@ export default function NewAgentPage() {
           {header}
 
           <main className="flex min-h-0 flex-1 flex-col">
-            {/* ── Message area ── */}
+            {showSaveHint ? (
+              <div className="px-4 pt-4">
+                <div className="mx-auto w-full max-w-(--container-width-md)">
+                  <Alert>
+                    <InfoIcon className="h-4 w-4" />
+                    <AlertDescription>{t.agents.saveHint}</AlertDescription>
+                  </Alert>
+                </div>
+              </div>
+            ) : null}
+
             <div className="flex min-h-0 flex-1 justify-center">
               <MessageList
-                className="size-full pt-10"
+                className={cn("size-full", showSaveHint ? "pt-4" : "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                onSubmitHumanInput={
+                  agentName ? handleSubmitHumanInput : undefined
+                }
               />
             </div>
 
-            {/* ── Bottom action area ── */}
             <div className="bg-background flex shrink-0 justify-center border-t px-4 py-4">
               <div className="w-full max-w-(--container-width-md)">
                 {agent ? (
-                  // ✅ Success card
                   <div className="flex flex-col items-center gap-4 rounded-2xl border py-8 text-center">
                     <CheckCircleIcon className="text-primary h-10 w-10" />
                     <p className="font-semibold">{t.agents.agentCreated}</p>
@@ -228,8 +458,8 @@ export default function NewAgentPage() {
                     </div>
                   </div>
                 ) : (
-                  // 📝 Normal input
                   <PromptInput
+                    disabled={thread.isLoading}
                     onSubmit={({ text }) => void handleChatSubmit(text)}
                   >
                     <PromptInputTextarea

@@ -1,0 +1,663 @@
+"""Tests for tool_result_meta normalization logic."""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+
+import pytest
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
+
+from deerflow.agents.middlewares.tool_result_meta import (
+    TOOL_META_KEY,
+    TOOL_RESULT_ERROR_TYPES,
+    ToolResultMeta,
+    normalize_tool_message,
+    normalize_tool_result,
+    stamp_exception_meta,
+)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell probes")
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("progress_enabled", [False, True])
+@pytest.mark.parametrize(
+    "stdout,exit_code",
+    [
+        ("Error: this is sample text\nREAL_EXIT=0\n", 0),
+        ('{"error":"sample data"}\n', 0),
+        ("Error: example-api-secret\n", 0),
+        ("Exit Code: 7", 0),
+        ("OK: sample\n", 0),
+        ("OK: sample\n", 7),
+        ("Error: " + "x" * 500 + "\nExit Code: 7", 0),
+        ("OK: " + "x" * 500, 7),
+        ("", 124),
+    ],
+)
+@pytest.mark.asyncio
+async def test_native_bash_producer_status_reaches_graph_and_receipt(tmp_path, monkeypatch, mode, progress_enabled, stdout, exit_code):
+    from langchain.agents import create_agent
+    from langchain_core.callbacks import BaseCallbackHandler
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.config import app_config, paths
+    from deerflow.extensions.registry import EMPTY_EXTENSIONS
+    from deerflow.sandbox import sandbox_provider
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    from deerflow.sandbox.tools import bash_tool
+
+    class Model(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    class Requests(BaseCallbackHandler):
+        def __init__(self):
+            self.messages = []
+
+        def on_chat_model_start(self, serialized, messages, **kwargs):
+            self.messages.append(messages[0])
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "config.json"))
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    monkeypatch.setattr(paths, "_paths", None)
+    config = app_config.AppConfig.model_validate(
+        {
+            "models": [],
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+                "allow_host_bash": True,
+                "bash_output_max_chars": 0 if exit_code == 124 else 80,
+                "bash_command_timeout": 0.1 if exit_code == 124 else 5,
+                "environment": {"EXAMPLE_API_KEY": "example-api-secret"},
+            },
+            "memory": {"enabled": False},
+            "summarization": {"enabled": False},
+            "title": {"enabled": False},
+            "tool_progress": {"enabled": progress_enabled},
+        }
+    )
+    monkeypatch.setattr(app_config, "_app_config", config)
+    monkeypatch.setattr(app_config, "_app_config_is_custom", True)
+    provider = LocalSandboxProvider()
+    monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)
+    command = f"printf '%s' {shlex.quote(stdout)}; exit {exit_code}"
+    if exit_code == 124:
+        command = "while :; do :; done"
+    model = Model(
+        messages=iter(
+            [
+                AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": command}, "id": "bash-probe"}]),
+                AIMessage(content="Done."),
+            ]
+        )
+    )
+    graph = create_agent(model, tools=[bash_tool], middleware=build_middlewares({}, model_name=None, memory_enabled=False, app_config=config, extensions=EMPTY_EXTENSIONS), state_schema=ThreadState)
+    try:
+        state = {"messages": [HumanMessage(content="Run the supplied command once.")]}
+        context = {"thread_id": "bash-status-probe", "user_id": "test-user", "app_config": config}
+        captured = Requests()
+        invoke_config = {"callbacks": [captured]}
+        result = graph.invoke(state, context=context, config=invoke_config) if mode == "sync" else await graph.ainvoke(state, context=context, config=invoke_config)
+        message = next(m for m in result["messages"] if isinstance(m, ToolMessage) and m.name == "bash")
+        if exit_code == 124:
+            assert "timed out" in message.content.lower()
+            assert message.content.endswith("Exit Code: 124")
+        elif len(stdout) > 80:
+            assert len(message.content) <= 80
+            assert "truncated" in message.content
+            if exit_code:
+                assert message.content.endswith(f"Exit Code: {exit_code}")
+        else:
+            expected_output = stdout.replace("example-api-secret", "[redacted]")
+            assert message.content == expected_output + (f"\nExit Code: {exit_code}" if exit_code else "")
+        expected = "error" if exit_code else "success"
+        assert message.status == expected
+        assert message.additional_kwargs[TOOL_META_KEY]["status"] == expected
+        assert message.additional_kwargs[TOOL_META_KEY]["source"] == "tool_return"
+        assert message.additional_kwargs[TOOL_META_KEY]["exit_code"] == exit_code
+        assert message.additional_kwargs["deerflow_tool_receipt"]["status"] == expected
+        projected = next(m for m in captured.messages[-1] if isinstance(m, ToolMessage) and m.name == "bash")
+        assert json.loads(projected.content) == {TOOL_META_KEY: {"status": expected, "source": "tool_return"}, "content": message.content}
+    finally:
+        provider.shutdown()
+
+
+def _make_msg(content: str, *, status: str = "success", kwargs: dict[str, object] | None = None) -> ToolMessage:
+    return ToolMessage(
+        content=content,
+        tool_call_id="tc-1",
+        name="test_tool",
+        status=status,
+        additional_kwargs=kwargs or {},
+    )
+
+
+def _meta(msg: ToolMessage) -> dict[str, object]:
+    return msg.additional_kwargs[TOOL_META_KEY]
+
+
+def test_existing_meta_is_preserved():
+    existing = {"status": "success", "source": "custom"}
+    msg = _make_msg("hello", kwargs={TOOL_META_KEY: existing})
+    result = normalize_tool_message(msg)
+    assert result.additional_kwargs[TOOL_META_KEY] is existing
+
+
+def test_legacy_read_file_error_prefix_is_classified_as_failure():
+    msg = ToolMessage(content="Error: File not found: /workspace/missing.txt", tool_call_id="read", name="read_file")
+
+    meta = _meta(normalize_tool_message(msg))
+
+    assert meta["status"] == "error"
+    assert meta["error_type"] == "unknown"
+    assert meta["source"] == "tool_return"
+
+
+def test_stamped_read_file_success_may_start_with_error_prefix():
+    metadata = {
+        "status": "success",
+        "error_type": None,
+        "recoverable_by_model": True,
+        "recommended_next_action": "continue",
+        "source": "tool_return",
+    }
+    msg = ToolMessage(
+        content="Error: is an example shown in this document.",
+        tool_call_id="read",
+        name="read_file",
+        additional_kwargs={TOOL_META_KEY: metadata},
+    )
+
+    result = normalize_tool_message(msg)
+
+    assert _meta(result) is metadata
+    assert _meta(result)["status"] == "success"
+
+
+@pytest.mark.parametrize("name", ["bash", "bash_tool"])
+@pytest.mark.parametrize("content", ["\nExit Code: 1", "12 passed, 1 error\nExit Code: 7", "Command exited with code 3", "partial output\nExit Code: -9", "Command timed out\nExit Code: 124"])
+def test_bash_nonzero_exit_marker_is_a_recoverable_error(name, content):
+    msg = ToolMessage(content=content, tool_call_id="bash-1", name=name)
+    normalize_tool_message(msg)
+    assert _meta(msg) == {
+        "status": "error",
+        "error_type": "unknown",
+        "recoverable_by_model": True,
+        "recommended_next_action": "try_alternative",
+        "source": "content_analysis",
+    }
+
+
+def test_bash_nonzero_exit_repairs_legacy_analysis_success_without_changing_producer_meta():
+    legacy = {"status": "success", "source": "content_analysis"}
+    msg = ToolMessage(content="\nExit Code: 1", tool_call_id="bash-1", name="bash", additional_kwargs={TOOL_META_KEY: legacy, "deerflow_tool_receipt": {"status": "success"}})
+    normalize_tool_message(msg)
+    assert _meta(msg)["status"] == "error"
+    assert legacy == {"status": "success", "source": "content_analysis"}
+    assert msg.additional_kwargs["deerflow_tool_receipt"]["status"] == "success"
+
+
+@pytest.mark.parametrize("source", ["tool_return", "exception", "progress_middleware", "custom"])
+def test_bash_nonzero_exit_preserves_explicit_producer_meta(source):
+    existing = {"status": "success", "source": source}
+    msg = ToolMessage(content="\nExit Code: 1", tool_call_id="bash-1", name="bash", additional_kwargs={TOOL_META_KEY: existing})
+    assert _meta(normalize_tool_message(msg)) is existing
+
+
+@pytest.mark.parametrize(
+    "name,content",
+    [
+        ("bash", "ok\nExit Code: 0"),
+        ("bash", "Command exited with code 0"),
+        ("bash", "Exit Code: 1\nordinary final output"),
+        ("bash", "validating error path: Command exited with code 3\n5 passed"),
+        ("bash", "A document says Exit Code: 1"),
+        ("read_file", "\nExit Code: 1"),
+        ("web_fetch", "Command exited with code 3"),
+    ],
+)
+def test_bash_exit_marker_does_not_classify_other_tool_content_or_prose(name, content):
+    msg = ToolMessage(content=content, tool_call_id="call-1", name=name)
+    assert _meta(normalize_tool_message(msg))["status"] == "success"
+
+
+def test_bash_exit_status_does_not_classify_arbitrary_stdout_as_an_auth_error():
+    msg = ToolMessage(content="Processed row 403\nExit Code: 1", tool_call_id="bash-1", name="bash")
+    assert _meta(normalize_tool_message(msg))["error_type"] == "unknown"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX inert shell command")
+@pytest.mark.parametrize(
+    "command,output,status",
+    [
+        (": attempt-0; exit 1", "\nExit Code: 1", "error"),
+        ("printf 'x\\n' | grep z", "\nExit Code: 1", "error"),
+        ("printf 'x\\n' | grep z || true", "(no output)", "success"),
+    ],
+)
+def test_native_bash_exit_is_stamped_before_receipt(monkeypatch, command, output, status):
+    from types import SimpleNamespace
+
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.sandbox.local import local_sandbox
+
+    monkeypatch.setattr(local_sandbox, "build_sandbox_env", lambda _injected: {"PATH": os.defpath})
+    actual = local_sandbox.LocalSandbox("exit-status-probe").execute_command(command, timeout=5)
+    assert actual == output
+    request = SimpleNamespace(tool_call={"id": "bash-1", "name": "bash", "args": {"command": command}})
+    errors = ToolErrorHandlingMiddleware()
+    result = ToolReceiptMiddleware().wrap_tool_call(request, lambda req: errors.wrap_tool_call(req, lambda _: ToolMessage(content=actual, tool_call_id="bash-1", name="bash")))
+    assert _meta(result)["status"] == status
+    assert _meta(result)["recoverable_by_model"] is True
+    assert result.additional_kwargs["deerflow_tool_receipt"]["status"] == status
+
+
+@pytest.mark.parametrize(
+    "snippet,expected_type",
+    [
+        ("Error: 401 unauthorized", "unknown"),
+        ("Error: permission denied for path", "unknown"),
+        ("Error: 429 rate limit exceeded", "unknown"),
+        ("Error: connection timeout", "unknown"),
+        ("Error: tool not configured", "unknown"),
+        ("Error: no results found for query", "unknown"),
+        ("Error: file not found", "unknown"),
+        ("Error: internal error 500", "unknown"),
+        ("Error: something completely unexpected happened", "unknown"),
+    ],
+)
+def test_error_prefix_classification(snippet: str, expected_type: str):
+    msg = _make_msg(snippet, status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == expected_type
+    assert m["error_type"] in TOOL_RESULT_ERROR_TYPES
+    assert m["source"] == "tool_return"
+
+
+def test_auth_error_is_unrecoverable_and_stop():
+    msg = _make_msg("Error: invalid api key", status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["recoverable_by_model"] is True
+    assert m["recommended_next_action"] == "try_alternative"
+
+
+def test_missing_key_prose_does_not_infer_config_or_auth():
+    msg = _make_msg("Error: no api key configured", status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["error_type"] == "unknown"
+    assert m["recommended_next_action"] == "try_alternative"
+    assert m["recoverable_by_model"] is True
+
+
+def test_rate_limited_error_suggests_summarize():
+    msg = _make_msg("Error: rate limited", status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["recommended_next_action"] == "try_alternative"
+    assert m["recoverable_by_model"] is True
+
+
+def test_no_results_prose_does_not_prescribe_rewrite():
+    msg = _make_msg("Error: no results found", status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["recoverable_by_model"] is True
+    assert m["recommended_next_action"] == "try_alternative"
+
+
+def test_nonstd_error_status_does_not_classify_from_content():
+    msg = _make_msg("ConnectionError: connection refused", status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["source"] == "tool_return"
+    assert m["error_type"] == "unknown"
+
+
+def test_nonstd_error_status_timeout_content():
+    msg = _make_msg("timeout occurred", status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["source"] == "tool_return"
+    assert m["error_type"] == "unknown"
+
+
+def test_nonstd_error_status_json_classifies_from_error_field():
+    content = '{"error": "api limit exceeded", "query": "connection test timeout"}'
+    msg = _make_msg(content, status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["source"] == "tool_return"
+    assert m["error_type"] == "unknown"
+
+
+def test_nonstd_error_status_json_no_error_key_is_unknown():
+    content = '{"message": "connection refused"}'
+    msg = _make_msg(content, status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown", "JSON dict with no 'error' key must resolve to unknown"
+
+
+def test_nonstd_error_status_json_no_error_key_with_dangerous_field_is_unknown():
+    content = '{"user_id": 401, "action": "login"}'
+    msg = _make_msg(content, status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown"
+    assert m["recommended_next_action"] != "stop", "spurious 401 in non-error field must not trigger stop"
+
+
+def test_nonstd_error_status_non_json_content_stays_unknown():
+    content = "connection refused: remote host unreachable"
+    msg = _make_msg(content, status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown"
+
+
+def test_json_error_field_dict_is_serialized_not_repr():
+    import json as _json
+
+    error_val = [{"loc": ["body"], "msg": "missing required field"}]
+    content = _json.dumps({"error": error_val})
+    msg = _make_msg(content, status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown"
+
+
+def test_no_results_prose_preserves_success_status():
+    for phrase in ("no results found", "No Content Found here", "no images found for query"):
+        msg = _make_msg(phrase, status="success")
+        result = normalize_tool_message(msg)
+        m = _meta(result)
+        assert m["status"] == "success", f"expected success for: {phrase!r}"
+        assert m["recommended_next_action"] == "continue"
+
+
+def test_partial_markers_detected():
+    for marker in ("partial results available", "limited results returned", "truncated output", "results may be incomplete"):
+        msg = _make_msg(f"Here are some {marker} from the search.", status="success")
+        result = normalize_tool_message(msg)
+        m = _meta(result)
+        assert m["status"] == "success", f"expected success for: {marker}"
+        assert m["recommended_next_action"] == "continue"
+
+
+def test_short_terse_success_is_not_partial():
+    # Mutation tools can legitimately return a short acknowledgment.
+    msg = _make_msg("Ok.", status="success")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "success"
+    assert m["source"] == "tool_return"
+
+
+def test_empty_content_is_not_partial():
+    msg = _make_msg("", status="success")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "success"
+
+
+def test_substantial_content_is_success():
+    content = "A" * 200
+    msg = _make_msg(content, status="success")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "success"
+    assert m["source"] == "tool_return"
+    assert m["recommended_next_action"] == "continue"
+    assert m["error_type"] is None
+
+
+def test_tool_result_meta_from_dict():
+    msg = _make_msg("A" * 200)
+    result = normalize_tool_message(msg)
+    meta_dict = _meta(result)
+    meta = ToolResultMeta(**meta_dict)
+    assert meta.status == "success"
+    assert meta.error_type is None
+    assert meta.recommended_next_action == "continue"
+
+
+def test_stamp_exception_meta_classifies_from_exc_info_not_content():
+    msg = _make_msg("Error: no results found", status="error")
+    result = stamp_exception_meta(msg, ConnectionError("connection refused"))
+    m = _meta(result)
+    assert m["source"] == "exception"
+    assert m["error_type"] == "transient"
+
+
+def test_stamp_exception_meta_overwrites_existing_meta():
+    pre_existing = {TOOL_META_KEY: {"source": "tool_return", "error_type": "unknown"}}
+    msg = _make_msg("Error: no results found", status="error", kwargs=pre_existing)
+    result = stamp_exception_meta(msg, PermissionError("access denied"))
+    m = _meta(result)
+    assert m["source"] == "exception"
+    assert m["error_type"] == "permission"
+
+
+def test_stamp_exception_meta_preserves_other_additional_kwargs():
+    msg = _make_msg("irrelevant", status="error", kwargs={"subagent_status": "running"})
+    result = stamp_exception_meta(msg, TimeoutError("timed out"))
+    assert result.additional_kwargs["subagent_status"] == "running"
+    assert TOOL_META_KEY in result.additional_kwargs
+
+
+def test_normalize_tool_result_passthrough_command():
+    cmd = Command(goto="next_node")
+    result = normalize_tool_result(cmd)
+    assert result is cmd
+
+
+def test_normalize_tool_result_stamps_tool_message():
+    msg = _make_msg("A" * 200)
+    result = normalize_tool_result(msg)
+    assert isinstance(result, ToolMessage)
+    assert TOOL_META_KEY in result.additional_kwargs
+
+
+def test_normalize_json_error_config_classified_as_error():
+    content = '{"error": "BRAVE_SEARCH_API_KEY is not configured", "query": "test"}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown"
+    assert m["source"] == "tool_return"
+
+
+def test_normalize_json_error_no_results_classified_correctly():
+    content = '{"error": "No results found", "query": "test"}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown"
+    assert m["recoverable_by_model"] is True
+
+
+def test_normalize_json_null_error_not_treated_as_error():
+    content = '{"error": null, "query": "test"}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] != "error"
+
+
+def test_normalize_json_no_error_key_not_treated_as_error():
+    content = '{"results": [{"title": "page one", "url": "https://example.com/one", "content": "summary one"}], "total": 1}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "success"
+
+
+def test_normalize_malformed_json_not_treated_as_error():
+    content = '{"error": "broken json'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] != "error"
+
+
+def test_normalize_json_error_with_leading_whitespace():
+    content = '  {"error": "No results found", "query": "test"}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown"
+
+
+def test_normalize_json_numeric_error_classified_correctly():
+    content = '{"error": 404, "query": "test"}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown"
+
+
+def test_normalize_json_zero_error_not_treated_as_error():
+    content = '{"error": 0, "query": "test"}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] != "error"
+
+
+def test_normalize_json_false_error_not_treated_as_error():
+    content = '{"error": false, "query": "test"}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] != "error"
+
+
+def test_normalize_json_boolean_true_error_classified_as_unknown():
+    """Boolean True in the error field means 'an error occurred' and must be classified.
+
+    A boolean error flag supplies no category, so the result is error/unknown.
+    This is intentional: a boolean True error is a real error with no further detail.
+    """
+    content = '{"error": true, "query": "test"}'
+    msg = _make_msg(content)
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == "unknown"
+    assert m["recoverable_by_model"] is True
+    assert m["recommended_next_action"] == "try_alternative"
+
+
+@pytest.mark.parametrize(
+    "error_value",
+    ["none", "None", "NONE", "null", "Null", "false", "False", "no", "ok", "success", "n/a", ""],
+)
+def test_normalize_json_semantic_zero_error_string_not_treated_as_error(error_value: str):
+    """M2 regression: error field containing a conventional 'no-error' string must not trigger misclassification.
+
+    Tools sometimes return {"error": "none", "results": [...]} on success.
+    The string "none" is truthy in Python, so without this guard the message
+    would have been classified as error (unknown), inflating stagnation counters.
+
+    Note: the empty-string case ("") is handled by the falsy guard (`if not error: return None`)
+    in _extract_json_error_text rather than by _SEMANTIC_ZERO_ERROR_STRINGS.  Both paths produce
+    the same outcome (no misclassification), but the mechanism differs from the other cases here.
+    """
+    content = json.dumps({"error": error_value, "results": ["item1", "item2", "item3"]})
+    msg = _make_msg(content, status="success")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] != "error", f'error="{error_value}" should not be treated as an error; got status={m["status"]!r}'
+
+
+@pytest.mark.parametrize(
+    "content, expected_error_type",
+    [
+        ("Error: HTTP 500 Internal Server Error", "unknown"),
+        ("Error: returned status 500", "unknown"),
+        ("Error: 401 Unauthorized", "unknown"),
+        ("Error: 404 Not Found", "unknown"),
+        ("Error: took 500ms to respond", "unknown"),
+        ("Error: query returned 4010 rows", "unknown"),
+        ("Error: batch 401A failed", "unknown"),
+        ("Error: response contained 5000 items", "unknown"),
+    ],
+)
+def test_numeric_codes_in_prose_do_not_determine_error_type(content: str, expected_error_type: str):
+    """HTTP-looking prose and embedded numbers are diagnostic text only."""
+    msg = _make_msg(content, status="error")
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["error_type"] == expected_error_type, f"{content!r} → expected {expected_error_type!r}, got {m['error_type']!r}"
+
+
+@pytest.mark.parametrize(
+    "subagent_status",
+    ["failed", "cancelled", "timed_out", "polling_timed_out"],
+)
+def test_subagent_failure_statuses_stamp_error(subagent_status: str):
+    """Task failures leave ToolMessage.status=success and no Error: prefix."""
+    msg = _make_msg(
+        f"Task {subagent_status.replace('_', ' ')}. Result: boom",
+        status="success",
+        kwargs={"subagent_status": subagent_status, "subagent_error": "connection timeout"},
+    )
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["source"] == "tool_return"
+    assert m["error_type"] == ("transient" if subagent_status in {"timed_out", "polling_timed_out"} else "unknown")
+    assert result.additional_kwargs["subagent_status"] == subagent_status
+
+
+def test_subagent_completed_still_content_analyzed():
+    msg = _make_msg(
+        "Task Succeeded. Result: ok",
+        status="success",
+        kwargs={"subagent_status": "completed"},
+    )
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "success"
+
+
+@pytest.mark.parametrize(
+    "subagent_status",
+    ["failed", "cancelled", "timed_out", "polling_timed_out"],
+)
+def test_normalize_tool_result_command_task_failures(subagent_status: str):
+    msg = _make_msg(
+        f"Task {subagent_status}. detail",
+        status="success",
+        kwargs={"subagent_status": subagent_status, "subagent_error": "Task failed"},
+    )
+    cmd = Command(update={"messages": [msg]})
+    result = normalize_tool_result(cmd, tool_call_id="tc-1")
+    assert isinstance(result, Command)
+    stamped = result.update["messages"][0]
+    assert _meta(stamped)["status"] == "error"

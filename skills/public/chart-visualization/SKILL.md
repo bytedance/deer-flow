@@ -1,7 +1,7 @@
 ---
 name: chart-visualization
 description: This skill should be used when the user wants to visualize data. It intelligently selects the most suitable chart type from 26 available options, extracts parameters based on detailed specifications, and generates a chart image using a JavaScript script.
-dependency:
+compatibility:
   nodejs: ">=18.0.0"
 ---
 
@@ -59,7 +59,8 @@ node ./scripts/generate.js '<payload_json>'
 ```
 
 ### 4. Result Return
-The script will output the URL of the generated chart image.
+The script prints each generated chart's result on stdout (the image URL for chart types; text or JSON for map tools).
+A missing `tool`, an unknown tool, or a failed chart-service request is written to stderr. The process exits with status 1 if any item in the batch fails, after printing URLs for the items that succeeded. Present a URL only when the command exits 0.
 Return the following to the user:
 - The image URL.
 - The complete `args` (specification) used for generation.

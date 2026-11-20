@@ -1,0 +1,13 @@
+# Standalone deps for the trace-based behavioural suite (tests/monocle/).
+#
+# Kept out of backend/pyproject.toml on purpose: monocle_test_tools hard-depends
+# on the ML eval stack (bert-score, sentence-transformers, transformers -> torch
+# + the CUDA wheels, ~48 packages, +950 lines in uv.lock). Isolating it here
+# keeps that weight out of the app's locked deps. The suite skips cleanly
+# (pytest.importorskip) when this is not installed.
+#
+# Pinned to 0.8.8: the file trace source the offline example loads
+# (with_trace_source("file", trace_path=...)) does not exist in 0.7.x.
+monocle_test_tools==0.8.8
+# Auto-loads the repo .env for the live tests (optional).
+python-dotenv>=1.0

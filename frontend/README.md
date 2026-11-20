@@ -2,6 +2,8 @@
 
 Like the original DeerFlow 1.0, we would love to give the community a minimalistic and easy-to-use web interface with a more modern and flexible architecture.
 
+Switching accounts reloads projects, custom agents, models, and other cached workspace data for the new account. Logging out immediately hides the previous account's data; refreshing the same account preserves its cache.
+
 ## Tech Stack
 
 - **Framework**: [Next.js 16](https://nextjs.org/) with [App Router](https://nextjs.org/docs/app)
@@ -35,14 +37,29 @@ pnpm dev
 # The app will be available at http://localhost:3000
 ```
 
-### Build
+### Build & Test
 
 ```bash
 # Type check
 pnpm typecheck
 
+# Check formatting
+pnpm format
+
+# Apply formatting
+pnpm format:write
+
 # Lint
 pnpm lint
+
+# Run unit tests
+pnpm test
+
+# One-time setup: install Playwright Chromium browser
+pnpm exec playwright install chromium
+
+# Run E2E tests (builds and starts production server automatically)
+pnpm test:e2e
 
 # Build for production
 pnpm build
@@ -50,6 +67,11 @@ pnpm build
 # Start production server
 pnpm start
 ```
+
+Production builds recreate `public/_pagefind/` from the current documentation,
+with separate English and Chinese indexes. The index step replaces its generated
+output directory to prevent old assets accumulating. Mobile docs search results scroll inside
+the menu and close it after selection, including the section already open.
 
 ## Site Map
 
@@ -67,18 +89,22 @@ pnpm start
 Key environment variables (see `.env.example` for full list):
 
 ```bash
-# Backend API URLs (optional, uses nginx proxy by default)
+# Backend API URL (optional, uses local Next.js/nginx proxy by default)
 NEXT_PUBLIC_BACKEND_BASE_URL="http://localhost:8001"
-# LangGraph API URLs (optional, uses nginx proxy by default)
-NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:2024"
+# LangGraph-compatible API URL (optional, uses local Next.js/nginx proxy by default)
+NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:8001/api"
 ```
 
 ## Project Structure
 
 ```
+tests/
+├── e2e/                    # E2E tests (Playwright, Chromium, mocked backend)
+└── unit/                   # Unit tests (mirrors src/ layout)
 src/
 ├── app/                    # Next.js App Router pages
 │   ├── api/                # API routes
+│   ├── showcase/           # Allowlisted public read-only demos
 │   ├── workspace/          # Main workspace pages
 │   └── mock/               # Mock/demo pages
 ├── components/             # React components
@@ -101,27 +127,50 @@ src/
 │   └── utils/              # Utility functions
 ├── hooks/                  # Custom React hooks
 ├── lib/                    # Shared libraries & utilities
-├── server/                 # Server-side code (Not available yet)
-│   └── better-auth/        # Authentication setup (Not available yet)
+├── server/                 # Server-side code
+│   └── better-auth/        # Authentication setup and session helpers
 └── styles/                 # Global styles
 ```
 
 ## Scripts
 
-| Command | Description |
-|---------|-------------|
-| `pnpm dev` | Start development server with Turbopack |
-| `pnpm build` | Build for production |
-| `pnpm start` | Start production server |
-| `pnpm lint` | Run ESLint |
-| `pnpm lint:fix` | Fix ESLint issues |
-| `pnpm typecheck` | Run TypeScript type checking |
-| `pnpm check` | Run both lint and typecheck |
+| Command             | Description                           |
+| ------------------- | ------------------------------------- |
+| `pnpm dev`          | Start development server with Webpack |
+| `pnpm build`        | Build for production                  |
+| `pnpm start`        | Start production server               |
+| `pnpm test`         | Run unit tests with Rstest            |
+| `pnpm test:e2e`     | Run E2E tests with Playwright         |
+| `pnpm format`       | Check formatting with Prettier        |
+| `pnpm format:write` | Apply formatting with Prettier        |
+| `pnpm lint`         | Run ESLint                            |
+| `pnpm lint:fix`     | Fix ESLint issues                     |
+| `pnpm typecheck`    | Run TypeScript type checking          |
+| `pnpm check`        | Run both lint and typecheck           |
 
 ## Development Notes
 
+HTML artifact previews keep an opaque iframe sandbox. Static sibling images,
+responsive image sources, classic scripts, stylesheets, CSS imports and CSS
+`url()` resources in the same thread's artifact route are fetched by the
+authenticated parent and inlined as data URLs. Existing external
+resources and external `<base>` URLs retain their browser behavior. Resource
+preparation is capped at 32 resources, 4 MiB per resource, 16 MiB total, eight
+nested CSS imports, 24 MiB of expanded references and ten seconds; unavailable or oversized resources show a
+partial-preview notice. Switching artifacts cancels preparation and releases
+the generated document Blob URL.
+Resource 401 responses remain local to the partial preview; only the document
+load uses the application's login-redirect policy. Preparation preserves the
+original doctype (including its absence) and handles inline SVG styles.
+
+This supports static generated reports rather than a complete website runtime.
+ES module imports, resources created dynamically by JavaScript, `fetch()`/XHR,
+iframes and navigation still follow opaque-origin browser restrictions and do
+not receive the parent session. View source or download the files when a report
+requires those features.
+
 - Uses pnpm workspaces (see `packageManager` in package.json)
-- Turbopack enabled by default in development for faster builds
+- Webpack is the default development bundler until the upstream Turbopack PostCSS worker leak is fixed in a stable Next.js release (#5132). Set `DEER_FLOW_DEV_BUNDLER=turbo` to opt in to Turbopack for local diagnosis, or `DEER_FLOW_DEV_BUNDLER=webpack` to select Webpack explicitly. Reconsider the default after the stable fix is verified on macOS arm64 and Linux.
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
 

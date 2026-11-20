@@ -4,15 +4,16 @@ from deerflow.subagents.config import SubagentConfig
 
 GENERAL_PURPOSE_CONFIG = SubagentConfig(
     name="general-purpose",
-    description="""A capable agent for complex, multi-step tasks that require both exploration and action.
+    description="""A capable agent for bounded exploration and action when there is clear delegation benefit.
 
 Use this subagent when:
-- The task requires both exploration and modification
-- Complex reasoning is needed to interpret results
-- Multiple dependent steps must be executed
-- The task would benefit from isolated context management
+- Its specialist tools, skills, model, or instructions materially improve the result
+- It owns one independent, non-overlapping part of genuinely parallel work
+- A bounded, context-heavy investigation should be isolated from the lead context
 
-Do NOT use for simple, single-step operations.""",
+Do NOT use merely because work is complex or multi-step, or merely because it is sequential;
+a bounded dependent chain may still be delegated when specialist or context-isolation benefit
+clearly wins. Do not use when it would duplicate repository discovery or overlap side effects.""",
     system_prompt="""You are a general-purpose subagent working on a delegated task. Your job is to complete the task autonomously and return a clear, actionable result.
 
 <guidelines>
@@ -23,6 +24,25 @@ Do NOT use for simple, single-step operations.""",
 - Return a concise summary of what you accomplished
 - Do NOT ask for clarification - work with the information provided
 </guidelines>
+
+<tool_restrictions>
+You are a subagent - the `task` tool is NOT available to you.
+You must NEVER attempt to call `task` or dispatch further subagents.
+Complete your delegated work directly using `bash`, `web_search`, `web_fetch`,
+`read_file`, and other available tools.
+If parallelism is needed, use bash background processes or handle steps sequentially.
+</tool_restrictions>
+
+<file_editing_workflow>
+When revising an existing file, prefer `str_replace` over `write_file` —
+it sends only the diff and avoids re-emitting the whole file (mirrors
+Claude Code's Edit and Codex's apply_patch). When writing long new
+content from scratch, split it into sections: the first `write_file`
+call creates the file, then use `write_file` with append=True to extend
+it section by section. This keeps each tool call small and avoids
+mid-stream chunk-gap timeouts on oversized single-shot writes.
+(See issue #3189.)
+</file_editing_workflow>
 
 <output_format>
 When you complete the task, provide:
@@ -38,10 +58,13 @@ You have access to the same sandbox environment as the parent agent:
 - User uploads: `/mnt/user-data/uploads`
 - User workspace: `/mnt/user-data/workspace`
 - Output files: `/mnt/user-data/outputs`
+- Deployment-configured custom mounts may also be available at other absolute container paths; use them directly when the task references those mounted directories
+- Treat `/mnt/user-data/workspace` as the default working directory for coding and file IO
+- Prefer relative paths from the workspace, such as `hello.txt`, `../uploads/input.csv`, and `../outputs/result.md`, when writing scripts or shell commands
 </working_directory>
 """,
     tools=None,  # Inherit all tools from parent
     disallowed_tools=["task", "ask_clarification", "present_files"],  # Prevent nesting and clarification
     model="inherit",
-    max_turns=50,
+    max_turns=150,
 )

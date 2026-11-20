@@ -15,7 +15,7 @@
         "id": "6409a240-5eeb-4df5-8681-4ad80a1daf7e"
       },
       {
-        "content": "<uploaded_files>\nNo files have been uploaded yet.\n</uploaded_files>",
+        "content": "<current_uploads>\nNo files have been uploaded yet.\n</current_uploads>",
         "additional_kwargs": {},
         "response_metadata": {},
         "type": "system",
@@ -113,9 +113,7 @@
           {
             "name": "present_files",
             "args": {
-              "filepaths": [
-                "/mnt/user-data/outputs/index.html"
-              ]
+              "filepaths": ["/mnt/user-data/outputs/index.html"]
             },
             "id": "present_files:2",
             "type": "tool_call"
@@ -159,9 +157,7 @@
     },
     "uploaded_files": [],
     "title": "Interactive 3D Weather Forecast Interface",
-    "artifacts": [
-      "/mnt/user-data/outputs/index.html"
-    ]
+    "artifacts": ["/mnt/user-data/outputs/index.html"]
   },
   "next": [],
   "tasks": [],

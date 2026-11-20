@@ -5,6 +5,7 @@ import json
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from deerflow.models import openai_codex_provider as codex_provider_module
 from deerflow.models.claude_provider import ClaudeChatModel
 from deerflow.models.credential_loader import CodexCliCredential
 from deerflow.models.openai_codex_provider import CodexChatModel
@@ -20,6 +21,44 @@ def test_codex_provider_requires_credentials(monkeypatch):
 
     with pytest.raises(ValueError, match="Codex CLI credential not found"):
         CodexChatModel()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"access_token": "   "},
+        {"token": "\t\n"},
+        {"tokens": {"access_token": " \r\n "}},
+    ],
+)
+def test_codex_provider_rejects_blank_file_credentials(tmp_path, monkeypatch, payload):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    with pytest.raises(ValueError, match="Codex CLI credential not found"):
+        CodexChatModel(model="gpt-5.4")
+
+
+def test_codex_provider_uses_normalized_access_token_in_authorization_header(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"access_token": "  codex-access-token\n"}), encoding="utf-8")
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    captured: dict[str, dict] = {}
+
+    def capture_request(self, headers, payload):
+        captured["headers"] = headers
+        captured["payload"] = payload
+        return {"output": [], "usage": {}}
+
+    monkeypatch.setattr(CodexChatModel, "_stream_response", capture_request)
+
+    model = CodexChatModel(model="gpt-5.4")
+    model._call_codex_api([HumanMessage(content="hello")])
+
+    assert captured["headers"]["Authorization"] == "Bearer codex-access-token"
+    assert captured["payload"]["input"] == [{"role": "user", "content": "hello"}]
 
 
 def test_codex_provider_concatenates_multiple_system_messages(monkeypatch):
@@ -147,3 +186,124 @@ def test_codex_provider_parses_valid_tool_arguments(monkeypatch):
     )
 
     assert result.generations[0].message.tool_calls == [{"name": "bash", "args": {"cmd": "pwd"}, "id": "tc-1", "type": "tool_call"}]
+
+
+class _FakeResponseStream:
+    def __init__(self, lines: list[str]):
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_lines(self):
+        yield from self._lines
+
+
+class _FakeHttpxClient:
+    def __init__(self, lines: list[str], *_args, **_kwargs):
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def stream(self, *_args, **_kwargs):
+        return _FakeResponseStream(self._lines)
+
+
+def test_codex_provider_merges_streamed_output_items_when_completed_output_is_empty(monkeypatch):
+    monkeypatch.setattr(
+        CodexChatModel,
+        "_load_codex_auth",
+        lambda self: CodexCliCredential(access_token="token", account_id="acct"),
+    )
+
+    lines = [
+        'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","content":[{"type":"output_text","text":"Hello from stream"}]}}',
+        'data: {"type":"response.completed","response":{"model":"gpt-5.4","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}',
+    ]
+
+    monkeypatch.setattr(
+        codex_provider_module.httpx,
+        "Client",
+        lambda *args, **kwargs: _FakeHttpxClient(lines, *args, **kwargs),
+    )
+
+    model = CodexChatModel()
+    response = model._stream_response(headers={}, payload={})
+    parsed = model._parse_response(response)
+
+    assert response["output"] == [
+        {
+            "type": "message",
+            "content": [{"type": "output_text", "text": "Hello from stream"}],
+        }
+    ]
+    assert parsed.generations[0].message.content == "Hello from stream"
+
+
+def test_codex_provider_orders_streamed_output_items_by_output_index(monkeypatch):
+    monkeypatch.setattr(
+        CodexChatModel,
+        "_load_codex_auth",
+        lambda self: CodexCliCredential(access_token="token", account_id="acct"),
+    )
+
+    lines = [
+        'data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","content":[{"type":"output_text","text":"Second"}]}}',
+        'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","content":[{"type":"output_text","text":"First"}]}}',
+        'data: {"type":"response.completed","response":{"model":"gpt-5.4","output":[],"usage":{}}}',
+    ]
+
+    monkeypatch.setattr(
+        codex_provider_module.httpx,
+        "Client",
+        lambda *args, **kwargs: _FakeHttpxClient(lines, *args, **kwargs),
+    )
+
+    model = CodexChatModel()
+    response = model._stream_response(headers={}, payload={})
+
+    assert [item["content"][0]["text"] for item in response["output"]] == [
+        "First",
+        "Second",
+    ]
+
+
+def test_codex_provider_preserves_completed_output_when_stream_only_has_placeholder(monkeypatch):
+    monkeypatch.setattr(
+        CodexChatModel,
+        "_load_codex_auth",
+        lambda self: CodexCliCredential(access_token="token", account_id="acct"),
+    )
+
+    lines = [
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","status":"in_progress","content":[]}}',
+        'data: {"type":"response.completed","response":{"model":"gpt-5.4","output":[{"type":"message","content":[{"type":"output_text","text":"Final from completed"}]}],"usage":{}}}',
+    ]
+
+    monkeypatch.setattr(
+        codex_provider_module.httpx,
+        "Client",
+        lambda *args, **kwargs: _FakeHttpxClient(lines, *args, **kwargs),
+    )
+
+    model = CodexChatModel()
+    response = model._stream_response(headers={}, payload={})
+    parsed = model._parse_response(response)
+
+    assert response["output"] == [
+        {
+            "type": "message",
+            "content": [{"type": "output_text", "text": "Final from completed"}],
+        }
+    ]
+    assert parsed.generations[0].message.content == "Final from completed"

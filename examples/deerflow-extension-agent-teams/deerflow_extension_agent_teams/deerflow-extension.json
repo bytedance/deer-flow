@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "community.agent-teams",
+  "locales": {
+    "zh-CN": {
+      "title": "Agent 团队",
+      "description": "让多个 Agent 围绕同一个目标协作，共享进展，交接任务。",
+      "usage": [
+        {
+          "title": "组建你的团队",
+          "description": "选择 2–8 个已有的自定义 Agent，给团队命名，并设定共同目标。"
+        },
+        {
+          "title": "用 @ 分配任务",
+          "description": "在团队对话中输入 @ 并选择成员，再发送任务；成员会在各自的会话中处理。"
+        },
+        {
+          "title": "查看进展与成果",
+          "description": "在活动记录中查看成员回复和交接；展开任务可打开成员会话、处理提问或下载成果。"
+        }
+      ],
+      "requirements": [
+        "至少准备 2 个自定义 Agent；如限制了工具分组，需要允许 extensions。"
+      ]
+    },
+    "en-US": {
+      "title": "Agent teams",
+      "description": "Bring Agents together around a shared goal, share progress and hand off tasks.",
+      "usage": [
+        {
+          "title": "Build your team",
+          "description": "Choose 2–8 existing Custom Agents, name your team and set a shared goal."
+        },
+        {
+          "title": "Delegate with @mentions",
+          "description": "Type @ and select members in the team composer, then send a task to their own conversations."
+        },
+        {
+          "title": "Review progress and results",
+          "description": "Read replies and handoffs in the activity feed. Expand a task to open its conversation, answer questions or download results."
+        }
+      ],
+      "requirements": [
+        "Prepare at least two Custom Agents; allow the extensions tool group if using a tool-group allowlist."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-agent-teams#readme"
+}

@@ -1,0 +1,205 @@
+---
+title: Troubleshooting
+description: A symptom-indexed guide to extension problems. Each entry quotes the exact log line or error message, explains the cause, and gives the fix, from installation and startup to middleware, lifecycle hooks, services, and routes.
+---
+
+import { Callout } from "nextra/components";
+
+# Troubleshooting
+
+Every extension diagnostic in the Gateway log starts with `Extension <use>:`, where `<use>` is the record's entry point, for example `Extension deerflow_extension_hello:install:`. Search the log for that prefix first. Under `make dev` the Gateway writes to `logs/gateway.log`; in Docker, use `make docker-logs` or `docker compose logs gateway`.
+
+Manager commands report failures on stderr as `extension command failed: <reason>` with exit status 1.
+
+## The extension does not seem to load
+
+### No `Extensions loaded` line at all
+
+The Gateway logs `Extensions loaded: N/M (...)` at INFO whenever `plugins:` has at least one entry. Without that line the Gateway read no `plugins:` list:
+
+- **The Gateway was not restarted.** Extensions load only at startup.
+- **The Gateway reads a different `config.yaml`.** The manager and the Gateway both honor `DEER_FLOW_CONFIG_PATH`; if one process has it set and the other does not, they use different files. See [Operating Extensions](/docs/harness/extensions/operations).
+- **The record was put in `extensions_config.json`.** `plugins:` is read only from `config.yaml`.
+
+### `Extensions loaded: 0/1 (none)`
+
+The entry was read but did not load. The error line just above says why; the entries below cover each one. The Gateway keeps running without the extension unless the record has `required: true`.
+
+### `could not resolve extension entry point: Could not import module <module>. Missing dependency '<module>'...`
+
+The module is not installed in the Gateway's environment. Install the package through the manager instead of `pip install`, so that it lands in `backend/uv.lock` and in images built from it. If you installed it and still see this, check that the `use` value spells the import path, not the distribution name: `deerflow_extension_hello:install`, not `deerflow-extension-hello:install`.
+
+### `could not resolve extension entry point: Module <module> does not define a <name> attribute/class`
+
+The module imports, but the function after the colon does not exist. Correct `use`.
+
+### `could not resolve extension entry point: <value> doesn't look like a variable path`
+
+`use` has no `:`. It must be `module.path:install`.
+
+### `extension entry point is not callable: <type>`
+
+`use` points at something other than a function, such as a module-level constant.
+
+### `extension requires extension-api <declared>, host provides <version>`
+
+The `@extension(api=...)` marker is outside what this host accepts. Before 1.0 the host accepts the same `0.minor` at a patch equal to or lower than its own.
+
+- Declared version **newer** than the host (for example `0.3.0` on a `0.2.1` host): upgrade DeerFlow, or install an extension release built for this host.
+- Declared version with a **newer patch** than the host (for example `0.2.2` on a `0.2.1` host): upgrade DeerFlow, or install the extension release that declares `0.2.1` or lower.
+- Declared version on an **older** minor (for example `0.1.0` on a `0.2.1` host): upgrade the extension to a release written against the host's minor.
+
+The message suggests `pip install 'deerflow-extension-api>=<declared>,<...'`. The host's contract version is fixed by its own `uv.lock`, so for an older extension that suggestion does not apply: fix the extension, not the host.
+
+### `extension declares invalid extension-api version marker of type <type>; expected a dotted numeric string such as '0.1'`
+
+`__deerflow_api__` was set to something other than a string like `"0.2.0"`. Use the `@extension(api="0.2.0")` decorator.
+
+### `install() failed: <error>`
+
+Your `install()` raised. Anything it registered before raising is rolled back and the Gateway continues with the next extension. The traceback follows the line. Keep `install()` to registration only: open connections and start background work in an [ExtensionService](/docs/harness/extensions/services-and-routes).
+
+### My code changes have no effect
+
+Local directories are installed as snapshots in `backend/extensions/sources/`, not as editable links. Run `make extension-upgrade SOURCE=<same absolute path>` and restart. In Docker, also rebuild the image.
+
+## The Gateway does not start
+
+### `ExtensionLoadError: required extension <use> failed to load`
+
+A record with `required: true` failed. The same message ends in `is not callable`, `could not inspect api marker`, `declares invalid api marker`, `declares incompatible api <version>`, or `failed to install` depending on the step. The line logged just before it has the cause. Recover with `make extension-disable NAME=<name>` or by setting `required: false`, then restart. See [Operating Extensions](/docs/harness/extensions/operations).
+
+### `extension table_prefix '<prefix>' would hide host-owned table(s) [...] from alembic autogenerate`
+
+The record's `table_prefix` is a prefix of a DeerFlow table name. This always aborts startup, even for a disabled or optional record. Choose a more specific prefix, such as `acme_audit_`.
+
+### A validation error for `plugins` when loading `config.yaml`
+
+For example `Extra inputs are not permitted` or `String should have at least 1 character` under `table_prefix`. Records reject unknown keys and an empty `table_prefix`. Fix the record; this is a config error, so it stops the Gateway whatever `required` says.
+
+## Installation and management commands fail
+
+| Message after `extension command failed:`                                                                 | Cause and fix                                                                                                   |
+| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `extension installation requires uv 0.8.0 or newer`                                                        | Upgrade uv, ideally to the version pinned in `backend/Dockerfile`                                                |
+| `extension has no pyproject.toml: <path>`                                                                  | The directory is not a package root                                                                             |
+| `extension pyproject.toml must declare project.name`                                                       | Add `[project] name = ...`                                                                                      |
+| `extension must declare exactly one 'deerflow.extensions' entry point`                                     | Declare one entry under `[project.entry-points."deerflow.extensions"]`                                          |
+| `invalid 'deerflow.extensions' entry point target`                                                         | The entry-point value must be `module.path:function`                                                            |
+| `distribution '<name>' must expose exactly one 'deerflow.extensions' entry point`                          | A package from an index or Git declares none or several entry points in that group                              |
+| `distribution '<name>' extension entry point could not be loaded`                                          | Importing the entry point raised in the synced environment, or it is not callable. Test `import` locally       |
+| `local extension snapshot contains a likely sensitive file: <name>`                                        | Delete the `.env`, key, or credential file from the directory, or build from a clean copy                       |
+| `local extension snapshots cannot contain symbolic links or junctions`                                     | Replace links with real files                                                                                   |
+| `local extension sources must be directories so they can be snapshotted for deployment`                    | You passed a local file, such as a wheel. Pass the package directory                                            |
+| `extension source is already installed: <path>`                                                            | Use `make extension-upgrade`                                                                                    |
+| `extension source is not installed: <path>; use install` / `extension '<name>' is not installed; use install` | `upgrade` only replaces existing installs                                                                     |
+| `Git SSH shorthand is not deployable; ...` / `remote Git sources must use public HTTPS; ...`               | Use `git+https://host/org/repo.git@<commit>`                                                                    |
+| `remote extension sources must use HTTPS`                                                                  | Plain HTTP is accepted only for loopback hosts                                                                  |
+| `extension source URLs cannot contain embedded credentials` / `... credential-like query parameters`        | Configure index credentials in uv instead of the URL                                                            |
+| `file URLs are not deployable; ...` / `local path references are not deployable; ...`                      | Pass a local directory instead                                                                                  |
+| `uv.lock contains a local dependency source outside the backend Docker build context`                      | Resolution picked up a local file, often through `UV_FIND_LINKS` or a local index. The operation was rolled back; remove that setting |
+| `expected exactly one configured extension matching '<name>'`                                              | No record, or several, match `NAME`. Check `make extension-list`                                                |
+| `configured extension '<name>' has no managed package metadata`                                            | A hand-written record without `package`; delete it from `config.yaml` yourself                                   |
+| `multiple configured plugins conflict with extension '<name>'`                                             | Another record already uses this `name` or `package` with a different `use`. Remove the stale record. During `upgrade`, this also means the new version changed its entry-point target: remove and reinstall |
+| `config.yaml contains duplicate top-level plugins keys`                                                    | Merge the two `plugins:` blocks                                                                                 |
+| `DeerFlow config not found: <path>`                                                                         | Run `make config`, or point `DEER_FLOW_CONFIG_PATH` at the right file                                           |
+| `extension installation recovery preserved a concurrent dependency-file edit` (or `removal`, `config edit`) | Someone else changed the files mid-operation. Review `git diff` and retry                                       |
+| `extension operation failed and the restored environment could not be synchronized; original failure: ...` | The rollback restored the files but `uv sync` failed. Run `cd backend && uv sync --locked --all-packages`         |
+
+A manager command that seems to hang is usually waiting for another command holding `.deer-flow/extension-manager.lock`.
+
+## Middleware problems
+
+### `placement <NAME> fell back to a secondary anchor (primary anchor middleware is absent from this stack); ...`
+
+A warning. The middleware the placement normally anchors to is missing from this particular chain, so the host used its next rule. For `TOOL_RAW` with subagent scope this happens on every subagent build and the fallback still meets the guarantee. For any other placement, check whether you still observe what you expect. See [Middleware Contributions](/docs/harness/extensions/middleware).
+
+### `<Class>.<hook> failed and was skipped: <error>`
+
+Your hook raised. The host recovered without repeating the model or tool call. Common variants:
+
+- `... did not call the downstream handler`: your wrap hook returned without calling `handler`. The host called it for you.
+- `... called the downstream handler more than once`: your wrap hook retried. Only the first call counts.
+
+### `contribute_middlewares() failed: <error>`
+
+Your contributor raised, so this agent was built without your middleware. It is called on every agent assembly; check for per-call assumptions such as a missing `agent_name`.
+
+### `contribution <n> must be a MiddlewarePlacement, got <type>` (or `has invalid scope`, `invalid placement`, `invalid order`, `middleware must be an AgentMiddleware`)
+
+An item returned by your contributor has the wrong type. `order` must be an `int` (not a `bool`), and `middleware` must be a LangChain `AgentMiddleware` instance.
+
+### `Middleware ordering constraint violated: ... Contributed by: <use>.`
+
+A hard failure: the agent cannot be built. The final stack broke one of the host's ordering invariants. Report it with the full message; extension contributions only land at placement anchors, so this should not happen with the public contract.
+
+### My middleware modifies the request or result, but nothing changes
+
+Expected. Extension wrap hooks are observe-only in this release: the host always forwards the original request and returns the real result.
+
+### My middleware sees nothing in normal runs
+
+It probably implements only the sync `wrap_tool_call` or `wrap_model_call`. Gateway runs are async; implement `awrap_tool_call` or `awrap_model_call` too.
+
+## Lifecycle hooks and observers
+
+### `Extension <use>: on_task_start timed out for task <id>; the 3.0s notification budget was spent`
+
+All task-lifecycle contributors share a 3-second budget per notification (`on_task_start` and `on_task_stop` each get their own). A slow contributor consumes it. The ones after it are then logged as `... skipped for task <id>; the 3.0s notification budget was spent`. Move slow work out of the hook, for example into a queue drained by a service.
+
+### `Extension <use>: on_task_stop failed for task <id>`
+
+The hook raised. The run's outcome is not affected, and the next contributor still runs.
+
+### Lifecycle hooks never fire outside the Gateway
+
+Under LangGraph Server, `langgraph dev`, or a direct harness call without a `run_id`, task-lifecycle notifications are skipped.
+
+### `No running loop registered for extension observations; ... dropped`
+
+A system-model or compaction observation arrived while no Gateway notification loop was running, for example in an embedded harness or during shutdown. The observation is dropped.
+
+### `Extension <use>: on_agent_assembled failed for AgentAssemblyDescriptor`
+
+Your assembly observer raised. It runs synchronously during agent construction; keep it cheap and non-raising.
+
+## Plugins and browser assets
+
+A validation error inside `registry.plugin(...)` raises, so it surfaces as `install() failed: <message>` for that extension, which then loads without any of its contributions.
+
+| Message after `install() failed:`                                             | Cause and fix                                                                                          |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `[Errno 2] No such file or directory: '<path>'`                               | The manifest, or a file it lists, is not in the installed package. Check that the wheel includes it; for an index or Git install, look inside the built wheel, not your source tree |
+| `Unsupported browser asset manifest; expected schema_version 1`               | The manifest must be an object with exactly `schema_version: 1`, `entry`, and `files`                  |
+| `Duplicate browser manifest key`                                              | A key appears twice in `ui_manifest.json`                                                              |
+| `Browser manifest must list unique asset paths`                               | `files` is empty, has more than 256 entries, repeats a path, or contains an invalid path              |
+| `Browser manifest entry must be a listed JavaScript module`                   | `entry` is missing from `files` or does not end in `.js` or `.mjs`                                     |
+| `Invalid browser asset path`                                                  | A path contains `..`, a dot segment or dotfile, an empty segment, or a character outside `A-Z a-z 0-9 _ - .` |
+| `Unsupported browser asset file type`                                         | A listed file's extension is not an accepted type. HTML is never served                                 |
+| `Browser assets must not contain symlinks` / `Browser asset root must not be a symlink` | Replace links with real files                                                          |
+| `Browser asset size limit exceeded`                                           | Over 64 KiB for the manifest, 4 MiB for one file, or 16 MiB in total                                   |
+| `Browser code must be nonempty and at most 512 KiB`                           | An inline `BrowserModule` is empty or too large; switch to `BrowserAssets`                             |
+| `Unsupported browser transport`                                               | `frontend` is neither a `BrowserModule` nor a `BrowserAssets`                                          |
+
+The plugin's files are snapshotted when the Gateway starts. After changing them, upgrade the extension and restart the Gateway. Browsers may keep already-cached code from the old revision until the page is reloaded.
+
+### A user-facing route cannot read run evidence
+
+`resolve_run_evidence_reader(request)` raises `PermissionError("run evidence requires an authenticated user with runs:read")` when the caller is not authenticated or lacks `runs:read`; return 403. `require_run_evidence_reader(request)` raises `NotImplementedError("request-scoped run evidence is unavailable")` on a host without request-scoped evidence; return 503. See [Run Evidence](/docs/harness/extensions/run-evidence).
+
+## Services and routes
+
+| Log line after `Extension <use>:`                                                          | Cause and fix                                                                                                  |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `service start() failed; continuing without it: <error>`                                    | `start()` raised. The service is not running; routes that depend on it should report that (the bundled example returns 503) |
+| `service stop() timed out after 30.0s; continuing shutdown`                                 | `stop()` took longer than its 30-second budget                                                                 |
+| `service stop() failed; continuing shutdown: <error>`                                       | `stop()` raised; shutdown continued                                                                            |
+| `router path <path> is already served by host; this router was not mounted`                 | A host route already handles that path and method. The whole router is skipped. Use your own prefix, such as `/api/<extension>/...` |
+| `router path <path> is already served by <other use>; this router was not mounted`          | Another extension, loaded earlier, owns the path                                                               |
+| `router could not be mounted; continuing without it: contributed WebSocket routes are not supported ...` | WebSocket routes are not accepted yet                                                                |
+| `router could not be mounted; continuing without it: contributed router lifecycle hooks are not supported; register an ExtensionService instead` | Remove `on_startup`/`on_shutdown` or `lifespan` from the router             |
+| `router could not be mounted; continuing without it: contributed router contains a Starlette Mount ...` | Mounts are not supported; declare the routes directly                                                  |
+| `router could not be mounted; continuing without it: contributed route <path> can enter a host public namespace` (or `a host-reserved exact path`) | The path could reach an authentication- or CSRF-exempt host path. Pick a different path |
+| `router could not be mounted; continuing without it: contributed router exposes no routes: ...` | The router is empty                                                                                       |
+
+Successfully mounted routes are logged at INFO as `Extension routers mounted: <use> -> <path>, ...`. Contributed routes always sit behind Gateway authentication; a 401 from them means the request is not authenticated, not that the route is missing.

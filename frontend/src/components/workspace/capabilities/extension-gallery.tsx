@@ -1,0 +1,156 @@
+"use client";
+
+import { ArrowLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+
+import { Button } from "@/components/ui/button";
+import {
+  extensionDirectory,
+  type ExtensionCatalogEntry,
+} from "@/core/extensions/catalog";
+import { useFrontendExtensions } from "@/core/extensions/hooks";
+import { extensionIcon } from "@/core/extensions/registry";
+import { useI18n } from "@/core/i18n/hooks";
+
+import { ExtensionDetail } from "./extension-detail";
+import { PluginRow } from "./plugin-directory";
+
+function ExtensionIconTile({ entry }: { entry: ExtensionCatalogEntry }) {
+  const Icon = extensionIcon(entry.loaded?.extension?.icon ?? entry.icon);
+  return (
+    <div className="bg-muted flex size-12 shrink-0 items-center justify-center rounded-xl">
+      <Icon className="size-6" />
+    </div>
+  );
+}
+
+export function ExtensionGallery({ query = "" }: { query?: string }) {
+  const { t, locale } = useI18n();
+  const publicQuery = useFrontendExtensions();
+  const params = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const selected = params.get("extension");
+  const entries = extensionDirectory(
+    publicQuery.data ?? [],
+    t.extensions.catalog,
+    locale,
+  );
+  const source = publicQuery;
+  function select(namespace?: string) {
+    const next = new URLSearchParams(params);
+    next.set("tab", "extensions");
+    if (namespace) next.set("extension", namespace);
+    else next.delete("extension");
+    router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+  }
+  const status = source.isPending ? (
+    <p role="status" className="text-muted-foreground text-sm">
+      {t.extensions.loading}
+    </p>
+  ) : source.isError ? (
+    <div role="alert" className="flex flex-wrap items-center gap-3 text-sm">
+      <p>{t.extensions.unavailable}</p>
+      <Button variant="outline" size="sm" onClick={() => void source.refetch()}>
+        {t.extensions.retry}
+      </Button>
+    </div>
+  ) : null;
+  const reload = (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="text-muted-foreground -mr-2.5"
+      aria-label={t.extensions.reloadAll}
+      onClick={() => window.location.reload()}
+    >
+      <RefreshCwIcon />
+      <span className="hidden sm:inline">{t.extensions.reloadAll}</span>
+    </Button>
+  );
+  if (selected) {
+    const entry = entries.find((item) => item.id === selected);
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="-ml-2.5"
+            onClick={() => select()}
+          >
+            <ArrowLeftIcon />
+            {t.extensions.all}
+          </Button>
+        </div>
+        {status}
+        {!entry ? (
+          <p className="text-muted-foreground py-8">
+            {t.extensions.notInstalled}
+          </p>
+        ) : (
+          <ExtensionDetail
+            entry={entry}
+            discovery={
+              source.isPending ? "pending" : source.isError ? "error" : "ready"
+            }
+          />
+        )}
+      </div>
+    );
+  }
+  const visible = entries.filter((entry) =>
+    `${entry.title} ${entry.description} ${entry.package ?? ""} ${entry.id} ${entry.loaded?.title ?? ""} ${entry.loaded?.description ?? ""}`
+      .toLowerCase()
+      .includes(query.trim().toLowerCase()),
+  );
+  return (
+    <div className="space-y-5">
+      <div className="flex items-start justify-between gap-6">
+        <p className="text-muted-foreground max-w-3xl min-w-0 flex-1 text-sm leading-6">
+          {t.extensions.deploymentHint}
+        </p>
+        {reload}
+      </div>
+      {status}
+      <div className="grid gap-x-10 md:grid-cols-2">
+        {visible.map((entry) => {
+          const loaded = entry.loaded;
+          return (
+            <PluginRow
+              key={entry.id}
+              name={entry.title}
+              description={entry.description}
+              icon={<ExtensionIconTile entry={entry} />}
+              label={
+                loaded?.error
+                  ? t.extensions.moduleUnavailable
+                  : loaded
+                    ? loaded.settings.enabled === true
+                      ? t.capabilities.enabled
+                      : t.capabilities.disabled
+                    : t.extensions.catalogEntry
+              }
+              onDetails={() => select(entry.id)}
+              detailsLabel={t.extensions.view(entry.title)}
+            >
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={t.extensions.open(entry.title)}
+                onClick={() => select(entry.id)}
+              >
+                <ChevronRightIcon />
+              </Button>
+            </PluginRow>
+          );
+        })}
+      </div>
+      {!visible.length && (
+        <p role="status" className="text-muted-foreground py-8">
+          {t.extensions.noResults}
+        </p>
+      )}
+    </div>
+  );
+}
