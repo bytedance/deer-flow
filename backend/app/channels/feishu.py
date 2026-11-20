@@ -162,6 +162,8 @@ _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 _MARKDOWN_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]*)[^)]*\)")
 _FENCED_CODE = re.compile(r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[ \t]*$")
 _INLINE_CODE_SPAN = re.compile(r"`[^`\n]*`")
+# A fence a streamed snapshot cut open: what follows its opener is still code.
+_UNCLOSED_FENCE = re.compile(r"(?m)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*$")
 
 
 def _rewrite_outside_inline_code(chunk: str, rewrite: Callable[[str], str]) -> str:
@@ -199,7 +201,14 @@ def _card_markdown(text: str) -> str:
         out.append(_rewrite_outside_inline_code(text[cursor : fenced.start()], as_link))
         out.append(fenced.group(0))
         cursor = fenced.end()
-    out.append(_rewrite_outside_inline_code(text[cursor:], as_link))
+
+    tail = text[cursor:]
+    # A snapshot streamed before its closing fence arrives has an open block at the
+    # end; that content is code too, so what follows the opener stays literal.
+    open_fence = _UNCLOSED_FENCE.search(tail)
+    literal_from = open_fence.start() if open_fence else len(tail)
+    out.append(_rewrite_outside_inline_code(tail[:literal_from], as_link))
+    out.append(tail[literal_from:])
     return "".join(out)
 
 

@@ -18,6 +18,7 @@ from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, 
 from lark_oapi.core.json import JSON
 
 from app.channels.feishu import FEISHU_CARD_MAX_BYTES, FEISHU_MAX_CARDS_PER_REPLY, FeishuChannel, _card_text_bytes, _split_card_text
+from app.channels.feishu_card_interaction import ClarificationCardRequest, build_button_card
 from app.channels.message_bus import MessageBus, OutboundMessage
 from app.channels.store import JsonChannelStore
 
@@ -240,6 +241,9 @@ async def test_reply_without_running_card_and_push_without_source_split_too(feis
         # Code renders literally in a card, so the shown source must not change.
         ("inline `![a](b)` keeps its marker", "inline `![a](b)` keeps its marker", True),
         ("```\n![a](b)\n```", "```\n![a](b)\n```", True),
+        # A snapshot streamed before the closing fence arrives keeps its open block literal.
+        ("```\n![a](b)", "```\n![a](b)", True),
+        ("```\n![a](b)\n```\ntail ![c](d)", "```\n![a](b)\n```\ntail [c](d)", True),
     ],
 )
 async def test_card_content_never_sends_a_markdown_image_feishu_cannot_resolve(text: str, expected: str, keeps_its_marker: bool):
@@ -248,6 +252,25 @@ async def test_card_content_never_sends_a_markdown_image_feishu_cannot_resolve(t
     assert rendered == expected
     # An unrendered marker inside code is literal text, not an image element.
     assert ("![" in rendered) is keeps_its_marker
+
+
+async def test_clarification_button_card_rewrites_an_image_in_the_question():
+    """The button card is delivered as raw card JSON, so it needs the rewrite too."""
+    request = ClarificationCardRequest(
+        request_id="r1",
+        source="s",
+        question="Pick ![chart](https://example.invalid/chart.png)",
+        options=("Alpha", "Beta"),
+        option_ids=("o1", "o2"),
+        callback_token="token",
+        context="context ![x](https://example.invalid/x.png)",
+    )
+
+    card = json.loads(build_button_card(request))
+
+    markdown = next(element for element in card["elements"] if element["tag"] == "markdown")
+    assert markdown["content"] == ("context [x](https://example.invalid/x.png)\n\nPick [chart](https://example.invalid/chart.png)")
+    assert "![" not in markdown["content"]
 
 
 async def test_card_answer_with_an_image_url_still_fits_the_body_limit():
