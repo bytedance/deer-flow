@@ -136,14 +136,20 @@ def _format_todos(todos: Iterable[Mapping[str, Any]]) -> str:
 
 
 def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
-    """Format a completion reminder for incomplete todo items."""
+    """Format a completion reminder for incomplete todo items.
+
+    The wording must match ``_TODO_TERMINAL_STATUSES``: the guard also accepts
+    ``blocked`` and ``waiting``, so the reminder offers them instead of asking
+    the model to finish everything or mark it completed.
+    """
     incomplete_text = _format_todos(todo for todo in todos if _stored_todo_status(todo) not in _TODO_TERMINAL_STATUSES)
     return (
         "<system_reminder>\n"
-        "You have incomplete todo items that must be finished before giving your final response:\n\n"
+        "You have todo items that are not completed, blocked, or waiting:\n\n"
         f"{incomplete_text}\n\n"
         "Please continue working on these tasks. Call `write_todos` to mark items as completed "
-        "as you finish them, and only respond when all items are done.\n"
+        "as you finish them. Mark an item `blocked` or `waiting` only when it cannot continue in this run, "
+        "and only respond when every item is completed, blocked, or waiting.\n"
         "</system_reminder>"
     )
 
