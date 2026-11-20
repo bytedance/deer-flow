@@ -96,8 +96,8 @@ class OpenVikingConfig:
 
         is_multi_user = raw_user_credentials is not None or credential_provider is not None or has_injected_credential_provider
 
-        if provider_config and credential_provider is None and not has_injected_credential_provider:
-            raise ValueError("OpenViking credential_provider_config requires credential_provider or an injected credential_provider")
+        if provider_config and credential_provider is None:
+            raise ValueError("OpenViking credential_provider_config requires credential_provider in backend_config")
 
         user_credential_unknowns: list[str] = []
         if is_multi_user:

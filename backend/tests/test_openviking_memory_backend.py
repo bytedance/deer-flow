@@ -1275,10 +1275,15 @@ def test_multi_user_config_validation_pool_masking_and_side_effect_free(
     dot_cfg = OpenVikingConfig.from_backend_config(_multi_user_backend_config(tmp_path, credential_provider=f"{nonexistent_pkg}.mod.VaultProvider"))
     assert dot_cfg.credential_provider == f"{nonexistent_pkg}.mod.VaultProvider"
     injected_cfg = OpenVikingConfig.from_backend_config(
-        _multi_user_backend_config(tmp_path, credential_provider_config={"namespace": "prod"}),
+        _multi_user_backend_config(tmp_path),
         has_injected_credential_provider=True,
     )
     assert injected_cfg.isolation_mode == "multi_user"
+    with pytest.raises(ValueError, match="credential_provider_config requires credential_provider"):
+        OpenVikingConfig.from_backend_config(
+            _multi_user_backend_config(tmp_path, credential_provider_config={"namespace": "prod"}),
+            has_injected_credential_provider=True,
+        )
 
     # read_failures_are_fatal_for_config supports multi-user configs without importing provider
     assert (
@@ -2353,3 +2358,145 @@ def test_non_home_alias_errors_do_not_retry_or_flip_uri_mode(
 
     assert len(manager._retriever.calls) == 1
     assert manager._use_home_alias_uris is False
+
+
+@pytest.mark.parametrize("bad_runtime_uid", [" alice", "alice ", "alice\x00bob", "alice\n", "alice\t"])
+def test_multi_user_rejects_untrimmed_or_control_char_runtime_user_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_runtime_uid: str,
+) -> None:
+    recorders, retrievers = _track_official_integration(monkeypatch)
+    provider_calls: list[str] = []
+
+    def provider(uid: str) -> str:
+        provider_calls.append(uid)
+        return f"key-{uid.strip()}"
+
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise"}),
+        credential_provider=provider,
+    )
+    try:
+        with pytest.raises(MemoryManagerError, match="stripped DeerFlow user_id"):
+            manager.add("thread-1", [HumanMessage("hi", id="h1")], user_id=bad_runtime_uid)
+        with pytest.raises(MemoryReadError) as ctx_exc:
+            manager.get_context(bad_runtime_uid, thread_id="thread-1")
+        assert isinstance(ctx_exc.value.__cause__, MemoryManagerError)
+        with pytest.raises(MemoryReadError) as search_exc:
+            manager.search("prefs", user_id=bad_runtime_uid)
+        assert isinstance(search_exc.value.__cause__, MemoryManagerError)
+
+        assert provider_calls == []
+        assert recorders == []
+        assert retrievers == []
+    finally:
+        manager.close()
+
+
+def test_hybrid_mode_rejects_dynamic_reuse_of_uncached_or_evicted_static_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorders, _ = _track_official_integration(monkeypatch)
+    dynamic_keys = {
+        "bob": {"api_key": "alice-static-secret", "tenant_id": "acme"},
+        "carol": {"api_key": "carol-dynamic-secret", "tenant_id": "globex"},
+    }
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path,
+            failure_policy={"read": "raise"},
+            client_pool={"max_clients": 1},
+            user_credentials={"alice": {"api_key": "alice-static-secret", "tenant_id": "acme"}},
+        ),
+        credential_provider=lambda uid: dynamic_keys.get(uid),
+    )
+    try:
+        # Case A: alice has never been acquired yet (not in _pool or _inflight_entries)
+        with pytest.raises(MemoryManagerError, match="cannot be shared across distinct DeerFlow scopes"):
+            manager.add("thread-1", [HumanMessage("leak", id="l1")], user_id="bob")
+        with pytest.raises(MemoryReadError, match="cannot be shared across distinct DeerFlow scopes"):
+            manager.get_context("bob")
+        assert recorders == []
+
+        # Case B: alice is acquired and then evicted from the size-1 pool by carol; conflict still catches bob
+        manager.search("prefs", user_id="alice")
+        assert len(recorders) == 1
+        manager.search("prefs", user_id="carol")
+        assert len(recorders) == 2
+        assert recorders[0].closed is True
+
+        with pytest.raises(MemoryManagerError, match="cannot be shared across distinct DeerFlow scopes"):
+            manager.add("thread-1", [HumanMessage("leak2", id="l2")], user_id="bob")
+        assert len(recorders) == 2
+    finally:
+        manager.close()
+
+
+def test_tenant_reassignment_retires_cached_and_inflight_handles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorders, _ = _track_official_integration(monkeypatch)
+    current = {"alice": OpenVikingCredential(api_key="alice-v1", tenant_id="acme")}
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path,
+            client_pool={"max_clients": 4, "idle_ttl_seconds": None},
+        ),
+        credential_provider=lambda uid: current.get(uid),
+    )
+    try:
+        # 1. Idle tenant reassignment closes the old acme handle immediately
+        manager.search("prefs", user_id="alice")
+        assert len(recorders) == 1
+        rec_acme = recorders[0]
+        assert rec_acme.closed is False
+
+        current["alice"] = OpenVikingCredential(api_key="alice-v2", tenant_id="globex")
+        manager.search("prefs", user_id="alice")
+        assert len(recorders) == 2
+        rec_globex = recorders[1]
+        assert rec_acme.closed is True
+        assert rec_globex.closed is False
+        assert list(manager._pool) == [("globex", "alice", current["alice"].key_fingerprint)]
+
+        # 2. In-flight entry across tenant reassignment is marked retired in _inflight_entries
+        started = threading.Event()
+        release = threading.Event()
+        orig_record = rec_globex.record
+
+        def blocked_record(*args: Any, **kwargs: Any) -> object:
+            started.set()
+            assert release.wait(5.0)
+            return orig_record(*args, **kwargs)
+
+        rec_globex.record = blocked_record
+        t_inflight = threading.Thread(
+            target=manager.add,
+            args=("t-tenant-rot", [HumanMessage("slow", id="s1")]),
+            kwargs={"user_id": "alice"},
+        )
+        t_inflight.start()
+        assert started.wait(5.0)
+
+        # Simulate concurrent eviction/re-entry of an already-in-flight entry before reassignment
+        with manager._pool_lock:
+            inflight_entry = next(iter(manager._inflight_entries))
+            assert inflight_entry.retired is False
+
+        current["alice"] = OpenVikingCredential(api_key="alice-v3", tenant_id="initech")
+        manager.search("prefs", user_id="alice")
+        assert len(recorders) == 3
+        rec_initech = recorders[2]
+        assert inflight_entry.retired is True
+        assert rec_globex.closed is False
+
+        release.set()
+        t_inflight.join(5.0)
+        assert not t_inflight.is_alive()
+        assert rec_globex.closed is True
+        assert rec_initech.closed is False
+    finally:
+        manager.close()

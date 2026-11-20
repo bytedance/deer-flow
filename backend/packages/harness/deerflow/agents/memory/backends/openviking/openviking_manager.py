@@ -27,6 +27,7 @@ from .credentials import (
     OpenVikingCredential,
     load_credential_provider,
     normalize_resolved_credential,
+    validate_user_key,
 )
 from .session import (
     _advanced_cursor,
@@ -190,6 +191,14 @@ class OpenVikingMemoryManager(MemoryManager):
 
     @property
     def read_failures_are_fatal(self) -> bool:
+        """Whether read failures or timeouts abort for this manager instance.
+
+        ``DynamicContextMiddleware`` consults the classmethod
+        :meth:`read_failures_are_fatal_for_config` over ``backend_config`` (which
+        requires ``user_credentials`` or ``credential_provider``), whereas this
+        instance property also covers direct programmatic callers injecting
+        ``host_hooks["credential_provider"]``.
+        """
         return self._config.read_failure_policy == "raise"
 
     def add_nowait(
@@ -586,6 +595,10 @@ class OpenVikingMemoryManager(MemoryManager):
         resolved_user = str(user_id)
         if not resolved_user or not resolved_user.strip():
             raise MemoryManagerError("OpenViking multi-user mode requires a non-empty DeerFlow user_id; refusing blank fallback.")
+        try:
+            resolved_user = validate_user_key(resolved_user)
+        except ValueError as exc:
+            raise MemoryManagerError(f"OpenViking multi-user mode requires a stripped DeerFlow user_id without control characters, got {resolved_user!r}") from exc
 
         credential = self._config.user_credentials.get(resolved_user)
         if credential is None and self._credential_provider is not None:
@@ -744,13 +757,7 @@ class OpenVikingMemoryManager(MemoryManager):
                         winner = existing
                         discard_new = True
                     else:
-                        to_close.extend(
-                            self._retire_scope_rotations_locked(
-                                credential.tenant_id,
-                                user_id,
-                                credential.key_fingerprint,
-                            )
-                        )
+                        to_close.extend(self._retire_scope_rotations_locked(key))
                         to_close.extend(self._evict_lru_locked())
                         new_entry.active_ops = 1
                         new_entry.last_used = now
@@ -803,6 +810,11 @@ class OpenVikingMemoryManager(MemoryManager):
         credential: OpenVikingCredential,
     ) -> MemoryManagerError | None:
         target_scope = (credential.tenant_id, user_id)
+        # In hybrid mode, also reject reuse of uncached or LRU/TTL-evicted static credentials.
+        for static_user, static_cred in self._config.user_credentials.items():
+            static_scope = (static_cred.tenant_id, static_user)
+            if static_cred.key_fingerprint == credential.key_fingerprint and static_scope != target_scope:
+                return MemoryManagerError(f"OpenViking USER API key cannot be shared across distinct DeerFlow scopes ({static_scope!r} and {target_scope!r})")
         for entry in (*self._pool.values(), *self._inflight_entries):
             if entry.key[2] == credential.key_fingerprint and (entry.key[0], entry.key[1]) != target_scope:
                 other_scope = (entry.key[0], entry.key[1])
@@ -811,18 +823,20 @@ class OpenVikingMemoryManager(MemoryManager):
 
     def _retire_scope_rotations_locked(
         self,
-        tenant_id: str | None,
-        user_id: str,
-        new_fingerprint: str,
+        new_key: _ClientPoolKey,
     ) -> list[_ScopedClientEntry]:
+        user_id = new_key[1]
         retired: list[_ScopedClientEntry] = []
         for entry_key in list(self._pool):
-            if entry_key[0] == tenant_id and entry_key[1] == user_id and entry_key[2] != new_fingerprint:
+            if entry_key[1] == user_id and entry_key != new_key:
                 entry = self._pool.pop(entry_key)
                 entry.retired = True
                 if entry.active_ops == 0 and not entry.closed:
                     entry.closed = True
                     retired.append(entry)
+        for entry in self._inflight_entries:
+            if entry.key[1] == user_id and entry.key != new_key:
+                entry.retired = True
         return retired
 
     def _evict_lru_locked(self) -> list[_ScopedClientEntry]:
