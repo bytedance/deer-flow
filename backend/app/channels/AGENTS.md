@@ -42,8 +42,9 @@ make test-blocking-io                                  # channels share the Gate
   reporting a rejected start or a response lost after submission.
 - **Slack does not retry HTTP 429 inside the SDK.** `WebClient` is created with
   the default handlers, which cover connection failures only. `SlackChannel.send`
-  waits for `Retry-After` in the shared channel retry, capped at 60 seconds so
-  one hint cannot stall the outbound listener. A missing or shorter hint keeps
+  waits for `Retry-After` in the shared channel retry up to 15 seconds; a longer
+  hint abandons the reply with a log line so it cannot hold a shared inbound
+  worker. A missing or shorter hint keeps
   the 1s/2s backoff. File uploads, connection replies, and the Working-on-it acknowledgment
   (`_send_running_reply`) still try once.
 - **Telegram photo fallback is narrow.** Only a photo `BadRequest` with

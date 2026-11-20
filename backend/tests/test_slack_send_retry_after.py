@@ -69,11 +69,11 @@ class TestSlackSendRetryAfter:
         async def go():
             channel, client = _channel()
             sleeps = _patch_retry_sleep(monkeypatch)
-            _install(client, [_api_error(429, {"Retry-After": "30"})])
+            _install(client, [_api_error(429, {"Retry-After": "12"})])
 
             await channel.send(_reply())
 
-            assert sleeps == [30.0]
+            assert sleeps == [12.0]
             assert [post["text"] for post in client.posts] == ["hello"]
 
         _run(go())
@@ -97,16 +97,30 @@ class TestSlackSendRetryAfter:
 
         _run(go())
 
-    def test_hint_above_the_cap_waits_sixty_seconds(self, monkeypatch):
+    def test_hint_above_the_budget_abandons_without_sleeping(self, monkeypatch):
         async def go():
             channel, client = _channel()
             sleeps = _patch_retry_sleep(monkeypatch)
             _install(client, [_api_error(429, {"Retry-After": "120"})])
 
+            with pytest.raises(SlackApiError):
+                await channel.send(_reply())
+
+            assert sleeps == []
+            assert client.posts == []
+            assert SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS == 15.0
+
+        _run(go())
+
+    def test_hint_at_the_budget_is_still_waited_out(self, monkeypatch):
+        async def go():
+            channel, client = _channel()
+            sleeps = _patch_retry_sleep(monkeypatch)
+            _install(client, [_api_error(429, {"Retry-After": "15"})])
+
             await channel.send(_reply())
 
-            assert sleeps == [60.0]
-            assert SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS == 60.0
+            assert sleeps == [15.0]
 
         _run(go())
 

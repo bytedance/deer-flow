@@ -30,9 +30,11 @@ from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 SLACK_STOP_TIMEOUT_SECONDS = 5.0
-# Outbound listeners await sends inline. Bound each 429 wait the same way
-# Telegram bounds a flood hint, so one Retry-After cannot stall the worker.
-SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS = 60.0
+# Outbound sends run inline on the shared inbound workers, so a long wait would
+# hold a worker that other providers also need. A 429 Retry-After up to this
+# budget is waited out; a longer one abandons the reply (logged) instead of
+# sleeping, and never retries before Slack allows it.
+SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS = 15.0
 # Match the manager's URL download ceiling. Slack workspace limits may be higher;
 # this keeps a single upload from exhausting Gateway memory.
 SLACK_MAX_INBOUND_FILE_BYTES = 50 * 1024 * 1024
@@ -285,13 +287,23 @@ class SlackChannel(Channel):
         ``WebClient`` keeps the SDK's default handlers, which retry connection
         errors only, so a 429 reaches this shared loop. The header is seconds.
         A missing or unusable hint keeps ``2**attempt``, and a shorter hint
-        does not shrink it.
+        does not shrink it. A hint above ``SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS``
+        re-raises the 429 so the shared loop stops retrying: sleeping that long
+        would occupy a shared inbound worker, and retrying sooner would be
+        rejected again.
         """
         delay = super()._outbound_retry_delay(attempt, exc)
         hint = self._slack_retry_after_seconds(exc)
         if hint is None:
             return delay
-        return max(delay, min(hint, SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS))
+        if hint > SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS:
+            logger.warning(
+                "[Slack] Retry-After %ss exceeds the inline wait budget of %ss; abandoning the send",
+                hint,
+                SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS,
+            )
+            raise exc
+        return max(delay, hint)
 
     @staticmethod
     def _slack_retry_after_seconds(exc: Exception) -> float | None:
