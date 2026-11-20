@@ -9,7 +9,12 @@ from __future__ import annotations
 import datetime
 import io
 import json
+import os
+import signal
+import subprocess
 import tarfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -88,6 +93,7 @@ class _FakeVeFaaSServer:
         self.describe_after_kill_keeps_running = False
         self.describe_error: tuple[int, str, str] | None = None
         self.create_status_sequence: list[str] = ["Running"]
+        self.ignore_list_metadata_filter = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         action = request.url.params.get("Action", "")
@@ -156,7 +162,7 @@ class _FakeVeFaaSServer:
             for record in self.sandboxes.values():
                 if record["FunctionId"] != payload["FunctionId"]:
                     continue
-                if all(record["Metadata"].get(k) == v for k, v in wanted_meta.items()):
+                if self.ignore_list_metadata_filter or all(record["Metadata"].get(k) == v for k, v in wanted_meta.items()):
                     items.append(
                         {
                             "Id": record["Id"],
@@ -166,9 +172,13 @@ class _FakeVeFaaSServer:
                             "Metadata": dict(record["Metadata"]),
                         }
                     )
+            page_number = int(payload.get("PageNumber", 1))
+            page_size = int(payload.get("PageSize", 50))
+            start = (page_number - 1) * page_size
+            page_items = items[start : start + page_size]
             return httpx.Response(
                 200,
-                json={"ResponseMetadata": {"RequestId": "req-list"}, "Result": {"Sandboxes": items, "Total": len(items)}},
+                json={"ResponseMetadata": {"RequestId": "req-list"}, "Result": {"Sandboxes": page_items, "Total": len(items)}},
             )
 
         if action == "SetSandboxTimeout":
@@ -416,10 +426,29 @@ class TestVeFaaSClient:
         with pytest.raises(VeFaaSApiError):
             client.describe_sandbox("fn-1", "missing-id")
 
-        # Function-level 404s indicate misconfiguration and must not report sandbox absence.
-        server.describe_error = (404, "FunctionNotFound", "function does not exist")
-        with pytest.raises(VeFaaSApiError):
-            client.describe_sandbox("fn-1", "missing-id")
+        # Non-sandbox *NotFound errors and empty-code 404s must fail closed rather than proving absence.
+        for status_code, err_code, err_msg in (
+            (404, "FunctionNotFound", "function does not exist"),
+            (404, "ActionNotFound", "unknown action"),
+            (404, "AccountNotFound", "unknown account"),
+            (404, "RouteNotFound", "unknown route"),
+            (404, "", "gateway route not found"),
+        ):
+            server.describe_error = (status_code, err_code, err_msg)
+            with pytest.raises(VeFaaSApiError):
+                client.describe_sandbox("fn-1", "missing-id")
+
+        # Bare JSON HTTP 404 responses (no ResponseMetadata.Error) must also fail closed.
+        for bare_404 in ({}, {"message": "no Route matched"}):
+            bare_client = VeFaaSClient(
+                endpoint="https://vefaas.ap-southeast-1.byteplusapi.com",
+                region="ap-southeast-1",
+                access_key="ak",
+                secret_key="sk",
+                httpx_client=httpx.Client(transport=httpx.MockTransport(lambda _r, body=bare_404: httpx.Response(404, json=body))),
+            )
+            with pytest.raises(VeFaaSApiError):
+                bare_client.describe_sandbox("fn-1", "sb-1")
 
         # Malformed/empty 2xx DescribeSandbox responses must fail closed rather than proving absence.
         for bad_body in (
@@ -731,5 +760,363 @@ class TestVeFaaSSandboxProviderLifecycle:
         provider, _, _ = _install_provider(monkeypatch, tmp_path)
         try:
             assert installed_signals == []
+        finally:
+            provider.shutdown()
+
+    def test_signal_handler_restores_and_reraises_sig_dfl_outside_host_ownership(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        installed: dict[int, Any] = {}
+        raised: list[int] = []
+
+        monkeypatch.setattr(provider_mod, "host_owns_sandbox_shutdown", lambda: False)
+        monkeypatch.setattr(provider_mod.signal, "getsignal", lambda _sig: signal.SIG_DFL)
+        monkeypatch.setattr(provider_mod.signal, "signal", lambda sig, handler: installed.__setitem__(sig, handler))
+        monkeypatch.setattr(provider_mod.signal, "raise_signal", lambda sig: raised.append(sig))
+
+        provider, _, _ = _install_provider(monkeypatch, tmp_path)
+        try:
+            assert signal.SIGTERM in installed
+            handler = installed[signal.SIGTERM]
+            # Even if shutdown() raises an unexpected exception, SIG_DFL is restored and re-raised.
+            monkeypatch.setattr(provider, "shutdown", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+            handler(signal.SIGTERM, None)
+            assert installed[signal.SIGTERM] == signal.SIG_DFL
+            assert raised == [signal.SIGTERM]
+        finally:
+            monkeypatch.undo()
+            provider.shutdown()
+
+    def test_sandbox_id_normalizes_none_user_id_and_differs_from_literal_none(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, _, _ = _install_provider(monkeypatch, tmp_path)
+        try:
+            sid_none = provider.acquire("t-none")
+            expected_empty = derive_sandbox_scope_token(user_id="", thread_id="t-none")
+            assert sid_none == expected_empty
+            assert provider.get_scoped(sid_none, thread_id="t-none", user_id="") is not None
+
+            sid_literal_none = provider.acquire("t-none", user_id="None")
+            assert sid_literal_none != sid_none
+            assert provider.get_scoped(sid_literal_none, thread_id="t-none", user_id="None") is not None
+        finally:
+            provider.shutdown()
+
+    def test_list_sandboxes_paginates_and_discovery_verifies_metadata_client_side(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        server = _FakeVeFaaSServer()
+        server.ignore_list_metadata_filter = True
+        sandbox_id = derive_sandbox_scope_token(user_id="u1", thread_id="t-page2")
+
+        # Fill page 1 (50 entries) with unrelated running sandboxes that do not match metadata.
+        for idx in range(52):
+            server.sandboxes[f"vefaas-other-{idx}"] = {
+                "Id": f"vefaas-other-{idx}",
+                "FunctionId": "fn-demo-app",
+                "Status": "Running",
+                "Pending": False,
+                "Metadata": {
+                    provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                    provider_mod.META_KEY_SANDBOX_ID: f"other-scope-{idx}",
+                },
+            }
+        # Place the matching sandbox on page 2.
+        server.sandboxes["vefaas-target-page2"] = {
+            "Id": "vefaas-target-page2",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sandbox_id,
+            },
+        }
+        provider, _, aio_instances = _install_provider(monkeypatch, tmp_path, server=server)
+        try:
+            acquired = provider.acquire("t-page2", user_id="u1")
+            assert acquired == sandbox_id
+            assert aio_instances[0].request_headers[provider_mod.INSTANCE_ROUTING_HEADER] == "vefaas-target-page2"
+            list_pages = [p["PageNumber"] for a, p, _ in server.requests if a == "ListSandboxes"]
+            assert list_pages == [1, 2]
+            assert not any(a == "CreateSandbox" for a, _, _ in server.requests)
+        finally:
+            provider.shutdown()
+
+    def test_incomplete_skills_upload_refuses_destructive_replace(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, _, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("t-budget", user_id="u-budget")
+            aio = aio_instances[0]
+            aio.uploaded_files.clear()
+            aio.commands.clear()
+
+            proj_root = tmp_path / "proj-budget"
+            for cat in ("public", "custom", "legacy", "integrations"):
+                (proj_root / cat).mkdir(parents=True)
+            (proj_root / "public" / "a.txt").write_text("one", encoding="utf-8")
+            (proj_root / "public" / "b.txt").write_text("two", encoding="utf-8")
+            projection = SimpleNamespace(
+                public=proj_root / "public",
+                custom=proj_root / "custom",
+                legacy=proj_root / "legacy",
+                integrations=proj_root / "integrations",
+            )
+            monkeypatch.setattr(provider_mod, "_MAX_UPLOAD_FILES", 1)
+            with pytest.raises(RuntimeError, match="exceeds the veFaaS upload limit"):
+                provider.sync_agent_skills(sandbox_id, thread_id="t-budget", user_id="u-budget", projection=projection)
+            assert aio.uploaded_files == {}
+            assert aio.commands == []
+        finally:
+            provider.shutdown()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX persistent shell test")
+    def test_upload_script_preserves_persistent_shell_and_cleans_up_temp_files(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, _, _ = _install_provider(monkeypatch, tmp_path)
+        dest_root = tmp_path / "remote-skills"
+        dest_root.mkdir()
+        (dest_root / "public").mkdir()
+        (dest_root / "public" / "existing.txt").write_text("keep-me", encoding="utf-8")
+
+        proj_root = tmp_path / "src-skills"
+        for cat in ("public", "custom", "legacy", "integrations"):
+            (proj_root / cat).mkdir(parents=True)
+        (proj_root / "public" / "new.txt").write_text("fresh-skill", encoding="utf-8")
+
+        proc = subprocess.Popen(
+            ["/bin/sh"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdin is not None and proc.stdout is not None
+        recorded_tars: list[Path] = []
+
+        def run_in_persistent_shell(cmd: str) -> str:
+            marker = f"__DONE_{len(recorded_tars)}__"
+            proc.stdin.write(f"{cmd}\nprintf '%s\\n' '{marker}'\n")
+            proc.stdin.flush()
+            lines: list[str] = []
+            while True:
+                line = proc.stdout.readline()
+                assert line != "", "persistent shell terminated unexpectedly"
+                if line.strip() == marker:
+                    break
+                lines.append(line)
+            return "".join(lines)
+
+        class _ShellSandbox:
+            def update_file(self, path: str, content: bytes) -> None:
+                p = Path(path)
+                recorded_tars.append(p)
+                p.write_bytes(content)
+
+            def execute_command(self, command: str) -> str:
+                return run_in_persistent_shell(command)
+
+        try:
+            shell_sandbox = _ShellSandbox()
+            sources = [(proj_root / cat, cat) for cat in ("public", "custom", "legacy", "integrations")]
+            assert provider._upload_trees(shell_sandbox, sources, dest_root=str(dest_root), replace=("public", "custom", "legacy", "integrations")) is True
+
+            # New skill replaced old one, temp tar & staging dir cleaned up, parent shell has no errexit.
+            assert (dest_root / "public" / "new.txt").read_text(encoding="utf-8") == "fresh-skill"
+            assert not (dest_root / "public" / "existing.txt").exists()
+            assert not recorded_tars[-1].exists()
+            assert not list(dest_root.glob(".vefaas-stage-*"))
+            flags_out = run_in_persistent_shell("printf '%s\\n' \"$-:\" ; false; echo STILL_ALIVE")
+            assert "STILL_ALIVE" in flags_out
+            assert "e" not in flags_out.splitlines()[0].rstrip(":")
+
+            # Failing upload (symlinked dest_root hitting exit 2) keeps parent shell alive & cleans temp tar.
+            symlink_dest = tmp_path / "symlink-skills"
+            symlink_dest.symlink_to(dest_root)
+            with pytest.raises(RuntimeError, match="upload into"):
+                provider._upload_trees(shell_sandbox, sources, dest_root=str(symlink_dest), replace=("public", "custom", "legacy", "integrations"))
+            assert not recorded_tars[-1].exists()
+            assert "STILL_ALIVE" in run_in_persistent_shell("echo STILL_ALIVE")
+            assert (dest_root / "public" / "new.txt").read_text(encoding="utf-8") == "fresh-skill"
+
+            # Failing tar extraction keeps parent shell alive and leaves existing skills intact.
+            class _CorruptTarShellSandbox(_ShellSandbox):
+                def update_file(self, path: str, content: bytes) -> None:
+                    del content
+                    p = Path(path)
+                    recorded_tars.append(p)
+                    p.write_bytes(b"not-a-valid-gzip-archive")
+
+            with pytest.raises(RuntimeError, match="upload into"):
+                provider._upload_trees(_CorruptTarShellSandbox(), sources, dest_root=str(dest_root), replace=("public", "custom", "legacy", "integrations"))
+            assert not recorded_tars[-1].exists()
+            assert not list(dest_root.glob(".vefaas-stage-*"))
+            assert "STILL_ALIVE" in run_in_persistent_shell("echo STILL_ALIVE")
+            assert (dest_root / "public" / "new.txt").read_text(encoding="utf-8") == "fresh-skill"
+        finally:
+            if proc.stdin:
+                proc.stdin.close()
+            proc.wait(timeout=5)
+            provider.shutdown()
+
+    def test_shutdown_waits_for_inflight_acquire_without_closing_client(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        entered_ready = threading.Event()
+        release_ready = threading.Event()
+        acquire_errors: list[BaseException] = []
+
+        provider, server, _ = _install_provider(monkeypatch, tmp_path)
+        # Allow shutdown() to manage client lifecycle so we verify client stays open while acquire is in-flight.
+        provider._client_override = None
+
+        def blocking_ready(_url: str, timeout: int = 30, headers: dict[str, str] | None = None) -> bool:
+            del timeout, headers
+            entered_ready.set()
+            release_ready.wait(timeout=5)
+            return True
+
+        monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", blocking_ready)
+
+        def run_acquire() -> None:
+            try:
+                provider.acquire("t-inflight", user_id="u1")
+            except BaseException as exc:
+                acquire_errors.append(exc)
+
+        worker = threading.Thread(target=run_acquire)
+        worker.start()
+        assert entered_ready.wait(timeout=5)
+
+        # shutdown() sees in-flight acquire -> fails incomplete without closing client or ownership store.
+        with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError, match="acquire"):
+            provider.shutdown()
+        assert provider._shutdown_complete is False
+        assert provider._client is not None and provider._client._closed is False
+
+        # Unblock acquire -> rolls back using the still-open client, then retry shutdown completes cleanly.
+        release_ready.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert len(acquire_errors) == 1
+        assert isinstance(acquire_errors[0], RuntimeError)
+
+        provider.shutdown()
+        assert provider._shutdown_complete is True
+        assert server.sandboxes == {}
+
+    def test_warm_pool_reap_race_does_not_kill_reacquired_sandbox_or_drop_lease(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, server, aio_instances = _install_provider(monkeypatch, tmp_path, sandbox_overrides={"idle_timeout": 1})
+        try:
+            sandbox_id = provider.acquire("t-race", user_id="u1")
+            provider.release(sandbox_id)
+            assert sandbox_id in provider._warm_pool
+
+            # Expire warm timestamp so _reap_expired_warm considers it eligible.
+            entry, _ = provider._warm_pool[sandbox_id]
+            provider._warm_pool[sandbox_id] = (entry, time.monotonic() - 10.0)
+
+            # Case 1: acquire() reclaims the sandbox while _reap_expired_warm is about to destroy it.
+            reap_entered = threading.Event()
+            release_reap = threading.Event()
+            orig_destroy_warm = provider._destroy_warm_entry
+
+            def paused_destroy_warm(sid: str, warm_entry: Any, *, reason: str) -> bool:
+                reap_entered.set()
+                release_reap.wait(timeout=5)
+                return orig_destroy_warm(sid, warm_entry, reason=reason)
+
+            monkeypatch.setattr(provider, "_destroy_warm_entry", paused_destroy_warm)
+            reaper = threading.Thread(target=provider._reap_expired_warm, args=(1.0,))
+            reaper.start()
+            assert reap_entered.wait(timeout=5)
+
+            # Concurrent acquire reclaims the sandbox while reaper is paused before reservation.
+            reacquired = provider.acquire("t-race", user_id="u1")
+            assert reacquired == sandbox_id
+
+            release_reap.set()
+            reaper.join(timeout=5)
+            assert not reaper.is_alive()
+
+            # Active sandbox must remain tracked, open, alive on server, and still owned.
+            assert provider.get(sandbox_id) is aio_instances[0]
+            assert aio_instances[0].closed is False
+            assert "vefaas-sb-1" in server.sandboxes
+            assert not any(a == "KillSandbox" for a, _, _ in server.requests)
+
+            # Case 2: once teardown reserves _local_teardown, a concurrent acquire refuses to promote it.
+            provider.release(sandbox_id)
+            entry2, _ = provider._warm_pool[sandbox_id]
+            provider._warm_pool[sandbox_id] = (entry2, time.monotonic() - 10.0)
+
+            kill_started = threading.Event()
+            release_kill = threading.Event()
+            orig_kill = provider._client.kill_sandbox
+
+            def blocking_kill(fn_id: str, remote_id: str) -> None:
+                kill_started.set()
+                release_kill.wait(timeout=5)
+                orig_kill(fn_id, remote_id)
+
+            monkeypatch.setattr(provider._client, "kill_sandbox", blocking_kill)
+            monkeypatch.setattr(provider, "_destroy_warm_entry", orig_destroy_warm)
+
+            reaper2 = threading.Thread(target=provider._reap_expired_warm, args=(1.0,))
+            reaper2.start()
+            assert kill_started.wait(timeout=5)
+
+            with pytest.raises(RuntimeError, match="currently being torn down"):
+                provider.acquire("t-race", user_id="u1")
+
+            release_kill.set()
+            reaper2.join(timeout=5)
+            assert not reaper2.is_alive()
+            assert server.sandboxes == {}
+        finally:
+            provider.shutdown()
+
+    def test_stale_renew_lost_does_not_forget_reacquired_sandbox(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, _, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("t-epoch", user_id="u1")
+
+            # Simulate a renew() that observes a concurrent re-acquire (bumping epoch) before returning LOST.
+            mock_store = MagicMock()
+            mock_store.supports_cross_process = True
+
+            def stale_renew(sid: str) -> RenewOutcome:
+                with provider._lock:
+                    provider._bump_acquire_epoch_locked(sid)
+                return RenewOutcome.LOST
+
+            mock_store.renew.side_effect = stale_renew
+            provider._ownership = mock_store
+
+            provider._renew_leases_once()
+            assert provider.get(sandbox_id) is aio_instances[0]
+            assert aio_instances[0].closed is False
+
+            # Also verify _forget_lost_sandbox skips entries currently reserved for local teardown.
+            with provider._lock:
+                provider._local_teardown[sandbox_id] = 1
+            try:
+                provider._forget_lost_sandbox(sandbox_id)
+                assert provider.get(sandbox_id) is aio_instances[0]
+                assert aio_instances[0].closed is False
+            finally:
+                with provider._lock:
+                    provider._local_teardown.pop(sandbox_id, None)
+        finally:
+            provider.shutdown()
+
+    def test_release_recycles_dirty_or_pending_sandbox_instead_of_warm_pool(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sid1 = provider.acquire("t-dirty", user_id="u1")
+            aio_instances[0].requires_container_recycle = True
+            provider.release(sid1)
+            assert sid1 not in provider._warm_pool
+            assert sid1 not in provider._sandboxes
+            assert "vefaas-sb-1" not in server.sandboxes
+
+            sid2 = provider.acquire("t-pending", user_id="u1")
+            aio_instances[1].has_pending_session_creates = True
+            provider.release(sid2)
+            assert sid2 not in provider._warm_pool
+            assert sid2 not in provider._sandboxes
+            assert "vefaas-sb-2" not in server.sandboxes
         finally:
             provider.shutdown()

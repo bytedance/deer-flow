@@ -33,11 +33,11 @@ DEFAULT_REQUEST_TIMEOUT = 30.0
 _URL_ADAPTER = TypeAdapter(AnyHttpUrl)
 _NOT_FOUND_ERROR_CODES = frozenset(
     {
-        "NotFound",
-        "ResourceNotFound",
         "SandboxNotFound",
         "InstanceNotFound",
         "InvalidSandboxId.NotFound",
+        "ResourceNotFound.Sandbox",
+        "ResourceNotFound.Instance",
     }
 )
 
@@ -336,9 +336,7 @@ class VeFaaSClient:
         if isinstance(error_obj, dict) and (error_obj.get("Code") or error_obj.get("Message")):
             error_code = str(error_obj.get("Code") or "")
             error_msg = self._redact(error_obj.get("Message") or error_code)
-            normalized_code = error_code.lower().replace(" ", "")
-            is_sandbox_not_found = "function" not in normalized_code and (error_code in _NOT_FOUND_ERROR_CODES or "notfound" in normalized_code or (response.status_code == 404 and not error_code))
-            err_cls: type[VeFaaSApiError] = VeFaaSSandboxNotFoundError if is_sandbox_not_found else VeFaaSApiError
+            err_cls: type[VeFaaSApiError] = VeFaaSSandboxNotFoundError if error_code in _NOT_FOUND_ERROR_CODES else VeFaaSApiError
             raise err_cls(
                 f"veFaaS {action} failed ({error_code}): {error_msg}",
                 status_code=response.status_code,
@@ -346,12 +344,6 @@ class VeFaaSClient:
                 request_id=str(request_id) if request_id else None,
             )
 
-        if response.status_code == 404:
-            raise VeFaaSSandboxNotFoundError(
-                f"veFaaS {action} returned HTTP 404",
-                status_code=404,
-                request_id=str(request_id) if request_id else None,
-            )
         if response.status_code >= 400:
             raise VeFaaSApiError(
                 f"veFaaS {action} returned HTTP {response.status_code}",
@@ -429,36 +421,66 @@ class VeFaaSClient:
         *,
         metadata: Mapping[str, str] | None = None,
         status: str | None = None,
-        page_number: int = 1,
+        page_number: int | None = None,
         page_size: int = 50,
+        max_pages: int = 100,
     ) -> list[VeFaaSSandboxRecord]:
-        """List sandbox instances belonging to ``function_id`` with optional metadata filters."""
-        payload: dict[str, Any] = {
-            "FunctionId": function_id,
-            "PageNumber": page_number,
-            "PageSize": page_size,
-        }
-        if metadata:
-            payload["Metadata"] = {str(k): str(v) for k, v in metadata.items()}
-        if status:
-            payload["Status"] = status
+        """List sandbox instances belonging to ``function_id`` with optional metadata filters.
 
-        result = self._request("ListSandboxes", payload)
-        raw_items = result.get("Sandboxes")
-        if raw_items is None:
-            raw_items = result.get("Items")
-        if raw_items is None:
-            return []
-        if not isinstance(raw_items, list):
-            raise VeFaaSApiError(f"veFaaS ListSandboxes returned malformed Sandboxes of type {type(raw_items).__name__}")
-
+        When ``page_number`` is omitted, paginates across pages until a short page
+        or the reported ``Total`` count is reached (bounded by ``max_pages``).
+        """
         records: list[VeFaaSSandboxRecord] = []
-        for item in raw_items:
-            if not isinstance(item, Mapping):
-                continue
-            record = _parse_record(item, fallback_function_id=function_id)
-            if record is not None:
-                records.append(record)
+        seen_ids: set[str] = set()
+        current_page = 1 if page_number is None else page_number
+        single_page = page_number is not None
+        pages_fetched = 0
+        raw_seen = 0
+
+        while True:
+            payload: dict[str, Any] = {
+                "FunctionId": function_id,
+                "PageNumber": current_page,
+                "PageSize": page_size,
+            }
+            if metadata:
+                payload["Metadata"] = {str(k): str(v) for k, v in metadata.items()}
+            if status:
+                payload["Status"] = status
+
+            result = self._request("ListSandboxes", payload)
+            raw_items = result.get("Sandboxes")
+            if raw_items is None:
+                raw_items = result.get("Items")
+            if raw_items is None:
+                break
+            if not isinstance(raw_items, list):
+                raise VeFaaSApiError(f"veFaaS ListSandboxes returned malformed Sandboxes of type {type(raw_items).__name__}")
+
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    continue
+                record = _parse_record(item, fallback_function_id=function_id)
+                if record is not None and record.id not in seen_ids:
+                    seen_ids.add(record.id)
+                    records.append(record)
+
+            pages_fetched += 1
+            raw_seen += len(raw_items)
+            if single_page or len(raw_items) < page_size:
+                break
+            total = result.get("Total")
+            if isinstance(total, int) and not isinstance(total, bool) and raw_seen >= total:
+                break
+            if pages_fetched >= max_pages:
+                logger.warning(
+                    "veFaaS ListSandboxes stopped after max_pages=%d (%d records fetched for function %s)",
+                    max_pages,
+                    len(records),
+                    function_id,
+                )
+                break
+            current_page += 1
         return records
 
     def set_sandbox_timeout(self, function_id: str, sandbox_id: str, *, timeout_minutes: int) -> None:
