@@ -13,8 +13,14 @@ SCRIPT = Path(__file__).resolve().parents[2] / "skills/public/video-generation/s
 
 
 @pytest.fixture(autouse=True)
-def clean_credentials(monkeypatch):
-    for key in ("GEMINI_API_KEY", "MINIMAX_API_KEY", "VIDEO_GENERATION_PROVIDER"):
+def clean_env(monkeypatch):
+    for key in (
+        "GEMINI_API_KEY",
+        "MINIMAX_API_KEY",
+        "VIDEO_GENERATION_PROVIDER",
+        "MINIMAX_VIDEO_RESOLUTION",
+        "MINIMAX_VIDEO_DURATION",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 

@@ -7,6 +7,8 @@ request, while startup-scoped capabilities report the runtime that actually
 started.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -89,6 +91,12 @@ class ImageGenerationManagementFeature(BaseModel):
     enabled: bool = Field(..., description="Whether web-managed image profiles are enabled")
 
 
+class ToolApprovalFeature(BaseModel):
+    enabled: bool = False
+    default_mode: Literal["ask", "auto", "full"] = "ask"
+    allowed_modes: list[Literal["ask", "auto", "full"]] = Field(default_factory=list)
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -102,6 +110,7 @@ class FeaturesResponse(BaseModel):
     thread_activity: ThreadActivityFeature
     image_generation_management: ImageGenerationManagementFeature
     run_inputs: bool = False
+    tool_approval: ToolApprovalFeature = Field(default_factory=ToolApprovalFeature)
 
 
 @router.get(
@@ -113,11 +122,13 @@ class FeaturesResponse(BaseModel):
 async def list_features(request: Request, config: AppConfig = Depends(get_config)) -> FeaturesResponse:
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
+    approval = getattr(config, "hitl_approval", None)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     image_management_enabled = getattr(request.app.state, "image_generation_management_enabled", None)
     if image_management_enabled is None:
         image_management_enabled = managed_image_profiles_enabled()
     return FeaturesResponse(
+        tool_approval=ToolApprovalFeature(enabled=approval.enabled, default_mode=approval.default_mode, allowed_modes=approval.allowed_modes) if approval is not None else ToolApprovalFeature(),
         run_inputs=getattr(getattr(request.app.state, "run_manager", None), "input_store", None) is not None,
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),

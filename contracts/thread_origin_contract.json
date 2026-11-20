@@ -7,6 +7,7 @@
     "github",
     "im_channel",
     "mcp_notification",
-    "schedule"
+    "schedule",
+    "subagent_batch"
   ]
 }

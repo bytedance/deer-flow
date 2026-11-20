@@ -8,7 +8,7 @@ import os
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import ExitStack
@@ -34,6 +34,7 @@ from deerflow.agents.middlewares.audit_context import (
 )
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.authz.provider import Principal
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
@@ -62,6 +63,7 @@ from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
 )
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
@@ -155,7 +157,8 @@ class SubagentResult:
             ``persistent_shell_sessions`` flag resolved from the state that
             carried the evidence (``None`` when unidentifiable — the matcher
             fails closed on it).
-            Accumulated per chunk (merged by ``tool_call_id``) so
+            Accumulated per chunk (merged by result message id, ``tool_call_id``
+            only for entries without one) so
             summarization compacting earlier messages cannot erase a recorded
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
@@ -213,8 +216,9 @@ class SubagentResult:
     def update_bash_executions(self, executions: list[dict[str, Any]] | None) -> None:
         """Merge bash evidence from the latest yielded state while still running.
 
-        Entries merge by ``tool_call_id`` in first-seen order and are capped to
-        the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
+        Entries merge by their result message (``tool_call_id`` when it has no
+        id, since providers can reuse call ids across responses) in first-seen
+        order and are capped to the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
         ``final_state`` scan, accumulation survives summarization compacting
         earlier AI/ToolMessages out of the streamed history. ``None`` leaves
         the field untouched (no evidence this chunk); an empty list still
@@ -227,9 +231,9 @@ class SubagentResult:
         with self._state_lock:
             if self.status.is_terminal:
                 return
-            merged = {str(entry.get("tool_call_id")): entry for entry in (self.bash_executions or [])}
+            merged = {_bash_evidence_key(entry): entry for entry in (self.bash_executions or [])}
             for execution in executions:
-                merged[str(execution.get("tool_call_id"))] = dict(execution)
+                merged[_bash_evidence_key(execution)] = dict(execution)
             self.bash_executions = list(merged.values())[-_BASH_EVIDENCE_MAX_ENTRIES:]
 
     def snapshot_tool_receipts(self) -> list[dict[str, Any]] | None:
@@ -483,15 +487,18 @@ _BASH_EVIDENCE_COMMAND_CHARS = 500
 _BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
 
 
-def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | None]:
-    """Derive the recorded status from the shell exit marker when present.
+def _bash_evidence_status(content: str, meta_status: str, meta: Mapping[str, Any]) -> tuple[str, str | None]:
+    """Prefer a provider exit code, retaining text markers for legacy results.
 
     Returns ``(status, marker)``: the marker text actually seen (e.g. ``Exit
-    Code: 5``), so consumers can report it instead of asserting a failure the
-    harness cannot distinguish from the command's own trailing text. The
-    explicit marker takes precedence over generic metadata in old checkpoints
-    or provider stamps that report ``success`` for a nonzero shell exit.
+    Code: 5``) only when text determined the status. A provider's numeric code
+    takes precedence over stdout, which may itself print an exit marker.
+    Missing or invalid codes retain the marker-first fallback for older
+    checkpoints and plain-string providers with generic success metadata.
     """
+    exit_code = meta.get("exit_code")
+    if meta.get("source") == "tool_return" and type(exit_code) is int:
+        return ("success" if exit_code == 0 else "error"), None
     return bash_exit_status(content) or (meta_status, None)
 
 
@@ -531,10 +538,22 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
         return None
 
 
+def _bash_evidence_key(execution: dict[str, Any]) -> tuple[str, str]:
+    """Identify one recorded execution across values chunks.
+
+    A provider may reuse a call id in a later response, so the result message
+    id names the execution; entries without one keep the call-id identity.
+    """
+    result_id = execution.get("result_id")
+    if isinstance(result_id, str) and result_id:
+        return ("result", result_id)
+    return ("call", str(execution.get("tool_call_id")))
+
+
 def _harvest_bash_executions(
     final_state: Any,
     *,
-    summary_cache: dict[str, tuple[str, str]] | None = None,
+    summary_cache: dict[tuple[str, str], tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
@@ -542,11 +561,11 @@ def _harvest_bash_executions(
     a specific recorded execution — the command text lets the parent match the
     criterion against the call that actually ran. A bounded summary stamp is
     computed from the full tool output before retaining the diagnostic tail.
-    The recorded status is the **actual shell exit status**: a nonzero bash exit comes back as ordinary output text
-    (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
-    ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
-    as success — so an explicit exit marker wins, and the meta status is only
-    the fallback when no marker exists. Every entry is stamped with
+    The recorded status prefers the provider's numeric exit code from
+    ``deerflow_tool_meta``. Older checkpoints and plain-string providers retain
+    the text-marker fallback (``Exit Code: N`` or a whole-output ``Command
+    exited with code N``), followed by the metadata/native status when no
+    marker exists. Every entry is stamped with
     ``shell_persistent`` — the producing sandbox's
     ``persistent_shell_sessions`` flag, resolved against the sandbox recorded
     in THIS state (the subagent's own graph state), so provenance survives
@@ -564,48 +583,48 @@ def _harvest_bash_executions(
             summary_cache.clear()
         return None
     try:
+        from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
         from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
         from deerflow.subagents.acceptance_checks import summarize_test_output
 
-        commands: dict[str, tuple[str, str, bool]] = {}
-        for message in messages:
-            if not isinstance(message, AIMessage):
-                continue
-            for tool_call in message.tool_calls or []:
-                name = str(tool_call.get("name") or "")
-                if name not in _BASH_EVIDENCE_TOOL_NAMES:
-                    continue
-                tool_call_id = str(tool_call.get("id") or "")
-                args = tool_call.get("args")
-                command = args.get("command") if isinstance(args, dict) else None
-                command = command if isinstance(command, str) else ""
-                # A truncated command loses its suffix; the matcher must not
-                # treat shell-structure analysis of the prefix as proof (a
-                # selection-changing suffix like ``-k smoke`` could be cut).
-                commands[tool_call_id] = (name, command[:_BASH_EVIDENCE_COMMAND_CHARS], len(command) > _BASH_EVIDENCE_COMMAND_CHARS)
-        if not commands:
+        # Tool-call ids are unique per response, not per conversation: pair each
+        # result with the call of its own response, so a reused id never labels
+        # one command's output with another command.
+        bash_calls = [occurrence for occurrence in pair_tool_call_results(messages) if occurrence.name in _BASH_EVIDENCE_TOOL_NAMES]
+        if not bash_calls:
             if summary_cache is not None:
                 summary_cache.clear()
             return []
+        positions = {id(message): index for index, message in enumerate(messages)}
+        answered = sorted((occurrence for occurrence in bash_calls if occurrence.result is not None), key=lambda occurrence: positions[id(occurrence.result)])
         executions: list[dict[str, Any]] = []
         # Only retained executions need full-output parsing. The per-run cache
         # survives values chunks, but keeps at most the same newest 20 outputs.
-        tool_messages = [message for message in messages if isinstance(message, ToolMessage) and str(message.tool_call_id or "") in commands][-_BASH_EVIDENCE_MAX_ENTRIES:]
-        next_cache: dict[str, tuple[str, str]] = {}
-        for message in tool_messages:
-            tool_call_id = str(message.tool_call_id or "")
-            entry = commands[tool_call_id]
-            name, command, command_truncated = entry
+        next_cache: dict[tuple[str, str], tuple[str, str]] = {}
+        for occurrence in answered[-_BASH_EVIDENCE_MAX_ENTRIES:]:
+            message = occurrence.result
+            tool_call_id = occurrence.call_id
+            name = occurrence.name
+            command = occurrence.args.get("command")
+            command = command if isinstance(command, str) else ""
+            # A truncated command loses its suffix; the matcher must not
+            # treat shell-structure analysis of the prefix as proof (a
+            # selection-changing suffix like ``-k smoke`` could be cut).
+            command_truncated = len(command) > _BASH_EVIDENCE_COMMAND_CHARS
+            command = command[:_BASH_EVIDENCE_COMMAND_CHARS]
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
+            meta = meta if isinstance(meta, dict) else {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
-            status, status_marker = _bash_evidence_status(content, meta_status)
-            cached = summary_cache.get(tool_call_id) if summary_cache is not None else None
+            status, status_marker = _bash_evidence_status(content, meta_status, meta)
+            result_id = message.id if isinstance(message.id, str) and message.id else None
+            cache_key = _bash_evidence_key({"result_id": result_id, "tool_call_id": tool_call_id})
+            cached = summary_cache.get(cache_key) if summary_cache is not None else None
             if cached is not None and (cached[0] is content or cached[0] == content):
                 test_summary = cached[1]
             else:
                 test_summary = summarize_test_output(content)
-            next_cache[tool_call_id] = (content, test_summary)
+            next_cache[cache_key] = (content, test_summary)
             output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
             if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
                 # A clipped test name/log line can look like a summary after
@@ -614,6 +633,7 @@ def _harvest_bash_executions(
             executions.append(
                 {
                     "tool_call_id": tool_call_id,
+                    "result_id": result_id,
                     "tool_name": name,
                     "command": command,
                     "command_truncated": command_truncated,
@@ -690,7 +710,27 @@ def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
                 return
 
         if loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
+            from deerflow.subagents.checkpoints import drain_checkpoint_runtimes, has_checkpoint_runtimes
+
+            if has_checkpoint_runtimes(loop):
+
+                async def drain_then_stop() -> None:
+                    await drain_checkpoint_runtimes()
+                    loop.call_soon(loop.stop)
+
+                cleanup = asyncio.run_coroutine_threadsafe(drain_then_stop(), loop)
+                if thread is threading.current_thread():
+                    return
+                try:
+                    cleanup.result(timeout=1)
+                except FuturesTimeoutError:
+                    logger.warning("Retaining isolated subagent loop ownership until checkpoint resources finish draining")
+                    return
+                except Exception:
+                    logger.exception("Retaining isolated subagent loop ownership because checkpoint resource cleanup failed")
+                    return
+            else:
+                loop.call_soon_threadsafe(loop.stop)
 
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=1)
@@ -794,10 +834,10 @@ def _run_on_isolated_loop_if_live(callback: Callable[[], None]) -> None:
         callback()
 
 
-def _submit_to_isolated_loop_in_context(
+def _submit_to_isolated_loop_in_context[T](
     context: Context,
-    coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
-) -> Future[SubagentResult]:
+    coro_factory: Callable[[], Coroutine[Any, Any, T]],
+) -> Future[T]:
     """Submit a coroutine to the isolated loop while preserving ContextVar state.
 
     The loop must be resolved before the coroutine is created: as direct
@@ -812,7 +852,7 @@ def _submit_to_isolated_loop_in_context(
     before the error propagates.
     """
 
-    def _submit() -> Future[SubagentResult]:
+    def _submit() -> Future[T]:
         loop = _get_isolated_subagent_loop()
         coroutine = coro_factory()
         try:
@@ -853,6 +893,9 @@ def _copy_isolated_subagent_context() -> Context:
     continue to reach the parent stream.
     """
     context = copy_context()
+    from deerflow.subagents.checkpoints import capture_checkpoint_runtime
+
+    capture_checkpoint_runtime(context)
     inherited_config = context.get(var_child_runnable_config)
     if inherited_config is None or "callbacks" not in inherited_config:
         return context
@@ -941,9 +984,12 @@ class SubagentExecutor:
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
         tool_progress_recorder: Any | None = None,
+        approval_runtime: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
         input_gate: Any | None = None,
+        agent_mcp_authority: Any | None = None,
+        principal_resolver: Callable[[], Awaitable[Principal]] | None = None,
     ):
         """Initialize the executor.
 
@@ -1024,6 +1070,7 @@ class SubagentExecutor:
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
         self.input_gate = input_gate
+        self.agent_mcp_authority = agent_mcp_authority
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
@@ -1031,6 +1078,7 @@ class SubagentExecutor:
         self.user_id = user_id
         # Guardrail attribution propagated from the parent runtime context.
         self.user_role = user_role
+        self._principal_resolver = principal_resolver
         self.oauth_provider = oauth_provider
         self.oauth_id = oauth_id
         self.run_id = run_id
@@ -1061,6 +1109,7 @@ class SubagentExecutor:
         self.loop_detection_recorder = loop_detection_recorder
         self.tool_promotion_recorder = tool_promotion_recorder
         self.tool_progress_recorder = tool_progress_recorder
+        self.approval_runtime = approval_runtime
 
         self._base_tools = _filter_tools(
             tools,
@@ -1100,6 +1149,9 @@ class SubagentExecutor:
         self.assembly_descriptor: Any | None = None
         self._assembled_system_prompt = self.config.system_prompt or ""
         self._assembled_skills: list[Any] = []
+        # Only these exact, build-generated instances receive the discovery
+        # exemption in the final name-policy audit; names alone are insufficient.
+        self._policy_discovery_tools: tuple[BaseTool, ...] = ()
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
@@ -1142,7 +1194,10 @@ class SubagentExecutor:
         except ReasoningPolicyError as exc:
             raise ValueError(f"Model {self.model_name}: {exc}") from exc
         # Preserve the original request for the factory's validation and logs.
-        model = create_chat_model(
+        # Provider construction can read local credentials (the Codex provider
+        # loads the CLI auth.json), so keep the build off the event loop.
+        model = await run_assembly(
+            create_chat_model,
             name=self.model_name,
             thinking_enabled=self.thinking_enabled,
             reasoning_effort=self.reasoning_effort,
@@ -1227,7 +1282,6 @@ class SubagentExecutor:
                 authorization_provider=authz_provider,
             )
             middlewares = apply_declared_tool_view(middlewares, authorized_names=declared_authorized)
-            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
         elif authz_provider is not None:
             # Defense in depth: the provider is configured but the seeded
             # decision state is missing, so the declaration pass is skipped.
@@ -1242,6 +1296,32 @@ class SubagentExecutor:
                 "is" if len(missing) == 1 else "are",
                 self.config.name,
             )
+        bound_tools = list(tools if tools is not None else self.tools)
+        # Native subagents have no resumable checkpoint/runtime. Reuse the lead
+        # builder's configured policy so matching calls fail closed instead of
+        # bypassing approval; disabled configuration remains a no-op.
+        from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
+
+        _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False, model_name=self.model_name)
+        # Extensions can add tools through middleware after the inherited list
+        # was filtered. Apply the same subagent policy to those declarations,
+        # independently of global authorization, without changing shared stacks
+        # or re-filtering generated discovery helpers in bound_tools.
+        from deerflow.agents.middlewares.tool_declarations import ToolPolicyNameResolver, apply_declared_tool_policy, verify_subagent_tool_policy
+
+        policy_names = ToolPolicyNameResolver()
+        middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools, name_resolver=policy_names)
+
+        from deerflow.subagents.checkpoints import checkpoint_runtime
+
+        history_runtime = checkpoint_runtime()
+        state_schema = ThreadState
+        if history_runtime is not None and history_runtime.mode == "delta":
+            from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+
+            state_schema = get_thread_state_schema("delta")
+            middlewares = normalize_middleware_state_schemas(middlewares, "delta")
+
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1254,14 +1334,28 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
-        bound_tools = list(tools if tools is not None else self.tools)
+        # Delta normalization can copy middleware, so audit both policies on
+        # the final instances that create_agent will bind.
+        if declared_authorized is not None:
+            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
+        verify_subagent_tool_policy(
+            bound_tools,
+            middlewares,
+            allowed=self.config.tools,
+            disallowed=self.config.disallowed_tools,
+            discovery_tools=getattr(self, "_policy_discovery_tools", ()),
+            name_resolver=policy_names,
+        )
         agent = create_agent(
             model=model,
             tools=bound_tools,
             middleware=middlewares,
             system_prompt=None,
-            state_schema=ThreadState,
-            checkpointer=False,
+            state_schema=state_schema,
+            # The opted-in scope replaces the inherited saver with its
+            # loop-owned peer before graph construction. All other entrypoints
+            # keep isolation from a possibly synchronous parent saver.
+            checkpointer=None if history_runtime is not None else False,
         )
         # Use the compiled registry: it includes middleware tools, normalized
         # callables, and LangChain's last-definition-wins name precedence.
@@ -1582,6 +1676,7 @@ class SubagentExecutor:
             enabled=resolved_app_config.tool_search.enabled,
         )
         final_tools.extend(late_tools)
+        self._policy_discovery_tools = tuple(helper for helper in (deferred_setup.tool_search_tool, skill_setup.describe_skill_tool) if helper is not None and any(helper is tool for tool in final_tools))
 
         # Combine the system prompt and skill discovery metadata into a single
         # SystemMessage. Full SKILL.md bodies are loaded only when activated.
@@ -1685,17 +1780,43 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
+        from deerflow.subagents.checkpoints import SubagentCheckpointError, subagent_checkpoint_scope
+
         with ensure_trace_context(self.deerflow_trace_id):
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
-                async with slot:
+                async with (
+                    subagent_checkpoint_scope(execution_id=result.task_id, run_id=self.run_id, tool_call_id=result.external_task_id, agent_name=self.config.name),
+                    slot,
+                ):
+                    if self._principal_resolver is not None:
+                        # Durable work can wait behind ordinary subagents after
+                        # its worker-side check. Revalidate before marking it
+                        # running or entering any task lifecycle hooks.
+                        try:
+                            principal = await self._principal_resolver()
+                            if not isinstance(principal, Principal) or principal.user_id != self.user_id:
+                                raise PermissionError("Subagent principal does not match its owner")
+                            self.user_role = principal.role
+                            self.oauth_provider = principal.oauth_provider
+                            self.oauth_id = principal.oauth_id
+                            self.channel_user_id = principal.channel_user_id
+                            self.is_internal = principal.is_internal
+                            self.authz_attributes = normalize_authz_attributes(principal.attributes)
+                            self._skill_authorization = None
+                        except Exception as exc:
+                            result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+                            return result
                     with result._state_lock:
                         if result.status.is_terminal:
                             return result
                         result.status = SubagentStatus.RUNNING
                         result.started_at = _utcnow()
                     return await self._aexecute_admitted(task, result)
+            except SubagentCheckpointError as exc:
+                result.try_set_terminal(SubagentStatus.FAILED, error=str(exc), admission_failure=True)
+                return result
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
                     SubagentStatus.FAILED,
@@ -1741,6 +1862,7 @@ class SubagentExecutor:
             lead_task_id,
             notify_task_start,
             notify_task_stop,
+            stopped_task_info,
             subagent_task_outcome,
         )
 
@@ -1749,17 +1871,22 @@ class SubagentExecutor:
         task_info: TaskInfo | None = None
         if loaded_extensions.needs_task_store:
             task_store = ExtensionData(result.external_task_id or result.task_id)
-        if loaded_extensions.has_task_lifecycle and self.run_id:
-            task_info = TaskInfo(
-                task_id=result.task_id,
-                run_id=self.run_id,
-                thread_id=self.thread_id or "",
-                kind="subagent",
-                parent_task_id=lead_task_id(self.run_id),
-                agent_name=self.config.name,
-            )
-            assert task_store is not None
-        elif loaded_extensions.has_task_lifecycle:
+            if self.run_id:
+                identity = TaskInfo(
+                    task_id=result.task_id,
+                    run_id=self.run_id,
+                    thread_id=self.thread_id or "",
+                    kind="subagent",
+                    parent_task_id=lead_task_id(self.run_id),
+                    agent_name=self.config.name,
+                )
+                # Seed the identity for every hook handed this store, not only
+                # lifecycle contributors: compaction events are named from it.
+                task_store.set(identity)
+                # A lifecycle contributor always implies a task store.
+                if loaded_extensions.has_task_lifecycle:
+                    task_info = identity
+        if loaded_extensions.has_task_lifecycle and not self.run_id:
             logger.debug(
                 "[trace=%s] Subagent %s has no run_id; skipping extension task lifecycle",
                 self.trace_id,
@@ -1788,7 +1915,7 @@ class SubagentExecutor:
                 return None
             return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
 
-        bash_summary_cache: dict[str, tuple[str, str]] = {}
+        bash_summary_cache: dict[tuple[str, str], tuple[str, str]] = {}
 
         def current_bash_executions() -> list[dict[str, Any]] | None:
             # RFC #4651 PR4: evidence for tests_passed acceptance leaves.
@@ -1894,6 +2021,10 @@ class SubagentExecutor:
             # audit). user_id reuses the resolved tracing id; on every
             # authenticated/IM path this equals the parent context value.
             context["user_id"] = self.user_id
+            if self.agent_mcp_authority is not None:
+                from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY
+
+                context[AGENT_AUTH_CONTEXT_KEY] = self.agent_mcp_authority
             context["user_role"] = self.user_role
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
@@ -1913,6 +2044,9 @@ class SubagentExecutor:
                 context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = dict(self.knowledge_scope)
             context["is_subagent"] = True
             context["interaction_mode"] = "autonomous"
+            if self.approval_runtime is not None:
+                context["__tool_approval_runtime"] = self.approval_runtime
+                context["tool_approval_mode"] = self.approval_runtime.mode
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
             execution_context = context
@@ -2184,7 +2318,11 @@ class SubagentExecutor:
                         await notify_task_stop(
                             loaded_extensions,
                             task_store,
-                            task_info,
+                            stopped_task_info(
+                                task_info,
+                                status=result.status.value,
+                                error=result.error,
+                            ),
                             subagent_task_outcome(
                                 cancelled=result.status is SubagentStatus.CANCELLED,
                                 succeeded=result.status is SubagentStatus.COMPLETED,

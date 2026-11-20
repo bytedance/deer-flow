@@ -610,6 +610,8 @@ def test_local_backend_forwards_legacy_image_environment(monkeypatch, network_mo
     observed = []
     monkeypatch.setattr(backend, "_start_container", lambda *_args, **kwargs: observed.append(kwargs) or "container-id")
     if network_mode == "restricted":
+        backend._pending_cleanup_ports_lock = threading.Lock()
+        backend._unknown_cleanup_ports = {}
         monkeypatch.setattr(backend, "_resource_names", lambda _sandbox_id: ("proxy", "internal"))
         monkeypatch.setattr(backend, "_egress_network_name", lambda _sandbox_id: "egress")
         monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")

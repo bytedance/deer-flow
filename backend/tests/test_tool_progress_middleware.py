@@ -45,7 +45,7 @@ def _meta_kwargs(
     error_type: str | None = None,
     recoverable_by_model: bool = True,
     recommended_next_action: str = "continue",
-    source: str = "content_analysis",
+    source: str = "tool_return",
 ) -> dict[str, object]:
     return {
         TOOL_META_KEY: {
@@ -209,6 +209,23 @@ def test_normal_call_no_hint_phase_active():
     assert result is msg
     assert mw._phase_states["t1"]["web_search"].phase == "active"
     assert mw._phase_states["t1"]["web_search"].consecutive_problems == 0
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_provider_exit_code_metadata_keeps_progress_tracking(exit_code):
+    mw = _make_mw()
+    request = _make_tool_request(tool_name="bash")
+    status = "error" if exit_code else "success"
+    metadata = _meta_kwargs(status=status, error_type="unknown" if exit_code else None)
+    metadata[TOOL_META_KEY]["exit_code"] = exit_code
+    message = _make_tool_message(tool_name="bash", meta_kwargs=metadata)
+    message.status = status
+
+    assert mw.wrap_tool_call(request, lambda _: message) is message
+
+    state = mw._phase_states["t1"]["bash"]
+    assert state.phase == "active"
+    assert state.consecutive_problems == (1 if exit_code else 0)
 
 
 # ---------------------------------------------------------------------------

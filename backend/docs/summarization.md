@@ -25,6 +25,17 @@ PII-redacted before splitting, then escaped before insertion into prompt blocks.
 No human-anchor filter or successful "too long" placeholder can discard selected
 source. Recent-message retention and AI/Tool partition boundaries stay unchanged.
 
+State system messages, tagged dynamic-context reminders and the latest genuine
+user request remain outside compression. Summary source conversion uses message
+copies to include native document `text`/`content` plaintext, title and context
+in their original block order, before redaction and chunking. Nonempty string
+titles and context are retained even when the source is opaque, absent or
+malformed; unsupported source bodies are not stringified. A `content` source
+contributes only direct strings and `text` blocks. Nested `document` blocks are
+not traversed, including their metadata; recursive extraction is outside this
+fix's scope. Compaction does not decode binary documents, fetch remote media or
+change checkpoint content.
+
 Only after all chunks succeed are hooks, the compaction event, history capture
 and message replacement committed once. Any failed chunk leaves active history
 unchanged; manual `/compact` reports generation failure. A pass processes at most
@@ -232,7 +243,7 @@ keep:
 
 #### `summary_prompt`
 - **Type**: String or null
-- **Default**: `null` (uses LangChain's default prompt)
+- **Default**: `null` (uses DeerFlow's built-in prompt)
 - **Description**: Custom prompt template for generating summaries. The prompt should guide the model to extract the most important context.
 
 #### `skill_file_read_tool_names`
@@ -243,11 +254,12 @@ keep:
 Legacy `preserve_recent_skill_*` settings are no longer used. Loaded skill retention is handled by the durable `skill_context` reference channel instead of by preserving raw skill-read messages in the summarization window.
 
 **Default Prompt Behavior:**
-The default LangChain prompt instructs the model to:
+The built-in DeerFlow prompt extends LangChain's prompt and asks the model to:
 - Extract highest quality/most relevant context
 - Focus on information critical to the overall goal
 - Avoid repeating completed actions
 - Return only the extracted context
+- Preserve current user requirements, literal approval phrases, conditions for acting, and later revisions
 
 ## How It Works
 
@@ -271,6 +283,11 @@ The default LangChain prompt instructs the model to:
 - Uses approximate token counting based on character count
 - For Anthropic models: ~3.3 characters per token
 - For other models: Uses LangChain's default estimation
+- For `VllmChatModel` using Chat Completions: History and token-based retention
+  estimates include the assistant reasoning replayed to vLLM. A non-null `reasoning` field takes
+  precedence over `reasoning_content`, including when it is empty. This applies
+  to both automatic and manual compaction. The estimate is approximate and
+  leaves the summary prompt and its trimming budget unchanged.
 - Can be customized with a custom `token_counter` function
 
 ### Message Preservation

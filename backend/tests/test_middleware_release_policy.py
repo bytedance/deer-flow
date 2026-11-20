@@ -124,6 +124,16 @@ def _make_loop_detection_middleware():
     return LoopDetectionMiddleware()
 
 
+def test_loop_result_aware_policy_changes_release_identity():
+    policies = collect_release_policies([_make_loop_detection_middleware()])
+    parameters = policies["LoopDetectionMiddleware"]
+    assert parameters["repetition_key"] == "call_and_result_v1"
+    assert parameters["read_prediction"] == "refresh_after_successful_write"
+    assert parameters["frequency_action"] == "observe_only"
+    legacy = {"LoopDetectionMiddleware": {key: value for key, value in parameters.items() if key != "repetition_key"}}
+    assert canonical_hash(policies) != canonical_hash(legacy)
+
+
 def _make_subagent_limit_middleware():
     from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 
@@ -301,6 +311,28 @@ def _middleware_fingerprint(middleware):
         enabled_skills=[],
         effective_policies={},
     ).fingerprint
+
+
+def test_todo_hard_stop_policy_changes_assembly_identity(monkeypatch):
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    current = TodoMiddleware()
+    previous = TodoMiddleware()
+    previous_params = previous.release_policy_parameters()
+    assert previous_params["completion_reminder_hard_stop_reasons"] == ["loop_capped", "token_capped", "safety_capped", "model_length_capped"]
+    previous_params["completion_reminder_hard_stop_reasons"] = ["loop_capped", "token_capped"]
+    assert previous_params.pop("skip_completion_reminder_on_safety_cap") is True
+    monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
+    assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
+
+
+def test_safety_text_only_stop_policy_changes_assembly_identity(monkeypatch):
+    current = _make_safety_finish_reason_middleware()
+    previous = _make_safety_finish_reason_middleware()
+    previous_params = previous.release_policy_parameters()
+    assert previous_params.pop("mark_text_only_termination") is True
+    monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
+    assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
 
 
 def _continuity_summarizer(config):

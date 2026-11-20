@@ -22,7 +22,7 @@ import re
 from collections.abc import Mapping
 
 DEERFLOW_ORIGIN_KEY = "deerflow_origin"
-ORIGIN_KINDS: frozenset[str] = frozenset({"schedule", "im_channel", "github", "extension", "mcp_notification"})
+ORIGIN_KINDS: frozenset[str] = frozenset({"schedule", "im_channel", "github", "extension", "mcp_notification", "subagent_batch"})
 
 _PROVIDER_RE = re.compile(r"[a-z0-9_-]{1,32}")
 _MAX_NAMESPACE_CHARS = 96

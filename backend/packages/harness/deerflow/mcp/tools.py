@@ -473,6 +473,23 @@ def _extract_thread_id(runtime: Runtime | None) -> str:
         return "default"
 
 
+def _describe_non_text_result(blocks: list[dict[str, Any]]) -> str:
+    """Name the non-text blocks of an error result without their payloads.
+
+    The tool error reported to the model is built from the result's text
+    blocks. An error result that carries only images or files has none, and
+    stringifying the blocks instead would put their base64 payload into the
+    model-visible message (and into the checkpointed ToolMessage). Report the
+    block kinds and MIME types, which is all the model can act on anyway.
+    """
+    parts: list[str] = []
+    for block in blocks:
+        kind = block.get("type", "unknown")
+        mime_type = block.get("mime_type")
+        parts.append(f"{kind} ({mime_type})" if mime_type else str(kind))
+    return ", ".join(parts)
+
+
 def _convert_call_tool_result(
     call_tool_result: Any,
     *,
@@ -549,10 +566,18 @@ def _convert_call_tool_result(
     # Convert MCP content blocks to LangChain content blocks.
     lc_content = []
     resource_links: list[dict[str, Any]] = []
+    is_error = bool(call_tool_result.isError)
+    # Empty binary payloads cannot become LangChain blocks (``create_file_block``
+    # rejects an empty base64 string). On an error result that would hide the
+    # server's diagnostics, so name the shape in the fallback message instead.
+    empty_binary_shapes: list[str] = []
     for item in call_tool_result.content:
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
+            if is_error and not item.data:
+                empty_binary_shapes.append(f"image ({item.mimeType})")
+                continue
             lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
         elif isinstance(item, AudioContent):
             raise NotImplementedError(f"AudioContent conversion to LangChain content blocks is not yet supported. Received audio with mime type: {item.mimeType}")
@@ -601,10 +626,24 @@ def _convert_call_tool_result(
                 lc_content.append(create_text_block(text=_resolve_text(res.text)))
             elif isinstance(res, BlobResourceContents):
                 mime = res.mimeType or None
+                if is_error and not res.blob:
+                    kind = "image" if mime and mime.startswith("image/") else "file"
+                    empty_binary_shapes.append(f"{kind} ({mime or 'application/octet-stream'})")
+                    continue
                 if mime and mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
                 else:
-                    lc_content.append(create_file_block(base64=res.blob, mime_type=mime))
+                    # ``BlobResourceContents.mimeType`` is optional in the MCP spec, but
+                    # langchain-core refuses a base64 block without one. Degrade to a
+                    # generic binary type instead of raising, so the rest of the result —
+                    # including the text blocks the server returned — survives. The
+                    # sibling ``ResourceLink`` branch already degrades the same way.
+                    lc_content.append(
+                        create_file_block(
+                            base64=res.blob,
+                            mime_type=mime or "application/octet-stream",
+                        )
+                    )
             else:
                 lc_content.append(create_text_block(text=str(res)))
         else:
@@ -612,7 +651,18 @@ def _convert_call_tool_result(
 
     if call_tool_result.isError:
         error_parts = [item["text"] for item in lc_content if isinstance(item, dict) and item.get("type") == "text"]
-        raise ToolException("\n".join(error_parts) if error_parts else str(lc_content))
+        if error_parts:
+            raise ToolException("\n".join(error_parts))
+        # No text block to report: describe the payload shapes instead of
+        # stringifying the blocks, which would put image/file base64 into the
+        # model-visible error message.
+        described = _describe_non_text_result(lc_content)
+        if empty_binary_shapes:
+            described = ", ".join(filter(None, [described, ", ".join(empty_binary_shapes)]))
+        message = "MCP tool returned an error result without text content"
+        if described:
+            message += f" ({described}); the payload is not shown"
+        raise ToolException(message + ".")
 
     artifact = None
     if call_tool_result.structuredContent is not None:
@@ -873,6 +923,7 @@ def _make_background_submit_tool(
     status_tool: str,
     cancel_tool: str,
     connection_scope: str,
+    agent_auth: bool = False,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
@@ -887,6 +938,9 @@ def _make_background_submit_tool(
         context = deerflow_runtime.context if deerflow_runtime is not None and deerflow_runtime.context else {}
         run_id = context.get("run_id")
         tool_call_id = getattr(deerflow_runtime, "tool_call_id", None) if deerflow_runtime is not None else None
+        from deerflow.mcp.agent_auth import task_agent_reference
+
+        agent_reference = task_agent_reference(deerflow_runtime, server_name, required=agent_auth)
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
@@ -903,6 +957,7 @@ def _make_background_submit_tool(
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
                     "connection_scope": connection_scope,
+                    **({"agent_auth": agent_reference} if agent_reference is not None else {}),
                 },
             ),
         )
@@ -979,6 +1034,7 @@ def _configure_task_tools_for_server(
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
                 connection_scope=connection_scope,
+                agent_auth=server_config.agent_auth,
             )
         )
     return configured
@@ -1004,8 +1060,52 @@ def _flatten_server_tool_groups(
     enabled_order: Collection[str],
     groups: Mapping[str, ServerDiscoveryResult],
 ) -> list[BaseTool]:
-    """Flatten grouped results in enabled-server declaration order."""
-    return [tool for name in enabled_order if name in groups for tool in groups[name].tools]
+    """Flatten grouped results in enabled-server declaration order.
+
+    A tool whose bound name duplicates an earlier one is dropped with a
+    warning naming the server whose tool survived. Server prefixes do not
+    make bound names unique across servers (server ``a`` exposing ``b_x`` and
+    server ``a_b`` exposing ``x`` both bind ``a_b_x``), and a duplicate name
+    would reach the model as two same-named declarations, where the provider
+    silently keeps only one. The surviving server is stable only while its
+    discovery keeps succeeding: when the winner's discovery fails, its group
+    is absent from both this flatten and the cache initializer's reuse path,
+    so the later duplicate becomes served again and the implementation behind
+    a bound name can alternate across cache generations with transient server
+    health.
+
+    The string checks below only cover a directly constructed
+    ``ServerDiscoveryResult`` in tests: production tools always pass through
+    ``_wrap_discovered_server_tools``, which guarantees a validated non-empty
+    string name before a group can exist.
+    """
+    flattened: list[BaseTool] = []
+    serving_server: dict[str, str] = {}
+    dropped = 0
+    for name in enabled_order:
+        if name not in groups:
+            continue
+        for tool in groups[name].tools:
+            bound_name = getattr(tool, "name", None)
+            if isinstance(bound_name, str) and bound_name in serving_server:
+                logger.warning(
+                    "Dropping MCP tool %r from server '%s': its bound name is already served by server '%s'; publishing both would hand the model two same-named declarations.",
+                    bound_name,
+                    name,
+                    serving_server[bound_name],
+                )
+                dropped += 1
+                continue
+            if isinstance(bound_name, str):
+                serving_server[bound_name] = name
+            flattened.append(tool)
+    if dropped:
+        logger.info(
+            "Publishing %d MCP tool(s) after dropping %d duplicate bound name(s)",
+            len(flattened),
+            dropped,
+        )
+    return flattened
 
 
 def _load_mcp_adapter_symbols() -> tuple[Any, Any] | None:
@@ -1043,7 +1143,7 @@ class _PreparedServerDiscovery:
     pool: MCPSessionPool
     bindings: dict[str, ServerBinding]
     ownership_domain: MCPPoolDomain
-    connection_scope: str
+    connection_scope: MCPPoolDomain
     personal_user_id: str | None = None
 
 
@@ -1055,6 +1155,7 @@ def _prepare_server_client(
     client_cls: Any,
     initial_oauth_header: str | None,
     oauth_token_manager: OAuthTokenManager,
+    connection_scope: MCPPoolDomain = "deployment",
 ) -> _PreparedServerClient:
     """Build the client/interceptors for one selected server."""
     server_cfg = extensions_config.mcp_servers.get(server_name)
@@ -1066,6 +1167,7 @@ def _prepare_server_client(
     )
     tool_interceptors = build_mcp_tool_interceptors(
         server_view,
+        connection_scope=connection_scope,
         oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
         resolver=resolve_variable,
         target_logger=logger,
@@ -1227,6 +1329,14 @@ def _wrap_discovered_server_tools(
     # Grouped results are directly usable by the cache/adapters that consume
     # them, so sync invocation is patched inside each server's group.
     for tool in current_server_tools:
+        if server_cfg is not None:
+            from deerflow.approvals.policy import digest
+            from deerflow.mcp.config_normalization import normalize_mcp_server_config
+
+            tool.metadata = {
+                **(tool.metadata or {}),
+                "deerflow_approval_binding": digest({"scope": connection_scope, "server": server_name, "config": normalize_mcp_server_config(server_cfg)}),
+            }
         if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
             tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
 
@@ -1353,6 +1463,7 @@ async def _discover_and_wrap_prepared(
             client_cls=client_cls,
             initial_oauth_header=initial_oauth_headers.get(server_name),
             oauth_token_manager=oauth_token_manager,
+            connection_scope=prepared.connection_scope,
         )
         for server_name in prepared.server_names
     ]

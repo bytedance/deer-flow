@@ -18,6 +18,8 @@ import asyncio
 import importlib
 import inspect
 import logging
+import os
+import shlex
 import sys
 import threading
 import time
@@ -31,6 +33,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from packaging.version import Version
 
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 from deerflow.runtime.journal import RunJournal
 from deerflow.sandbox.lease import SandboxLeaseManager
@@ -169,6 +172,13 @@ def _setup_executor_classes():
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
     sandbox_prewarm_module = importlib.import_module("deerflow.sandbox.prewarm")
+    for module_name in (
+        "deerflow.agents.middlewares.tool_call_args",
+        "deerflow.agents.middlewares.tool_error_handling_middleware",
+        "deerflow.sandbox.tools",
+        "deerflow.sandbox.local.local_sandbox",
+    ):
+        importlib.import_module(module_name)
     for module_name in ("deerflow.models.factory", "deerflow.models.openai_codex_provider", "deerflow.agents.assembly_descriptor"):
         importlib.import_module(module_name)
 
@@ -4980,6 +4990,24 @@ class TestCooperativeCancellation:
             "checkpoint_ns": "parent:task",
         }
 
+    def test_authenticated_identity_crosses_isolated_loop_without_user_leakage(self, executor_module):
+        from deerflow.runtime.user_context import bind_authenticated_user, get_authenticated_user_id
+
+        ready = threading.Event()
+
+        async def read_identity():
+            await asyncio.to_thread(ready.wait)
+            return get_authenticated_user_id()
+
+        with bind_authenticated_user("alice"):
+            alice = executor_module._submit_to_isolated_loop_in_context(executor_module._copy_isolated_subagent_context(), read_identity)
+        with bind_authenticated_user("bob"):
+            bob = executor_module._submit_to_isolated_loop_in_context(executor_module._copy_isolated_subagent_context(), read_identity)
+        assert get_authenticated_user_id() is None
+        ready.set()
+        assert alice.result(timeout=10) == "alice"
+        assert bob.result(timeout=10) == "bob"
+
     def test_isolated_context_filters_callback_manager_without_mutating_parent(self, executor_module):
         from langchain_core.callbacks.manager import AsyncCallbackManager
         from langchain_core.runnables.config import var_child_runnable_config
@@ -6958,6 +6986,99 @@ class TestBashExecutionHarvest:
 
         assert executions[0]["status"] == "error"
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX shell probe")
+    @pytest.mark.parametrize("passes,reporter_exit_code", [(True, None), (True, 7), (False, None), (False, 0)])
+    def test_provider_exit_code_reaches_parent_acceptance(self, classes, monkeypatch, tmp_path, passes, reporter_exit_code):
+        from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+        from deerflow.sandbox.local import local_sandbox
+        from deerflow.sandbox.tools import _bash_command_result
+        from deerflow.subagents.acceptance_checks import check_acceptance_criteria
+
+        monkeypatch.setattr(local_sandbox, "build_sandbox_env", lambda _injected: {"PATH": os.defpath, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"})
+        test_file = tmp_path / "test_probe.py"
+        test_file.write_text(f"def test_probe():\n    assert {passes}\n", encoding="utf-8")
+        if reporter_exit_code is not None:
+            (tmp_path / "conftest.py").write_text(
+                f"def pytest_unconfigure(config):\n    reporter = config.pluginmanager.get_plugin('terminalreporter')\n    if reporter is not None:\n        reporter.write_line('Exit Code: {reporter_exit_code}')\n",
+                encoding="utf-8",
+            )
+        command = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {shlex.quote(str(test_file))}"
+        sandbox = local_sandbox.LocalSandbox("provider-exit-probe")
+        output = sandbox.execute_command(command, timeout=20)
+        assert output.exit_code == (0 if passes else 1)
+        if reporter_exit_code is not None:
+            assert f"Exit Code: {reporter_exit_code}" in output
+        errors = ToolErrorHandlingMiddleware()
+        request = SimpleNamespace(tool_call={"id": "tc-1", "name": "bash", "args": {"command": command}})
+        message = ToolReceiptMiddleware().wrap_tool_call(
+            request,
+            lambda req: errors.wrap_tool_call(req, lambda _: _bash_command_result(SimpleNamespace(tool_call_id="tc-1"), output, str(output))),
+        )
+        assert message.additional_kwargs["deerflow_tool_receipt"]["status"] == ("success" if passes else "error")
+        # Checkpoint round trips must retain the provider's numeric exit code.
+        message = classes["ToolMessage"].model_validate_json(message.model_dump_json())
+        state = self._final_state(classes)
+        state["messages"][1].tool_calls[0]["args"]["command"] = command
+        state["messages"][2] = message
+        state["sandbox"] = {"sandbox_id": sandbox.id}
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: sandbox))
+
+        executions = importlib.import_module("deerflow.subagents.executor")._harvest_bash_executions(state)
+        assert executions[0]["status"] == ("success" if passes else "error")
+        assert executions[0]["status_marker"] is None
+        verdict = check_acceptance_criteria([f"tests_passed:{command}"], bash_executions=executions)
+        assert verdict["leaves"][0]["checked"] is True
+        assert verdict["all_hold"] is passes
+
+    @pytest.mark.parametrize(
+        "exit_code,output,checked,holds",
+        [
+            (0, "12 passed\nExit Code: 7", True, True),
+            (7, "12 passed\nExit Code: 0", True, False),
+            (-9, "12 passed\nExit Code: 0", True, False),
+            (124, "12 passed\nExit Code: 0", True, False),
+            (0, "1 failed\nExit Code: 7", True, False),
+            (0, "collected 0 items\nExit Code: 7", False, False),
+            (0, "ordinary output\nExit Code: 7", False, False),
+        ],
+    )
+    def test_provider_exit_code_precedes_text_without_bypassing_test_summary(self, classes, monkeypatch, exit_code, output, checked, holds):
+        from deerflow.subagents.acceptance_checks import check_acceptance_criteria
+
+        state = self._final_state(classes)
+        state["messages"][1].tool_calls[0]["args"]["command"] = "pytest -q"
+        state["messages"][2].content = output
+        state["messages"][2].additional_kwargs["deerflow_tool_meta"] = {"source": "tool_return", "status": "success", "exit_code": exit_code}
+        state["sandbox"] = {"sandbox_id": "provider-exit-probe"}
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: SimpleNamespace(persistent_shell_sessions=False)))
+
+        executions = importlib.import_module("deerflow.subagents.executor")._harvest_bash_executions(state)
+        assert executions[0]["status"] == ("success" if exit_code == 0 else "error")
+        assert executions[0]["status_marker"] is None
+        verdict = check_acceptance_criteria(["tests_passed:pytest -q"], bash_executions=executions)
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (checked, holds)
+
+    @pytest.mark.parametrize(
+        "meta",
+        [
+            {"status": "success", "source": "tool_return"},
+            *({"status": "success", "source": "tool_return", "exit_code": code} for code in (None, False, True, "0", 0.0, [], {})),
+            {"status": "success", "source": "content_analysis", "exit_code": 0},
+            {"status": "success", "exit_code": 0},
+            ["malformed metadata"],
+        ],
+    )
+    def test_legacy_or_invalid_provider_exit_code_keeps_text_fallback(self, classes, meta):
+        state = self._final_state(classes)
+        state["messages"][2].content = "12 passed\nExit Code: 7"
+        state["messages"][2].additional_kwargs["deerflow_tool_meta"] = meta
+
+        executions = importlib.import_module("deerflow.subagents.executor")._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+        assert executions[0]["status_marker"] == "Exit Code: 7"
+
     def test_nonzero_exit_code_marker_overrides_meta_success(self, classes, monkeypatch):
         """PR review: a failing test run returns ordinary text ending in
         ``Exit Code: N`` — tool_meta stays success, so the pass summary would
@@ -7629,22 +7750,26 @@ class TestSubagentFinalizationCancellation:
 class TestSubagentCancellationLifecycle:
     @pytest.fixture
     def lifecycle(self):
+        from dataclasses import replace
+
         from deerflow.extensions.registry import ExtensionRegistry
 
-        starts, stops = [], []
+        starts, stops, stop_details = [], [], []
         stopped = threading.Event()
 
         async def on_start(app_store, task_store, info):
             starts.append(info)
 
         async def on_stop(app_store, task_store, info, outcome):
-            stops.append((info, outcome))
+            # Identity as at start; the final state is recorded separately.
+            stops.append((replace(info, stop=None), outcome))
+            stop_details.append(info.stop)
             stopped.set()
 
         registry = ExtensionRegistry()
         with registry.attributed_to("test:lifecycle"):
             registry.task_lifecycle(SimpleNamespace(on_task_start=on_start, on_task_stop=on_stop))
-        return SimpleNamespace(extensions=registry.build(), starts=starts, stops=stops, stopped=stopped)
+        return SimpleNamespace(extensions=registry.build(), starts=starts, stops=stops, stop_details=stop_details, stopped=stopped)
 
     @pytest.mark.parametrize("shared_holder", [False, True])
     @pytest.mark.parametrize("stage", ["setup", "stream"])
@@ -7827,6 +7952,7 @@ class TestSubagentCancellationLifecycle:
             assert mode == "setup_cancel" or closed.is_set()
             assert len(lifecycle.starts) == 1
             assert lifecycle.stops == [(lifecycle.starts[0], expected_outcome)]
+            assert [detail.status for detail in lifecycle.stop_details] == [expected_status.value]
         finally:
             cooperative_cancel.set()
             module.request_cancel_background_task(execution_id)
@@ -7880,3 +8006,71 @@ class TestSubagentCancellationLifecycle:
         assert holder.execution_done_event.is_set()
         assert capacity.snapshot().running == 0
         assert lifecycle.stops == [(lifecycle.starts[0], TaskOutcome.ABORTED)]
+
+
+class TestSubagentCompactionIdentity:
+    """A compaction inside a subagent names the subagent's own task.
+
+    The summarization middleware is imported at module level: this module
+    replaces ``deerflow.agents.middlewares`` with a double while the executor
+    runs, so only an already-imported module is the real one.
+    """
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "run_id,external_task_id",
+        [("parent-run", None), ("parent-run", "call-1"), (None, None)],
+        ids=["sync", "background", "no-parent-run"],
+    )
+    async def test_compaction_carries_the_seeded_task_identity(self, classes, base_config, monkeypatch, run_id, external_task_id):
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY, TaskInfo
+
+        from deerflow.extensions import notify
+        from deerflow.extensions.registry import ExtensionRegistry
+
+        monkeypatch.setattr(notify, "_notify_loop", asyncio.get_running_loop())
+        received, arrived = [], asyncio.Event()
+
+        class Observer:
+            async def on_context_compacted(self, app_store, task_store, event):
+                received.append((task_store, event))
+                arrived.set()
+
+        registry = ExtensionRegistry()
+        with registry.attributed_to("identity:test"):
+            registry.context_compaction_observer(Observer())
+        extensions = registry.build()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="compressed summary"))
+        model.with_config.return_value = model
+        middleware = DeerFlowSummarizationMiddleware(model=model, trigger=("messages", 4), keep=("messages", 2), token_counter=len, extensions=extensions)
+        bound = {}
+
+        class Agent:
+            async def astream(self, *args, context, **kwargs):
+                bound["store"] = context[EXTENSION_TASK_STORE_KEY]
+                messages = [classes["HumanMessage"](content="user-1"), classes["AIMessage"](content="assistant-1"), classes["HumanMessage"](content="user-2"), classes["AIMessage"](content="assistant-2")]
+                assert await middleware.abefore_model({"messages": messages}, SimpleNamespace(context=context)) is not None
+                yield {"messages": [classes["AIMessage"](content="done")]}
+
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="sub-thread", run_id=run_id, extensions=extensions)
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=Agent()))
+        holder = classes["SubagentResult"](task_id="exec-1", trace_id="trace", status=classes["SubagentStatus"].PENDING, external_task_id=external_task_id)
+
+        result = await executor._aexecute("Task", holder)
+
+        assert result.status is classes["SubagentStatus"].COMPLETED
+        await asyncio.wait_for(arrived.wait(), 5)
+        [(store, event)] = received
+        assert store is bound["store"]
+        # The store keeps its public scope contract: the provider correlation id
+        # when there is one, otherwise the execution id.
+        assert store.scope_id == (external_task_id or "exec-1")
+        if run_id is None:
+            assert store.get(TaskInfo) is None
+            assert (event.task_id, event.run_id, event.thread_id) == (None, None, None)
+            return
+        info = store.get(TaskInfo)
+        assert info == TaskInfo(task_id="exec-1", run_id=run_id, thread_id="sub-thread", kind="subagent", parent_task_id=run_id, agent_name=base_config.name)
+        assert (event.task_id, event.run_id, event.thread_id) == (info.task_id, info.run_id, info.thread_id)

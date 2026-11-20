@@ -40,6 +40,8 @@ class ToolContext(ActionContext):
     """
 
     thread_id: str | None
+    # Host-stamped execution identity, never supplied by tool arguments.
+    run_id: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

@@ -43,6 +43,22 @@ def test_packaged_entry_is_checked_without_importing_plugin(tmp_path):
     checker.check_wheel(tmp_path, wheel(tmp_path))
 
 
+def test_documentation_must_survive_packaging(tmp_path):
+    package = tmp_path / "src/example"
+    package.mkdir(parents=True)
+    (package / "deerflow-extension.json").write_text("{}")
+    with pytest.raises(ValueError, match="documentation is not packaged"):
+        checker.check_wheel(tmp_path, wheel(tmp_path))
+
+
+def test_packaged_documentation_requires_usage(tmp_path):
+    page = {"schema_version": 1, "id": "example.helper", "locales": {"en-US": {"title": "Helper", "description": "Does useful work."}}}
+    with pytest.raises(ValueError, match="usage"):
+        checker.check_wheel(tmp_path, wheel(tmp_path, files={"example/deerflow-extension.json": json.dumps(page)}))
+    page["locales"]["en-US"]["usage"] = [{"title": "Start a task", "description": "Works automatically."}]
+    checker.check_wheel(tmp_path, wheel(tmp_path, files={"example/deerflow-extension.json": json.dumps(page)}))
+
+
 def test_backend_only_wheel_skips_extraction(tmp_path, monkeypatch):
     def fail_if_extracted(*args, **kwargs):
         pytest.fail("Backend-only wheels must not be extracted")

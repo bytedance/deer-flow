@@ -165,6 +165,17 @@ async def test_batch_task_rejects_duplicate_item_keys_without_submitting(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_cancel_batch_keeps_the_existing_submitter_signature(monkeypatch) -> None:
+    class ExistingSubmitter:
+        async def cancel_batch(self, *, batch_id, user_id):
+            return {"id": batch_id}
+
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: ExistingSubmitter())
+    result = await tool_module.cancel_batch.coroutine(runtime=_runtime(), batch_id="batch-1")
+    assert result == "Batch batch-1 cancellation requested."
+
+
+@pytest.mark.asyncio
 async def test_bound_batch_tools_use_the_explicit_submitter(monkeypatch) -> None:
     explicit = AsyncMock()
     explicit.get_batch.return_value = {
@@ -281,6 +292,31 @@ def _explicit_submitter() -> AsyncMock:
         "total_items": 1,
     }
     return explicit
+
+
+@pytest.mark.asyncio
+async def test_followup_captures_configurable_settings_with_context_precedence(monkeypatch):
+    _mock_subagent_catalog(monkeypatch)
+    submitter = _explicit_submitter()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+    runtime = _runtime()
+    runtime.config["configurable"].update(thinking_enabled=False, reasoning_effort="high", max_concurrent_subagents=2, max_total_subagents=4)
+    runtime.context["reasoning_effort"] = "low"
+    await tool_module.batch_task.coroutine(
+        title="Meeting records",
+        items=[BatchTaskItem(key="a", prompt="Read")],
+        subagent_type="general-purpose",
+        continuation="Summarize",
+        runtime=runtime,
+        tool_call_id="batch-call",
+    )
+    captured = submitter.submit.call_args.args[0].continuation_context["context"]
+    assert {key: captured[key] for key in ("thinking_enabled", "reasoning_effort", "max_concurrent_subagents", "max_total_subagents")} == {
+        "thinking_enabled": False,
+        "reasoning_effort": "low",
+        "max_concurrent_subagents": 2,
+        "max_total_subagents": 4,
+    }
 
 
 def test_bound_batch_tools_sync_path_uses_the_explicit_submitter(monkeypatch) -> None:

@@ -9,8 +9,8 @@ from uuid import NAMESPACE_URL, uuid5
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.gateway.deps import get_current_user, get_run_context, get_run_manager
-from deerflow.runtime.runs.inputs import InputConflict, RunInputs
+from app.gateway.deps import get_agent_runs, get_current_user, get_run_manager
+from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,21 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
     run = await manager.get(run_id, user_id=user_id)
     if run is None or run.thread_id != thread_id:
         raise HTTPException(404, "Run not found")
-    if get_run_context(request).agent_runs is None:
+    if get_agent_runs(request) is None:
         raise HTTPException(503, "Run inputs require an authenticated session")
+    from app.gateway.coordination_workers import managed_task, worker_context, worker_error
+    from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
+
+    if task_id := await managed_task(request, thread_id):
+        service, owner, runs = worker_context(request)
+        if body.mode != "queue":
+            raise HTTPException(409, "Use queue mode to update a managed worker")
+        try:
+            item = await service.repo.append_input(owner, task_id, request_id=f"run-input:{run_id}:{body.request_id}", content=body.text)
+            service.watch(runs, owner, task_id)
+            return _worker_input_receipt(item, run_id, body.request_id)
+        except (TaskConflict, TaskNotFound) as exc:
+            raise worker_error(exc) from exc
     row = await _store(request).get(run_id, user_id=user_id)
     if row is None or row.get("run_inputs") is None:
         raise HTTPException(409, "This Run has not enabled interactive inputs")
@@ -63,10 +76,36 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
     return {**item, "target_run_id": run_id}
 
 
+def _worker_input_receipt(item, run_id, request_id, consuming_run=None, cancelled=False):
+    return {
+        "id": request_id,
+        "target_run_id": run_id,
+        "message_id": str(uuid5(NAMESPACE_URL, f"deerflow-input:{run_id}:{request_id}")),
+        "mode": "queue",
+        "text": item["content"],
+        "created_at": item["created_at"],
+        "status": "applied" if consuming_run else "cancelled" if cancelled else "pending",
+        **({"run_id": consuming_run} if consuming_run else {}),
+    }
+
+
 async def list_thread_inputs(thread_id: str, request: Request):
     user_id = await get_current_user(request)
     if user_id is None:
         raise HTTPException(401, "Authentication required")
+    from app.gateway.coordination_workers import managed_task
+    from deerflow.persistence.coordination.sql import TaskNotFound
+
+    if task_id := await managed_task(request, thread_id):
+        try:
+            receipts, active, cancelled = await request.app.state.coordination_workers.repo.input_receipts(user_id, task_id)
+        except TaskNotFound as exc:
+            raise HTTPException(404, "Task not found") from exc
+        items = []
+        for item, consuming_run in receipts:
+            _, run, key = item["request_id"].split(":", 2)
+            items.append(_worker_input_receipt(item, run, key, consuming_run, cancelled))
+        return {"items": items, "active_run_id": active}
     rows = await _store(request).list_input_runs(thread_id, user_id=user_id)
     items = []
     for row in reversed(rows):
@@ -75,7 +114,15 @@ async def list_thread_inputs(thread_id: str, request: Request):
             if status in ("pending", "applying") and (row["status"] not in ("pending", "running", "success") or row.get("stop_reason")):
                 status = "not_applied"
             items.append({key: value for key, value in {**entry, "status": status, "target_run_id": row["run_id"]}.items() if key != "context"})
-    return {"items": items[-32:], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
+    # Rank unresolved inputs (pending / not_applied / ...) ahead of terminal
+    # applied/cancelled receipts, prefer the newest entry within each group,
+    # cap at 32 records, then restore chronological order. A plain items[-32:]
+    # slice lets two full batches of receipts hide an older retryable input
+    # (issue #7972). If more than 32 inputs are unresolved, this deliberately
+    # returns 32 unresolved rows and no receipts for submission reconciliation;
+    # that trade-off follows the priority the issue asks for.
+    keep = sorted(range(len(items)), key=lambda i: (items[i]["status"] in ("applied", "cancelled"), -i))[:32]
+    return {"items": [items[i] for i in sorted(keep)], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
 
 
 async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: str):
@@ -92,7 +139,13 @@ async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: st
         if entry["mode"] != "queue" or entry["status"] != "pending":
             continue
         try:
-            run = await agent_runs.dispatch_input(thread_id=thread_id, run_id=inputs.run_id, input_id=entry["id"])
+            try:
+                run = await agent_runs.dispatch_input(thread_id=thread_id, run_id=inputs.run_id, input_id=entry["id"])
+            except InputCancelled:
+                # Cancellation can win after the snapshot, even during
+                # admission. The atomic claim proves no Run was started.
+                logger.info("Skipping cancelled queued input %s for Run %s", entry["id"], inputs.run_id)
+                continue
             while run.status in ("pending", "running"):
                 # AgentRuns.wait retains its capped backoff and revocation
                 # checks; a long task exceeding a wait window is still live.
@@ -164,7 +217,7 @@ async def change_run_input(thread_id: str, run_id: str, input_id: str, request: 
     inputs = RunInputs(_store(request), run_id, user_id)
     try:
         if retry:
-            handle = get_run_context(request).agent_runs
+            handle = get_agent_runs(request)
             if handle is None:
                 raise HTTPException(503, "Run inputs require an authenticated session")
             from deerflow.runtime.run_origin import admit_origin

@@ -29,6 +29,8 @@ from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.extensions.stack import compose_with_extensions
 
+pytestmark = pytest.mark.bundled_extension
+
 
 @pytest.fixture
 def jev(monkeypatch):

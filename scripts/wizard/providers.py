@@ -734,6 +734,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var=None,
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="specstream",
+        display_name="SpecStream",
+        description="Answers from the live web with a source for each result, API key required",
+        use="deerflow.community.specstream.tools:web_search_tool",
+        env_var="SPECSTREAM_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -811,5 +819,13 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         env_var=None,
         tool_name="web_fetch",
         extra_config={"base_url": "http://localhost:11235", "timeout": 30},
+    ),
+    WebProvider(
+        name="specstream",
+        display_name="SpecStream",
+        description="Page text as markdown, also PDF, Word and Excel, API key required",
+        use="deerflow.community.specstream.tools:web_fetch_tool",
+        env_var="SPECSTREAM_API_KEY",
+        tool_name="web_fetch",
     ),
 ]

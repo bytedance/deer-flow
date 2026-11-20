@@ -3,6 +3,11 @@ import { getBackendBaseURL } from "@/core/config";
 
 export interface FeaturesResponse {
   run_inputs?: boolean;
+  tool_approval?: {
+    enabled: boolean;
+    default_mode: "ask" | "auto" | "full";
+    allowed_modes: ("ask" | "auto" | "full")[];
+  };
   agents_api: { enabled: boolean };
   browser_control?: { enabled: boolean };
   mcp_tasks?: { enabled: boolean };

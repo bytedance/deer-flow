@@ -65,6 +65,7 @@ from deerflow.config.subagents_config import (
     effective_subagent_concurrency,
     effective_total_subagents_per_run,
 )
+from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, AgentMcpAuthority
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.runtime.checkpoint_mode import (
@@ -374,9 +375,9 @@ def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.
 
 **CRITICAL RULES:**
-- Mark todos as completed IMMEDIATELY after finishing each step - do NOT batch completions
-- Keep EXACTLY ONE task as `in_progress` at any time (unless tasks can run in parallel)
-- Update the todo list in REAL-TIME as you work - this gives users visibility into your progress
+- Update todos at meaningful milestones; group related status changes in one call
+- Mark a task `completed` only after it is fully finished and verified
+- Use `in_progress` only for work that is actively underway; do not keep a task active just to show progress
 - DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
 
 **When to Use:**
@@ -428,16 +429,18 @@ Skip this tool when:
 
 ## How to Use
 
-1. **Starting a task**: Mark it as `in_progress` BEFORE beginning work
-2. **Completing a task**: Mark it as `completed` IMMEDIATELY after finishing
+1. **Starting a task**: Mark it as `in_progress` when work begins
+2. **Completing a task**: Mark it as `completed` after it is fully finished and verified
 3. **Updating the list**: Add new tasks, remove irrelevant ones, or update descriptions as needed
 4. **Multiple updates**: You can make several updates at once (e.g., complete one task and start the next)
 
 ## Task States
 
 - `pending`: Task not yet started
-- `in_progress`: Currently working on (can have multiple if tasks run in parallel)
-- `completed`: Task finished successfully
+- `in_progress`: Currently being worked on
+- `blocked`: Work cannot continue because a dependency or error must be resolved; terminal for this run
+- `waiting`: Waiting for the user or an external resource; terminal for this run
+- `completed`: Task fully finished and verified
 
 ## Task Completion Requirements
 
@@ -450,18 +453,15 @@ Never mark a task as completed if:
 - You couldn't find necessary resources or dependencies
 - Quality standards haven't been met
 
-If blocked, keep the task as `in_progress` and create a new task describing what needs to be resolved.
+If blocked or waiting, record that status and keep the reason in the task description. The run may finish with those statuses; do not relabel them as completed.
 
 ## Best Practices
 
 - Create specific, actionable items
 - Break complex tasks into smaller, manageable steps
 - Use clear, descriptive task names
-- Update task status in real-time as you work
-- Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
+- Update task status at meaningful milestones and group related changes when practical
 - Remove tasks that are no longer relevant
-- **IMPORTANT**: When you write the todo list, mark your first task(s) as `in_progress` immediately
-- **IMPORTANT**: Unless all tasks are completed, always have at least one task `in_progress` to show progress
 
 Being proactive with task management demonstrates thoroughness and ensures all requirements are completed successfully.
 
@@ -520,8 +520,8 @@ def build_middlewares(
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
-        mcp_routing_middleware: Optional PR2 middleware that auto-promotes
-            deferred MCP schemas before the deferred filter runs.
+        mcp_routing_middleware: Compatibility middleware for advisory MCP
+            capability metadata; schema selection requires tool_search.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
         authorization_provider: Provider already resolved for assembly-time
@@ -706,6 +706,12 @@ def build_middlewares(
 
     middlewares.append(SystemMessageCoalescingMiddleware())
 
+    # after_model runs in reverse order. Apply the delegation limit first
+    # so loop observations use the same batch that reaches the tools node.
+    loop_detection_config = resolved_app_config.loop_detection
+    if loop_detection_config.enabled:
+        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     effective_max_subagents_per_run: int | None = None
@@ -718,11 +724,6 @@ def build_middlewares(
         max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), resolved_app_config)
         effective_max_subagents_per_run = max_total_subagents
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
-
-    # LoopDetectionMiddleware — detect and break repetitive tool call loops
-    loop_detection_config = resolved_app_config.loop_detection
-    if loop_detection_config.enabled:
-        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
     # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
@@ -826,6 +827,29 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     if agent_config and agent_config.skills is not None:
         return set(agent_config.skills)
     return None
+
+
+def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool, model_name: str | None = None) -> None:
+    hitl_config = getattr(app_config, "hitl_approval", None)
+    if hitl_config is None or hitl_config.enabled is not True:
+        return
+    from deerflow.approvals.middleware import ToolApprovalMiddleware
+
+    known_tool_names = {tool.name for tool in final_tools}
+    unknown_names = set(hitl_config.tools) - known_tool_names
+    if unknown_names:
+        logger.warning("hitl_approval.tools contains names not present in this build's tool set: %s", sorted(unknown_names))
+    logger.info(
+        "hitl_approval enabled: tools=%s non_interactive=%s max_actions=%s",
+        hitl_config.tools,
+        hitl_config.non_interactive,
+        hitl_config.max_actions,
+    )
+    # Resolve artifact handles first, then approve the concrete operation.
+    # Authorization remains inside this wrapper so edited arguments are checked
+    # by the same mandatory guardrails before reaching the bound tool.
+    index = next((i + 1 for i, middleware in enumerate(middlewares) if type(middleware).__name__ == "ArtifactResolutionMiddleware"), 0)
+    middlewares.insert(index, ToolApprovalMiddleware(hitl_config, app_config=app_config, supports_resume=supports_resume, model_name=model_name))
 
 
 def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
@@ -1005,7 +1029,14 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         scheduler_capability = None
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    agent_authority = runtime_context.get(AGENT_AUTH_CONTEXT_KEY) if isinstance(runtime_context, Mapping) else None
+    pinned_agent = isinstance(agent_authority, AgentMcpAuthority) and not is_bootstrap and not cfg.get("is_subagent")
+    if pinned_agent:
+        agent_config = agent_authority.agent_config()
+        if agent_authority.user_id != resolved_user_id or agent_config is None or agent_config.name != agent_name:
+            raise ValueError("Admitted MCP agent definition does not match this run")
+    else:
+        agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
     memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
@@ -1231,6 +1262,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             app_config=resolved_app_config,
             authorization_provider=_authz_provider,
         )
+        _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=False, model_name=model_name)
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
@@ -1394,11 +1426,13 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         app_config=resolved_app_config,
         authorization_provider=_authz_provider,
     )
+    _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False), model_name=model_name)
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,
         max_total_subagents=max_total_subagents,
         agent_name=agent_name,
+        agent_soul=agent_authority.soul if pinned_agent else None,
         available_skills=available_skills,
         app_config=resolved_app_config,
         deferred_names=setup.deferred_names,

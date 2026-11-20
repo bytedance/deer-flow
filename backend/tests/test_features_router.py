@@ -78,6 +78,7 @@ def test_features_reports_agents_api_enabled() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "agents_api": {"enabled": True},
+        "tool_approval": {"enabled": False, "default_mode": "ask", "allowed_modes": []},
         "run_inputs": False,
         "browser_control": {"enabled": False},
         "mcp_tasks": {"enabled": False},
@@ -103,6 +104,7 @@ def test_features_reports_agents_api_disabled() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "agents_api": {"enabled": False},
+        "tool_approval": {"enabled": False, "default_mode": "ask", "allowed_modes": []},
         "run_inputs": False,
         "browser_control": {"enabled": False},
         "mcp_tasks": {"enabled": False},

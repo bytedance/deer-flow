@@ -4,10 +4,12 @@ import asyncio
 import logging
 import socket
 import uuid
+from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.authz.provider import Principal
 from deerflow.community.ragflow.sources import durable_source_artifact
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
@@ -134,8 +136,14 @@ def _log_release_failure(pending: Future[None], *, execution_id: str) -> None:
         logger.error("Registry release failed for batch execution %s", execution_id, exc_info=exc)
 
 
+_TRUSTED = object()
+
+
 class SubagentBatchService:
     """Lease, execute, and recover durable native-subagent batch items."""
+
+    # cancel_batch enforces runs:cancel for follow-ups with the caller's authority.
+    accepts_continuation_authority = True
 
     # Also used by focused shutdown tests constructing an instance via __new__.
     _stopping: bool = False
@@ -151,6 +159,10 @@ class SubagentBatchService:
         app_config: AppConfig | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
         extensions: LoadedExtensions | None = None,
+        prepare_continuation=None,
+        dispatch_continuation=None,
+        cancel_continuation=None,
+        resolve_principal: Callable[[dict[str, Any]], Awaitable[Principal]] | None = None,
     ) -> None:
         self._repository = repository
         self._config = config
@@ -169,6 +181,11 @@ class SubagentBatchService:
         self._executions: dict[str, asyncio.Task[None]] = {}
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
+        self._prepare_continuation = prepare_continuation
+        self._dispatch_continuation = dispatch_continuation
+        self._cancel_continuation = cancel_continuation
+        self._resolve_principal = resolve_principal
+        self._continuations: dict[str, asyncio.Task] = {}
 
     async def start(self) -> None:
         if self._stopping:
@@ -199,7 +216,7 @@ class SubagentBatchService:
             execution_ids = list(self._execution_ids.values())
             for execution_id in execution_ids:
                 request_cancel_background_task(execution_id)
-            tasks = list(self._executions.values())
+            tasks = [*self._executions.values(), *getattr(self, "_continuations", {}).values()]
 
             if poller is not None:
                 poller.cancel()
@@ -227,6 +244,7 @@ class SubagentBatchService:
         self._executions.clear()
         self._execution_ids.clear()
         self._item_batches.clear()
+        getattr(self, "_continuations", {}).clear()
         if self._poller is poller:
             self._poller = None
         self._stop_drains = 0
@@ -249,6 +267,12 @@ class SubagentBatchService:
                 pass
 
     async def run_once(self, *, now: datetime) -> None:
+        if self._dispatch_continuation is not None:
+            owner = f"{self._lease_owner[:80]}:{uuid.uuid4().hex}"
+            for batch in await self._repository.claim_continuations(now=now, lease_owner=owner, lease_seconds=self._config.lease_seconds, exclude_batch_ids=tuple(self._continuations)):
+                task = asyncio.create_task(self._continue_batch(batch, owner), name=f"subagent-batch-followup-{batch['id']}")
+                self._continuations[batch["id"]] = task
+                task.add_done_callback(lambda _, key=batch["id"]: self._continuations.pop(key, None))
         available = max(0, self._runtime_config.max_running - len(self._executions))
         if available <= 0:
             return
@@ -292,6 +316,11 @@ class SubagentBatchService:
             raise ValueError(f"max_running_items must be between 1 and {self._config.max_running_items_per_batch}")
         if max_running > max_live:
             raise ValueError("max_running_items must not exceed max_live_items")
+        continuation = None
+        if request.continuation:
+            if self._prepare_continuation is None or self._dispatch_continuation is None:
+                raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
+            continuation = await self._prepare_continuation(request)
         return await self._repository.create_batch(
             batch_id=f"subagent-batch-{uuid.uuid4().hex}",
             user_id=request.user_id,
@@ -306,7 +335,29 @@ class SubagentBatchService:
             max_running_items=max_running,
             max_attempts=self._config.max_attempts,
             execution_spec=request.execution_spec,
+            **({"continuation": continuation} if continuation is not None else {}),
         )
+
+    async def _continue_batch(self, batch, owner):
+        try:
+            outcome = await self._dispatch_continuation(batch)
+            if outcome and outcome.get("status") == "waiting":
+                # A question can stay open for hours: keep the claim until its
+                # lease expires instead of rereading the conversation every poll.
+                return
+            status = outcome.get("status", "dispatched") if outcome else "pending"
+            run_id = outcome.get("run_id") if outcome else None
+            saved = await self._repository.finish_continuation(batch["id"], lease_owner=owner, status=status, run_id=run_id)
+            if not saved and run_id and self._cancel_continuation is not None:
+                current = await self._repository.get_batch(batch["id"], user_id=batch["user_id"])
+                if current is None or current.get("continuation_status") in ("cancelled", "suppressed"):
+                    await self._cancel_continuation(batch["id"], batch["user_id"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The lease will expire. Re-admission uses the same immutable key,
+            # so an unknown launch outcome never creates a second follow-up.
+            logger.warning("Batch follow-up remains unconfirmed: %s", batch["id"], exc_info=True)
 
     async def get_batch(
         self,
@@ -318,11 +369,18 @@ class SubagentBatchService:
 
     async def read_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None:
         """Read one current-thread result; never expose worker execution context."""
+        if position < 0:
+            return None
         batch = await self._repository.get_batch(batch_id, user_id=user_id)
         if batch is None or batch["thread_id"] != thread_id:
             return None
         items = await self._repository.list_items(batch_id, user_id=user_id, offset=position, limit=1, include_result=True)
-        if not items:
+        # ``list_items(offset=position)`` only lands on ``position`` while item
+        # rows are dense; after any retention gap it returns the next surviving
+        # row. Serving it would attribute one item's report to another item key
+        # (``next_position`` advances from the wrong base too). Verify the row's
+        # position, same as the browser projection below.
+        if not items or items[0].get("position") != position:
             return None
         fields = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
         return {key: items[0].get(key) for key in fields}
@@ -380,13 +438,30 @@ class SubagentBatchService:
         *,
         batch_id: str,
         user_id: str,
+        continuation_authority: Any = _TRUSTED,
     ) -> dict[str, Any] | None:
+        if continuation_authority is not _TRUSTED:
+            current = await self._repository.get_batch(batch_id, user_id=user_id)
+            if current is None:
+                return None
+            if current.get("continuation_status") is not None:
+                if self._cancel_continuation is None:
+                    raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
+                await self._cancel_continuation(
+                    batch_id,
+                    user_id,
+                    thread_id=current["thread_id"],
+                    authority=continuation_authority,
+                    authorize_only=True,
+                )
         batch = await self._repository.cancel_batch(batch_id, user_id=user_id)
         if batch is None:
             return None
         for item_id, execution_id in list(self._execution_ids.items()):
             if self._item_batches.get(item_id) == batch_id:
                 request_cancel_background_task(execution_id)
+        if batch.get("continuation_status") == "cancelled" and self._cancel_continuation is not None:
+            await self._cancel_continuation(batch_id, user_id)
         # Normal ids are not prefixed; the renew loop observes the durable
         # cancellation within lease_seconds/3. Keeping cancellation durable is
         # what lets another worker own the HTTP control request safely.
@@ -397,6 +472,32 @@ class SubagentBatchService:
             if lease.valid:
                 await self._execute_leased_item(item, lease)
 
+    def _bind_principal_resolver(self, batch: dict[str, Any]) -> Callable[[], Awaitable[Principal]] | None:
+        if self._resolve_principal is None:
+            return None
+        owner_loop = asyncio.get_running_loop()
+
+        async def resolve() -> Principal:
+            principal = await self._resolve_principal(batch)
+            if not isinstance(principal, Principal) or principal.user_id != batch["user_id"]:
+                raise PermissionError("Batch principal does not match its owner")
+            return principal
+
+        async def resolve_on_owner_loop() -> Principal:
+            # Native executors use a separate loop; the host's async database
+            # pool must stay on the Gateway loop, including after capacity waits.
+            if asyncio.get_running_loop() is owner_loop:
+                return await resolve()
+            coro = resolve()
+            try:
+                pending = asyncio.run_coroutine_threadsafe(coro, owner_loop)
+            except BaseException:
+                coro.close()
+                raise
+            return await asyncio.wrap_future(pending)
+
+        return resolve_on_owner_loop
+
     async def _execute_leased_item(self, item: dict[str, Any], lease: BatchItemLease) -> None:
         item_id = item["id"]
         execution_id: str | None = None
@@ -404,13 +505,15 @@ class SubagentBatchService:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
             spec = batch["execution_spec"]
+            principal_resolver = self._bind_principal_resolver(batch)
+            principal = await principal_resolver() if principal_resolver is not None else None
             config_data = spec["subagent_config"]
             if "prompt_overlay" in config_data:
                 from deerflow.config.prompt_overlay import PromptOverlay
 
                 config_data = {**config_data, "prompt_overlay": PromptOverlay.model_validate(config_data["prompt_overlay"])}
             config = SubagentConfig(**config_data)
-            app_config = self._app_config or get_app_config()
+            app_config = self._app_config or await run_assembly(get_app_config)
             from deerflow.tools import get_available_tools
 
             effective_model = resolve_subagent_model_name(
@@ -442,6 +545,12 @@ class SubagentBatchService:
                 )
                 return
             executor_kwargs = {}
+            if principal_resolver is not None:
+                executor_kwargs["principal_resolver"] = principal_resolver
+            if "mcp_agent_auth" in spec:
+                from deerflow.mcp.agent_auth import restore_agent_authority
+
+                executor_kwargs["agent_mcp_authority"] = restore_agent_authority(batch["user_id"], spec["mcp_agent_auth"])
             if THREAD_INCARNATION_CONTEXT_KEY in spec:
                 executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] = spec[THREAD_INCARNATION_CONTEXT_KEY]
             executor = SubagentExecutor(
@@ -451,13 +560,13 @@ class SubagentBatchService:
                 parent_model=spec.get("parent_model"),
                 thread_id=batch["thread_id"],
                 user_id=batch["user_id"],
-                user_role=spec.get("user_role"),
-                oauth_provider=spec.get("oauth_provider"),
-                oauth_id=spec.get("oauth_id"),
+                user_role=principal.role if principal is not None else spec.get("user_role"),
+                oauth_provider=principal.oauth_provider if principal is not None else spec.get("oauth_provider"),
+                oauth_id=principal.oauth_id if principal is not None else spec.get("oauth_id"),
                 run_id=batch.get("run_id"),
-                channel_user_id=spec.get("channel_user_id"),
-                is_internal=spec.get("is_internal") is True,
-                authz_attributes=spec.get("authz_attributes"),
+                channel_user_id=principal.channel_user_id if principal is not None else spec.get("channel_user_id"),
+                is_internal=principal.is_internal if principal is not None else spec.get("is_internal") is True,
+                authz_attributes=principal.attributes if principal is not None else spec.get("authz_attributes"),
                 knowledge_scope=spec.get("knowledge_scope"),
                 execution_capacity=self._execution_capacity,
                 extensions=self._extensions,

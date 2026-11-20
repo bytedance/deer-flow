@@ -518,6 +518,24 @@ describe("GoalStatus a11y", () => {
   });
 });
 
+describe("GoalStatus approval metadata errors", () => {
+  it("directs users to the reload-error panel instead of an approval card", () => {
+    render(
+      bar({
+        goal: makeGoal(),
+        hasPendingApproval: true,
+        approvalMetadataError: true,
+      }),
+    );
+
+    expect(visibleRowText()).toContain(
+      "Approval details failed to load. Use the reload-error panel above to try again.",
+    );
+    expect(visibleRowText()).not.toContain("Review the tool approval above");
+    expect(liveRegion().textContent).toContain("reload-error panel");
+  });
+});
+
 describe("GoalStatus visuals", () => {
   function chipClass() {
     return screen.getByTestId("goal-status-chip").className;

@@ -165,8 +165,7 @@ P0 does not implement automatic derived-content forgetting.
 Local measurements on macOS arm64 (five captures, warm local disk): canonical
 capture plus digest took a median 4.43 ms for 4 files / 3,120 bytes and 94.03 ms
 for 256 files / 16,711,473 bytes. These are package-processing measurements, not
-model latency or a deployment throughput guarantee. Reproduce with
-`uv run pytest tests/test_skill_mutation_package_cost.py -q -s` from `backend/`.
+model latency or a deployment throughput guarantee.
 
 Live PostgreSQL validation on 2026-09-23 used PostgreSQL 17.11 (aarch64,
 `READ COMMITTED`), one pytest host process and two concurrent actors sharing a

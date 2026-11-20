@@ -18,6 +18,8 @@ from deerflow.extensions.anchors import outermost
 from deerflow.extensions.injection import inject_middlewares
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
+pytestmark = pytest.mark.bundled_extension
+
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-screening"
 
 

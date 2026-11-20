@@ -1,5 +1,7 @@
 # IEEE Citation Template
 
+This is an optional formatting example. Adapt sections and length to the request and available evidence. Paper names below illustrate citation syntax only; include them only if they belong to the actual selected corpus. Describe only searches, screening, reading and delegation that actually occurred.
+
 Use this template when the user targets an IEEE conference or journal, or explicitly asks for IEEE format. IEEE uses **numeric citations** — references are numbered in the order they first appear in the text, and in-text citations use bracketed numbers.
 
 ## Citation Format Rules
@@ -38,11 +40,11 @@ Formatting rules:
 ### Special cases
 
 - **More than 6 authors**: IEEE allows listing the first author followed by `et al.`: `A. Vaswani et al., "Attention is all you need," arXiv:1706.03762, 2017.` Use this for papers with many authors to keep reference entries readable.
-- **If the paper has also been published at a venue**: prefer the venue citation format over arXiv. In this workflow we only have arXiv metadata, so always use the arXiv form.
+- **If the paper has also been published at a venue**: use verified venue metadata when available; otherwise cite the known preprint without inventing publication details.
 
 ## Report Structure
 
-Follow this structure verbatim. Note that IEEE reports use **numeric citations throughout**, so you need to assign a number to each paper **in order of first appearance** in the Themes section, then use those numbers consistently in per-paper annotations and the reference list.
+Adapt this structure to the requested review. Assign a reference number at each paper's first actual appearance anywhere in the report, then reuse it consistently.
 
 ```markdown
 # Systematic Literature Review: <Topic>
@@ -54,21 +56,21 @@ Follow this structure verbatim. Note that IEEE reports use **numeric citations t
 
 ## Executive Summary
 
-<3-5 sentences summarizing the state of the literature. Cite papers with bracketed numbers as you first introduce them, e.g. "Transformer architectures [1] have become the dominant approach, with extensions focusing on efficiency [2], [3] and long-context handling [4].">
+<Summarize supported findings and uncertainty using bracketed citations. Do not copy a conclusion from this example.>
 
 ## Methodology
 
-This review surveyed <N> arXiv papers retrieved on <YYYY-MM-DD> using the query `<query>`<, filtered to category <cat>><, published between <start_date> and <end_date>>. Papers were sorted by <relevance | submission date> and the top <N> were included. Metadata extraction was performed by language-model agents, with cross-paper synthesis performed by the lead agent.
+<Describe actual databases, query variants, dates, pagination or result caps, screening, deduplication and included count. Distinguish metadata/abstract inspection from full-text reading. Mention agents only if used. Do not describe the top N results as exhaustive coverage.>
 
-**Limitations of this review**: arXiv preprints are not peer-reviewed; coverage is limited to arXiv.
+**Limitations of this review**: <State actual coverage, publication status, unavailable full text and selection limitations. An arXiv-only search cannot establish coverage of the wider literature; verify publication status per paper.>
 
 ## Themes
 
-<3-6 thematic sections. First appearance of each paper gets a bracketed number; subsequent mentions reuse the same number. The number assignment order is: first paper mentioned in Theme 1 gets [1], next new paper gets [2], etc.>
+<Use as many themes as the evidence supports, reusing reference numbers assigned at first appearance anywhere in the report.>
 
 ### Theme 1: <Theme name>
 
-<Paragraphs describing the theme. Cite with bracketed numbers: "The original transformer architecture [1] introduced self-attention, which was later extended in [2] and [3]. Comparative analyses [4] show that...">
+<Explain the theme using bracketed citations from the selected corpus. Report only supported relationships and comparisons.>
 
 ### Theme 2: <Theme name>
 

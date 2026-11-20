@@ -55,12 +55,23 @@ jobs:
             // ---- area: replaces .github/labeler.yml (path -> area) ----
             const AREA_RULES = [
               ['area:frontend', [/^frontend\//]],
-              ['area:backend',  [/^backend\/app\//, /^backend\/packages\/harness\/deerflow\/(runtime|persistence|config|tools|guardrails|tracing|models|utils|uploads)\//]],
+              // Cover both backend packages. Keep the harness exclusions aligned
+              // with the dedicated tree rules below; the offline replay checks this.
+              ['area:backend',  [
+                /^backend\/app\//,
+                /^backend\/packages\/harness\/(?!deerflow\/(?:agents|subagents|reflection|sandbox|skills|mcp)\/)/,
+                /^backend\/packages\/extension-api\//,
+              ]],
               ['area:agents',   [/^backend\/packages\/harness\/deerflow\/(agents|subagents|reflection)\//, /(^|\/)langgraph\.json$/, /^backend\/.*\/prompts\//]],
               ['area:sandbox',  [/^docker\//, /^backend\/packages\/harness\/deerflow\/sandbox\//, /(^|\/)Dockerfile$/]],
               ['area:skills',   [/^skills\//, /^backend\/packages\/harness\/deerflow\/skills\//, /^frontend\/src\/core\/skills\//]],
               ['area:mcp',      [/^backend\/packages\/harness\/deerflow\/mcp\//, /^frontend\/src\/core\/mcp\//]],
-              ['area:ci',       [/^\.github\//, /^scripts\//]],
+              // deploy/ holds the Helm chart, which is release/deploy tooling like
+              // scripts/: bump_version.sh rewrites its versions, verify_versions.sh
+              // and the chart workflow gate its rendering. Without this entry a PR
+              // that touches only deploy/ (plus its backend/tests/test_helm_*.py)
+              // matches no rule at all and arrives with no area label.
+              ['area:ci',       [/^\.github\//, /^scripts\//, /^deploy\/helm\//]],
               ['area:docs',     [/^docs\//, /\.mdx?$/]],
               ['area:deps',     [/(^|\/)(pyproject\.toml|uv\.lock|package\.json|pnpm-lock\.yaml)$/]],
             ];

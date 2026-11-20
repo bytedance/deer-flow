@@ -66,6 +66,7 @@ class ModelResponse(BaseModel):
     description: str | None = Field(None, description="Model description")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode (deprecated: derived from `reasoning`)")
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort (deprecated: derived from `reasoning`)")
+    provider: str | None = Field(default=None, description="Managed provider display label; no endpoint or credentials")
     reasoning: ReasoningCapabilitiesResponse = Field(..., description="Normalized reasoning capability contract")
 
 
@@ -75,6 +76,7 @@ def _model_response(model: ModelConfig) -> ModelResponse:
         model=model.model,
         display_name=model.display_name,
         description=model.description,
+        provider=model._managed_provider,
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
         reasoning=ReasoningCapabilitiesResponse(**reasoning_capabilities_payload(resolve_reasoning_contract(model))),
@@ -195,7 +197,7 @@ async def list_models(
         owner = await _resolve_bound_owner_for_model_list(request)
         principal_user = owner if owner is not None else user
         try:
-            provider, principal = resolve_model_authorization(principal_user, is_internal=_is_internal_caller(request, user))
+            provider, principal = await asyncio.to_thread(resolve_model_authorization, principal_user, is_internal=_is_internal_caller(request, user))
         except _AuthorizationUnavailable as exc:
             if exc.fail_closed:
                 visible_models = []
@@ -261,6 +263,6 @@ async def get_model(
     # model exists but the role lacks permission to use it).
     user = await get_optional_user_from_request(request)
     if user is not None:
-        authorize_model_use(user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
+        await asyncio.to_thread(authorize_model_use, user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
 
     return _model_response(model)

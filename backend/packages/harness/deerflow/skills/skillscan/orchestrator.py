@@ -1381,6 +1381,8 @@ def _relative_file(path: Path, root: Path) -> str:
 
 def _is_hidden_sensitive_path(rel_path: str) -> bool:
     parts = PurePosixPath(rel_path).parts
+    if not parts:
+        return False
     if ".aws" in parts and parts[-1] == "credentials":
         return True
     if ".git" in parts and parts[-1] == "config":
@@ -1446,11 +1448,15 @@ def _http_host(url: str) -> str | None:
     if not url[:8].lower().startswith(("http://", "https://")):
         return None
     try:
-        # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
-        # for the host. Malformed URLs remain outbound in _is_outbound_url.
-        host = urlsplit(url).hostname
+        parts = urlsplit(url)
     except ValueError:
         return None
+    # Python versions differ on which brackets in userinfo they accept.
+    # Treat raw brackets there as malformed so the URL stays outbound.
+    userinfo, at_sign, _hostport = parts.netloc.rpartition("@")
+    if at_sign and ("[" in userinfo or "]" in userinfo):
+        return None
+    host = parts.hostname
     return host.lower() if host else None
 
 

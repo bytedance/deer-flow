@@ -64,12 +64,16 @@ export function GoalStatus({
   outcome = null,
   isRunning = false,
   hasOpenHumanInputCard = false,
+  hasPendingApproval = false,
+  approvalMetadataError = false,
 }: {
   className?: string;
   goal: GoalState | null;
   outcome?: ThreadGoalOutcome | null;
   isRunning?: boolean;
   hasOpenHumanInputCard?: boolean;
+  hasPendingApproval?: boolean;
+  approvalMetadataError?: boolean;
 }) {
   const { locale, t } = useI18n();
   const bar = t.inputBox.goalBar;
@@ -78,6 +82,8 @@ export function GoalStatus({
     outcome,
     isRunning,
     hasOpenHumanInputCard,
+    hasPendingApproval,
+    approvalMetadataError,
   });
   const copy = describeGoalBarCopy(view, t);
   const announceKey = goalBarAnnounceKey(view);
@@ -103,16 +109,26 @@ export function GoalStatus({
     return null;
   }
   const met = view.kind === "met";
-  const hasDetails = view.kind === "stopped" || view.kind === "paused" || met;
+  const awaitingApproval = view.kind === "awaitingApproval";
+  const hasDetails =
+    view.kind === "stopped" ||
+    view.kind === "paused" ||
+    view.kind === "awaitingApproval" ||
+    met;
   const note = "note" in view ? view.note : null;
   const rawCode = "rawCode" in view ? view.rawCode : null;
   const reliedOnAssumption = met && view.reliedOnAssumption;
   const chipStyle =
     view.kind === "stopped"
       ? { Icon: STOP_ICONS[view.stop], tone: CHIP_TONES[view.chip] }
-      : view.kind === "paused"
-        ? { Icon: PauseIcon, tone: CHIP_TONES.paused }
-        : null;
+      : view.kind === "awaitingApproval"
+        ? {
+            Icon: MessageCircleQuestionIcon,
+            tone: CHIP_TONES.waitingForYou,
+          }
+        : view.kind === "paused"
+          ? { Icon: PauseIcon, tone: CHIP_TONES.paused }
+          : null;
 
   return (
     <section
@@ -134,6 +150,8 @@ export function GoalStatus({
         >
           {met ? (
             <CircleCheckIcon className="size-4" />
+          ) : awaitingApproval ? (
+            <MessageCircleQuestionIcon className="size-4" />
           ) : (
             <TargetIcon className="size-4" />
           )}

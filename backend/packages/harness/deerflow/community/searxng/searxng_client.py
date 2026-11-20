@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -141,7 +142,7 @@ class SearxngClient:
 
         logger.debug(f"Searching SearXNG at {self.base_url} with query: {query} (page {pageno})")
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with await asyncio.to_thread(httpx.AsyncClient, timeout=30) as client:
                 resp = await client.get(
                     f"{self.base_url}/search",
                     params=params,

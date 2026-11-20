@@ -54,6 +54,10 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 
 Middlewares execute in strict order, each handling a specific concern:
 
+Starting a new graph invocation resets tool-progress tracking. Results and model
+retries still finishing from an earlier invocation cannot block its tools or
+restore obsolete progress hints, including same-run goal continuations.
+
 | # | Middleware | Purpose |
 |---|-----------|---------|
 | 1 | **ThreadDataMiddleware** | Creates per-thread isolated directories (workspace, uploads, outputs) |
@@ -66,13 +70,21 @@ Middlewares execute in strict order, each handling a specific concern:
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
 
-When `loop_detection.enabled` is set, loop detection checks both repeated
-tool-call sets and per-tool frequency. Warnings do not skip the rest of a
-tool-call batch: any hard limit reached takes precedence and stops the entire
-batch before tool execution. Warning-only batches remain fully counted and
-receive a transient hint on the next model request.
+When `loop_detection.enabled` is set, loop detection checks repeated tool-call
+sets whose results show no progress. Warnings do not skip the rest of a
+tool-call batch: a hash-based hard limit stops the entire batch before tool
+execution. Tool-name frequency is retained as an INFO observability metric for
+workload and cost analysis; its thresholds never warn or stop a run. Warning-
+only batches remain fully counted and receive a transient hint on the next
+model request.
 
 ### Sandbox System
+
+With lazy initialization, a fresh AIO run prepares its authorized Agent skill
+view without acquiring a container until a sandbox-backed tool needs one.
+Existing sandbox state still requires eager policy rebinding; upload-based
+providers still acquire and synchronize skills eagerly. Explicit sandbox
+prewarming remains a separate opt-in behavior.
 
 Per-thread isolated execution with virtual path translation:
 
@@ -104,6 +116,10 @@ queued claims use conditional database writes, so competing workers cannot claim
 the same item or undo a pause/cancellation observed after their initial read.
 
 ### Memory System
+
+If the local retrieval index is busy, read-only, or temporarily unavailable,
+DeerMem falls back to substring search without deleting it. Automatic index
+recreation is reserved for SQLite-confirmed corruption or a non-database file.
 
 LLM-powered persistent context retention across conversations:
 

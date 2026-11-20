@@ -112,6 +112,10 @@ class E2BSandbox(Sandbox):
                     logger.warning("Error closing E2BSandbox %s: %s", self.id, e)
                 return
 
+    @property
+    def artifact_root(self) -> str:
+        return self._home_dir
+
     def _resolve_path(self, path: str) -> str:
         """Map DeerFlow virtual paths into the e2b sandbox filesystem.
 

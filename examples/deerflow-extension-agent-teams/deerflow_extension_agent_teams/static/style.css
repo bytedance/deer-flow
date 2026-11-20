@@ -778,3 +778,20 @@ pre {
     transition: none;
   }
 }
+
+.artifact-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.artifact-attachment input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+.team-artifacts .text-button {
+  margin-inline-end: 12px;
+}

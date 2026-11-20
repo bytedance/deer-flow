@@ -71,7 +71,7 @@ def _successful_operation_key(call: dict[str, Any], message: Any) -> str | None:
         return None
     # Reuse the established classification for old messages without structured
     # status. Work on a copy: observing a checkpoint must never rewrite it.
-    status_message = normalize_tool_message(ToolMessage(content=_field(message, "content", ""), tool_call_id=str(call["id"]), name=name, additional_kwargs=dict(kwargs)))
+    status_message = normalize_tool_message(ToolMessage(content=_field(message, "content", ""), tool_call_id=str(call["id"]), name=name, additional_kwargs=dict(kwargs), artifact=_field(message, "artifact")))
     meta = status_message.additional_kwargs.get(TOOL_META_KEY)
     if not isinstance(meta, Mapping) or meta.get("status") != "success":
         return None

@@ -32,6 +32,8 @@ from deerflow.community.firecrawl import tools as firecrawl_tools
 from deerflow.community.image_search import tools as image_search_tools
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.serper import tools as serper_tools
+from deerflow.community.serply import tools as serply_tools
+from deerflow.community.specstream import tools as specstream_tools
 from deerflow.community.youcom import tools as youcom_tools
 
 COMMUNITY_ROOT = Path(ddg_search_tools.__file__).resolve().parent.parent
@@ -44,9 +46,11 @@ SHARED_OWNER_PROVIDERS = {
     "ddg_search": ("DDG Search", ddg_search_tools),
     "image_search": ("DDG image search", image_search_tools),
     "serper": ("Serper", serper_tools),
+    "serply": ("Serply", serply_tools),
     "fastcrw": ("fastCRW", fastcrw_tools),
     "firecrawl": ("Firecrawl", firecrawl_tools),
     "youcom": ("You.com", youcom_tools),
+    "specstream": ("SpecStream", specstream_tools),
 }
 
 # Providers that still normalize locally, including Exa's generic helper and
@@ -60,7 +64,6 @@ DEFERRED_PROVIDERS = {
     "exa",
     "groundroute",
     "searxng",
-    "serply",
     "sofya",
     "tencent_wsa",
 }

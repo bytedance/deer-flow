@@ -115,12 +115,12 @@ def test_normalize_command_success_stamps_success_meta():
     assert _meta(result.update["messages"][0])["status"] == "success"
 
 
-def test_normalize_command_partial_success_from_content():
+def test_normalize_command_does_not_infer_partial_success_from_prose():
     message = _tool_message("no results found for query")
     result = normalize_tool_result(_command(message))
 
-    assert _meta(result.update["messages"][0])["status"] == "partial_success"
-    assert _meta(result.update["messages"][0])["recommended_next_action"] == "rewrite_query"
+    assert _meta(result.update["messages"][0])["status"] == "success"
+    assert _meta(result.update["messages"][0])["recommended_next_action"] == "continue"
 
 
 def test_normalize_command_preserves_producer_supplied_meta():
