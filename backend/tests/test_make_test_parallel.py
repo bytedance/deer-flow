@@ -80,7 +80,7 @@ def test_make_test_runs_all_six_shards_and_reports_any_failure(test_project: Pat
     for group in range(1, 7):
         args = json.loads((test_project / f"{group}.started").read_text(encoding="utf-8"))
         assert args[:3] == ["run", "pytest", "-m"]
-        assert args[args.index("-m") + 1] == "not live and not bundled_extension"
+        assert args[args.index("-m") + 1] == "not live and not bundled_extension and not benchmark"
         assert "--ignore=tests/blocking_io" in args
         assert args[args.index("--splits") + 1] == "6"
         assert args[args.index("--group") + 1] == str(group)

@@ -28,6 +28,8 @@ from scripts.benchmark.deermem_eviction.results import summarize_policy_results,
 from scripts.benchmark.deermem_eviction.runner import ensure_run_config_identity, response_path, run_answer_calls, verify_run_identity
 from scripts.benchmark.deermem_eviction.stats import exact_mcnemar, paired_bootstrap_difference
 
+pytestmark = pytest.mark.benchmark
+
 BACKEND_ROOT = Path(__file__).parents[1]
 EVAL_ROOT = BACKEND_ROOT / "scripts" / "benchmark" / "deermem_eviction"
 

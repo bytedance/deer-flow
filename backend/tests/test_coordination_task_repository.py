@@ -175,13 +175,13 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     engine, _, schema = database
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
-    await asyncio.to_thread(command.upgrade, config, "0056_coordination_task_state")
+    await asyncio.to_thread(command.upgrade, config, "0057_coordination_workers")
     async with engine.connect() as conn:
 
         def diff(sync):
             context = MigrationContext.configure(
                 sync,
-                opts={"compare_type": True, "include_object": lambda _, name, kind, *_args: kind != "table" or name in {"coord_tasks", "coord_inputs"}},
+                opts={"compare_type": True, "include_object": lambda _, name, kind, *_args: kind != "table" or name in {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts"}},
             )
             return compare_metadata(context, Base.metadata)
 
@@ -193,6 +193,56 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
     assert "threads_meta" in tables
-    assert not {"coord_tasks", "coord_inputs"} & tables
-    await asyncio.to_thread(command.upgrade, config, "0056_coordination_task_state")
+    assert not {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts"} & tables
+    await asyncio.to_thread(command.upgrade, config, "0057_coordination_workers")
     assert (await repo.create("alice", request_id="root", objective="After re-upgrade"))["status"] == TaskStatus.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_worker_admission_is_atomic_with_cancellation_and_replay(database):
+    from deerflow.persistence.coordination.workers import RUN_KEY_PREFIX, CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.runtime.runs.manager import ConflictError
+
+    engine, dialect, schema = database
+    await bootstrap.bootstrap_schema(engine, backend=dialect, postgres_schema=schema)
+    sessions = async_sessionmaker(engine)
+    workers = CoordinationWorkerRepository(sessions)
+    runs = RunRepository(sessions)
+    task = await workers.create("alice", request_id="dispatch", objective="Review")
+    await workers.append_input("alice", task["id"], request_id="input:follow-up", content="Check the result")
+    first, retry = await asyncio.gather(*(workers.prepare("alice", task["id"], "lead_agent") for _ in range(2)))
+    assert first == retry
+    worker, execution, project = first
+    assert project is None
+    kwargs = dict(thread_id=worker["thread_id"], owner_worker_id="gateway", user_id="alice", lease_expires_at=None)
+    key = RUN_KEY_PREFIX + execution["id"]
+    with pytest.raises(ConflictError):
+        await runs.create_thread_operation_atomic("unmanaged", **kwargs, idempotency_key="client-key")
+    with pytest.raises(TaskNotFound):
+        await workers.view("bob", task["id"])
+    with pytest.raises(TaskNotFound):
+        await workers.list_artifacts("bob", task["id"], limit=1, offset=0)
+    with pytest.raises(TaskNotFound):
+        await workers.list_worker_inputs("bob", task["id"], after=0, limit=1)
+    (pending,) = await workers.list_worker_inputs("alice", task["id"], after=0, limit=1)
+    assert (pending["source"], pending["status"], pending["run_id"]) == ("task_api", "pending", None)
+    assert await workers.list_artifacts("alice", task["id"], limit=1, offset=0) == []
+    current = await workers.get("alice", task["id"])
+    admitted, cancelled = await asyncio.gather(
+        runs.create_thread_operation_atomic("native", **kwargs, idempotency_key=key),
+        workers.request_cancel("alice", task["id"], expected_revision=current["revision"]),
+        return_exceptions=True,
+    )
+    assert cancelled["status"] == TaskStatus.CANCELLING
+    stopped = await workers.cancellations("alice", task["id"])
+    (receipt,) = await workers.list_worker_inputs("alice", task["id"], after=0, limit=1)
+    if isinstance(admitted, ConflictError):
+        assert stopped == [] and await runs.get("native", user_id="alice") is None
+        assert (receipt["status"], receipt["run_id"]) == ("not_admitted", None)
+    else:
+        assert not isinstance(admitted, BaseException) and stopped == [(worker["thread_id"], "native")]
+        assert (await workers.view("alice", task["id"]))["execution"]["run_id"] == "native"
+        assert (receipt["status"], receipt["run_id"]) == ("admitted", "native")
+    with pytest.raises(ConflictError):
+        await runs.create_thread_operation_atomic("late", **kwargs, idempotency_key=RUN_KEY_PREFIX + uuid4().hex)
