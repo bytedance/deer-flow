@@ -57,9 +57,11 @@ The standard lead-agent builders (including custom-agent bootstrap) and
   the excerpt and truncation flag if the same source ID reappears in active
   history. Changes to the original active prefix or the archive batches can
   expire the cursor. Each page checks the full ranked source ID sequence, so a
-  change to matching or order after index maintenance also expires it. Only
-  the returned page's archived records are decoded for excerpts.
-  If the archive cannot be read, a fresh search returns up to eight active hits
+  change to matching or order after index maintenance also expires it. Python
+  decodes only archived records needed for the returned excerpts. For a `role`
+  filter, SQLite also reads matching candidates' payloads before pagination.
+  If the archive cannot be read or the page needs a malformed archived record,
+  a fresh search returns up to eight active hits
   with `unavailable` and omits `next_cursor`. An existing cursor returns
   `stale_cursor` because the archived result order cannot be continued safely.
   Start a fresh search for `stale_cursor` or `invalid_cursor`. Each page checks the

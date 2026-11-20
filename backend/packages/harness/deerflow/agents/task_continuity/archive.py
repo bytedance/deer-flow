@@ -231,15 +231,22 @@ def _archived_page_records(db: sqlite3.Connection, batches: list[str], page: lis
         # result ranked here through a different archived version.
         batch_placeholders = ",".join("?" for _ in batches)
         rows = db.execute(
-            f"SELECT payload FROM sources WHERE batch IN ({batch_placeholders}) AND id IN ({placeholders}) ORDER BY rowid",
+            f"SELECT id, payload FROM sources WHERE batch IN ({batch_placeholders}) AND id IN ({placeholders}) ORDER BY rowid",
             [*batches, *(source_id for source_id, _ in archived)],
         )
     else:
-        rows = db.execute(f"SELECT payload FROM sources WHERE rowid IN ({placeholders})", [rowid for _, rowid in archived])
+        rows = db.execute(f"SELECT id, payload FROM sources WHERE rowid IN ({placeholders})", [rowid for _, rowid in archived])
     records_by_id = {}
-    for (payload,) in rows:
-        row = json.loads(payload)
-        records_by_id.setdefault(row["id"], row)
+    for source_id, payload in rows:
+        if source_id in records_by_id:
+            continue
+        try:
+            row = json.loads(payload)
+        except (ValueError, TypeError) as exc:
+            raise sqlite3.DatabaseError("Invalid JSON in archived history payload") from exc
+        if not isinstance(row, dict) or row.get("id") != source_id or not isinstance(row.get("text"), str) or row.get("role") not in ("human", "ai", "tool") or not isinstance(row.get("truncated"), bool):
+            raise sqlite3.DatabaseError("Invalid archived history record")
+        records_by_id[source_id] = row
     return records_by_id
 
 
@@ -341,7 +348,7 @@ def _search(state: dict, runtime: Runtime, query: str, role: str | None, excerpt
 
 def lookup(
     state: dict,
-    runtime,
+    runtime: Runtime,
     *,
     query: str | None = None,
     source_id: str | None = None,

@@ -1268,6 +1268,48 @@ def test_history_search_reports_unavailable_for_mismatched_archive_id(role_runti
     assert result == {"results": [], "status": "unavailable"}
 
 
+@pytest.mark.parametrize("damage", ["invalid_json", "missing_id", "missing_text", "invalid_text"])
+@pytest.mark.parametrize("damage_first_page", [True, False], ids=["first_page", "continuation"])
+def test_history_search_degrades_for_malformed_archive_payload(role_runtime, damage, damage_first_page):
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    messages = [HumanMessage(content="needle body", id=f"hit-{i}") for i in range(12)]
+    role_runtime.state["task_history"] = archive.capture({}, role_runtime, messages, TaskContinuityConfig(enabled=True))
+    arguments = {"runtime": role_runtime, "query": "needle"}
+    first = json.loads(history_search.invoke(arguments))
+    assert len(first["results"]) == 8
+    next_arguments = {**arguments, "cursor": first["next_cursor"]}
+    if damage_first_page:
+        damaged_id = first["results"][0]["id"]
+    else:
+        healthy_tail = json.loads(history_search.invoke(next_arguments))
+        assert len(healthy_tail["results"]) == 4
+        damaged_id = healthy_tail["results"][-1]["id"]
+
+    path, _ = archive.scope(role_runtime)
+    with closing(sqlite3.connect(path)) as db, db:
+        (stored_payload,) = db.execute("SELECT payload FROM sources WHERE id = ?", (damaged_id,)).fetchone()
+        payload = json.loads(stored_payload)
+        if damage == "missing_id":
+            del payload["id"]
+        elif damage == "missing_text":
+            del payload["text"]
+        elif damage == "invalid_text":
+            payload["text"] = 42
+        updated = db.execute("UPDATE sources SET payload = ? WHERE id = ?", ("{" if damage == "invalid_json" else json.dumps(payload), damaged_id))
+        assert updated.rowcount == 1
+
+    refreshed = json.loads(history_search.invoke(arguments))
+    if damage_first_page:
+        assert refreshed == {"results": [], "status": "unavailable"}
+    else:
+        assert refreshed == first
+        continuation = json.loads(history_search.invoke(next_arguments))
+        assert continuation == {"results": [], "status": "stale_cursor"}
+
+
 def test_history_search_preserves_first_active_page_when_archive_is_unavailable(role_runtime):
     import json
 
