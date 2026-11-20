@@ -31,16 +31,32 @@ for f in "$EXAMPLE_YAML" "$VALUES_YAML"; do
   fi
 done
 
-example=$(grep -E '^config_version:[[:space:]]+[0-9]+' "$EXAMPLE_YAML" | head -1 | awk '{print $2}')
-chart=$(awk '/^config:[[:space:]]*\|/{f=1; next} f && /^[[:space:]]+config_version:[[:space:]]+[0-9]+/ {print $2; exit}' "$VALUES_YAML")
+example_raw=$(awk '/^config_version:[[:space:]]+/ {sub(/^config_version:[[:space:]]+/, ""); print; exit}' "$EXAMPLE_YAML")
+chart_raw=$(awk '
+  /^config:[[:space:]]*\|/ { in_config=1; next }
+  in_config && /^[[:space:]]+config_version:[[:space:]]+/ {
+    sub(/^[[:space:]]+config_version:[[:space:]]+/, "")
+    print
+    exit
+  }
+' "$VALUES_YAML")
 
-printf 'config.example.yaml config_version=%s\n' "$example"
-printf 'chart values.yaml     config_version=%s\n' "$chart"
+printf 'config.example.yaml config_version=%s\n' "$example_raw"
+printf 'chart values.yaml     config_version=%s\n' "$chart_raw"
 
-if [ -z "$example" ] || [ -z "$chart" ]; then
+if [ -z "$example_raw" ] || [ -z "$chart_raw" ]; then
   echo "::error::could not parse config_version from one of the files" >&2
   exit 1
 fi
+
+version_pattern='^(0|[1-9][0-9]{0,17})([[:space:]]+#.*)?[[:space:]]*$'
+if [[ ! "$example_raw" =~ $version_pattern || ! "$chart_raw" =~ $version_pattern ]]; then
+  printf '::error::config_version must be a canonical decimal integer of at most 18 digits, without leading zeros (config.example.yaml: %s, values.yaml: %s)\n' "$example_raw" "$chart_raw" >&2
+  exit 1
+fi
+
+example=$(printf '%s\n' "$example_raw" | awk '{print $1}')
+chart=$(printf '%s\n' "$chart_raw" | awk '{print $1}')
 
 if [ "$chart" -lt "$example" ]; then
   echo "::error::chart config_version ($chart) is behind config.example.yaml ($example). Bump 'config_version' in deploy/helm/deer-flow/values.yaml (and the README example) to $example." >&2
