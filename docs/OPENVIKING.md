@@ -223,9 +223,17 @@ Provider resolution contract (`OpenVikingCredentialProvider`):
 - Embedded hosts and custom extensions can also inject a provider instance or
   callable programmatically via `host_hooks["credential_provider"]` when calling
   `OpenVikingMemoryManager.from_config(..., credential_provider=...)`, without
-  declaring an import path in `config.yaml`.
-- `credential_provider_config` must be empty when neither `credential_provider`
-  nor `host_hooks["credential_provider"]` is provided.
+  declaring an import path in `config.yaml`. Because Gateway and
+  `DynamicContextMiddleware` config bootstrap consult
+  `OpenVikingMemoryManager.read_failures_are_fatal_for_config(backend_config)`
+  (which requires `user_credentials` or `credential_provider` in
+  `backend_config`), `host_hooks["credential_provider"]` is intended for direct
+  programmatic callers outside config-driven Gateway/`DynamicContextMiddleware`
+  wiring.
+- `credential_provider_config` applies only when DeerFlow instantiates a
+  config-declared `credential_provider` and must be omitted or empty when
+  `credential_provider` is not set in `backend_config` (including when passing an
+  already-instantiated hook via `host_hooks["credential_provider"]`).
 - At request time, the provider's `resolve(user_id)` returns one of:
   - `OpenVikingCredential(api_key=..., tenant_id=...)`
   - a mapping containing only `api_key` and optional `tenant_id`
@@ -323,9 +331,10 @@ boundary; peers separate memory scopes within that user.
 ## Security and isolation invariants
 
 - **Fail-closed user resolution**: in multi-user mode, `None`, empty, or
-  whitespace-only `user_id` values, unmapped users, revoked users (`None` from
-  `credential_provider`), invalid/blank keys, and provider errors all fail
-  closed (`MemoryManagerError`, or `MemoryReadError` on read paths when
+  whitespace-only `user_id` values, leading/trailing whitespace or control
+  characters (`\0`) on runtime `user_id` values, unmapped users, revoked users
+  (`None` from `credential_provider`), invalid/blank keys, and provider errors
+  all fail closed (`MemoryManagerError`, or `MemoryReadError` on read paths when
   `failure_policy.read: raise`) before any OpenViking HTTP call is made.
 - **No fallback to shared or ambient credentials**: DeerFlow never falls back
   to another user's key, a default key, ambient `OPENVIKING_API_KEY`, or
@@ -333,18 +342,22 @@ boundary; peers separate memory scopes within that user.
 - **Cross-user duplicate key rejection**: DeerFlow tracks each key by its
   SHA-256 `key_fingerprint` and refuses to share the same API key across
   different users—both statically during `user_credentials` config validation
-  and dynamically in the runtime `client_pool`.
+  and dynamically in the runtime `client_pool`. Static `user_credentials`
+  fingerprints are always checked globally (including in hybrid deployments even
+  when a static user has not yet been called or was evicted); for purely dynamic
+  providers, runtime duplicate-key detection covers currently cached and
+  in-flight pool entries rather than evicted historical scopes.
 - **Key validation without secret echoes**: API keys must contain printable
   ASCII (`0x21..0x7E`) only (rejecting whitespace, newlines, `\0`, control
   characters, and non-ASCII to prevent header injection). Config/validation
   errors and `repr(OpenVikingConfig)` never echo raw API keys.
 - **Key rotation and revocation**: pool entries are keyed by
   `(tenant_id, user_id, key_fingerprint)`. When a provider rotates a user's key
-  to a new fingerprint, DeerFlow opens a fresh scoped handle and retires the
-  previous cached handle for that `(tenant_id, user_id)` once active
-  operations complete. When a provider revokes a user by returning `None`,
-  DeerFlow immediately retires all cached handles for that user and refuses the
-  request.
+  or reassigns their `tenant_id`, DeerFlow opens a fresh scoped handle and
+  retires all previous cached and in-flight handles for that `user_id` so they
+  close once active operations complete. When a provider revokes a user by
+  returning `None`, DeerFlow immediately retires all cached and in-flight
+  handles for that user and refuses the request.
 - **Refcount-safe, lock-free handle lifecycle**: in-flight operations hold a
   reference count on the acquired entry so evicted, rotated, or revoked handles
   are never closed out from under an active request, and pool locks are never
