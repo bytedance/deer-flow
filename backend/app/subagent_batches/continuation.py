@@ -21,7 +21,11 @@ class BatchContinuations:
 
     async def prepare(self, request):
         from app.gateway.services import _CONTEXT_CONFIGURABLE_KEYS, _MODEL_SELECTION_CONTEXT_KEYS
+        from deerflow.persistence.coordination.workers import THREAD_PREFIX
 
+        workers = getattr(self.app.state, "coordination_workers", None)
+        if workers is not None and request.thread_id.startswith(THREAD_PREFIX) and await workers.repo.task_for_thread(request.thread_id):
+            raise AgentRunError(409, "A managed worker accepts follow-ups through its coordination task")
         host = self.app.state.agent_runs_host
         grant = host.capture_batch_authority(request.continuation_authority, user_id=request.user_id)
         source = await request.continuation_authority.get(thread_id=request.thread_id, run_id=request.run_id)

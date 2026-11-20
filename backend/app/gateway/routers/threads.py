@@ -1481,6 +1481,10 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
     if not moved:
         raise HTTPException(status_code=404, detail="Thread or project not found")
     record = await thread_store.get(thread_id)
+    if record is None:
+        # The move takes no thread lock, so a DELETE can remove the row
+        # between ``set_project`` and this read. The thread is gone either way.
+        raise HTTPException(status_code=404, detail="Thread or project not found")
     return ThreadResponse(
         thread_id=thread_id,
         status=record.get("status", "idle"),
