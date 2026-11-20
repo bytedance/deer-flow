@@ -2,6 +2,7 @@
 
 import json
 import os
+from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
@@ -187,13 +188,21 @@ class _BrokenStdout:
         raise OSError  # forces the devnull dup2 to take its best-effort path
 
 
-def test_main_print_broken_pipe_exits_without_traceback(monkeypatch):
+def test_main_print_broken_pipe_exits_without_traceback(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_make_session", _FakeSession)
     read_fd, write_fd = os.pipe()
     os.close(read_fd)
-    with os.fdopen(write_fd, "w", encoding="utf-8") as stdout:
+    stdout = os.fdopen(write_fd, "w", encoding="utf-8")
+    try:
         monkeypatch.setattr(cli.sys, "stdout", stdout)
-        assert cli.main(["--print", "hello"]) == 1
+        rc = cli.main(["--print", "hello"])
+        assert rc == 1
+        stdout.flush()  # Repeat the flush Python performs at shutdown.
+    finally:
+        # A close-time flush must not mask a failed assertion above.
+        with suppress(BrokenPipeError):
+            stdout.close()
+    assert capsys.readouterr().err == ""
 
 
 def test_main_json_broken_pipe_error_record_fails_silently(monkeypatch):
