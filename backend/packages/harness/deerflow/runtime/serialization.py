@@ -79,11 +79,13 @@ def serialize_channel_values(channel_values: dict[str, Any]) -> dict[str, Any]:
 
     Only ``__pregel_*`` keys are removed — ``__interrupt__`` is deliberately
     preserved so the LangGraph SDK can detect interrupt events from values
-    chunks (see issue #3595).
+    chunks (see issue #3595). The middleware-owned ``durable_context_snapshot``
+    channel is also removed because it is model/checkpoint state, not public
+    API data.
     """
     result: dict[str, Any] = {}
     for key, value in channel_values.items():
-        if key.startswith("__pregel_"):
+        if key.startswith("__pregel_") or key == "durable_context_snapshot":
             continue
         result[key] = serialize_lc_object(value)
     return result
@@ -167,6 +169,7 @@ def serialize(obj: Any, *, mode: str = "") -> Any:
     * ``messages`` — obj is ``(message_chunk, metadata_dict)``
     * ``values`` — obj is the full state dict; ``__pregel_*`` keys stripped and
       base64 ``data:`` image blocks dropped from hide_from_ui messages
+    * ``updates``: node state writes have internal channels stripped
     * everything else — recursive ``model_dump()`` / ``dict()`` fallback
     """
     if mode == "messages":
@@ -175,4 +178,6 @@ def serialize(obj: Any, *, mode: str = "") -> Any:
         # ``values`` snapshots stream the full state to the frontend, so they
         # must drop base64 image payloads the same way the REST endpoints do.
         return serialize_channel_values_for_api(obj) if isinstance(obj, dict) else serialize_lc_object(obj)
+    if mode == "updates" and isinstance(obj, dict):
+        return {node: serialize_channel_values(update) if isinstance(update, dict) else serialize_lc_object(update) for node, update in obj.items()}
     return serialize_lc_object(obj)

@@ -140,7 +140,8 @@ class TestDurableContextStamping:
             messages=[],
             state={"summary_text": summary_text, "delegations": [], "skill_context": []},
         )
-        return middleware._inject(request)
+        prepared, _pending = middleware._prepare_request(request)[:2]
+        return prepared
 
     def test_the_authority_contract_is_stamped_as_a_middleware_injection(self):
         from langchain_core.messages import SystemMessage
