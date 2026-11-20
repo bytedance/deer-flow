@@ -998,8 +998,9 @@ and `time_range`; the filters do not apply to `web_fetch` or other search provid
 
 #### Hosted reader URLs
 
-Jina, Tavily, InfoQuest and the official Exa API accept absolute HTTP(S) URLs
-for `web_fetch`. The tool checks the URL locally before contacting the reader.
+GroundRoute, InfoQuest, Jina, Sofya, SpecStream, Tavily, Unbrowse and the
+official Exa API accept absolute HTTP(S) URLs for `web_fetch`. The tool checks
+the URL locally before contacting the reader.
 Malformed URLs, embedded user credentials, local hostnames such as `localhost`,
 known metadata hosts and non-public IP literals return a tool error.
 The reader receives an accepted URL exactly as supplied, including its encoded
@@ -1400,7 +1401,7 @@ DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
