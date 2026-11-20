@@ -1275,10 +1275,17 @@ def test_multi_user_config_validation_pool_masking_and_side_effect_free(
     dot_cfg = OpenVikingConfig.from_backend_config(_multi_user_backend_config(tmp_path, credential_provider=f"{nonexistent_pkg}.mod.VaultProvider"))
     assert dot_cfg.credential_provider == f"{nonexistent_pkg}.mod.VaultProvider"
     injected_cfg = OpenVikingConfig.from_backend_config(
-        _multi_user_backend_config(tmp_path),
+        _multi_user_backend_config(tmp_path, client_pool={"max_clients": 8}),
         has_injected_credential_provider=True,
     )
     assert injected_cfg.isolation_mode == "multi_user"
+    assert injected_cfg.pool_max_clients == 8
+    monkeypatch.setenv("OPENVIKING_API_KEY", "single-user-secret")
+    single_empty_pool_cfg = OpenVikingConfig.from_backend_config(
+        _backend_config(tmp_path, client_pool={}),
+    )
+    assert single_empty_pool_cfg.isolation_mode == "single_user"
+    assert OpenVikingConfig.from_backend_config(_backend_config(tmp_path, client_pool=None)).isolation_mode == "single_user"
     with pytest.raises(ValueError, match="credential_provider_config requires credential_provider"):
         OpenVikingConfig.from_backend_config(
             _multi_user_backend_config(tmp_path, credential_provider_config={"namespace": "prod"}),
@@ -1327,15 +1334,18 @@ def test_multi_user_config_validation_pool_masking_and_side_effect_free(
         ({"user_credentials": {"alice": {"api_key": "dup-secret"}, "bob": {"api_key": "dup-secret"}}}, "must not share the same API key"),
         ({"user_credentials": {"alice": {"api_key": "bad key"}}}, "printable ASCII"),
         ({"user_credentials": {"alice": {"api_key": "bad\r\nkey"}}}, "printable ASCII"),
-        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": ""}}}, "tenant_id must not be empty"),
-        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": " acme"}}}, "leading or trailing whitespace"),
-        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": "t" * 129}}}, "at most 128"),
-        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": "ac\x00me"}}}, "control characters"),
+        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": ""}}}, r"user_credentials\.alice:.*tenant_id must not be empty"),
+        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": 123}}}, r"user_credentials\.alice:.*tenant_id must be a string"),
+        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": " acme"}}}, r"user_credentials\.alice:.*leading or trailing whitespace"),
+        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": "t" * 129}}}, r"user_credentials\.alice:.*at most 128"),
+        ({"user_credentials": {"alice": {"api_key": "a-key", "tenant_id": "ac\x00me"}}}, r"user_credentials\.alice:.*control characters"),
         ({"credential_provider": ""}, "must not be empty"),
         ({"credential_provider": "SingleName"}, "expected 'pkg.mod:Attr'"),
         ({"credential_provider": "pkg:mod:Attr"}, "at most one ':'"),
         ({"credential_provider": "pkg.class:Attr"}, "valid Python identifiers"),
         ({"owner_user_id": "alice", "credential_provider_config": {"endpoint": "x"}}, "requires credential_provider"),
+        ({"owner_user_id": "alice", "client_pool": {"max_clients": 4}}, "client_pool is only supported in multi-user mode"),
+        ({"owner_user_id": "alice", "client_pool": {"idle_ttl_seconds": 30.0}}, "client_pool is only supported in multi-user mode"),
         ({"user_credentials": {"alice": {"api_key": "a-key"}}, "client_pool": {"max_clients": True}}, r"client_pool\.max_clients must be an integer"),
         ({"user_credentials": {"alice": {"api_key": "a-key"}}, "client_pool": {"max_clients": 1.5}}, r"client_pool\.max_clients must be an integer"),
         ({"user_credentials": {"alice": {"api_key": "a-key"}}, "client_pool": {"max_clients": 0}}, "between 1 and 4096"),

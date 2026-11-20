@@ -2593,7 +2593,7 @@ memory:
   #   # or injected programmatically via host_hooks["credential_provider"]):
   #   # credential_provider: my_company.openviking_auth:VaultCredentialProvider
   #   # credential_provider_config: {}
-  #   client_pool:
+  #   client_pool:              # multi-user mode only
   #     max_clients: 64         # LRU cap (1..4096)
   #     idle_ttl_seconds: 900.0 # null disables idle TTL eviction
   #
