@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_config
 from app.gateway.upload_ingestion import ThreadUploadIngestionService, UnsafeFilenameError, UnsafeUploadDestinationError
+from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -459,14 +460,14 @@ async def upload_files(
                 skipped_files.append(file.filename)
                 continue
             except UnsafeUploadDestinationError as e:
-                logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
+                logger.warning("Skipping upload with unsafe destination %s: %s", sanitize_log_param(file.filename), sanitize_log_param(str(e)))
                 skipped_files.append(e.filename)
                 continue
             except HTTPException as e:
                 await service.cleanup_written()
                 raise e
             except Exception as e:
-                logger.error(f"Failed to upload {file.filename}: {e}")
+                logger.error("Failed to upload %s: %s", sanitize_log_param(file.filename), sanitize_log_param(str(e)))
                 await service.cleanup_written()
                 raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}.")
             uploaded_files.append(file_info)
@@ -527,5 +528,5 @@ async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Requ
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Failed to delete {filename}: {e}")
+        logger.error("Failed to delete %s: %s", sanitize_log_param(filename), sanitize_log_param(str(e)))
         raise HTTPException(status_code=500, detail=f"Failed to delete {filename}.")
