@@ -154,6 +154,7 @@ export interface Translations {
       | "knowledgePlatform"
       | "knowledgeCenter"
       | "skillEvolution"
+      | "runPostmortem"
       | "weknora"
       | "lightrag"
       | "example",

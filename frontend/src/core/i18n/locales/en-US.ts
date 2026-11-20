@@ -205,6 +205,7 @@ export const enUS: Translations = {
         "en-US",
       ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
+      runPostmortem: bundledCopy("deerflow-extension-run-postmortem", "en-US"),
       weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
       example: bundledCopy("deerflow-extension-example", "en-US"),
     },

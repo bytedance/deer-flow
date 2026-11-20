@@ -193,6 +193,7 @@ export const zhCN: Translations = {
         "zh-CN",
       ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "zh-CN"),
+      runPostmortem: bundledCopy("deerflow-extension-run-postmortem", "zh-CN"),
       weknora: bundledCopy("deerflow-extension-weknora", "zh-CN"),
       example: bundledCopy("deerflow-extension-example", "zh-CN"),
     },
