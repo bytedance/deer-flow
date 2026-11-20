@@ -36,7 +36,8 @@ usable after the source link is revoked.
 The copied messages are context for the model, not something the visitor said,
 so memory extraction skips them, also when compaction removes them. New turns in
 the copy are remembered as in any other conversation, including assistant replies
-that repeat copied content.
+that repeat copied content. A copy made before this behavior existed has its
+copied messages marked before its next run.
 
 ## Deployment and limits
 
