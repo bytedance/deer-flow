@@ -216,6 +216,9 @@ class TodoMiddleware(TodoListMiddleware):
         return {
             "system_prompt_hash": canonical_hash(self.system_prompt),
             "tool_description_hash": canonical_hash(self.tool_description),
+            # The fixed reminder template is model-visible instruction text too;
+            # hash it with an empty item list so per-run todo content stays out.
+            "completion_reminder_template_hash": canonical_hash(_format_completion_reminder([])),
             "state_channel": "todos",
             "skip_completion_reminder_on_length_cap": True,
             "skip_completion_reminder_on_safety_cap": True,
