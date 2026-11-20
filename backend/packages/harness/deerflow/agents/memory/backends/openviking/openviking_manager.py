@@ -80,6 +80,7 @@ class OpenVikingMemoryManager(MemoryManager):
     _recorder: Any = PrivateAttr(default=None)
     _retriever: Any = PrivateAttr(default=None)
     _use_actor_peer: Any = PrivateAttr()
+    _use_home_alias_uris: bool = PrivateAttr(default=False)
     _partial_write_error: type[Exception] = PrivateAttr()
     _should_keep_hidden_message: Any = PrivateAttr(default=None)
     _session_locks: weakref.WeakValueDictionary[str, threading.RLock] = PrivateAttr(default_factory=weakref.WeakValueDictionary)
@@ -247,7 +248,6 @@ class OpenVikingMemoryManager(MemoryManager):
                     raise MemoryReadError(str(exc)) from exc
                 raise
             retriever = copy.copy(entry.retriever)
-            retriever.target_uri = _memory_target_uris(peer_id)
             if thread_id:
                 retriever.search_mode = "search"
                 retriever.session_id = _session_id(
@@ -257,8 +257,11 @@ class OpenVikingMemoryManager(MemoryManager):
                     tenant_id=credential.tenant_id,
                 )
             try:
-                with self._actor_peer_scope(peer_id):
-                    documents = retriever.invoke(self._config.injection_query)
+                documents = self._invoke_retriever(
+                    retriever,
+                    self._config.injection_query,
+                    peer_id=peer_id,
+                )
             except Exception as exc:
                 if self._config.read_failure_policy == "raise":
                     raise MemoryReadError("OpenViking context retrieval failed") from exc
@@ -313,7 +316,6 @@ class OpenVikingMemoryManager(MemoryManager):
                     raise MemoryReadError(str(exc)) from exc
                 raise
             retriever = copy.copy(entry.retriever)
-            retriever.target_uri = _memory_target_uris(peer_id)
             retriever.search_mode = "find"
             retriever.session_id = None
             retriever.limit = max(1, min(int(top_k), 100))
@@ -324,8 +326,11 @@ class OpenVikingMemoryManager(MemoryManager):
                     "conds": [category],
                 }
             try:
-                with self._actor_peer_scope(peer_id):
-                    documents = retriever.invoke(query.strip())
+                documents = self._invoke_retriever(
+                    retriever,
+                    query.strip(),
+                    peer_id=peer_id,
+                )
             except Exception as exc:
                 if self._config.read_failure_policy == "raise":
                     raise MemoryReadError("OpenViking memory search failed") from exc
@@ -964,6 +969,24 @@ class OpenVikingMemoryManager(MemoryManager):
                     exc_info=True,
                 )
 
+    def _invoke_retriever(self, retriever: Any, query: str, *, peer_id: str) -> list[Any]:
+        use_home = self._use_home_alias_uris
+        retriever.target_uri = _memory_target_uris(peer_id, use_home_alias=use_home)
+        try:
+            with self._actor_peer_scope(peer_id):
+                return retriever.invoke(query)
+        except Exception as exc:
+            if use_home or not _should_retry_with_home_alias(exc):
+                raise
+            # OpenViking >=0.5.5 rejects uid-less ``viking://user/<reserved>`` shorthands;
+            # retry once with ``viking://~/...`` and remember it for future calls.
+            self._use_home_alias_uris = True
+            logger.info("OpenViking server requires 'viking://~/' user-space URIs; switching target_uri format")
+            retry_retriever = copy.copy(retriever)
+            retry_retriever.target_uri = _memory_target_uris(peer_id, use_home_alias=True)
+            with self._actor_peer_scope(peer_id):
+                return retry_retriever.invoke(query)
+
     def _handle_write_error(
         self,
         exc: Exception,
@@ -974,6 +997,14 @@ class OpenVikingMemoryManager(MemoryManager):
         if self._config.write_failure_policy == "raise":
             raise MemoryManagerError(detail) from exc
         logger.error(detail, exc_info=True)
+
+
+def _should_retry_with_home_alias(exc: Exception) -> bool:
+    """Return True when an OpenViking >=0.5.5 server rejected legacy uid-less URIs."""
+
+    if "viking://~/" not in str(exc):
+        return False
+    return getattr(exc, "code", None) == "INVALID_URI" or type(exc).__name__ == "InvalidURIError"
 
 
 def _load_official_integration() -> dict[str, Any]:
