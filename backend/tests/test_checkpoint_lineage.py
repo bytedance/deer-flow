@@ -227,6 +227,20 @@ def test_goal_leaf_inheriting_stamps_is_not_duration_only():
     assert is_duration_only_checkpoint(goal_leaf, parent=parent) is False
 
 
+def test_swapped_channel_versions_are_not_a_duration_checkpoint():
+    """Version values belong to channel names; a permutation is a state change."""
+    parent = _snapshot("ckpt-parent", [], channel_versions={"messages": 5, "goal": 2})
+    swapped_leaf = _snapshot(
+        "ckpt-swapped",
+        [],
+        parent_id="ckpt-parent",
+        metadata=dict(_POSTGRES_DURATION_METADATA),
+        channel_versions={"messages": 2, "goal": 5},
+    )
+
+    assert is_duration_only_checkpoint(swapped_leaf, parent=parent) is False
+
+
 def test_postgres_attribution_only_duration_checkpoint_is_recognised():
     """A leaf stamped for message attribution alone has an empty ``run_durations`` map."""
     parent = _snapshot("ckpt-real", [], channel_versions={"messages": 5})

@@ -16,6 +16,7 @@ Requires: Docker running locally
 
 import subprocess
 import time
+import uuid
 
 import pytest
 
@@ -38,13 +39,37 @@ def _container_running(container_name: str) -> bool:
     return result.returncode == 0 and result.stdout.strip().lower() == "true"
 
 
-def _stop_container(container_name: str) -> None:
-    subprocess.run(["docker", "stop", container_name], capture_output=True, timeout=15)
+def _stop_container(container_id: str) -> None:
+    subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=15)
 
 
-# Use a lightweight image for testing to avoid pulling the heavy sandbox image
+def _start_container(container_name: str) -> str:
+    result = subprocess.run(
+        ["docker", "run", "--rm", "-d", "--name", container_name, E2E_TEST_IMAGE, *_SLEEP_CMD],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"Failed to start {container_name}: {result.stderr}"
+    container_id = result.stdout.strip()
+    assert container_id, f"Docker returned empty container ID for {container_name}"
+    return container_id
+
+
+def _wait_container_stopped(container_name: str, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _container_running(container_name):
+            return
+        time.sleep(0.05)
+
+
+# Use a lightweight image for testing to avoid pulling the heavy sandbox image.
+# Trap SIGTERM in PID 1 so `docker stop` inside `backend.destroy()` exits cleanly
+# instead of blocking for Docker's 10-second SIGTERM grace timeout per container.
 E2E_TEST_IMAGE = "busybox:latest"
 E2E_PREFIX = "deer-flow-sandbox-e2e-test"
+_SLEEP_CMD = ["sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait"]
 
 
 @pytest.fixture(autouse=True)
@@ -78,17 +103,11 @@ class TestOrphanReconciliationE2E:
         4. Simulate _reconcile_orphans() logic → container should be destroyed
         """
         container_name = f"{E2E_PREFIX}-orphan01"
-
-        # Step 1: Start a container (simulating previous process lifecycle)
-        result = subprocess.run(
-            ["docker", "run", "--rm", "-d", "--name", container_name, E2E_TEST_IMAGE, "sleep", "3600"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert result.returncode == 0, f"Failed to start test container: {result.stderr}"
+        created_ids: list[str] = []
 
         try:
+            # Step 1: Start a container (simulating previous process lifecycle)
+            created_ids.append(_start_container(container_name))
             assert _container_running(container_name), "Test container should be running"
 
             # Step 2: Create backend and list running containers
@@ -115,30 +134,25 @@ class TestOrphanReconciliationE2E:
             # Destroy it (simulating what _reconcile_orphans does for old containers)
             backend.destroy(orphan_info)
 
-            # Give Docker a moment to stop the container
-            time.sleep(1)
+            _wait_container_stopped(container_name)
 
             # Verify container is gone
             assert not _container_running(container_name), "Orphan container should be stopped after destroy"
 
         finally:
-            # Safety cleanup
-            _stop_container(container_name)
+            # Safety cleanup only for containers started by this test
+            for cid in created_ids:
+                _stop_container(cid)
 
     def test_multiple_orphans_all_cleaned(self):
         """Multiple orphaned containers are all found and can be cleaned up."""
-        containers = []
+        containers: list[str] = []
+        created_ids: list[str] = []
         try:
             # Start 3 containers
             for i in range(3):
                 name = f"{E2E_PREFIX}-multi{i:02d}"
-                result = subprocess.run(
-                    ["docker", "run", "--rm", "-d", "--name", name, E2E_TEST_IMAGE, "sleep", "3600"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                assert result.returncode == 0, f"Failed to start {name}: {result.stderr}"
+                created_ids.append(_start_container(name))
                 containers.append(name)
 
             from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
@@ -162,34 +176,28 @@ class TestOrphanReconciliationE2E:
             for info in running:
                 backend.destroy(info)
 
-            time.sleep(1)
+            for name in containers:
+                _wait_container_stopped(name)
 
             # Verify all gone
             for name in containers:
                 assert not _container_running(name), f"{name} should be stopped"
 
         finally:
-            for name in containers:
-                _stop_container(name)
+            for cid in created_ids:
+                _stop_container(cid)
 
     def test_list_running_ignores_unrelated_containers(self):
         """Containers with different prefixes should not be listed."""
-        unrelated_name = "unrelated-test-container"
+        unrelated_suffix = uuid.uuid4().hex[:8]
+        unrelated_name = f"unrelated-e2e-{unrelated_suffix}"
         our_name = f"{E2E_PREFIX}-ours001"
+        created_ids: list[str] = []
 
         try:
-            # Start an unrelated container
-            subprocess.run(
-                ["docker", "run", "--rm", "-d", "--name", unrelated_name, E2E_TEST_IMAGE, "sleep", "3600"],
-                capture_output=True,
-                timeout=30,
-            )
-            # Start our container
-            subprocess.run(
-                ["docker", "run", "--rm", "-d", "--name", our_name, E2E_TEST_IMAGE, "sleep", "3600"],
-                capture_output=True,
-                timeout=30,
-            )
+            # Start an unrelated container and our container; both starts must succeed.
+            created_ids.append(_start_container(unrelated_name))
+            created_ids.append(_start_container(our_name))
 
             from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
 
@@ -206,10 +214,9 @@ class TestOrphanReconciliationE2E:
 
             # Should find ours but not unrelated
             assert "ours001" in found_ids
-            # "unrelated-test-container" doesn't match "deer-flow-sandbox-e2e-test-" prefix
             for info in running:
                 assert not info.sandbox_id.startswith("unrelated")
 
         finally:
-            _stop_container(unrelated_name)
-            _stop_container(our_name)
+            for cid in created_ids:
+                _stop_container(cid)

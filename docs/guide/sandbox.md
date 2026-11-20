@@ -7,6 +7,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+Local bash tool status follows the process exit code, including timeout failures.
+Successful commands may print `Error:` or JSON containing an `error` field without
+being marked as failed. Output is still subject to the configured redaction and
+size limits; those transformations do not change the execution status.
+
 The optional [Tenki provider](../../backend/packages/harness/deerflow/community/tenki/README.md)
 retains failed termination handles for retry and rejects late acquisitions after
 reset or shutdown. If shutdown reports outstanding work, retry after its SDK
@@ -83,6 +88,12 @@ same-size content edits are still copied on release.
 Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
+
+The optional [boxd provider](../../backend/packages/harness/deerflow/community/boxd_sandbox/README.md)
+runs each user/thread scope in an isolated boxd machine. A new machine receives
+the thread's files and skills before it is handed out, and release copies
+generated outputs back to thread storage with the same alias and path checks.
+See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
 
 The [sandbox benchmark](../../backend/scripts/benchmark/sandbox/README.md#opensandbox)
 also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,

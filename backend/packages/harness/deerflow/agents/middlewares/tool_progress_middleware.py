@@ -31,8 +31,10 @@ Division of labor with LoopDetectionMiddleware (middleware position 23):
 
   LoopDetectionMiddleware is a call-pattern guard — it fires after the model
   responds (before tools execute), inspects the tool_calls signature in the
-  AIMessage, and forces the *whole turn* to stop when the model keeps issuing
-  the same calls regardless of results.
+  AIMessage alongside completed results, and can force the *whole turn* to stop
+  when the model repeats calls with unchanged outcomes (call+result fingerprint
+  repetition). Per-tool frequency thresholds are INFO-only observability metrics
+  and do not warn or hard-stop execution.
 
   They are complementary, not competing:
   - ToolProgressMiddleware is fine-grained (per-tool BLOCK, other tools normal).

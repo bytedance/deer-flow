@@ -184,7 +184,7 @@ The row-level artifacts disclosed in #4789 corrected the PR text's noisy-signal 
 The default tests are offline and use only synthetic LongMemEval-shaped rows:
 
 ```bash
-PYTHONPATH=. uv run pytest tests/test_bench_deermem_eviction_*.py -q
+PYTHONPATH=. uv run pytest tests/test_bench_deermem_eviction.py -q
 ```
 
 They cover config and manifest contracts, prompt hashing, dataset-integrity rejection, evidence extraction, distractor filtering, deterministic pool construction, production selector behavior, correction reservation, public-result redaction, overwrite protection, and every grading rule with its edge cases.

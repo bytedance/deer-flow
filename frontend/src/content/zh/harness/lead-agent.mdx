@@ -107,7 +107,7 @@ models:
 
 ## 计划模式
 
-当请求配置中将 `is_plan_mode` 设为 `true` 时，`TodoMiddleware` 被激活。Agent 然后维护一个结构化的任务列表，在处理复杂任务时将条目标记为 `in_progress`、`completed` 或 `pending`。这为用户提供了 Agent 进度的可见性。
+当请求配置中将 `is_plan_mode` 设为 `true` 时，`TodoMiddleware` 被激活。Agent 会在有意义的里程碑更新结构化任务列表。条目状态可以是 `pending`、`in_progress`、`completed`、`blocked` 或 `waiting`；只有完全完成并验证过的工作才能标记为 `completed`，`blocked` 和 `waiting` 用于说明本轮无法继续的原因。
 
 计划模式适用于显示增量进度有价值的复杂、多步骤任务。对于简单请求，最好禁用它以避免不必要的开销。
 
