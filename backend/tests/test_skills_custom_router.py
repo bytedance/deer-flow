@@ -806,6 +806,31 @@ def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path, *, user_factory=Non
     return _make_test_app(_patch_demo_custom_skill_config(monkeypatch, tmp_path), user_factory=user_factory)
 
 
+@pytest.mark.asyncio
+async def test_custom_skill_response_readback_uses_mutation_lock_after_write(monkeypatch, tmp_path):
+    config = _patch_demo_custom_skill_config(monkeypatch, tmp_path)
+    lock_calls = []
+
+    class _RecordingLock:
+        def __enter__(self):
+            lock_calls.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            lock_calls.append("exit")
+            return False
+
+    monkeypatch.setattr(skills_router, "_custom_skill_mutation", lambda storage: _RecordingLock())
+
+    plain_response = await skills_router._read_custom_skill_response("demo-skill", config)
+    assert plain_response.content == _skill_content("demo-skill")
+    assert lock_calls == []
+
+    after_write_response = await skills_router._read_custom_skill_response("demo-skill", config, after_write=True)
+    assert after_write_response.content == plain_response.content
+    assert lock_calls == ["enter", "exit"]
+
+
 @pytest.mark.parametrize(
     ("skill_name", "detail"),
     [
