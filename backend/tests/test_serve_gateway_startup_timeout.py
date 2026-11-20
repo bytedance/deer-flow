@@ -63,6 +63,12 @@ def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, a
     (checkout / "backend").mkdir()
     for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "detect_uv_extras.py"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    # Point the loopback probe at a missing path so a real listener on 8001 cannot signal readiness.
+    wait_for_port = scripts / "wait-for-port.sh"
+    probe = '"/dev/tcp/$host/$PORT"'
+    source = wait_for_port.read_text(encoding="utf-8")
+    assert source.count(probe) == 1
+    wait_for_port.write_text(source.replace(probe, f'"{(tmp_path / "no-tcp").as_posix()}/$host/$PORT"'), encoding="utf-8", newline="\n")
     (scripts / "nginx-local-conf.sh").write_text("printf 'test-nginx.conf\\n'\n", encoding="utf-8", newline="\n")
     (scripts / "config-upgrade.sh").write_text("exit 0\n", encoding="utf-8", newline="\n")
     (scripts / "cleanup-containers.sh").write_text('printf "cleanup\\n" >> "$TEST_CLEANUP"\n', encoding="utf-8", newline="\n")

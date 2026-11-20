@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import subprocess
@@ -64,10 +65,27 @@ def ipv6_port() -> Iterator[int]:
 
 
 @pytest.fixture
-def closed_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def closed_port() -> Iterator[int]:
+    # Bound but never listening, so the port stays reserved and refuses connections.
+    reserved = [socket.socket(socket.AF_INET, socket.SOCK_STREAM)]
+    reserved[0].bind(("127.0.0.1", 0))
+    port = reserved[0].getsockname()[1]
+    try:
+        try:
+            ipv6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        except OSError:
+            ipv6 = None
+        if ipv6 is not None:
+            reserved.append(ipv6)
+            try:
+                ipv6.bind(("::1", port))
+            except OSError as exc:
+                if exc.errno == errno.EADDRINUSE:
+                    pytest.skip(f"[::1]:{port} is already in use")
+        yield port
+    finally:
+        for sock in reserved:
+            sock.close()
 
 
 def test_ipv4_listener_is_ready_without_lsof(tmp_path: Path, ipv4_port: int) -> None:
