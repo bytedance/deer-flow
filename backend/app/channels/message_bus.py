@@ -348,8 +348,9 @@ class MessageBus:
 
         For an adapter whose side effect a duplicate delivery must not repeat
         (Discord creating a thread): ``False`` means another delivery owns the
-        message. On ``True`` the adapter copies ``msg.dedupe_claimed`` onto the
-        message it publishes, and calls ``release_inbound_claim`` if it never
+        message. On ``True`` the adapter copies ``msg.dedupe_claimed`` and
+        ``msg._inbound_dedupe_claim`` onto the message it publishes, and calls
+        ``release_inbound_claim`` with that claimed message if it never
         publishes one. Without a dispatcher every message may proceed. Must run
         on the Gateway loop, where the dedupe store's engine lives.
         """

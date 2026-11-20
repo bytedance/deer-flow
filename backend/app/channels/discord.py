@@ -21,6 +21,7 @@ from app.channels.connection_identity import attach_connection_identity
 from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
+    InboundDedupeClaim,
     InboundMessage,
     InboundMessageType,
     InboundReservation,
@@ -136,11 +137,11 @@ class DiscordChannel(Channel):
         # Uses a dedicated JSON file next to the channel store's state, separate from
         # the ChannelStore itself, which maps IM conversations to DeerFlow thread IDs.
         self._active_threads: dict[str, str] = {}
-        # Dedupe claims recorded for messages not yet committed to the bus, by
-        # Discord message id. Each is settled once: a commit hands it to the
-        # queue (the manager releases it if shutdown discards the message),
+        # Dedupe claims recorded for messages not yet committed to the bus,
+        # keyed by admission receipt. Each is settled once: a commit hands it to
+        # the queue (the manager releases it if shutdown discards the message),
         # every other outcome releases it, and stop() releases what is left.
-        self._unsettled_claims: dict[str, InboundMessage] = {}
+        self._unsettled_claims: dict[InboundDedupeClaim, InboundMessage] = {}
         self._unsettled_claims_lock = threading.Lock()
         # Reverse-lookup set for O(1) thread ID checks (avoids O(n) scan of _active_threads.values()).
         self._active_thread_ids: set[str] = set()
@@ -833,10 +834,10 @@ class DiscordChannel(Channel):
         finally:
             if not reservation_transferred:
                 reservation.release()
-                if claim.dedupe_claimed:
+                if claim.dedupe_claimed and (receipt := claim._inbound_dedupe_claim) is not None:
                     # Refused once stop() closed cross-loop intake; stop() then releases it.
                     message_id = claim.metadata["message_id"]
-                    self._submit_threadsafe_coroutine(self._release_unsettled_claim(message_id), self._main_loop, name="release_inbound_claim", msg_id=message_id)
+                    self._submit_threadsafe_coroutine(self._release_unsettled_claim(receipt), self._main_loop, name="release_inbound_claim", msg_id=message_id)
 
     async def _create_thread_once_claimed(self, message, claim: InboundMessage):
         """``_create_thread`` after winning *claim*; raises ``_NotClaimed`` on a duplicate."""
@@ -862,19 +863,21 @@ class DiscordChannel(Channel):
 
     async def _claim_on_gateway_loop(self, claim: InboundMessage) -> bool:
         claimed = await self.bus.claim_inbound(claim)
-        if claim.dedupe_claimed:
+        if claim.dedupe_claimed and (receipt := claim._inbound_dedupe_claim) is not None:
             # Registered with the claim itself, so no later exit path can lose it.
             with self._unsettled_claims_lock:
-                self._unsettled_claims[claim.metadata["message_id"]] = claim
+                self._unsettled_claims[receipt] = claim
         return claimed
 
-    def _settle_claim(self, message_id: Any) -> InboundMessage | None:
-        """Take *message_id*'s unsettled claim, if any: the caller now decides its outcome."""
+    def _settle_claim(self, receipt: InboundDedupeClaim | None) -> InboundMessage | None:
+        """Take *receipt*'s unsettled claim, if any: the caller now decides its outcome."""
+        if receipt is None:
+            return None
         with self._unsettled_claims_lock:
-            return self._unsettled_claims.pop(str(message_id), None)
+            return self._unsettled_claims.pop(receipt, None)
 
-    async def _release_unsettled_claim(self, message_id: Any) -> None:
-        if (claim := self._settle_claim(message_id)) is not None:
+    async def _release_unsettled_claim(self, receipt: InboundDedupeClaim | None) -> None:
+        if (claim := self._settle_claim(receipt)) is not None:
             await self.bus.release_inbound_claim(claim)
 
     def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation, *, guild_id: str | None) -> Future[bool] | None:
@@ -961,16 +964,16 @@ class DiscordChannel(Channel):
         A message that was claimed against inbound dedupe but never committed
         gives its claim back, also when stop() cancels this task.
         """
-        message_id = inbound.metadata.get("message_id")
+        receipt = inbound._inbound_dedupe_claim
         try:
             committed = self._commit_reserved_inbound(reservation, await self._attach_connection_identity(inbound, guild_id=guild_id))
         except BaseException:
-            await await_drained(self._release_unsettled_claim(message_id))
+            await await_drained(self._release_unsettled_claim(receipt))
             raise
         if committed:
-            self._settle_claim(message_id)
+            self._settle_claim(receipt)
         else:
-            await self._release_unsettled_claim(message_id)
+            await self._release_unsettled_claim(receipt)
         return committed
 
     async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:

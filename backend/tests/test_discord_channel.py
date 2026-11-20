@@ -1069,3 +1069,183 @@ class TestDiscordDedupeClaimBeforeThreadCreation:
         await channel.stop()
 
         assert self._key() not in dedupe._store
+
+    @pytest.mark.asyncio
+    async def test_late_failed_thread_creation_preserves_replacement_claim(self, monkeypatch, tmp_path) -> None:
+        """An older callback failing in ``_create_thread`` after its pre-claim expired
+        must not hand a replacement handoff's receipt back to the dedupe store."""
+        from app.channels import dedupe_store as dedupe_module
+
+        clock = [0.0]
+        monkeypatch.setattr(dedupe_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        bus, channel, dedupe = self._wire(tmp_path)
+        channel._thread_store_path = tmp_path / "discord_threads.json"
+        first_started, second_started = asyncio.Event(), asyncio.Event()
+        fail_first, finish_second = asyncio.Event(), asyncio.Event()
+        first_settled = asyncio.Event()
+        orig_release_unsettled = channel._release_unsettled_claim
+        calls = 0
+
+        async def observe_release_unsettled(arg):
+            try:
+                await orig_release_unsettled(arg)
+            finally:
+                first_settled.set()
+
+        channel._release_unsettled_claim = observe_release_unsettled
+
+        async def create_thread(message):
+            nonlocal calls
+            calls += 1
+            attempt = calls
+            if attempt == 1:
+                first_started.set()
+                await fail_first.wait()
+                raise RuntimeError("stale thread create failed")
+            if attempt == 2:
+                second_started.set()
+                await finish_second.wait()
+                return SimpleNamespace(id=777)
+            return SimpleNamespace(id=888)
+
+        channel._create_thread = create_thread
+        first_task = asyncio.create_task(channel._on_message(_make_discord_message("hello")))
+        second_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(first_started.wait(), timeout=5)
+            clock[0] = dedupe_module.INBOUND_DEDUPE_TTL_SECONDS + 1
+
+            second_task = asyncio.create_task(channel._on_message(_make_discord_message("hello")))
+            await asyncio.wait_for(second_started.wait(), timeout=5)
+
+            fail_first.set()
+            with pytest.raises(RuntimeError, match="stale thread create failed"):
+                await asyncio.wait_for(first_task, timeout=5)
+            await asyncio.wait_for(first_settled.wait(), timeout=5)
+
+            # A third delivery while the replacement is still creating its thread must be dropped.
+            await channel._on_message(_make_discord_message("hello"))
+            assert calls == 2
+            assert self._key() in dedupe._store
+            assert bus.inbound_queue.qsize() == 0
+
+            finish_second.set()
+            await asyncio.wait_for(second_task, timeout=5)
+            inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
+            bus.inbound_task_done()
+            assert inbound._inbound_dedupe_claim is not None
+            assert dedupe._store.get(self._key()) == (clock[0], inbound._inbound_dedupe_claim.token)
+            assert channel._unsettled_claims == {}
+        finally:
+            fail_first.set()
+            finish_second.set()
+            for task in (first_task, second_task):
+                if task is not None and not task.done():
+                    await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("older_outcome", ["identity-error", "commit-refused", "committed"])
+    async def test_handoff_settlement_only_touches_its_own_admission_receipt(self, monkeypatch, tmp_path, older_outcome: str) -> None:
+        """Settling or releasing an older Gateway handoff after pre-claim expiry must neither
+        erase an active replacement receipt nor orphan the replacement in ``_unsettled_claims``."""
+        from app.channels import dedupe_store as dedupe_module
+
+        clock = [0.0]
+        monkeypatch.setattr(dedupe_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        bus, channel, dedupe = self._wire(tmp_path)
+        channel._mention_only = True
+        channel._thread_store_path = tmp_path / "discord_threads.json"
+        first_identity_started, finish_first_identity = asyncio.Event(), asyncio.Event()
+        second_create_started, fail_second_create = asyncio.Event(), asyncio.Event()
+        release_done = [asyncio.Event(), asyncio.Event()]
+        release_idx = 0
+        orig_release_unsettled = channel._release_unsettled_claim
+        orig_commit = channel._commit_reserved_inbound
+        create_calls = 0
+        identity_calls = 0
+        commit_calls = 0
+
+        async def observe_release_unsettled(arg):
+            nonlocal release_idx
+            slot = release_idx
+            release_idx += 1
+            try:
+                await orig_release_unsettled(arg)
+            finally:
+                if slot < len(release_done):
+                    release_done[slot].set()
+
+        channel._release_unsettled_claim = observe_release_unsettled
+
+        async def create_thread(message):
+            nonlocal create_calls
+            create_calls += 1
+            if create_calls == 1:
+                return SimpleNamespace(id=777)
+            if create_calls == 2:
+                second_create_started.set()
+                await fail_second_create.wait()
+                raise RuntimeError("replacement thread create failed")
+            return SimpleNamespace(id=999)
+
+        async def attach_identity(inbound, guild_id=None):
+            nonlocal identity_calls
+            identity_calls += 1
+            if identity_calls == 1:
+                first_identity_started.set()
+                await finish_first_identity.wait()
+                if older_outcome == "identity-error":
+                    raise RuntimeError("identity lookup failed")
+            return inbound
+
+        def commit_reserved(reservation, inbound):
+            nonlocal commit_calls
+            commit_calls += 1
+            if commit_calls == 1 and older_outcome == "commit-refused":
+                reservation.release()
+                return False
+            return orig_commit(reservation, inbound)
+
+        channel._create_thread = create_thread
+        channel._attach_connection_identity = attach_identity
+        channel._commit_reserved_inbound = commit_reserved
+
+        first_task = asyncio.create_task(channel._on_message(_make_discord_message("<@999> hello")))
+        second_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(first_identity_started.wait(), timeout=5)
+            clock[0] = dedupe_module.INBOUND_DEDUPE_TTL_SECONDS + 1
+
+            second_task = asyncio.create_task(channel._on_message(_make_discord_message("<@999> hello")))
+            await asyncio.wait_for(second_create_started.wait(), timeout=5)
+
+            finish_first_identity.set()
+            await asyncio.wait_for(first_task, timeout=5)
+            if older_outcome == "committed":
+                committed_msg = await asyncio.wait_for(bus.get_inbound(), timeout=5)
+                bus.inbound_task_done()
+                assert committed_msg._inbound_dedupe_claim is not None
+            else:
+                await asyncio.wait_for(release_done[0].wait(), timeout=5)
+
+            # Replacement receipt is still active, so a third delivery is suppressed.
+            await channel._on_message(_make_discord_message("<@999> hello"))
+            assert create_calls == 2
+            assert self._key() in dedupe._store
+
+            # When the replacement itself later fails before handoff, its receipt was not
+            # popped by the older handoff's settlement and is still released cleanly.
+            expected_release_slot = 0 if older_outcome == "committed" else 1
+            fail_second_create.set()
+            with pytest.raises(RuntimeError, match="replacement thread create failed"):
+                await asyncio.wait_for(second_task, timeout=5)
+            await asyncio.wait_for(release_done[expected_release_slot].wait(), timeout=5)
+
+            assert self._key() not in dedupe._store
+            assert channel._unsettled_claims == {}
+        finally:
+            finish_first_identity.set()
+            fail_second_create.set()
+            for task in (first_task, second_task):
+                if task is not None and not task.done():
+                    await asyncio.gather(task, return_exceptions=True)
