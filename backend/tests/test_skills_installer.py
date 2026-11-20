@@ -707,13 +707,14 @@ class TestInstallSkillFromArchive:
 
         assert not (skills_root / "custom" / "test-skill").exists()
 
-    def test_binary_asset_with_text_prefix_does_not_consume_text_budget(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("ending", [b"\x00", b"\xff", b"\xc3"], ids=["nul", "invalid-utf8", "truncated-utf8"])
+    def test_binary_asset_with_text_prefix_does_not_consume_text_budget(self, tmp_path, monkeypatch, ending):
         import deerflow.skills.installer as installer
 
         monkeypatch.setattr(installer, "MAX_MODEL_FILE_BYTES", 2)
         zip_path = self._make_skill_zip(tmp_path)
         with zipfile.ZipFile(zip_path, "a") as zf:
-            zf.writestr("test-skill/data/asset", b"asset" + b" " * 65536 + b"\x00")
+            zf.writestr("test-skill/data/asset", b"asset" + b" " * 65536 + ending)
             zf.writestr("test-skill/data/letter", "é")
         reviewed = []
 

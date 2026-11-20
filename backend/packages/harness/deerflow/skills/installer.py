@@ -334,6 +334,7 @@ def _read_additional_text(path: Path, rel_path: str, location: str) -> tuple[str
         decoder.decode(b"", final=True)
     except UnicodeDecodeError:
         return None
+    # A binary asset can have a valid text prefix past the limit, so apply the text budget only after validating EOF.
     if size > MAX_MODEL_FILE_BYTES:
         raise SkillSecurityScanError(f"Security scan failed for {location}: additional text file exceeds the review size limit")
     content = "".join(parts)
