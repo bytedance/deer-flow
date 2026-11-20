@@ -31,6 +31,7 @@ from app.gateway.routers import (
     channel_connections,
     channels,
     console,
+    coordination,
     features,
     feedback,
     github_webhooks,
@@ -1358,6 +1359,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)
+    app.include_router(coordination.router)
     app.include_router(subagent_batches.router)
 
     # Memory API is mounted at /api/memory

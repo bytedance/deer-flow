@@ -9,7 +9,10 @@ The platform-specific cases exercise real subprocess and process-tree/group
 semantics, while the shared tests pin the user-facing timeout notice.
 """
 
+import copy
+import json
 import os
+import pickle
 import shlex
 import signal
 import subprocess
@@ -25,6 +28,22 @@ from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
 linux_proc_fd_only = pytest.mark.skipif(not Path("/proc/self/fd").exists(), reason="requires Linux /proc fd links")
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "command,expected,exit_code",
+    [("printf 'Error: sample\\n'", "Error: sample\n", 0), ("printf 'OK\\n'; exit 7", "OK\n\nExit Code: 7", 7), (":", "(no output)", 0)],
+)
+def test_command_output_keeps_string_and_copy_contracts(command, expected, exit_code):
+    output = LocalSandbox("command-result").execute_command(command, timeout=5)
+
+    assert isinstance(output, str)
+    assert output == expected
+    assert json.loads(json.dumps({"output": output})) == {"output": expected}
+    for copied in (copy.copy(output), copy.deepcopy(output), pickle.loads(pickle.dumps(output))):
+        assert copied == expected
+        assert copied.exit_code == exit_code
 
 
 @posix_only
@@ -101,6 +120,7 @@ def test_timeout_output_carries_authoritative_failure_marker(monkeypatch):
 
     assert "timed out" in output.lower()
     assert output.endswith("Exit Code: 124")
+    assert output.exit_code == 124
 
 
 def test_windows_timeout_returns_notice(monkeypatch):

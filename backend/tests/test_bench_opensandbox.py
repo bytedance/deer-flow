@@ -16,6 +16,8 @@ from deerflow.config.sandbox_config import SandboxConfig
 from scripts.benchmark.sandbox import bench_provider as bench
 from scripts.benchmark.sandbox import summarize
 
+pytestmark = pytest.mark.benchmark
+
 
 class Remote:
     def __init__(self, number):
