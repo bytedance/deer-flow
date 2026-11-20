@@ -50,7 +50,6 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
     THREAD_INCARNATION_METADATA_GUARD_KEY,
 )
-from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -63,6 +62,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_writable_channels,
 )
 from deerflow.runtime.context_keys import (
+    AGENT_AUTH_CONTEXT_KEY,
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
@@ -243,6 +243,7 @@ def _release_run_scoped_references(
     internal_context_keys = {
         "__run_journal",
         "__run_input_control",
+        "__tool_approval_runtime",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
         SCHEDULER_CAPABILITY_CONTEXT_KEY,
@@ -358,7 +359,11 @@ async def _persist_delivery_receipt(
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR = "Scheduled goal cleanup failed"
 _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
+# Stream error frames and the /wait error envelope share one name for a run that
+# ends in error without an exception; the Gateway spells it the same way.
+_RUN_ERROR_NAME = "RunError"
 _RECURSION_CAPPED_LISTED_OUTPUTS = 5
 
 
@@ -624,9 +629,10 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CONVERSATION_READER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
+            AGENT_AUTH_CONTEXT_KEY,
             "__run_input_control",
+            "__tool_approval_runtime",
             "_hitl_disabled_resume_escape",
-            "_hitl_resume_tool_names",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -657,6 +663,7 @@ def _build_runtime_context(
     *,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     scheduler_capability: SchedulerRunCapability | None = None,
+    agent_mcp_authority: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -686,6 +693,8 @@ def _build_runtime_context(
         runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
     if scheduler_capability is not None:
         runtime_ctx[SCHEDULER_CAPABILITY_CONTEXT_KEY] = scheduler_capability
+    if agent_mcp_authority is not None:
+        runtime_ctx[AGENT_AUTH_CONTEXT_KEY] = agent_mcp_authority
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -736,6 +745,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     mcp_task_repo: Any | None = field(default=None)
+    approval_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
@@ -750,6 +760,7 @@ class RunContext:
     conversation_reader: Any | None = field(default=None)
     agent_runs: Any | None = field(default=None)
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
+    agent_mcp_authority: Any | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
     # Host-only preflight under durable run ownership; failures reject execution.
@@ -764,6 +775,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
+        configurable.pop(AGENT_AUTH_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1041,6 +1053,8 @@ async def run_agent(
         lead_task_outcome,
         notify_task_start,
         notify_task_stop,
+        read_only_copy,
+        stopped_task_info,
     )
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
@@ -1083,6 +1097,7 @@ async def run_agent(
     pending_pause = False
     streamed_interrupts: list[Any] = []
     input_control = None
+    approval_runtime = None
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
@@ -1262,6 +1277,7 @@ async def run_agent(
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
+                metadata=read_only_copy(record.metadata),
             )
             task_store = ExtensionData(task_id)
             # Seed the identity for every hook handed this store, not only
@@ -1356,7 +1372,6 @@ async def run_agent(
         hitl_config = getattr(hitl_app_config, "hitl_approval", None)
         hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
         hitl_resume_actions = await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input)
-        hitl_resume_tool_names = _hitl_action_tool_names(hitl_resume_actions)
         hitl_resume_calls = _hitl_action_calls(hitl_resume_actions)
         if journal is not None and hitl_resume_calls:
             journal.adopt_resumed_tool_calls(hitl_resume_calls)
@@ -1375,14 +1390,12 @@ async def run_agent(
             ctx.agent_runs,
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
+            agent_mcp_authority=ctx.agent_mcp_authority,
         )
         # A disabled all-reject escape still needs the HITL hook to consume the
         # pending interrupt. The assembly marker makes that hook deny rather
         # than pause again; all other runs cannot inject this internal mode.
         runtime_ctx.pop("_hitl_disabled_resume_escape", None)
-        runtime_ctx.pop("_hitl_resume_tool_names", None)
-        if hitl_resume_tool_names:
-            runtime_ctx["_hitl_resume_tool_names"] = hitl_resume_tool_names
         if hitl_resume_escape:
             runtime_ctx["_hitl_disabled_resume_escape"] = True
         register_sandbox_prewarm_cleanup(runtime_ctx)
@@ -1432,6 +1445,21 @@ async def run_agent(
                 on_replan=record_steered_response,
             )
             runtime_ctx[INPUT_CONTEXT_KEY] = input_control
+        if ctx.approval_store is not None and hitl_config is not None and hitl_config.enabled and isinstance(thread_incarnation, str) and record.user_id:
+            from deerflow.approvals.policy import resolve_mode
+            from deerflow.approvals.runtime import ApprovalRuntime
+
+            approval_runtime = ApprovalRuntime(
+                ctx.approval_store,
+                scope=(record.user_id, thread_id, thread_incarnation),
+                run_id=run_id,
+                mode=resolve_mode(hitl_config, runtime_ctx),
+                timeout=hitl_config.child_approval_timeout_seconds,
+                record=record,
+                journal=journal,
+                interactive=resolve_run_interaction_policy({"context": runtime_ctx}).allows_clarification and origin_kind_of(record.metadata) is None,
+            )
+            runtime_ctx["__tool_approval_runtime"] = approval_runtime
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
@@ -1636,35 +1664,44 @@ async def run_agent(
             streamed_interrupts.extend(interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])
 
         def remember_approval(interrupts: Any) -> None:
+            from deerflow.approvals.protocol import combine_approval_payloads
+
+            payloads = []
             for pending_interrupt in interrupts:
                 value = pending_interrupt.get("value") if isinstance(pending_interrupt, Mapping) else getattr(pending_interrupt, "value", None)
                 if isinstance(value, dict) and value.get("kind") == "hitl_approval":
-                    record.metadata["hitl_approval"] = value
-                    return
+                    payloads.append(value)
+            if payloads:
+                record.metadata["hitl_approval"] = combine_approval_payloads(payloads)
 
         async def detect_pending_pause() -> None:
             nonlocal pending_pause
             if pending_pause or record.abort_event.is_set():
                 return
-            if streamed_interrupts:
-                pending_pause = True
-                remember_approval(streamed_interrupts)
-                return
             # Values/update frames expose interrupts directly, so disabled HITL
             # keeps the old hot path there. Message-only streams need the snapshot
             # fallback for generic (non-HITL) interrupts as well.
             hitl_enabled = bool(hitl_config is not None and hitl_config.enabled)
+            if streamed_interrupts and not hitl_enabled:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
+                return
             if not hitl_enabled and {"values", "updates"} & requested_modes:
                 return
             snapshot_capable = accessor is not None and accessor.checkpointer is not None and callable(getattr(getattr(accessor, "graph", None), "aget_state", None))
             if not snapshot_capable:
+                if streamed_interrupts:
+                    pending_pause = True
+                    remember_approval(streamed_interrupts)
                 return
             snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
             snapshot_tasks = getattr(snapshot, "tasks", None) or ()
             pending_pause = any(getattr(task, "interrupts", ()) for task in snapshot_tasks)
             if pending_pause:
-                for task in snapshot_tasks:
-                    remember_approval(getattr(task, "interrupts", ()) or ())
+                remember_approval([item for task in snapshot_tasks for item in (getattr(task, "interrupts", ()) or ())])
+            elif streamed_interrupts:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
@@ -1849,6 +1886,12 @@ async def run_agent(
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
+            # Deliberately no `error` frame here, unlike the delivery check below.
+            # The fallback was streamed and stored as a visible assistant message
+            # carrying the provider failure (tagged `deerflow_error_fallback`), so
+            # this turn never looked like a silent success; a frame would only
+            # duplicate that notice. The record still commits `error` for
+            # accounting and retry purposes.
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
@@ -1907,6 +1950,17 @@ async def run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif delivery_error is not None and not record.ownership_lost:
+                # The run record is terminal `error`, so the stream must say the
+                # same thing: the web UI raises its run-failure toast only for an
+                # `error` frame, and streaming IM channels mark a turn failed only
+                # on that frame. Without it they report a successful turn while
+                # the record (and /wait) report the failure.
+                delivery_frame = {"message": delivery_error, "name": _RUN_ERROR_NAME}
+                if record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True):
+                    await bridge.publish(run_id, "error", delivery_frame)
+                else:
+                    terminal_error_frame = delivery_frame
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
@@ -1998,7 +2052,7 @@ async def run_agent(
 
         async def finalize() -> None:
             nonlocal completion_hook_task
-            nonlocal journal, seq_stamper
+            nonlocal journal, seq_stamper, approval_runtime
             nonlocal accessor, agent, agent_result, cancel_action, checkpoint_rollback_completed
             nonlocal completion_data, deferred_finalization_interrupt, delivery_content, goal_completion, goal_evaluator_model
             nonlocal graph_input, pre_run_workspace_snapshot, produced_output_paths, rollback_point, runtime
@@ -2022,7 +2076,9 @@ async def run_agent(
 
                 # A rejected resume has not written state; compensating it through
                 # the state-only graph would itself discard the pending Sends.
-                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_resume_rejected:
+                # A native pause has not failed: restoring the pre-run checkpoint
+                # would drop the edit and strand the interrupt behind the new head.
+                if not record.ownership_lost and _is_edit_replay_run(record) and record.status not in (RunStatus.success, RunStatus.waiting_for_input) and not checkpoint_resume_rejected:
                     if not record.finalizing:
                         await run_manager.set_finalizing(run_id, True)
                     try:
@@ -2084,6 +2140,11 @@ async def run_agent(
                     receipt_persisted = await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content)
                     if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
                         await run_manager.set_status(run_id, RunStatus.error, error=_DELIVERY_RECEIPT_FAILED_ERROR, persist=False)
+                        # Same invariant as the completion branch: the record is now
+                        # `error`, so the stream must not end as a success. Frames
+                        # already deferred and published below the finalizer run
+                        # before END.
+                        terminal_error_frame = {"message": _DELIVERY_RECEIPT_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and journal is not None and persist_completion:
                     try:
@@ -2125,7 +2186,10 @@ async def run_agent(
                         deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(cleanup_task, deferred_finalization_interrupt)
                     except Exception:
                         logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
-                        await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
+                        await run_manager.set_status(run_id, RunStatus.error, error=_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, persist=False)
+                        # Same invariant as the receipt failure above: the record
+                        # is now `error`, so the stream must not end as a success.
+                        terminal_error_frame = {"message": _SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
                     try:
@@ -2273,7 +2337,13 @@ async def run_agent(
                         notify_task_stop(
                             extensions,
                             task_store,
-                            task_info,
+                            stopped_task_info(
+                                task_info,
+                                status=record.status.value,
+                                error=record.error,
+                                goal_verdict=record.goal_verdict,
+                                persisted=not record.ownership_lost and getattr(record, "terminal_status_persisted", True),
+                            ),
                             lead_task_outcome(
                                 aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
                                 succeeded=record.status == RunStatus.success,
@@ -2359,7 +2429,12 @@ async def run_agent(
 
                 terminal_stream_authorized = not record.ownership_lost and record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True)
                 if terminal_stream_authorized:
-                    if terminal_error_frame is not None:
+                    # A staged frame predates the final outcome, and a cancellation
+                    # can still win after it was staged: an interrupt replaces the
+                    # status and a rollback replaces the message (both can land
+                    # while scheduled-goal cleanup runs). Publish only the error
+                    # the record actually committed.
+                    if terminal_error_frame is not None and record.status == RunStatus.error and record.error == terminal_error_frame.get("message"):
                         await bridge.publish(
                             run_id,
                             "error",
@@ -2376,6 +2451,12 @@ async def run_agent(
                     raise deferred_finalization_interrupt
             finally:
                 try:
+                    if approval_runtime is not None:
+                        try:
+                            await approval_runtime.close()
+                        except Exception:
+                            logger.warning("Failed to cancel pending child approvals for run %s", run_id, exc_info=True)
+                        approval_runtime = None
                     if journal is not None:
                         try:
                             await journal.close(flush=not record.ownership_lost)
@@ -3185,21 +3266,11 @@ def _is_resume_command_input(graph_input: Any) -> bool:
     return isinstance(graph_input, Command) and graph_input.resume is not None
 
 
-async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> set[str]:
-    """Recover gated names from the durable pause matched by this resume."""
-    return _hitl_action_tool_names(await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input))
-
-
-def _hitl_action_tool_names(actions: list[Mapping[str, Any]]) -> set[str]:
-    """Names for the replay gate: every action naming a tool, with or without a usable call id."""
-    return {action["tool_name"] for action in actions if isinstance(action.get("tool_name"), str)}
-
-
 def _hitl_action_calls(actions: list[Mapping[str, Any]]) -> dict[str, str]:
     """Calls for journal adoption: only actions that also carry a usable ``tool_call_id``.
 
     The calls were dispatched by the paused Run, but the resume Run produces
-    their results: a rejection is written by HITL ``after_model`` with no tool
+    their results: a rejection is returned by the approval gate without a tool
     callback, so the resume journal must adopt these calls to persist it.
     """
     return {action["tool_call_id"]: action["tool_name"] for action in actions if isinstance(action.get("tool_call_id"), str) and action["tool_call_id"] and isinstance(action.get("tool_name"), str)}
@@ -3209,7 +3280,10 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
     """Return the actions of the live durable pause this resume answers."""
     if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
         return []
-    responses = graph_input.resume.get("responses")
+    from deerflow.approvals.protocol import approval_responses
+    from deerflow.runtime.checkpoint_history import recent_checkpoint_history
+
+    responses = approval_responses(graph_input.resume)
     if not isinstance(responses, list):
         return []
     response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
@@ -3232,9 +3306,17 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
                 payload = getattr(pending_interrupt, "value", None)
                 if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval":
                     continue
+                # Version 2 routes parallel decisions by LangGraph interrupt
+                # ID. Match each pause against its own response group, rather
+                # than comparing every action with the flattened batch.
+                interrupt_id = getattr(pending_interrupt, "id", None)
+                grouped_responses = responses if "responses" in graph_input.resume else approval_responses(graph_input.resume.get(interrupt_id))
+                if not isinstance(grouped_responses, list):
+                    continue
+                group_ids = {response.get("tool_call_id") for response in grouped_responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
                 pending_ids = payload.get("pending_tool_call_ids")
                 actions = payload.get("actions")
-                if not isinstance(pending_ids, list) or set(pending_ids) != response_ids or not isinstance(actions, list):
+                if not isinstance(pending_ids, list) or set(pending_ids) != group_ids or not isinstance(actions, list):
                     continue
                 matched.extend(action for action in actions if isinstance(action, Mapping))
         return matched
@@ -3245,7 +3327,9 @@ def _is_all_reject_hitl_resume(graph_input: Any) -> bool:
     """Return whether this is a well-formed reject-only HITL resume payload."""
     if not isinstance(graph_input, Command) or not isinstance(graph_input.resume, dict):
         return False
-    responses = graph_input.resume.get("responses")
+    from deerflow.approvals.protocol import approval_responses
+
+    responses = approval_responses(graph_input.resume)
     return (
         isinstance(responses, list)
         and bool(responses)

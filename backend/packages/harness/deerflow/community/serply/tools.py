@@ -17,6 +17,7 @@ import re
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
@@ -42,14 +43,8 @@ _api_key_warned: set[str] = set()
 
 def _get_api_key(tool_name: str = "web_search") -> str | None:
     config = get_app_config().get_tool_config(tool_name)
-    if config is not None:
-        api_key = (config.model_extra or {}).get("api_key")
-        if isinstance(api_key, str) and api_key.strip():
-            return api_key.strip()
-    env_key = os.getenv("SERPLY_API_KEY")
-    if isinstance(env_key, str) and env_key.strip():
-        return env_key.strip()
-    return None
+    configured = resolve_api_key((config.model_extra or {}).get("api_key")) if config is not None else None
+    return configured or resolve_api_key(os.getenv("SERPLY_API_KEY"))
 
 
 def _count_for_request(value: object) -> int:

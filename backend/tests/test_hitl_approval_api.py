@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from starlette.testclient import TestClient
 from test_runtime_lifecycle_e2e import (  # noqa: F401
@@ -103,6 +103,84 @@ def _fake_two_target_model(*args, **kwargs):
     return _StateAwareModel(responses=[], call_count=2)
 
 
+def test_live_child_approval_endpoint_fences_owner_run_and_answer(isolated_app):
+    _enable_approval()
+    release = threading.Event()
+
+    class WaitingModel(_StateAwareModel):
+        def _generate(self, *args, **kwargs):
+            if not release.wait(20):
+                raise TimeoutError("model was not released")
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="done"))])
+
+    with patch(_MODEL_PATCH, new=lambda *args, **kwargs: WaitingModel(responses=[])), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        rid = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "work"}]})).json()["run_id"]
+        try:
+            assert _wait_run_status(client, tid, rid, "running")["status"] == "running"
+            store = isolated_app.state.approval_store
+
+            async def seed():
+                from app.gateway.deps import get_run_manager, get_thread_store
+
+                request = SimpleNamespace(app=isolated_app)
+                record = await get_run_manager(request).get(rid)
+                thread = await get_thread_store(request).get(tid, user_id=record.user_id)
+                scope = (record.user_id, tid, thread["incarnation"])
+                payload = {
+                    "version": 2,
+                    "kind": "hitl_approval",
+                    "request_id": "child-review",
+                    "transport": "live",
+                    "run_id": rid,
+                    "allowed_decisions": ["approve", "reject", "edit"],
+                    "pending_tool_call_ids": ["call"],
+                    "actions": [
+                        {"request_id": "child-review", "tool_call_id": "call", "tool_name": "write", "args": {"value": "before"}, "args_schema": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}
+                    ],
+                }
+                await store.create(
+                    {
+                        "request_id": "child-review",
+                        "user_id": scope[0],
+                        "thread_id": tid,
+                        "incarnation": scope[2],
+                        "run_id": rid,
+                        "fingerprint": "binding",
+                        "kind": "live",
+                        "status": "pending",
+                        "decision": None,
+                        "response": None,
+                        "payload": payload,
+                        "created_at": time.time(),
+                        "expires_at": time.time() + 60,
+                    }
+                )
+                return scope
+
+            scope = client.portal.call(seed)
+            base = f"/api/threads/{tid}"
+            assert client.get(base + "/tool-approvals").json()["requests"][0]["run_id"] == rid
+            endpoint = base + f"/runs/{rid}/tool-approvals/child-review"
+            headers = {"X-CSRF-Token": csrf}
+            answer = {"responses": [{"request_id": "child-review", "tool_call_id": "call", "option_id": "edit", "args": {"value": "after"}}]}
+            malformed = {"responses": [{**answer["responses"][0], "args": {"value": 9}}]}
+            assert client.post(endpoint, json=malformed, headers=headers).status_code == 422
+            assert client.post(endpoint.replace(rid, "another-run"), json=answer, headers=headers).status_code == 404
+            assert client.post(endpoint, json=answer, headers=headers).status_code == 200
+            assert client.post(endpoint, json=answer, headers=headers).status_code == 200
+            conflict = {"responses": [{**answer["responses"][0], "option_id": "reject"}]}
+            assert client.post(endpoint, json=conflict, headers=headers).status_code == 409
+
+            async def read():
+                return await store.get("child-review", scope=scope)
+
+            assert client.portal.call(read)["response"] == answer
+        finally:
+            release.set()
+
+
 @pytest.fixture(params=["full", "delta"])
 def isolated_app(request, isolated_deer_flow_home, monkeypatch):  # noqa: F811
     if request.param == "delta":
@@ -174,8 +252,7 @@ def _wait_run_terminal(client, tid, rid, timeout=20.0):
 
 def _approval_request_id(client, tid, tool_call_id):
     state = _wait_for_approval(client, tid)
-    payload = next(item for group in state["interrupts"].values() for item in group)["value"]
-    return next(action["request_id"] for action in payload["actions"] if action["tool_call_id"] == tool_call_id)
+    return next(action["request_id"] for group in state["interrupts"].values() for item in group for action in item["value"]["actions"] if action["tool_call_id"] == tool_call_id)
 
 
 def _resume(client, csrf, tid, option_id, value=None, *, tool_call_id="call_hitl_1", request_id=None):
@@ -232,6 +309,26 @@ def test_approval_pause_then_approve_executes(isolated_app):
         duplicate = _resume(client, csrf, tid, "approve", request_id=payloads[0]["value"]["request_id"])
         assert duplicate.status_code == 409
         assert duplicate.json()["detail"]["code"] == "no_pending_approval"
+
+
+def test_checkpointed_approval_survives_gateway_restart(isolated_app):
+    _enable_approval()
+    with patch(_MODEL_PATCH, new=_fake_model):
+        with TestClient(isolated_app) as client:
+            csrf = _register_user(client)
+            tid = _create_thread(client, csrf)
+            _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]}))
+            request_id = _approval_request_id(client, tid, "call_hitl_1")
+            cookies = dict(client.cookies)
+        with TestClient(isolated_app) as restarted:
+            restarted.cookies.update(cookies)
+            assert _approval_request_id(restarted, tid, "call_hitl_1") == request_id
+            approved = _resume(restarted, csrf, tid, "approve", request_id=request_id)
+            assert approved.status_code == 200, approved.text
+            assert _wait_run_terminal(restarted, tid, approved.json()["run_id"])["status"] == "success"
+            state = restarted.get(f"/api/threads/{tid}").json()
+            written = [message for message in state["values"]["messages"] if message.get("type") == "tool" and message.get("content") == "OK"]
+            assert len(written) == 1
 
 
 def test_fresh_run_rechecks_pending_approval_at_durable_admission(isolated_app):
@@ -756,3 +853,127 @@ async def test_pending_interrupts_fall_back_to_sync_saver_history():
     assert recovered_task_id in pending
     assert recovered_interrupt.value == payload
     assert await has_any_pending_interrupt(SimpleNamespace(checkpointer=saver), config) is True
+
+
+_ORIGINAL_PROMPT = "original prompt"
+_EDITED_PROMPT = "edited prompt"
+
+
+class _EditReplayModel(_StateAwareModel):
+    """Answer the original prompt in text; the edited prompt needs an approved tool."""
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+        if not any(isinstance(message, HumanMessage) and _EDITED_PROMPT in str(message.content) for message in messages):
+            message = AIMessage(content="original answer")
+        elif any(isinstance(message, ToolMessage) for message in messages):
+            message = AIMessage(content="edited answer")
+        else:
+            message = AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"path": "/mnt/user-data/workspace/edited.txt", "content": "ok"}, "id": "call_edit_1"}])
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _fake_edit_replay_model(*args, **kwargs):
+    return _EditReplayModel(responses=[])
+
+
+def _pause_edit_replay(client, csrf, tid) -> str:
+    """Finish a turn, edit it, and return the source run once the replay's worker has finalized its pause."""
+    source = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": _ORIGINAL_PROMPT}]}))
+    assert source.status_code == 200, source.text
+    source_run_id = source.json()["run_id"]
+    assert _wait_run_terminal(client, tid, source_run_id)["status"] == "success"
+
+    messages = client.get(f"/api/threads/{tid}").json()["values"]["messages"]
+    human_id = next(message["id"] for message in messages if message.get("type") == "human" and _ORIGINAL_PROMPT in str(message.get("content")))
+    prepared = client.post(
+        f"/api/threads/{tid}/runs/edit-regenerate/prepare",
+        json={"human_message_id": human_id, "replacement_text": _EDITED_PROMPT},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert prepared.status_code == 200, prepared.text
+    body = prepared.json()
+    replay = _run(client, csrf, tid, _run_body(input=body["input"], checkpoint=body["checkpoint"], metadata=body["metadata"]))
+    assert replay.status_code == 200, replay.text
+    replay_run_id = replay.json()["run_id"]
+    assert _wait_run_status(client, tid, replay_run_id, "waiting_for_input")["status"] == "waiting_for_input"
+    # Join returns after the worker's finalizer, which is where a failed edit rolls back.
+    assert client.get(f"/api/threads/{tid}/runs/{replay_run_id}/join").status_code == 200
+    return source_run_id
+
+
+def _human_texts(client, tid) -> list[str]:
+    return [str(message.get("content")) for message in client.get(f"/api/threads/{tid}").json()["values"]["messages"] if message.get("type") == "human"]
+
+
+def _assert_history_shows_only_the_edit(client, tid, source_run_id) -> None:
+    page = client.get(f"/api/threads/{tid}/messages/page")
+    assert page.status_code == 200, page.text
+    rows = page.json()["data"]
+    assert not [row for row in rows if row.get("run_id") == source_run_id]
+    assert any(_EDITED_PROMPT in str(row.get("content")) for row in rows)
+
+
+def test_edit_replay_paused_for_approval_keeps_the_edit(isolated_app):
+    _enable_approval()
+    with patch(_MODEL_PATCH, new=_fake_edit_replay_model), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        source_run_id = _pause_edit_replay(client, csrf, tid)
+
+        humans = _human_texts(client, tid)
+        assert any(_EDITED_PROMPT in text for text in humans), humans
+        assert not any(_ORIGINAL_PROMPT in text for text in humans), humans
+        assert _approval_request_id(client, tid, "call_edit_1")
+        _assert_history_shows_only_the_edit(client, tid, source_run_id)
+
+
+@pytest.mark.parametrize("option_id", ["approve", "reject"])
+def test_answering_a_paused_edit_replay_finishes_the_edit_and_frees_the_thread(isolated_app, option_id):
+    _enable_approval()
+    with patch(_MODEL_PATCH, new=_fake_edit_replay_model), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        source_run_id = _pause_edit_replay(client, csrf, tid)
+
+        resumed = _resume(client, csrf, tid, option_id, tool_call_id="call_edit_1")
+        assert resumed.status_code == 200, resumed.text
+        assert _wait_run_terminal(client, tid, resumed.json()["run_id"])["status"] == "success"
+
+        state = client.get(f"/api/threads/{tid}").json()
+        tool_results = [message["content"] for message in state["values"]["messages"] if message.get("type") == "tool"]
+        assert len(tool_results) == 1
+        assert (tool_results[0] == "OK") is (option_id == "approve")
+        assert state["values"]["messages"][-1]["content"] == "edited answer"
+        assert not state.get("interrupts")
+        _assert_history_shows_only_the_edit(client, tid, source_run_id)
+
+        next_turn = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "a later question"}]}))
+        assert next_turn.status_code == 200, next_turn.text
+        assert _wait_run_terminal(client, tid, next_turn.json()["run_id"])["status"] == "success"
+
+
+def test_failed_resume_of_an_approved_edit_replay_keeps_the_edit(isolated_app):
+    class FailingAfterApprovalModel(_EditReplayModel):
+        def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+            if any(isinstance(message, ToolMessage) for message in messages) and not any(isinstance(message, HumanMessage) and "a later question" in str(message.content) for message in messages):
+                raise RuntimeError("provider failed after approval")
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    _enable_approval()
+    with patch(_MODEL_PATCH, new=lambda *args, **kwargs: FailingAfterApprovalModel(responses=[])), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        source_run_id = _pause_edit_replay(client, csrf, tid)
+
+        resumed = _resume(client, csrf, tid, "approve", tool_call_id="call_edit_1")
+        assert resumed.status_code == 200, resumed.text
+        assert _wait_run_terminal(client, tid, resumed.json()["run_id"], timeout=60.0)["status"] == "error"
+
+        humans = _human_texts(client, tid)
+        assert any(_EDITED_PROMPT in text for text in humans), humans
+        assert not any(_ORIGINAL_PROMPT in text for text in humans), humans
+        _assert_history_shows_only_the_edit(client, tid, source_run_id)
+
+        next_turn = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "a later question"}]}))
+        assert next_turn.status_code == 200, next_turn.text
+        assert _wait_run_terminal(client, tid, next_turn.json()["run_id"], timeout=60.0)["status"] == "success"

@@ -26,6 +26,10 @@ tasks; absence of evidence stays permissive there rather than failing closed.
 Edit replay resolves its base through the same lineage-first path as regenerate;
 it must pass `head_checkpoint` or it silently degrades to the chronological scan
 that cannot tell sibling branches apart.
+An edit replay that pauses for tool approval stays the current attempt: the edit
+remains in thread state and replaces the source turn in history. Only a failed,
+timed-out or cancelled attempt restores the pre-edit checkpoint; once the pause is
+answered, the resume run is an ordinary run and its failure keeps the edit.
 
 ### Chat archive
 

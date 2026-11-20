@@ -11,6 +11,8 @@ from scripts.benchmark.context_snapshot.cases import CASES, Case
 from scripts.benchmark.context_snapshot.grading import passed, score
 from scripts.benchmark.context_snapshot.report import clean_success, summarize, usage
 
+pytestmark = pytest.mark.benchmark
+
 
 def test_invoice_grader_allows_divmod_and_detects_rounding_errors():
     case = next(case for case in CASES if case.name == "invoice_total")

@@ -40,6 +40,10 @@ client or the real storage, because the payload shape is the contract.
 - **Invalid extraction output is dropped per item.** Filter a bad fact before the
   storage validation can abort the whole batch. A removal that is paired with a
   replacement applies only when the replacement passes every write gate.
+- **Keep project extraction scoped to the captured membership.** User edits
+  fence queued writes, and project injection follows memory opt-outs. After
+  the user pool commits, a project write failure consumes the batch. See
+  [project memory](../../../../../../docs/guide/projects.md#project-memory).
 - **Confirmation needs human evidence.** Extraction must not raise confirmation
   counters from lexical or model hints. Search raises access heat only for the
   facts it returns.

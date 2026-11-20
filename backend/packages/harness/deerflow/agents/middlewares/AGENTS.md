@@ -74,6 +74,10 @@ make test-blocking-io
   subagent work is evidence, not acceptance.
 - **Status comes from metadata.** Do not infer a delegation, todo or tool status
   from reply text.
+- **A tool-call id is unique only within one response.** Some providers number
+  every response's calls from `call_0`, so a delegation is identified by its run,
+  its call id and the AIMessage that issued it. Pairing by call id alone merges
+  separate delegations and lets the per-run cap under-count.
 
 ## Compaction
 

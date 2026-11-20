@@ -114,7 +114,7 @@ async def test_mark_approval_answered_retries_and_updates_memory_and_store():
         idempotency_request=identity,
     )
     await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
-    original_put = store.put
+    original_answer = store.answer_approval
     attempts = 0
 
     async def fail_once(run_id, **kwargs):
@@ -122,9 +122,9 @@ async def test_mark_approval_answered_retries_and_updates_memory_and_store():
         attempts += 1
         if attempts == 1:
             raise sqlite3.OperationalError("database is locked")
-        return await original_put(run_id, **kwargs)
+        return await original_answer(run_id, **kwargs)
 
-    store.put = fail_once
+    store.answer_approval = fail_once
     assert await manager.mark_approval_answered("thread") is not None
 
     assert attempts == 2
@@ -243,27 +243,27 @@ async def test_mark_approval_answered_acknowledges_worker_finalization_before_st
     paused = await manager.create_or_reject("thread", metadata={"hitl_approval": {"request_id": "approval-1"}})
     await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
     previous_revision = paused.terminal_status_revision
-    original_put = store.put
-    answered_put_started, release_answered_put = asyncio.Event(), asyncio.Event()
+    original_answer = store.answer_approval
+    answered_cas_started, release_answered_cas = asyncio.Event(), asyncio.Event()
 
-    async def hold_answered_put(run_id, **kwargs):
-        answered_put_started.set()
-        await release_answered_put.wait()
-        return await original_put(run_id, **kwargs)
+    async def hold_answered_cas(run_id, **kwargs):
+        answered_cas_started.set()
+        await release_answered_cas.wait()
+        return await original_answer(run_id, **kwargs)
 
-    store.put = hold_answered_put
+    store.answer_approval = hold_answered_cas
     answered = asyncio.create_task(manager.mark_approval_answered("thread"))
     try:
-        await asyncio.wait_for(answered_put_started.wait(), 1)
+        await asyncio.wait_for(answered_cas_started.wait(), 1)
         assert paused.terminal_status_revision == previous_revision + 1
         assert paused.terminal_commit_proof is not None
         assert paused.terminal_commit_proof.status == RunStatus.success
         assert manager.terminal_event_status(paused) == "success"
         assert not paused.terminal_status_persisted
-        release_answered_put.set()
+        release_answered_cas.set()
         assert await asyncio.wait_for(answered, 1) is not None
     finally:
-        release_answered_put.set()
+        release_answered_cas.set()
         await finish(answered)
 
     receipt = object()
@@ -358,24 +358,23 @@ async def test_mark_approval_answered_reconciles_newer_local_state():
     manager = RunManager(store=store)
     paused = await manager.create_or_reject("thread", metadata={"hitl_approval": {"request_id": "approval-1"}})
     await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
-    original_put = store.put
-    answered_put_started, release_answered_put = asyncio.Event(), asyncio.Event()
+    original_answer = store.answer_approval
+    answered_cas_started, release_answered_cas = asyncio.Event(), asyncio.Event()
 
-    async def hold_answered_put(run_id, **kwargs):
-        if kwargs["status"] == RunStatus.success.value:
-            answered_put_started.set()
-            await release_answered_put.wait()
-        await original_put(run_id, **kwargs)
+    async def hold_answered_cas(run_id, **kwargs):
+        answered_cas_started.set()
+        await release_answered_cas.wait()
+        return await original_answer(run_id, **kwargs)
 
-    store.put = hold_answered_put
+    store.answer_approval = hold_answered_cas
     answered = asyncio.create_task(manager.mark_approval_answered("thread"))
     try:
-        await asyncio.wait_for(answered_put_started.wait(), 1)
+        await asyncio.wait_for(answered_cas_started.wait(), 1)
         await manager.set_status(paused.run_id, RunStatus.error, error="newer terminal state", persist=False)
-        release_answered_put.set()
+        release_answered_cas.set()
         assert await asyncio.wait_for(answered, 1) is not None
     finally:
-        release_answered_put.set()
+        release_answered_cas.set()
         await finish(answered)
 
     assert paused.status == RunStatus.error

@@ -243,7 +243,7 @@ keep:
 
 #### `summary_prompt`
 - **Type**: String or null
-- **Default**: `null` (uses LangChain's default prompt)
+- **Default**: `null` (uses DeerFlow's built-in prompt)
 - **Description**: Custom prompt template for generating summaries. The prompt should guide the model to extract the most important context.
 
 #### `skill_file_read_tool_names`
@@ -254,11 +254,12 @@ keep:
 Legacy `preserve_recent_skill_*` settings are no longer used. Loaded skill retention is handled by the durable `skill_context` reference channel instead of by preserving raw skill-read messages in the summarization window.
 
 **Default Prompt Behavior:**
-The default LangChain prompt instructs the model to:
+The built-in DeerFlow prompt extends LangChain's prompt and asks the model to:
 - Extract highest quality/most relevant context
 - Focus on information critical to the overall goal
 - Avoid repeating completed actions
 - Return only the extracted context
+- Preserve current user requirements, literal approval phrases, conditions for acting, and later revisions
 
 ## How It Works
 

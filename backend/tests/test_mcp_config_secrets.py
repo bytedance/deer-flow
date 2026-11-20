@@ -220,6 +220,33 @@ def test_merge_preserves_masked_env_values():
     assert merged.env["KEY"] == "real_secret"
 
 
+def test_bulk_merge_preserves_agent_auth_until_explicitly_changed():
+    existing = McpServerConfigResponse(type="http", url="https://mcp.example", agent_auth=True)
+    assert _merge_preserving_secrets(McpServerConfigResponse(description="Renamed"), existing).agent_auth is True
+    assert _merge_preserving_secrets(McpServerConfigResponse(agent_auth=False), existing).agent_auth is False
+
+
+@pytest.mark.asyncio
+async def test_targeted_edit_preserves_agent_auth_until_explicitly_changed(monkeypatch, tmp_path):
+    from deerflow.config.extensions_config import reset_extensions_config
+
+    path = tmp_path / "extensions_config.json"
+    path.write_text(json.dumps({"mcpServers": {"target": {"type": "http", "url": "https://mcp.example", "agent_auth": True}}}), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(path))
+    _track_mcp_reconciliation_handoff(monkeypatch)
+    reset_extensions_config()
+    try:
+        edit = {"type": "http", "url": "https://mcp.example", "description": "Updated description"}
+        response = await update_mcp_server(_request_with_role("admin"), McpServerConfigUpdateRequest(server_name="target", server=McpServerConfigResponse.model_validate(edit)))
+        assert response.mcp_servers["target"].agent_auth is True
+        assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["target"]["agent_auth"] is True
+        edit["agent_auth"] = False
+        await update_mcp_server(_request_with_role("admin"), McpServerConfigUpdateRequest(server_name="target", server=McpServerConfigResponse.model_validate(edit)))
+        assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["target"]["agent_auth"] is False
+    finally:
+        reset_extensions_config()
+
+
 def test_merge_preserves_masked_header_values():
     """Incoming '***' header values should be replaced with existing secrets."""
     incoming = McpServerConfigResponse(headers={"Authorization": "***"})

@@ -388,6 +388,72 @@ def test_null_sandbox_timeout_uses_default(monkeypatch: pytest.MonkeyPatch) -> N
     provider.shutdown()
 
 
+@pytest.mark.parametrize(("configured", "expected"), [({}, False), ({"secure_access": None}, False), ({"secure_access": False}, False), ({"secure_access": True}, True)])
+def test_create_forwards_secure_access(monkeypatch: pytest.MonkeyPatch, configured: dict[str, Any], expected: bool) -> None:
+    provider, sdk = _install(monkeypatch, config=configured)
+
+    provider.acquire("thread-1", user_id="user-1")
+
+    assert sdk.create_calls[0]["secure_access"] is expected
+    provider.shutdown()
+
+
+def test_create_keeps_sdk_default_resources_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"resource": None, "resource_requests": {}})
+
+    provider.acquire("thread-1", user_id="user-1")
+
+    assert sdk.create_calls[0]["resource"] is None
+    assert sdk.create_calls[0]["resource_requests"] is None
+    provider.shutdown()
+
+
+def test_create_forwards_resource_limits_and_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"resource": {"cpu": 2, "memory": " 4Gi "}, "resource_requests": {" cpu ": 0.5, "memory": "1Gi"}})
+
+    provider.acquire("thread-1", user_id="user-1")
+
+    assert sdk.create_calls[0]["resource"] == {"cpu": "2", "memory": "4Gi"}
+    assert sdk.create_calls[0]["resource_requests"] == {"cpu": "0.5", "memory": "1Gi"}
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("name", ["resource", "resource_requests"])
+@pytest.mark.parametrize(
+    "value",
+    ["2", ["cpu"], {"cpu": True}, {"cpu": None}, {1: "2"}, {"": "1"}, {" ": "1"}, {"cpu": ""}, {"cpu": "  "}, {"cpu": 0}, {"cpu": -1}, {"cpu": float("nan")}, {"cpu": float("inf")}],
+)
+def test_provider_rejects_invalid_resources(monkeypatch: pytest.MonkeyPatch, name: str, value: Any) -> None:
+    with pytest.raises(ValueError, match=f"sandbox.{name} must map resource names to positive quantities"):
+        _install(monkeypatch, config={name: value})
+
+
+@pytest.mark.parametrize("value", ["true", "false", 1, 0])
+def test_provider_rejects_non_boolean_secure_access(monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
+    with pytest.raises(ValueError, match="sandbox.secure_access must be true or false"):
+        _install(monkeypatch, config={"secure_access": value})
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [({}, False), ({"use_server_proxy": None}, False), ({"use_server_proxy": False}, False), ({"use_server_proxy": True}, True)],
+)
+def test_create_forwards_use_server_proxy(monkeypatch: pytest.MonkeyPatch, configured: dict[str, Any], expected: bool) -> None:
+    provider, sdk = _install(monkeypatch, config=configured)
+
+    try:
+        provider.acquire("thread-1", user_id="user-1")
+        assert sdk.create_calls[0]["connection_config"].kwargs["use_server_proxy"] is expected
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("value", ["true", "false", 1, 0])
+def test_provider_rejects_non_boolean_use_server_proxy(monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
+    with pytest.raises(ValueError, match=r"sandbox\.use_server_proxy must be true or false"):
+        _install(monkeypatch, config={"use_server_proxy": value})
+
+
 @pytest.mark.parametrize(
     ("config_key", "value", "message"),
     [
