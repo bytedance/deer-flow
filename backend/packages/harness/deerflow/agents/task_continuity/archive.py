@@ -12,8 +12,10 @@ import json
 import logging
 import re
 import sqlite3
+from collections import OrderedDict
 from contextlib import closing
 from pathlib import Path
+from threading import Lock
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_config
@@ -26,6 +28,10 @@ from deerflow.utils.file_io import run_file_io
 from deerflow.utils.messages import message_content_to_text
 
 logger = logging.getLogger(__name__)
+
+_SOURCE_LOOKUP_CACHE_BATCHES = 128
+_source_lookup_cache: OrderedDict[tuple[Path, str, int], dict[str, int]] = OrderedDict()
+_source_lookup_lock = Lock()
 
 
 def digest(value) -> str:
@@ -140,61 +146,6 @@ def reachable(state: dict, owner: str) -> list[str]:
     return history.get("batches", [])
 
 
-def _has_source_lookup(db: sqlite3.Connection) -> bool:
-    return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_lookup'").fetchone() is not None
-
-
-def _source_lookup_current(db: sqlite3.Connection) -> bool:
-    # Real batch and source IDs are never empty. This row marks complete coverage.
-    return db.execute("SELECT 1 FROM source_lookup WHERE batch='' AND id='' AND source_rowid=0").fetchone() is not None
-
-
-def _prepare_source_lookup(db: sqlite3.Connection) -> None:
-    if _has_source_lookup(db):
-        if _source_lookup_current(db):
-            return
-        db.execute("DELETE FROM source_lookup")
-    else:
-        db.execute("CREATE TABLE source_lookup (batch TEXT, id TEXT, source_rowid INTEGER, PRIMARY KEY (batch, id, source_rowid)) WITHOUT ROWID")
-        # Older application versions also fire these triggers. An insert from
-        # an older writer switches readers to the scan until capture repairs it.
-        db.execute("CREATE TRIGGER source_lookup_invalidate AFTER INSERT ON batches BEGIN DELETE FROM source_lookup WHERE batch=''; END")
-        db.execute("CREATE TRIGGER source_lookup_evict AFTER DELETE ON batches BEGIN DELETE FROM source_lookup WHERE batch=old.id; END")
-    db.execute("INSERT INTO source_lookup SELECT batch, id, rowid FROM sources")
-
-
-def _store_batch(db: sqlite3.Connection, batch: str, sources: list[dict], max_batches: int, *, indexed: bool) -> None:
-    # Serialize retention and write both tables together so a failed
-    # replacement cannot leave the surviving archive or index incomplete.
-    with db:
-        db.execute("BEGIN IMMEDIATE")
-        if not indexed and _has_source_lookup(db):
-            db.execute("DROP TRIGGER source_lookup_invalidate")
-            db.execute("DROP TRIGGER source_lookup_evict")
-            db.execute("DROP TABLE source_lookup")
-
-        exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
-        created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
-        expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, max_batches - 1)).fetchall()
-        for (expired_id,) in expired:
-            db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
-            db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
-
-        if indexed:
-            _prepare_source_lookup(db)  # Evict first to fit the backfill within the page ceiling.
-        if not exists:
-            db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
-            lookup_rows = []
-            for source in sources:
-                inserted = db.execute("INSERT INTO sources VALUES (?, ?, ?, ?)", (batch, source["id"], json.dumps(source, ensure_ascii=False), index_text(source["text"])))
-                if indexed:
-                    lookup_rows.append((batch, source["id"], inserted.lastrowid))
-            if indexed:
-                db.executemany("INSERT INTO source_lookup VALUES (?, ?, ?)", lookup_rows)
-        if indexed:
-            db.execute("INSERT OR IGNORE INTO source_lookup VALUES ('', '', 0)")
-
-
 def capture(state: dict, runtime, messages, config) -> dict:
     """Publish a batch only via the returned checkpoint update; rollback stays isolated."""
     history = normalize_task_history(state.get("task_history"))
@@ -206,17 +157,23 @@ def capture(state: dict, runtime, messages, config) -> dict:
         sources = sources[-config.max_records_per_batch :]
         batch = digest([owner, sources])
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with closing(sqlite3.connect(path, timeout=5)) as db:
+        with closing(sqlite3.connect(path, timeout=5)) as db, db:
             db.execute("PRAGMA max_page_count=32768")  # 128 MiB at SQLite's default page size.
             db.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, created INTEGER)")
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS sources USING fts5(batch UNINDEXED, id UNINDEXED, payload UNINDEXED, words)")
-            try:
-                _store_batch(db, batch, sources, config.max_batches, indexed=True)
-            except sqlite3.OperationalError as error:
-                if getattr(error, "sqlite_errorcode", None) != sqlite3.SQLITE_FULL:
-                    raise
-                # Preserve the archive's capacity when only the optional index cannot fit.
-                _store_batch(db, batch, sources, config.max_batches, indexed=False)
+            # Lock before selecting victims, so concurrent captures cannot plan
+            # against stale retention state. Rollback restores evicted rows if
+            # the replacement still cannot fit within SQLite's page ceiling.
+            db.execute("BEGIN IMMEDIATE")
+            exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
+            created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
+            expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, config.max_batches - 1)).fetchall()
+            for (expired_id,) in expired:
+                db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
+                db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
+            if not exists:
+                db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
+                db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
         batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
         return {"scope": owner, "batches": batches, "omitted_records": omitted, "status": "available"}
     except (OSError, sqlite3.Error, ValueError):
@@ -238,20 +195,59 @@ async def acapture(*args) -> dict:
         raise
 
 
-def _exact_source_row(db: sqlite3.Connection, batches: list[str], placeholders: str, source_id: str) -> tuple[str] | None:
-    if _has_source_lookup(db) and _source_lookup_current(db):
-        # Match the FTS row identity too: SQLite can reuse rowids after deletion.
-        row = db.execute(
-            "SELECT sources.payload FROM ("
-            f"SELECT batch, id, source_rowid FROM source_lookup WHERE batch IN ({placeholders}) AND id=? ORDER BY source_rowid LIMIT 1"
-            ") AS match LEFT JOIN sources ON sources.rowid=match.source_rowid AND sources.batch=match.batch AND sources.id=match.id",
-            [*batches, source_id],
-        ).fetchone()
-        if row is None:
-            return None
-        if row[0] is not None:
-            return row
-    return db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id]).fetchone()
+def _batch_source_locators(db: sqlite3.Connection, path: Path, batch_versions: list[tuple[str, int]]) -> dict[str, dict[str, int]]:
+    locators: dict[str, dict[str, int]] = {}
+    with _source_lookup_lock:
+        for batch, created in batch_versions:
+            key = (path, batch, created)
+            if key in _source_lookup_cache:
+                locators[batch] = _source_lookup_cache[key]
+                _source_lookup_cache.move_to_end(key)
+
+    missing = {batch: {} for batch, _ in batch_versions if batch not in locators}
+    if not missing:
+        return locators
+
+    placeholders = ",".join("?" for _ in missing)
+    for rowid, batch, source_id in db.execute(f"SELECT rowid, batch, id FROM sources WHERE batch IN ({placeholders}) ORDER BY rowid", tuple(missing)):
+        missing[batch].setdefault(source_id, rowid)
+
+    # A native batch ID hashes its ordered records. The creation sequence
+    # distinguishes an evicted batch from a later insertion of those records.
+    with _source_lookup_lock:
+        for batch, created in batch_versions:
+            if batch in missing:
+                key = (path, batch, created)
+                _source_lookup_cache[key] = missing[batch]
+                _source_lookup_cache.move_to_end(key)
+        while len(_source_lookup_cache) > _SOURCE_LOOKUP_CACHE_BATCHES:
+            _source_lookup_cache.popitem(last=False)
+    return locators | missing
+
+
+def _exact_source_row(db: sqlite3.Connection, path: Path, batches: list[str], placeholders: str, source_id: str) -> tuple[int, tuple[str] | None]:
+    db.execute("BEGIN")  # Pin batch versions, locator checks and payload to the same snapshot.
+    batch_versions = db.execute(f"SELECT id, created FROM batches WHERE id IN ({placeholders})", batches).fetchall()
+    locators = _batch_source_locators(db, path, batch_versions)
+    candidates = sorted((rows[source_id], batch) for batch, rows in locators.items() if source_id in rows)
+    if not candidates:
+        return len(batch_versions), None
+
+    rowid_placeholders = ",".join("?" for _ in candidates)
+    rows = db.execute(
+        f"SELECT rowid, batch, payload FROM sources WHERE rowid IN ({rowid_placeholders}) AND id=? ORDER BY rowid",
+        [*[rowid for rowid, _ in candidates], source_id],
+    ).fetchall()
+    # Check every duplicate before choosing the first stored version, since
+    # a restored archive may reuse rowids or change their relative order.
+    if [(rowid, batch) for rowid, batch, _ in rows] == candidates:
+        return len(batch_versions), (rows[0][2],)
+
+    with _source_lookup_lock:
+        for batch, created in batch_versions:
+            _source_lookup_cache.pop((path, batch, created), None)
+    row = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id]).fetchone()
+    return len(batch_versions), row
 
 
 def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False) -> dict:
@@ -271,21 +267,19 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     if batches:
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
-                if source_id:
-                    db.execute("BEGIN")  # Pin batch status, coverage and payload to the same read snapshot.
                 placeholders = ",".join("?" for _ in batches)
-                present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
-                if present != len(batches) and status != "unavailable":
-                    status = "partially_expired"
                 if source_id:
-                    exact_row = _exact_source_row(db, batches, placeholders, source_id)
+                    present, exact_row = _exact_source_row(db, path, batches, placeholders, source_id)
                     rows = (exact_row,) if exact_row is not None else ()
                 else:
+                    present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
                     parameters = [match, *batches, *([role] if role is not None else [])]
                     # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
                     rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
+                if present != len(batches) and status != "unavailable":
+                    status = "partially_expired"
                 for (payload,) in rows:
                     row = json.loads(payload)
                     # Repeated archives share one result slot; keep FTS order

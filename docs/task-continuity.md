@@ -128,19 +128,12 @@ their original task messages. Existing thread deletion removes this directory;
 there is no cross-thread search or separate global index. On multiple hosts,
 workers need the same thread filesystem to read these local archives.
 
-Exact source-ID reads use an auxiliary SQLite index to locate original archive
-rows. Older archives and batches added by an older DeerFlow process stay readable
-by scanning until capture builds the index for retained rows. Capture and
-eviction maintain the index in the same write transaction. The index counts
-toward the archive's page ceiling. If SQLite runs out of space, writers with
-the index retry using the original scan-based layout.
-
-During a downgrade or mixed-version rollout, older writers invalidate index
-coverage when they add a batch, but the index still occupies pages. Those
-writers can hit `SQLITE_FULL` even when the batch would fit without the index.
-They report history as `unavailable` for that capture. Ordinary compaction
-continues, and that batch is unavailable through task-history recall. The
-failed transaction rolls back and preserves previously archived batches.
+Exact source-ID reads cache row locations for recently accessed batches in
+the current process. A worker scans uncached batches on its first read, then
+validates cached locations against the archive before returning source text.
+If a location has gone stale, that read falls back to a scan. The cache uses
+memory only and leaves the archive format and page ceiling unchanged, so
+workers on older DeerFlow versions can share the same archive.
 
 Checkpoint state holds batch references and the user/thread scope binding.
 Every history reader validates this metadata, including source lookup, capture

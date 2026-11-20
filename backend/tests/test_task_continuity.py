@@ -130,22 +130,17 @@ def test_read_by_id_deduplicates_active_and_archived_source(scoped):
     assert [row["id"] for row in result["results"]] == [source_id]
 
 
-def test_exact_history_read_indexes_legacy_archive_after_capture(scoped, monkeypatch):
+def test_exact_history_reads_reuse_reachable_batch_locators(scoped, monkeypatch):
     import json
     import sqlite3
-    from contextlib import closing
 
-    message = HumanMessage(content="needle " + "padding " * 200, id="repeated-version")
-    source_id = archive.records([message])[0]["id"]
-    old = {"task_history": archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True, max_record_chars=1000))}
-    path = archive.scope(scoped)[0]
-    real_connect = sqlite3.connect
-    with closing(real_connect(path)) as db:
-        db.execute("DROP TRIGGER IF EXISTS source_lookup_invalidate")
-        db.execute("DROP TRIGGER IF EXISTS source_lookup_evict")
-        db.execute("DROP TABLE IF EXISTS source_lookup")
+    messages = conversation()
+    source_ids = [row["id"] for row in archive.records(messages)]
+    scoped.state = {"task_history": archive.capture({}, scoped, messages, TaskContinuityConfig(enabled=True))}
+    assert json.loads(history_read.func(scoped, source_ids[0]))["text"] == messages[0].content
 
     queries = []
+    real_connect = sqlite3.connect
 
     def connect(*args, **kwargs):
         db = real_connect(*args, **kwargs)
@@ -153,173 +148,119 @@ def test_exact_history_read_indexes_legacy_archive_after_capture(scoped, monkeyp
         return db
 
     monkeypatch.setattr(archive.sqlite3, "connect", connect)
-    scoped.state = old
-    legacy = json.loads(history_read.func(scoped, source_id))
-    assert legacy["text"] == message.content[:1000]
-    assert legacy["truncated"] is True
-    with closing(real_connect(path)) as db:
-        assert not db.execute("SELECT name FROM sqlite_master WHERE name='source_lookup'").fetchone()
+    assert json.loads(history_read.func(scoped, source_ids[1]))["text"] == messages[1].content
+    exact_queries = [query for query in queries if "FROM sources " in query]
+    assert exact_queries
+    assert all("WHERE rowid " in query for query in exact_queries)
+
+    queries.clear()
+    assert json.loads(history_read.func(scoped, "r" + "f" * 32)) == {"error": "source_unavailable", "status": "available"}
+    assert not any("FROM sources " in query for query in queries)
+
+
+def test_exact_history_reads_preserve_source_precedence_and_reachability(scoped):
+    import json
+
+    message = HumanMessage(content="needle " + "padding " * 200, id="repeated-version")
+    source_id = archive.records([message])[0]["id"]
+    old = {"task_history": archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True, max_record_chars=1000))}
+    older_runtime = SimpleNamespace(context=scoped.context, state=old)
+    first = json.loads(history_read.func(older_runtime, source_id))
+    assert first["text"] == message.content[:1000]
+    assert first["truncated"] is True
 
     config = TaskContinuityConfig(enabled=True, max_batches=2, max_record_chars=2000)
     future = HumanMessage(content="later checkpoint", id="later")
-    later_id = archive.records([future])[0]["id"]
+    future_id = archive.records([future])[0]["id"]
     scoped.state = {"task_history": archive.capture(old, scoped, [message, future], config)}
-    queries.clear()
-    assert json.loads(history_read.func(scoped, source_id)) == legacy
-    indexed_query = next((query for query in queries if "FROM source_lookup" in query and "payload" in query), "")
-    assert "FROM source_lookup" in indexed_query
-    with closing(real_connect(path)) as db:
-        plan = db.execute("EXPLAIN QUERY PLAN " + indexed_query).fetchall()
-        assert any("SEARCH source_lookup" in row[3] for row in plan)
-    old_runtime = SimpleNamespace(context=scoped.context, state=old)
-    assert json.loads(history_read.func(old_runtime, later_id)) == {
-        "error": "source_unavailable",
-        "status": "available",
-    }
+    assert json.loads(history_read.func(scoped, source_id)) == first
+    # The warm path must also pick the first archived version across batches.
+    assert json.loads(history_read.func(scoped, source_id)) == first
+    assert json.loads(history_read.func(older_runtime, future_id)) == {"error": "source_unavailable", "status": "available"}
 
     scoped.state["messages"] = [message]
     assert json.loads(history_read.func(scoped, source_id))["text"] == message.content
     scoped.state = {"task_history": archive.capture(scoped.state, scoped, [HumanMessage(content="new", id="new")], config)}
     assert json.loads(history_read.func(scoped, source_id))["text"] == message.content
-    assert json.loads(history_read.func(old_runtime, source_id)) == {"error": "source_unavailable", "status": "partially_expired"}
+    assert json.loads(history_read.func(older_runtime, source_id)) == {"error": "source_unavailable", "status": "partially_expired"}
 
 
-def test_exact_history_read_rejects_a_reused_fts_rowid(scoped):
-    import json
-    import sqlite3
-    from contextlib import closing
-
-    first = HumanMessage(content="first checkpoint", id="first")
-    later = HumanMessage(content="later checkpoint", id="later")
-    config = TaskContinuityConfig(enabled=True)
-    scoped.state = {"task_history": archive.capture({}, scoped, [first], config)}
-    archive.capture(scoped.state, scoped, [later], config)
-    first_id, later_id = [row["id"] for row in archive.records([first, later])]
-
-    with closing(sqlite3.connect(archive.scope(scoped)[0])) as db, db:
-        later_rowid = db.execute("SELECT rowid FROM sources WHERE id=?", (later_id,)).fetchone()[0]
-        # A stale lookup must not return text from a batch outside the checkpoint.
-        db.execute("UPDATE source_lookup SET source_rowid=? WHERE id=?", (later_rowid, first_id))
-
-    result = json.loads(history_read.func(scoped, first_id))
-    assert result["id"] == first_id
-    assert result["text"] == first.content
-
-
-def test_legacy_writer_invalidates_index_until_next_capture(scoped):
-    import json
-    import sqlite3
-    from contextlib import closing
-
-    current = HumanMessage(content="indexed checkpoint", id="current")
-    legacy = HumanMessage(content="legacy checkpoint", id="legacy")
-    config = TaskContinuityConfig(enabled=True, max_batches=1)
-    first = archive.capture({}, scoped, [current], config)
-    source = archive.records([legacy])[0]
-    path, owner = archive.scope(scoped)
-    legacy_batch = archive.digest([owner, [source]])
-    with closing(sqlite3.connect(path)) as db, db:
-        # Older writers can reuse a deleted FTS rowid and do not update the side table.
-        db.execute("DELETE FROM sources WHERE batch=?", (first["batches"][0],))
-        db.execute("DELETE FROM batches WHERE id=?", (first["batches"][0],))
-        db.execute("INSERT INTO batches VALUES (?, ?)", (legacy_batch, 1))
-        db.execute("INSERT INTO sources VALUES (?, ?, ?, ?)", (legacy_batch, source["id"], json.dumps(source), archive.index_text(source["text"])))
-
-    scoped.state = {"task_history": {**first, "batches": [legacy_batch]}}
-    result = json.loads(history_read.func(scoped, source["id"]))
-    assert result["text"] == legacy.content
-
-    # Even a duplicate capture of the legacy batch must restore indexed coverage.
-    assert archive.capture(scoped.state, scoped, [legacy], config)["batches"] == [legacy_batch]
-    with closing(sqlite3.connect(path)) as db:
-        assert db.execute("SELECT id FROM source_lookup WHERE batch=?", (legacy_batch,)).fetchall() == [(source["id"],)]
-        assert not db.execute("SELECT 1 FROM source_lookup WHERE batch=?", (first["batches"][0],)).fetchone()
-
-
-def test_legacy_writer_at_page_ceiling_can_write_after_dropping_optional_index(scoped):
+def test_exact_history_read_revalidates_rowid_after_archive_restore(scoped, monkeypatch, tmp_path):
     import json
     import sqlite3
     from contextlib import closing
 
     config = TaskContinuityConfig(enabled=True)
-    current = HumanMessage(content="indexed checkpoint", id="current")
-    legacy = HumanMessage(content="legacy padding " * 1000, id="legacy")
-    history = archive.capture({}, scoped, [current], config)
-    current_source, legacy_source = archive.records([current, legacy])
-    path, owner = archive.scope(scoped)
-    legacy_batch = archive.digest([owner, [legacy_source]])
+    target = HumanMessage(content="target checkpoint", id="target")
+    source_id = archive.records([target])[0]["id"]
+    archive.capture({}, scoped, [HumanMessage(content="prior checkpoint", id="prior")], config)
+    history = archive.capture({}, scoped, [target], config)
+    scoped.state = {"task_history": history}
+    expected = json.loads(history_read.func(scoped, source_id))
+    assert expected["text"] == target.content
+    original = archive.scope(scoped)[0]
 
-    def legacy_insert(db: sqlite3.Connection) -> None:
-        with db:
-            db.execute("BEGIN IMMEDIATE")
-            db.execute("INSERT INTO batches VALUES (?, ?)", (legacy_batch, 2))
-            db.execute("INSERT INTO sources VALUES (?, ?, ?, ?)", (legacy_batch, legacy_source["id"], json.dumps(legacy_source, ensure_ascii=False), archive.index_text(legacy_source["text"])))
+    with monkeypatch.context() as replacement:
+        paths = Paths(base_dir=tmp_path / "restore")
+        replacement.setattr(archive, "get_paths", lambda: paths)
+        earlier = [HumanMessage(content=f"Different checkpoint row {i}", id=f"different-{i}") for i in range(2)]
+        archive.capture({}, scoped, earlier, config)
+        assert archive.capture({}, scoped, [target], config) == history
+        restored = archive.scope(scoped)[0]
 
-    with closing(sqlite3.connect(path)) as db, closing(sqlite3.connect(":memory:")) as probe:
-        # Derive the bound from the same write on this SQLite build's page layout.
-        db.backup(probe)
-        legacy_insert(probe)
-        page_limit = probe.execute("PRAGMA page_count").fetchone()[0] - 1
-        assert db.execute(f"PRAGMA max_page_count={page_limit}").fetchone()[0] == page_limit
+    with closing(sqlite3.connect(original)) as db, closing(sqlite3.connect(restored)) as backup:
+        rowid = db.execute("SELECT rowid FROM sources WHERE id=?", (source_id,)).fetchone()[0]
+        # A restored archive can reuse that rowid for a different source, while
+        # the target batch has the same digest and creation order as before.
+        assert backup.execute("SELECT id FROM sources WHERE rowid=?", (rowid,)).fetchone()[0] != source_id
+        backup.backup(db)
 
-        with pytest.raises(sqlite3.OperationalError) as raised:
-            legacy_insert(db)
-        assert raised.value.sqlite_errorcode == sqlite3.SQLITE_FULL
-        assert db.execute("SELECT id FROM batches").fetchall() == [(history["batches"][0],)]
-        assert db.execute("SELECT id FROM sources").fetchall() == [(current_source["id"],)]
-
-        with db:
-            db.execute("BEGIN IMMEDIATE")
-            db.execute("DROP TRIGGER source_lookup_invalidate")
-            db.execute("DROP TRIGGER source_lookup_evict")
-            db.execute("DROP TABLE source_lookup")
-        legacy_insert(db)
-        assert db.execute("PRAGMA page_count").fetchone()[0] <= page_limit
-
-    scoped.state = {"task_history": {**history, "batches": [*history["batches"], legacy_batch]}}
-    assert json.loads(history_read.func(scoped, current_source["id"]))["text"] == current.content
-    assert json.loads(history_read.func(scoped, legacy_source["id"]))["text"] == legacy_source["text"][:4000]
+    assert json.loads(history_read.func(scoped, source_id)) == expected
 
 
-def test_archive_at_page_ceiling_can_capture_without_optional_index(scoped, monkeypatch):
+def test_exact_history_reads_preserve_original_archive_capacity(scoped, monkeypatch):
     import json
     import sqlite3
     from contextlib import closing
 
     messages = conversation()
     config = TaskContinuityConfig(enabled=True)
-    scoped.state = {"task_history": archive.capture({}, scoped, messages, config)}
+    first = archive.capture({}, scoped, messages, config)
+    assert first["status"] == "available"
+    scoped.state = {"task_history": first}
+    first_id = archive.records(messages)[0]["id"]
+    assert json.loads(history_read.func(scoped, first_id))["text"] == messages[0].content
     path = archive.scope(scoped)[0]
     real_connect = sqlite3.connect
-    with closing(real_connect(path)) as db:
-        db.execute("DROP TRIGGER IF EXISTS source_lookup_invalidate")
-        db.execute("DROP TRIGGER IF EXISTS source_lookup_evict")
-        db.execute("DROP TABLE source_lookup")
-        db.execute("VACUUM")
-        page_count = db.execute("PRAGMA page_count").fetchone()[0]
 
-    limit_hits = []
+    def archive_schema(db):
+        return db.execute("SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' AND name NOT GLOB 'sources_*' ORDER BY name").fetchall()
+
+    with closing(real_connect(path)) as db:
+        assert archive_schema(db) == [("table", "batches"), ("table", "sources")]
+        page_count = db.execute("PRAGMA page_count").fetchone()[0]
 
     class LimitedConnection(sqlite3.Connection):
         def execute(self, sql, parameters=(), /):
             if sql == "PRAGMA max_page_count=32768":
                 sql = f"PRAGMA max_page_count={page_count}"
-            try:
-                return super().execute(sql, parameters)
-            except sqlite3.OperationalError as error:
-                if error.sqlite_errorcode == sqlite3.SQLITE_FULL:
-                    limit_hits.append(sql)
-                raise
+            return super().execute(sql, parameters)
 
     monkeypatch.setattr(archive.sqlite3, "connect", lambda *args, **kwargs: real_connect(*args, **kwargs, factory=LimitedConnection))
-    result = archive.capture(scoped.state, scoped, messages, config)
+    new_message = HumanMessage(content="New checkpoint at capacity", id="new-checkpoint")
+    result = archive.capture(scoped.state, scoped, [new_message], config)
 
-    assert any("CREATE TABLE source_lookup" in query for query in limit_hits)
-    assert result == scoped.state["task_history"]
+    assert result["status"] == "available"
+    assert len(result["batches"]) == 2
+    assert result["batches"][:1] == first["batches"]
     with closing(real_connect(path)) as db:
-        assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='source_lookup'").fetchone()
-    first_id = archive.records(messages)[0]["id"]
+        assert archive_schema(db) == [("table", "batches"), ("table", "sources")]
+        assert db.execute("PRAGMA page_count").fetchone()[0] == page_count
+
+    scoped.state = {"task_history": result}
+    new_id = archive.records([new_message])[0]["id"]
     assert json.loads(history_read.func(scoped, first_id))["text"] == messages[0].content
+    assert json.loads(history_read.func(scoped, new_id))["text"] == new_message.content
 
 
 def test_active_only_matches_deduplicate_before_result_limit(scoped):
