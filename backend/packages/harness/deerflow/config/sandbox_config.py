@@ -228,9 +228,18 @@ class SandboxConfig(BaseModel):
         secure_access: Ask OpenSandbox to require a per-sandbox access token on
             sandbox endpoints (default: false). Needs a Kubernetes runtime in
             ingress gateway mode; other servers reject the create with 400.
+        resource, resource_requests: Sandbox limits and requests as maps of
+            resource names to quantities, e.g. {cpu: "2", memory: 4Gi}. Without
+            resource, the SDK default of 1 CPU / 2Gi applies.
         ready_timeout: Create/readiness deadline in seconds (default: 30).
         sandbox_timeout: Remote lifetime in seconds (default: 14400); 0 requires
             explicit provider cleanup.
+
+    BoxdSandboxProvider specific options:
+        boxd_api_key, org, region: boxd credentials and placement
+            (``BOXD_API_KEY`` is the fallback for ``boxd_api_key``).
+        vcpu, memory, from_snapshot, auto_suspend_timeout, ready_timeout,
+            name_prefix, labels: machine shape, readiness deadline and naming.
     """
 
     use: str = Field(
@@ -362,7 +371,7 @@ class SandboxConfig(BaseModel):
             "`hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image "
             "only gets the bounded host-side request. `bash_command_timeout` is "
             "forwarded to each provider's command API. LocalSandbox, AioSandbox, "
-            "OpenSandbox, E2B, BoxLite, and Tenki apply it to bash commands; "
+            "OpenSandbox, E2B, BoxLite, Tenki, and boxd apply it to bash commands; "
             "providers without per-command timeout support retain their own "
             "defaults."
         ),

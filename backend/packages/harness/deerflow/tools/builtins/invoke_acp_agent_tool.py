@@ -269,6 +269,19 @@ def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
             f"{message} Install it with `npm install --global @minimax-ai/code`, run `mcode login`, and restart DeerFlow so it inherits the updated PATH. "
             "If the Gateway runs in Docker, ensure `mcode` is installed and authenticated inside the Gateway container/image."
         )
+    if agent == "pi" or cmd == "pi-acp":
+        if cmd == "npx":
+            return (
+                f"{message} Install Node.js (which includes npm and `npx`) in the Gateway environment, "
+                "then restart DeerFlow so it inherits the updated Gateway PATH. "
+                "If the Gateway runs in Docker, install Node.js inside the Gateway container/image."
+            )
+        return (
+            f"{message} Install the Pi ACP adapter with `npm install --global pi-acp`, "
+            "or configure the agent to use `npx -y pi-acp`. Ensure Node.js and "
+            "`npx` are available on the Gateway PATH (inside the Gateway "
+            "container when running Docker)."
+        )
     return f"{message} Install the agent binary or update `acp_agents.{agent}.command` in config.yaml."
 
 

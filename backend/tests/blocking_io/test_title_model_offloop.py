@@ -1,6 +1,6 @@
 """Title generation must build its provider off the Gateway event loop.
 
-Inside a graph run, ``aafter_model`` builds the configured title model inline.
+Inside a graph run, ``aafter_agent`` builds the configured title model inline.
 ``create_chat_model`` can read local CLI credentials (Codex ``auth.json``,
 Claude Code credential files) while it is constructed, so every other request
 on the shared loop waited for that read. The real Codex provider is built under

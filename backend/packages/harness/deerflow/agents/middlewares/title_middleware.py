@@ -9,11 +9,14 @@ from unicodedata import category
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.agents.middlewares.model_response import has_tool_call_intent
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_texts
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
@@ -35,7 +38,7 @@ class TitleMiddlewareState(AgentState):
 
 
 class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
-    """Automatically generate a title for the thread after the first user message."""
+    """Generate a title when the agent finishes its first exchange."""
 
     state_schema = TitleMiddlewareState
 
@@ -109,11 +112,60 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     @staticmethod
     def _is_user_message_for_title(message: object) -> bool:
-        return TitleMiddleware._message_type(message) == "human" and not TitleMiddleware._is_dynamic_context_reminder_message(message)
+        if TitleMiddleware._message_type(message) != "human" or TitleMiddleware._is_dynamic_context_reminder_message(message):
+            return False
+        if isinstance(message, dict):
+            # Apply the same authorship rules to checkpoint metadata.
+            message = HumanMessage(content="", name=message.get("name"), additional_kwargs=message.get("additional_kwargs") or {})
+        # RunInputControl stamps instructions appended while the current run is active.
+        if isinstance(message, HumanMessage) and message.additional_kwargs.get("run_input_id") and message.additional_kwargs.get("run_input_source") == "user":
+            return False
+        return is_genuine_user_message(message)
+
+    @staticmethod
+    def _has_tool_call_intent(message: object) -> bool:
+        if isinstance(message, AIMessage):
+            return has_tool_call_intent(message)
+        if not isinstance(message, Mapping):
+            return False
+        raw = message.get("additional_kwargs")
+        return bool(message.get("tool_calls") or message.get("invalid_tool_calls") or message.get("function_call") or (isinstance(raw, Mapping) and (raw.get("tool_calls") or raw.get("function_call"))))
+
+    def _first_exchange(self, state: TitleMiddlewareState) -> tuple[object | None, object | None]:
+        """Select the first user request and its latest assistant step.
+
+        The graph calls after_model once per model step. Earlier assistant
+        messages may describe the plan or request tools. Only the latest step
+        after the user request can complete that exchange. If a second user
+        message is already present, this middleware no longer owns the title.
+        """
+        user_message = None
+        assistant_message = None
+        for message in state.get("messages") or []:
+            if self._is_user_message_for_title(message):
+                if user_message is not None:
+                    return None, None
+                user_message = message
+            elif user_message is not None and self._message_type(message) == "ai":
+                assistant_message = message
+        return user_message, assistant_message
+
+    def _final_assistant_text(self, message: object | None) -> str:
+        if message is None or self._has_tool_call_intent(message):
+            return ""
+        content = self._message_content(message)
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") in ("text", "output_text") and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+            content = "\n".join(parts)
+        return self._strip_think_tags(content) if isinstance(content, str) else ""
 
     def _get_title_user_message(self, state: TitleMiddlewareState) -> str:
-        messages = state.get("messages") or []
-        user_message = next((m for m in messages if self._is_user_message_for_title(m)), None)
+        user_message = next((message for message in state.get("messages") or [] if self._is_user_message_for_title(message)), None)
         if user_message is None:
             return ""
         if isinstance(user_message, dict):
@@ -186,23 +238,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if state.get("title"):
             return False
 
-        # Check if this is the first turn (has at least one user message and one assistant response).
-        # Defensively coerce a None ``messages`` channel (possible when reading a
-        # partially-initialized checkpoint) into an empty list so ``len()`` is safe.
-        messages = state.get("messages") or []
-        min_messages = 1 if allow_partial_exchange else 2
-        if len(messages) < min_messages:
-            return False
-
-        # Count user and assistant messages
-        user_messages = [m for m in messages if self._is_user_message_for_title(m)]
-        assistant_messages = [m for m in messages if self._message_type(m) == "ai"]
-
-        # Normal path: title only after first complete exchange. Interrupted path
-        # (``allow_partial_exchange=True``) accepts a lone first-turn user message
-        # so a fallback title can still be persisted when the run is cancelled
-        # before any AI chunk reaches the checkpoint.
-        return len(user_messages) == 1 and (len(assistant_messages) >= 1 or allow_partial_exchange)
+        user_message, assistant_message = self._first_exchange(state)
+        return user_message is not None and (assistant_message is not None or allow_partial_exchange)
 
     def _build_title_prompt(self, state: TitleMiddlewareState) -> tuple[str, str]:
         """Extract user/assistant messages and build the title prompt.
@@ -210,12 +247,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         Returns (prompt_string, user_msg) so callers can use user_msg as fallback.
         """
         config = self._get_title_config()
-        messages = state.get("messages") or []
-
-        assistant_msg_content = next((self._message_content(m) for m in messages if self._message_type(m) == "ai"), "")
-
+        _, assistant_message = self._first_exchange(state)
+        assistant_msg = self._final_assistant_text(assistant_message)
         user_msg = self._get_title_user_message(state)
-        assistant_msg = self._strip_think_tags(self._normalize_content(assistant_msg_content))
 
         # This model is invoked directly, outside the main model wrappers.
         # Redact complete fields before truncation can split an identifier.
@@ -318,10 +352,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         self,
         state: TitleMiddlewareState,
         *,
+        turn_ended: bool = True,
         task_store=None,
     ) -> dict | None:
         """Generate a configured LLM title asynchronously and fall back locally."""
-        if not self._should_generate_title(state):
+        if not self._should_generate_title(state, allow_partial_exchange=turn_ended):
             return None
 
         attachment_title = self._attachment_only_title(state)
@@ -336,6 +371,14 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         config = self._get_title_config()
         if not config.model_name:
+            return {"title": self._fallback_title(user_msg)}
+
+        # Default and attachment titles use only the user request and retain
+        # their early state update. A configured model also needs the answer.
+        if not turn_ended:
+            return None
+        _, assistant_message = self._first_exchange(state)
+        if not self._final_assistant_text(assistant_message):
             return {"title": self._fallback_title(user_msg)}
 
         try:
@@ -384,5 +427,18 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         return await self._agenerate_title_result(
             state,
+            turn_ended=False,
             task_store=task_store_from_runtime(runtime),
         )
+
+    @override
+    def after_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
+        # A return_direct tool can end the graph without one last model step.
+        # Keep the local title fallback for that path, as for interrupted runs.
+        return self._generate_title_result(state, allow_partial_exchange=True)
+
+    @override
+    async def aafter_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
+        from deerflow_extension_api import task_store_from_runtime
+
+        return await self._agenerate_title_result(state, task_store=task_store_from_runtime(runtime))

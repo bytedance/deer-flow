@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 import os
 import stat
@@ -168,21 +167,47 @@ def test_publish_permission_failure_keeps_previous_file(tmp_path, monkeypatch, p
     assert list(tmp_path.iterdir()) == [target]
 
 
-def test_screenshot_writes_go_through_the_atomic_publish():
-    source = inspect.getsource(browser_automation_tools)
+def test_screenshot_writes_preserve_existing_output_on_replace_failure(tmp_path, monkeypatch):
+    outputs_path = tmp_path / "outputs"
+    outputs_path.mkdir()
+    target = outputs_path / "shot.png"
+    target.write_bytes(b"old screenshot")
 
-    # A truncating write left a partial capture behind while the function returned
-    # the name as if it had been saved.
-    assert "(outputs_path / name).write_bytes(" not in source
-    assert "_publish_bytes_atomically(outputs_path / name, content)" in source
+    def fail_replace(*args):
+        raise OSError("replace interrupted")
+
+    with monkeypatch.context() as patches:
+        patches.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError, match="replace interrupted"):
+            browser_automation_tools._write_screenshot(outputs_path, "shot.png", b"new screenshot")
+
+    assert target.read_bytes() == b"old screenshot"
+    assert list(outputs_path.iterdir()) == [target]
+
+    saved_name = browser_automation_tools._write_screenshot(outputs_path, "shot.png", b"new screenshot")
+    assert saved_name == "shot.png"
+    assert target.read_bytes() == b"new screenshot"
+    assert list(outputs_path.iterdir()) == [target]
 
 
-def test_capture_writes_go_through_the_atomic_publish():
-    source = inspect.getsource(browserless_tools)
+def test_capture_writes_release_reserved_name_on_replace_failure_and_publish_atomically(tmp_path, monkeypatch):
+    outputs_path = tmp_path / "outputs"
+    outputs_path.mkdir()
 
-    assert "(outputs_path / final_name).write_bytes(" not in source
-    assert "destination.unlink(missing_ok=True)" in source
-    assert "_publish_bytes_atomically(destination, content)" in source
+    def fail_replace(*args):
+        raise OSError("replace interrupted")
+
+    with monkeypatch.context() as patches:
+        patches.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError, match="replace interrupted"):
+            browserless_tools._write_capture_output(outputs_path, "capture.png", b"new capture")
+
+    assert list(outputs_path.iterdir()) == []
+
+    saved_name = browserless_tools._write_capture_output(outputs_path, "capture.png", b"new capture")
+    assert saved_name == "capture.png"
+    assert (outputs_path / saved_name).read_bytes() == b"new capture"
+    assert list(outputs_path.iterdir()) == [outputs_path / saved_name]
 
 
 def test_both_tools_share_the_atomic_publisher():
