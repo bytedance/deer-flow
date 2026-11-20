@@ -46,6 +46,9 @@ _BLOCK_SEVERITY = "CRITICAL"
 _NESTED_ZIP_PEEK_MEMBER_LIMIT = 256
 _MAX_ARCHIVE_MEMBERS = 4096
 _TEXT_PROBE_BYTES = 4096
+# Trying the Python parser on a data file can amplify a compact JSON array into
+# many AST nodes. Bound speculative parsing separately from known Python files.
+_MAX_INFERRED_PYTHON_CHARS = 128 * 1024
 
 _SPECS = [
     RuleSpec("package-path-traversal", "CRITICAL", "Archive member path traverses outside the skill root.", "Remove parent-directory traversal from the package path."),
@@ -65,6 +68,7 @@ _SPECS = [
     RuleSpec("package-nested-archive", "HIGH", "Package contains a nested archive file.", "Unpack and review nested archives before packaging the skill."),
     RuleSpec("package-hidden-sensitive-file", "HIGH", "Package contains a hidden sensitive file.", "Remove hidden credential or package-manager config files."),
     RuleSpec("package-undecodable-script", "HIGH", "Code file is not NUL-free UTF-8 text, so it was analyzed from a lossy decode.", "Store code as UTF-8 text without NUL bytes, and keep compiled or binary artifacts out of scripts/."),
+    RuleSpec("package-python-analysis-limit", "HIGH", "Text exceeds the limit for inferring Python source.", "Review the file or split it into smaller files before installation."),
     RuleSpec("package-git-directory", "MEDIUM", "Package contains a .git directory.", "Package only source files needed by the skill, excluding repository metadata."),
     RuleSpec("secret-private-key", "CRITICAL", "Private key material is embedded in skill content.", "Move private keys to a managed secret store and remove them from the skill."),
     RuleSpec("secret-cloud-token", "CRITICAL", "High-confidence cloud or API token is embedded in skill content.", "Move tokens to environment variables or a secret store."),
@@ -370,19 +374,39 @@ def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: i
 
 
 def _scan_text_file(rel_path: str, text: str) -> list[SecurityFinding]:
-    findings: list[SecurityFinding] = []
-    findings.extend(_scan_secrets(rel_path, text))
+    # Python accepts a leading UTF-8 BOM in a source file. ast.parse(str)
+    # expects it to have been consumed by the decoder.
+    text = text.removeprefix("\ufeff")
+    named_python = _is_python_path(rel_path, text)
+    over_python_limit = not named_python and len(text) > _MAX_INFERRED_PYTHON_CHARS
+    tree = None if over_python_limit else _parse_python(text)
+    findings = _scan_secrets(rel_path, text, tree, named_python=named_python)
     if PurePosixPath(rel_path).name == "SKILL.md":
         findings.extend(_scan_declaration(rel_path, text))
-    if _is_python_path(rel_path, text):
-        findings.extend(_scan_python(rel_path, text))
-    if _is_shell_path(rel_path, text):
-        findings.extend(_scan_shell(rel_path, text))
+    # A JSON array/object is valid Python syntax too. A literal-only document
+    # with path or URL labels does not perform a sensitive read or network call.
+    if tree is not None and (named_python or _has_python_operations(tree)):
+        findings.extend(_scan_python(rel_path, tree))
+    if over_python_limit:
+        findings.append(_finding("package-python-analysis-limit", file=rel_path, evidence=f"{len(text)} characters"))
+    shell_findings = _scan_shell(rel_path, text)
+    if shell_findings and tree is not None and not _is_shell_path(rel_path, text):
+        _moderate_quoted_shell_findings(shell_findings, tree)
+    findings.extend(shell_findings)
     findings.extend(_scan_network_and_resource(rel_path, text))
     return findings
 
 
-def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
+def contains_sensitive_package_content(rel_path: str, text: str) -> bool:
+    """Keep newly reviewed package data with recognizable secrets local."""
+    if _is_hidden_sensitive_path(rel_path):
+        return True
+    text = text.removeprefix("\ufeff")
+    tree = _parse_python(text) if len(text) <= _MAX_INFERRED_PYTHON_CHARS else None
+    return bool(_scan_secrets(rel_path, text, tree, named_python=False))
+
+
+def _scan_secrets(rel_path: str, text: str, python_tree: ast.Module | None, *, named_python: bool) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     private_key = re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", text)
     if private_key:
@@ -398,11 +422,11 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
             continue
         break
 
-    if _is_python_path(rel_path, text):
-        findings.extend(_scan_python_secret_assignments(rel_path, text))
-        return findings
-
-    findings.extend(_scan_secret_assignments_by_text(rel_path, text))
+    if python_tree is None or not named_python:
+        text_bindings = _scan_secret_assignments_by_text(rel_path, text)
+        if text_bindings or python_tree is None:
+            return [*findings, *text_bindings]
+    findings.extend(_scan_python_secret_assignments(rel_path, python_tree, data_text=None if named_python else text))
     return findings
 
 
@@ -659,7 +683,7 @@ def _python_secret_literal_candidates(expr: ast.expr) -> list[tuple[ast.expr, st
     return candidates
 
 
-def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
+def _scan_python_secret_assignments(rel_path: str, tree: ast.Module, *, data_text: str | None) -> list[SecurityFinding]:
     """Report embedded Python secrets from real literal bindings, not from raw text.
 
     A line-oriented sweep cannot tell an annotation (``token: Optional[str]``), a
@@ -680,14 +704,21 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
     separates from its name (``[token, version] = ["…", 2]``): those two shapes are
     reported while the file parses and go quiet once it carries a syntax error.
     """
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return _scan_secret_assignments_by_text(rel_path, text)
-
+    source: bytes | None = None
+    line_starts: list[int] = []
     for name, value in _python_secret_bindings(tree):
         if not _SECRET_ASSIGNMENT_NAME_RE.match(name or ""):
             continue
+        if data_text is not None and (name or "").lower() == "tokens" and value is not None:
+            # Preserve the text format's usage-counter exemption when the data
+            # also parses as Python. AST column offsets count UTF-8 bytes.
+            if source is None:
+                source = data_text.replace("\r\n", "\n").replace("\r", "\n").encode()
+                line_starts = [0, *(match.end() for match in re.finditer(b"\n", source))]
+            start = line_starts[value.lineno - 1] + value.col_offset
+            sample = "tokens=" + source[start : start + 512].decode("utf-8", errors="ignore")
+            if (match := _SECRET_ASSIGNMENT_RE.match(sample)) and _is_token_usage_measurement(sample, match):
+                continue
         for node, literal in _python_secret_literal_candidates(value):
             if _looks_like_placeholder(literal):
                 continue
@@ -717,12 +748,19 @@ def _scan_declaration(rel_path: str, text: str) -> list[SecurityFinding]:
     return findings
 
 
-def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
-    findings: list[SecurityFinding] = []
+def _parse_python(text: str) -> ast.Module | None:
     try:
-        tree = ast.parse(text)
+        return ast.parse(text)
     except SyntaxError:
-        return findings
+        return None
+
+
+def _has_python_operations(tree: ast.Module) -> bool:
+    return any(not isinstance(statement, ast.Expr) for statement in tree.body) or any(isinstance(node, (ast.Call, ast.Attribute)) for node in ast.walk(tree))
+
+
+def _scan_python(rel_path: str, tree: ast.Module) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
 
     aliases = _collect_python_aliases(tree)
     has_sensitive_read = False
@@ -1231,6 +1269,15 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding("shell-env-dump", file=rel_path, line=_line_number(code, match.start("cmd")), evidence=command))
         break
     return findings
+
+
+def _moderate_quoted_shell_findings(findings: list[SecurityFinding], tree: ast.Module) -> None:
+    """Send a shell idiom quoted as data to contextual review at warning severity."""
+    for finding in findings:
+        if finding["severity"] != "CRITICAL" or not (line_number := finding["line"]) or not (evidence := finding["evidence"]):
+            continue
+        if any(isinstance(node, ast.Constant) and isinstance(node.value, str) and node.lineno <= line_number <= (node.end_lineno or node.lineno) and evidence in node.value for node in ast.walk(tree)):
+            finding["severity"] = "HIGH"
 
 
 def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding]:
