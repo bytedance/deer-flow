@@ -1343,8 +1343,9 @@ class TestChat:
         """The CLI and chat must agree on interleaved deltas and metadata-only events."""
         from deerflow.tui.cli import _RunOutcome
 
-        with patch.object(client, "stream", return_value=iter(events)):
-            assert client.chat("q", thread_id="t-shared-answer") == expected
+        with patch.object(client, "stream", return_value=iter(events)) as stream:
+            assert client.chat("q", thread_id="t-shared-answer", thinking_enabled=True) == expected
+        stream.assert_called_once_with("q", thread_id="t-shared-answer", thinking_enabled=True)
 
         outcome = _RunOutcome()
         for event in events:
@@ -1397,11 +1398,13 @@ class TestChat:
         with (
             patch.object(client, "_ensure_agent"),
             patch.object(client, "_agent", graph),
+            patch.object(client, "_serialize_message", wraps=client._serialize_message) as serialize_message,
         ):
             result = client.chat("q", thread_id="t-loop-stop")
 
         assert result.startswith("Checking again.")
         assert "[FORCED STOP]" in result
+        serialize_message.assert_not_called()
 
     def test_empty_response(self, client):
         """chat() returns empty string if no AI message produced."""
