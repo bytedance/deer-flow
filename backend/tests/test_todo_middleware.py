@@ -1325,8 +1325,8 @@ class TestMalformedStoredTodos:
         """The reminder must offer blocked/waiting, which the guard also accepts.
 
         The old text asked the model to finish everything and only mark items
-        completed, so a step that cannot continue was retried or falsely marked
-        completed to get past the guard.
+        completed. This test checks the instruction the model receives, not how a
+        particular model responds to it.
         """
         reminder = _format_completion_reminder([{"content": "Needs input", "status": "in_progress"}])
 
