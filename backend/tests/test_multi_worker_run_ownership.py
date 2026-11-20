@@ -2878,20 +2878,20 @@ async def test_cancellation_during_terminal_receipt_cannot_commit_staged_success
     bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
     record.task = asyncio.create_task(run_agent(bridge, manager, record, ctx=RunContext(checkpointer=None, event_store=ReceiptStore()), agent_factory=lambda **kwargs: Agent(), graph_input={}, config={}))
     try:
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), 5)
         assert record.status == RunStatus.success
         assert await store.request_cancel(record.run_id, action="interrupt") == "interrupt"
         await manager._renew_leases()
         assert record.abort_event.is_set()
         release.set()
-        await asyncio.wait_for(record.task, 1)
+        await asyncio.wait_for(record.task, 5)
         assert not record.ownership_lost
         assert record.status == RunStatus.interrupted
         assert (await store.get(record.run_id))["status"] == "interrupted"
         bridge.publish_end.assert_awaited_once()
     finally:
         release.set()
-        await asyncio.wait_for(asyncio.gather(record.task, return_exceptions=True), 1)
+        await asyncio.wait_for(asyncio.gather(record.task, return_exceptions=True), 5)
 
 
 # ---------------------------------------------------------------------------

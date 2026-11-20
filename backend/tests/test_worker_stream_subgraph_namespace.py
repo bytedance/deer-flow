@@ -313,6 +313,9 @@ class _RecordingStreamBridge(MemoryStreamBridge):
 
 
 class _IntegrationRunManager:
+    # A real RunManager without a run_ownership config reports False.
+    heartbeat_enabled = False
+
     def __init__(self, record: RunRecord) -> None:
         self._record = record
 

@@ -391,7 +391,10 @@ publish an immutable outcome proof only on explicit successful commit results;
 matching row fields and legacy `None` results cannot confirm a commit. Atomic
 replacement registers attempts before admission I/O and acknowledges only the
 returned claimed rows, using their committed outcome fields. It does not repeat
-the interrupted update. An interrupted ACK is intermediate while a live Worker
+the interrupted update. Atomic replacement stores the first cancellation action
+with each interrupted row. The Manager uses that stored action for the local Worker.
+Only a stored rollback action can allow checkpoint restoration after interruption.
+An interrupted ACK is intermediate while a live Worker
 still owes rollback: keep a separate rollback barrier and explicitly renew that
 interrupted row under the same live-owner/lease predicates until the final error
 ACK. An active-only renewal that was already in flight across atomic rollback

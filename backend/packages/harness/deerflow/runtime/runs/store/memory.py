@@ -671,6 +671,9 @@ class MemoryRunStore(RunStore):
             for r in candidates:
                 r["status"] = "interrupted"
                 r["error"] = "Cancelled by newer run"
+                if r.get("cancel_action") is None:
+                    r["cancel_action"] = multitask_strategy
+                    r["cancel_requested_at"] = now
                 r["owner_worker_id"] = owner_worker_id
                 r["updated_at"] = now
                 r["change_seq"] = change_seq

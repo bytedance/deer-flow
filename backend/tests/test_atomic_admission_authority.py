@@ -28,6 +28,8 @@ async def test_same_owner_atomic_replacement_does_not_fence_its_old_run(store, s
     row = await store.get(first.run_id, user_id="review")
     assert row["owner_worker_id"] == "owner"
     assert row["status"] == "interrupted"
+    assert row["cancel_action"] == strategy
+    assert row["cancel_requested_at"] is not None
     assert datetime.fromisoformat(row["lease_expires_at"]) > datetime.now(UTC)
     assert second.status == RunStatus.pending
     if strategy == "rollback":
@@ -36,6 +38,28 @@ async def test_same_owner_atomic_replacement_does_not_fence_its_old_run(store, s
         assert row["status"] == "error"
         assert row["error"] == "Rolled back by user"
     assert not first.ownership_lost, "successful same-owner atomic replacement was treated as lost ownership"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("first_action,replacement_action", [("interrupt", "rollback"), ("rollback", "interrupt")])
+async def test_atomic_replacement_keeps_first_cancel_action(store, first_action, replacement_action):
+    manager = manager_for(store)
+    first = await manager.create_or_reject("thread", user_id="review")
+    await manager.try_start(first.run_id)
+    assert await store.request_cancel(first.run_id, action=first_action) == first_action
+    before = await store.get(first.run_id, user_id="review")
+    first.task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        await manager.create_or_reject("thread", multitask_strategy=replacement_action, user_id="review")
+
+        after = await store.get(first.run_id, user_id="review")
+        assert after["cancel_action"] == first_action
+        assert after["cancel_requested_at"] == before["cancel_requested_at"]
+        assert first.abort_action == first_action
+        assert first.rollback_finalization_pending == (first_action == "rollback")
+    finally:
+        first.task.cancel()
+        await asyncio.gather(first.task, return_exceptions=True)
 
 
 @pytest.mark.anyio
