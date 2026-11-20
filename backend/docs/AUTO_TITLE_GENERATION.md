@@ -16,6 +16,8 @@ TitleMiddleware 会先把 LangChain message content 里的结构化 block/list �
 
 如果直接返回的工具结束了图执行，没有最终的助手回复，`after_agent` 使用首条用户消息或已验证的附件生成本地标题。
 
+首轮运行被中断或达到步数上限时，若线程还没有标题，Gateway 会从首条用户消息或已验证的附件生成本地标题。`full` 和 `delta` 两种 checkpoint 模式都支持这一回退。
+
 ## ⚠️ 重要：存储机制
 
 ### Title 存储位置

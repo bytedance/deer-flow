@@ -17,8 +17,9 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import ConfigDict
 
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.app_config import AppConfig
+from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -50,7 +51,7 @@ class _ToolLoopModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
-async def _run_until_recursion_cap(tmp_path: Path, *, with_goal: bool) -> dict[str, Any]:
+async def _run_until_recursion_cap(tmp_path: Path, *, with_goal: bool, checkpoint_mode: CheckpointChannelMode = "full") -> dict[str, Any]:
     evaluator_calls: list[Any] = []
     published: list[tuple[str, Any]] = []
 
@@ -80,7 +81,9 @@ async def _run_until_recursion_cap(tmp_path: Path, *, with_goal: bool) -> dict[s
                 return f"wrote part-{n}.md"
 
             model = _ToolLoopModel(calls=[])
-            graph = create_agent(model=model, tools=[write_part], state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+            # Snapshot every delta write so the cap lands on a stored messages snapshot.
+            state_schema = get_thread_state_schema(checkpoint_mode, snapshot_frequency=1)
+            graph = create_agent(model=model, tools=[write_part], state_schema=state_schema, context_schema=dict, checkpointer=saver)
             app_config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
             app_config.title.enabled = True
             app_config.memory.enabled = app_config.memory.injection_enabled = False
@@ -90,7 +93,7 @@ async def _run_until_recursion_cap(tmp_path: Path, *, with_goal: bool) -> dict[s
                 bridge,
                 manager,
                 record,
-                ctx=worker.RunContext(checkpointer=saver, event_store=events, app_config=app_config),
+                ctx=worker.RunContext(checkpointer=saver, event_store=events, app_config=app_config, checkpoint_channel_mode=checkpoint_mode),
                 agent_factory=lambda config: graph,
                 graph_input={"messages": [HumanMessage(content="Write the report in parts.")]},
                 config={"configurable": {"thread_id": record.thread_id}, "recursion_limit": 6},
@@ -126,8 +129,9 @@ def _no_network(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_recursion_cap_reports_a_plain_stop_with_unpresented_outputs(tmp_path):
-    result = await _run_until_recursion_cap(tmp_path, with_goal=False)
+@pytest.mark.parametrize("checkpoint_mode", ["full", "delta"])
+async def test_recursion_cap_reports_a_plain_stop_with_unpresented_outputs(tmp_path, checkpoint_mode):
+    result = await _run_until_recursion_cap(tmp_path, with_goal=False, checkpoint_mode=checkpoint_mode)
     record = result["record"]
 
     assert record.status == RunStatus.error
