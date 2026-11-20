@@ -20,7 +20,7 @@ def _to_bash_path(path: Path) -> str:
         rest = posix[2:]
         for root in ("/mnt", ""):
             probe = f"{root}/{drive}{rest}"
-            check = subprocess.run(["bash", "-c", f'test -e "{probe}"'])
+            check = subprocess.run(["bash", "-c", f'test -e "{probe}"'], check=False)
             if check.returncode == 0:
                 return probe
         return f"/mnt/{drive}{rest}"
@@ -34,6 +34,7 @@ def _run_install_script(cwd: Path, env: dict[str, str]) -> subprocess.CompletedP
     cwd_path = _to_bash_path(cwd)
     return subprocess.run(
         ["bash", "-c", f'cd "{cwd_path}" && bash "{script_path}" example/repo@example-skill'],
+        check=False,
         env=env,
         capture_output=True,
         encoding="utf-8",
@@ -60,20 +61,13 @@ def test_install_skill_reaches_npx_when_project_root_exists(tmp_path: Path) -> N
     nested = project_root / "nested" / "dir"
     nested.mkdir(parents=True)
 
-    if shutil.which("bash") is None:
-        pytest.skip("bash is required")
-    script_path = _to_bash_path(INSTALL_SCRIPT)
-    cwd_path = _to_bash_path(nested)
-    cmd = (
-        f'cd "{cwd_path}" && '
-        'npx() { return 77; }; export -f npx; '
-        f'bash "{script_path}" example/repo@example-skill'
-    )
-    result = subprocess.run(
-        ["bash", "-c", cmd],
-        capture_output=True,
-        encoding="utf-8",
-        timeout=15,
-    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    npx_stub = bin_dir / "npx"
+    npx_stub.write_bytes(b"#!/bin/sh\nexit 77\n")
+    npx_stub.chmod(0o755)
+
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    result = _run_install_script(nested, env)
 
     assert result.returncode == 77, result.stderr
