@@ -21,6 +21,8 @@ HUBSPOT = {"access_token": "token"}
     ],
 )
 async def test_business_client_tls_setup_runs_off_loop(provider, credentials, call, expected_path, monkeypatch):
+    # Proxy transports create additional SSL contexts even when send is mocked.
+    monkeypatch.setenv("no_proxy", "*")
     loop_thread = threading.get_ident()
     original_context = ssl.create_default_context
     contexts = []
