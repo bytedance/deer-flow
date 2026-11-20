@@ -486,15 +486,18 @@ _BASH_EVIDENCE_COMMAND_CHARS = 500
 _BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
 
 
-def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | None]:
-    """Derive the recorded status from the shell exit marker when present.
+def _bash_evidence_status(content: str, meta_status: str, meta: Mapping[str, Any]) -> tuple[str, str | None]:
+    """Prefer a provider exit code, retaining text markers for legacy results.
 
     Returns ``(status, marker)``: the marker text actually seen (e.g. ``Exit
-    Code: 5``), so consumers can report it instead of asserting a failure the
-    harness cannot distinguish from the command's own trailing text. The
-    explicit marker takes precedence over generic metadata in old checkpoints
-    or provider stamps that report ``success`` for a nonzero shell exit.
+    Code: 5``) only when text determined the status. A provider's numeric code
+    takes precedence over stdout, which may itself print an exit marker.
+    Missing or invalid codes retain the marker-first fallback for older
+    checkpoints and plain-string providers with generic success metadata.
     """
+    exit_code = meta.get("exit_code")
+    if meta.get("source") == "tool_return" and type(exit_code) is int:
+        return ("success" if exit_code == 0 else "error"), None
     return bash_exit_status(content) or (meta_status, None)
 
 
@@ -557,11 +560,11 @@ def _harvest_bash_executions(
     a specific recorded execution — the command text lets the parent match the
     criterion against the call that actually ran. A bounded summary stamp is
     computed from the full tool output before retaining the diagnostic tail.
-    The recorded status is the **actual shell exit status**: a nonzero bash exit comes back as ordinary output text
-    (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
-    ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
-    as success — so an explicit exit marker wins, and the meta status is only
-    the fallback when no marker exists. Every entry is stamped with
+    The recorded status prefers the provider's numeric exit code from
+    ``deerflow_tool_meta``. Older checkpoints and plain-string providers retain
+    the text-marker fallback (``Exit Code: N`` or a whole-output ``Command
+    exited with code N``), followed by the metadata/native status when no
+    marker exists. Every entry is stamped with
     ``shell_persistent`` — the producing sandbox's
     ``persistent_shell_sessions`` flag, resolved against the sandbox recorded
     in THIS state (the subagent's own graph state), so provenance survives
@@ -609,9 +612,10 @@ def _harvest_bash_executions(
             command_truncated = len(command) > _BASH_EVIDENCE_COMMAND_CHARS
             command = command[:_BASH_EVIDENCE_COMMAND_CHARS]
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
+            meta = meta if isinstance(meta, dict) else {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
-            status, status_marker = _bash_evidence_status(content, meta_status)
+            status, status_marker = _bash_evidence_status(content, meta_status, meta)
             result_id = message.id if isinstance(message.id, str) and message.id else None
             cache_key = _bash_evidence_key({"result_id": result_id, "tool_call_id": tool_call_id})
             cached = summary_cache.get(cache_key) if summary_cache is not None else None

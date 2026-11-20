@@ -46,6 +46,19 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
         raise HTTPException(404, "Run not found")
     if get_agent_runs(request) is None:
         raise HTTPException(503, "Run inputs require an authenticated session")
+    from app.gateway.coordination_workers import managed_task, worker_context, worker_error
+    from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
+
+    if task_id := await managed_task(request, thread_id):
+        service, owner, runs = worker_context(request)
+        if body.mode != "queue":
+            raise HTTPException(409, "Use queue mode to update a managed worker")
+        try:
+            item = await service.repo.append_input(owner, task_id, request_id=f"run-input:{run_id}:{body.request_id}", content=body.text)
+            service.watch(runs, owner, task_id)
+            return _worker_input_receipt(item, run_id, body.request_id)
+        except (TaskConflict, TaskNotFound) as exc:
+            raise worker_error(exc) from exc
     row = await _store(request).get(run_id, user_id=user_id)
     if row is None or row.get("run_inputs") is None:
         raise HTTPException(409, "This Run has not enabled interactive inputs")
@@ -63,10 +76,36 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
     return {**item, "target_run_id": run_id}
 
 
+def _worker_input_receipt(item, run_id, request_id, consuming_run=None, cancelled=False):
+    return {
+        "id": request_id,
+        "target_run_id": run_id,
+        "message_id": str(uuid5(NAMESPACE_URL, f"deerflow-input:{run_id}:{request_id}")),
+        "mode": "queue",
+        "text": item["content"],
+        "created_at": item["created_at"],
+        "status": "applied" if consuming_run else "cancelled" if cancelled else "pending",
+        **({"run_id": consuming_run} if consuming_run else {}),
+    }
+
+
 async def list_thread_inputs(thread_id: str, request: Request):
     user_id = await get_current_user(request)
     if user_id is None:
         raise HTTPException(401, "Authentication required")
+    from app.gateway.coordination_workers import managed_task
+    from deerflow.persistence.coordination.sql import TaskNotFound
+
+    if task_id := await managed_task(request, thread_id):
+        try:
+            receipts, active, cancelled = await request.app.state.coordination_workers.repo.input_receipts(user_id, task_id)
+        except TaskNotFound as exc:
+            raise HTTPException(404, "Task not found") from exc
+        items = []
+        for item, consuming_run in receipts:
+            _, run, key = item["request_id"].split(":", 2)
+            items.append(_worker_input_receipt(item, run, key, consuming_run, cancelled))
+        return {"items": items, "active_run_id": active}
     rows = await _store(request).list_input_runs(thread_id, user_id=user_id)
     items = []
     for row in reversed(rows):
