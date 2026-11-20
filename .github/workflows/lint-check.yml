@@ -61,6 +61,17 @@ jobs:
           --after "${{ github.sha }}"
           --github-annotations
 
+  frontend-scope-reads:
+    # Not gated on a scope: the PR that makes frontend code read a new path
+    # outside the frontend scope may only run frontend jobs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check frontend reads stay inside the frontend scope
+        run: python3 scripts/ci_changed_scopes.py --check-frontend-reads
+
   label-declarations:
     runs-on: ubuntu-latest
     steps:

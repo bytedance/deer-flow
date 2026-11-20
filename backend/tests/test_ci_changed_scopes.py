@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import re
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +28,7 @@ GATED_JOBS = {
     "frontend-unit-tests.yml": {"frontend-unit-tests": "frontend"},
     "lint-check.yml": {"lint-backend": "backend", "lint-frontend": "frontend"},
 }
-ALWAYS_RUN_JOBS = {"lint-check.yml": {"agent-guidance", "label-declarations"}}
+ALWAYS_RUN_JOBS = {"lint-check.yml": {"agent-guidance", "frontend-scope-reads", "label-declarations"}}
 
 
 def _workflow(name: str) -> dict:
@@ -53,6 +53,8 @@ def _workflow(name: str) -> dict:
         (["contracts/thread_goal_contract.json"], {"backend": True, "frontend": True}),
         (["examples/deerflow-extension-bookmarks/manifest.json"], {"backend": True, "frontend": True}),
         (["skills/public/data-analysis/SKILL.md"], {"backend": True, "frontend": True}),
+        # frontend/Makefile runs `make test` through this launcher; backend tests also read it.
+        (["scripts/pnpm.py"], {"backend": True, "frontend": True}),
         # A frontend test reads the backend's built-in capability catalog.
         (["backend/packages/harness/deerflow/capabilities/builtin.json"], {"backend": True, "frontend": True}),
         # A new top-level directory is unknown to both lists: backend runs (skip-list), frontend does not.
@@ -232,6 +234,27 @@ def test_script_fails_open_when_the_diff_is_unknown(checkout: Path) -> None:
     assert _run_script(checkout, "pull_request") == {"backend": "true", "frontend": "true"}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the stub git is a POSIX shell script")
+def test_script_fails_open_when_a_changed_path_is_not_utf8(checkout: Path, tmp_path: Path) -> None:
+    # `git diff -z` prints raw path bytes; many filesystems refuse to create such a file, so stub git.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "git"
+    stub.write_text("#!/bin/sh\nprintf 'frontend/src/\\377.tsx\\0'\n", encoding="utf-8")
+    stub.chmod(0o755)
+    result = subprocess.run(
+        [sys.executable, "scripts/ci_changed_scopes.py", "--event", "pull_request"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+
+    assert dict(line.split("=", 1) for line in result.stdout.splitlines()) == {"backend": "true", "frontend": "true"}
+    assert "running every scope" in result.stderr
+
+
 # --- workflow wiring --------------------------------------------------------
 
 
@@ -261,31 +284,27 @@ def test_workflow_cancels_superseded_runs(name: str) -> None:
 
 
 # --- frontend reads stay inside the frontend scope ---------------------------
-
-_RELATIVE_IMPORT = re.compile(r"""(?:from\s+|import\(\s*|require\(\s*)["']((?:\.\./)+[^"']+)["']""")
-_DIRNAME_PATH = re.compile(r"""__dirname\s*,\s*["']((?:\.\./)+[^"']*)["']""")
-_CWD_PATH = re.compile(r"""process\.cwd\(\)\s*,\s*["']((?:\.\./)+[^"']*)["']""")
-
-
-def _frontend_reads_outside_frontend() -> dict[str, set[str]]:
-    reads: dict[str, set[str]] = {}
-    sources = [path for base in ("src", "tests/unit") for path in (FRONTEND_ROOT / base).rglob("*") if path.suffix in {".ts", ".tsx", ".js", ".mjs"}]
-    sources += [path for path in FRONTEND_ROOT.glob("*.config.*") if path.is_file()]
-    for source in sources:
-        text = source.read_text(encoding="utf-8", errors="ignore")
-        targets = [source.parent / match for pattern in (_RELATIVE_IMPORT, _DIRNAME_PATH) for match in pattern.findall(text)]
-        targets += [FRONTEND_ROOT / match for match in _CWD_PATH.findall(text)]
-        for target in targets:
-            resolved = target.resolve()
-            relative = resolved.relative_to(REPO_ROOT.resolve()).as_posix() + ("/" if resolved.is_dir() else "")
-            if not relative.startswith("frontend/"):
-                reads.setdefault(relative, set()).add(source.relative_to(FRONTEND_ROOT).as_posix())
-    return reads
+# lint-check.yml runs this check on every PR; these tests pin the scanner.
 
 
 def test_frontend_only_reads_paths_inside_its_scope() -> None:
-    reads = _frontend_reads_outside_frontend()
+    reads = scopes_module.frontend_reads_outside_frontend(REPO_ROOT)
 
     assert reads, "the scanner found no reads outside frontend/; it no longer recognizes the read patterns"
+    assert reads.get("scripts/pnpm.py") == {"Makefile"}, "the scanner no longer reads frontend/Makefile"
     outside = {path: sorted(files) for path, files in reads.items() if not scopes_module.scopes_for([path])["frontend"]}
     assert outside == {}, "add these paths to FRONTEND_PREFIXES in scripts/ci_changed_scopes.py"
+
+
+def test_frontend_read_check_fails_on_a_new_read_outside_the_scope(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    unit = tmp_path / "frontend" / "tests" / "unit"
+    unit.mkdir(parents=True)
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "pyproject.toml").write_text("", encoding="utf-8")
+    (tmp_path / "contracts").mkdir()
+    (unit / "contract.test.ts").write_text('readFileSync(path.join(process.cwd(), "../contracts"));\n', encoding="utf-8")
+    assert scopes_module.check_frontend_reads(tmp_path) == 0
+
+    (unit / "version.test.ts").write_text('readFileSync(path.resolve(__dirname, "../../../backend/pyproject.toml"));\n', encoding="utf-8")
+    assert scopes_module.check_frontend_reads(tmp_path) == 1
+    assert "tests/unit/version.test.ts reads backend/pyproject.toml" in capsys.readouterr().err

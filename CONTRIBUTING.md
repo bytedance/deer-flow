@@ -393,13 +393,15 @@ Pull requests trigger the following CI workflows:
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml) (skipped only when every changed file is one the backend suite never reads)
 - **Bundled extension tests** — [.github/workflows/bundled-extension-tests.yml](.github/workflows/bundled-extension-tests.yml) (triggered by example packages, `backend/packages/**`, `backend/app/gateway/**` and the marked test modules)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml) (run when `frontend/` or a file it reads changes)
+- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
 
-[scripts/ci_changed_scopes.py](scripts/ci_changed_scopes.py) holds these path rules
+[scripts/ci_changed_scopes.py](scripts/ci_changed_scopes.py) holds the path rules
 for the unit test and lint workflows. Pushes to `main` and changes under
 `.github/` run every scope. When a test starts reading a file outside its own
-tree, add that path to the script; `backend/tests/test_ci_changed_scopes.py`
-fails when a frontend file reads a path outside the frontend scope.
-- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+tree, add that path to the script. On every pull request, the
+`frontend-scope-reads` lint job fails when a frontend file reads a path outside
+the frontend scope, and `backend/tests/test_ci_changed_scopes.py` fails when
+backend code names a frontend path that would skip the backend scope.
 
 The browser E2E and full-stack replay jobs use the official Playwright image,
 which includes Chromium and its system libraries. When upgrading the locked
