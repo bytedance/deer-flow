@@ -18,6 +18,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
+from deerflow.agents.assembly_descriptor import describe_middleware
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummaryGenerationError
 from deerflow.agents.thread_state import ThreadState
@@ -123,6 +124,18 @@ async def test_middle_chunk_fallback_becomes_the_next_full_carry(asynchronous, f
     assert middleware.summary_call_count == 1
     assert middleware.summary_skip_count == 0
     assert state == original
+
+
+def test_compaction_release_policy_lists_supported_length_detectors():
+    descriptor = describe_middleware(_middleware(RecordingModel()))
+
+    assert descriptor.policy_parameters["summary_length_detectors"] == [
+        "openai_compatible_length",
+        "anthropic_max_tokens",
+        "gemini_max_tokens",
+        "openai_responses_length",
+        "ollama_length",
+    ]
 
 
 @pytest.mark.asyncio

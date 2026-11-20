@@ -60,5 +60,4 @@ def test_default_detectors_cover_chat_and_responses_providers():
         "anthropic_max_tokens",
         "gemini_max_tokens",
         "openai_responses_length",
-        "ollama_length",
     ]

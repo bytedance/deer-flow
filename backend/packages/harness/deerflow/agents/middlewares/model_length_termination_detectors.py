@@ -146,7 +146,6 @@ def default_detectors() -> list[ModelLengthTerminationDetector]:
         AnthropicMaxTokensDetector(),
         GeminiMaxTokensDetector(),
         OpenAIResponsesLengthDetector(),
-        OllamaLengthDetector(),
     ]
 
 
