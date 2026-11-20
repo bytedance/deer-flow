@@ -244,7 +244,7 @@ def init_skill(skill_name, path):
         skill_md_path.write_text(skill_content, encoding="utf-8")
         print("✅ Created SKILL.md")
     except Exception as e:
-        print(f"❌ Error creating SKILL.md: {e}")
+        print(f"❌ Error creating SKILL.md: {e}", file=sys.stderr)
         return None
 
     # Create resource directories with example files
@@ -271,7 +271,7 @@ def init_skill(skill_name, path):
         example_asset.write_text(EXAMPLE_ASSET, encoding="utf-8")
         print("✅ Created assets/example_asset.txt")
     except Exception as e:
-        print(f"❌ Error creating resource directories: {e}")
+        print(f"❌ Error creating resource directories: {e}", file=sys.stderr)
         return None
 
     # Print next steps
@@ -286,6 +286,7 @@ def init_skill(skill_name, path):
 
 def main():
     if len(sys.argv) < 4 or sys.argv[2] != '--path':
+        print("❌ Error: Expected a skill name and --path <path>.", file=sys.stderr)
         print("Usage: init_skill.py <skill-name> --path <path>")
         print("\nSkill name requirements:")
         print("  - Hyphen-case identifier (e.g., 'data-analyzer')")

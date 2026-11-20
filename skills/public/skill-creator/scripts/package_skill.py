@@ -89,11 +89,11 @@ def package_skill(skill_path, output_dir=None):
 
     # Validate skill folder exists
     if not skill_path.exists():
-        print(f"❌ Error: Skill folder not found: {skill_path}")
+        print(f"❌ Error: Skill folder not found: {skill_path}", file=sys.stderr)
         return None
 
     if not skill_path.is_dir():
-        print(f"❌ Error: Path is not a directory: {skill_path}")
+        print(f"❌ Error: Path is not a directory: {skill_path}", file=sys.stderr)
         return None
 
     # Validate SKILL.md exists
@@ -101,7 +101,7 @@ def package_skill(skill_path, output_dir=None):
     try:
         manifest_info = skill_md.lstat()
     except FileNotFoundError:
-        print(f"❌ Error: SKILL.md not found in {skill_path}")
+        print(f"❌ Error: SKILL.md not found in {skill_path}", file=sys.stderr)
         return None
     if _is_link(manifest_info) or not stat.S_ISREG(manifest_info.st_mode):
         print("❌ Error: SKILL.md must be a regular file inside the skill directory.", file=sys.stderr)
@@ -111,8 +111,8 @@ def package_skill(skill_path, output_dir=None):
     print("🔍 Validating skill...")
     valid, message = validate_skill(skill_path)
     if not valid:
-        print(f"❌ Validation failed: {message}")
-        print("   Please fix the validation errors before packaging.")
+        print(f"❌ Validation failed: {message}", file=sys.stderr)
+        print("   Please fix the validation errors before packaging.", file=sys.stderr)
         return None
     print(f"✅ {message}\n")
 
@@ -154,6 +154,7 @@ def package_skill(skill_path, output_dir=None):
 
 def main():
     if len(sys.argv) < 2:
+        print("❌ Error: A skill directory is required.", file=sys.stderr)
         print("Usage: python scripts/package_skill.py <path/to/skill-folder> [output-directory]")
         print("\nExample:")
         print("  python scripts/package_skill.py skills/public/my-skill")
