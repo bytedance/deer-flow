@@ -145,15 +145,19 @@ async def _plain_client(options):
 
 
 class JinaHTTPFailure(str):
-    """Keep the crawl string contract while carrying the terminal HTTP status."""
+    """Keep the crawl string contract while carrying the received HTTP status."""
 
     status_code: int
 
     @classmethod
-    def from_response(cls, status_code: int, response_text: str) -> Self:
-        result = cls(f"Error: Jina API returned status {status_code}: {response_text}")
+    def with_status(cls, status_code: int, message: str) -> Self:
+        result = cls(message)
         result.status_code = status_code
         return result
+
+    @classmethod
+    def from_response(cls, status_code: int, response_text: str) -> Self:
+        return cls.with_status(status_code, f"Error: Jina API returned status {status_code}: {response_text}")
 
 
 class JinaClient:
@@ -244,7 +248,10 @@ class JinaClient:
                                                     if max_response_bytes is not None and len(content) + len(chunk) > max_response_bytes:
                                                         reason = "response_limit"
                                                         pending_return = True
-                                                        return f"Error: Jina API response exceeds max_response_bytes ({max_response_bytes})"
+                                                        return JinaHTTPFailure.with_status(
+                                                            response.status_code,
+                                                            f"Error: Jina API response exceeds max_response_bytes ({max_response_bytes})",
+                                                        )
                                                     content.extend(chunk)
                                                 response_text = content.decode(response.encoding or "utf-8", errors="replace")
                             except (httpx.ConnectError, httpx.ConnectTimeout):

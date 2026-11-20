@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
+from deerflow.community.jina_ai import jina_client
 from deerflow.community.jina_ai.jina_client import JinaClient
 
 pytestmark = pytest.mark.anyio
@@ -56,7 +57,7 @@ def transport(monkeypatch):
         # Record proxy configuration but keep all traffic on the offline transport.
         return real_client(transport=httpx.MockTransport(handle), trust_env=False)
 
-    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(jina_client, "httpx", SimpleNamespace(AsyncClient=client, ConnectError=httpx.ConnectError, ConnectTimeout=httpx.ConnectTimeout))
     monkeypatch.setenv("JINA_API_KEY", "dummy-test-key")
     return responses, requests, options
 
@@ -202,6 +203,26 @@ async def test_tool_error_skips_extraction(transport, monkeypatch, limit):
         assert stream.closed and stream.reads == 1
     else:
         assert not transport[2]
+
+
+@pytest.mark.parametrize(("status", "category"), [(200, "unknown"), (401, "auth")])
+async def test_tool_response_limit_retains_http_status(transport, monkeypatch, status, category):
+    from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_message
+    from deerflow.community.jina_ai import tools
+
+    config = SimpleNamespace(model_extra={"max_response_bytes": 256, "max_retries": 2})
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _: config))
+    stream = respond(transport, [b"provider-body:" + b"x" * 256, b"must not read"], status)
+    message = await tools.web_fetch_tool.ainvoke({"type": "tool_call", "name": "web_fetch", "id": "fetch-1", "args": {"url": "https://example.com"}})
+
+    assert stream.reads == 1 and stream.closed
+    assert len(transport[1]) == 1
+    assert message.content.startswith("Error: Jina API response exceeds max_response_bytes (256)")
+    assert "provider-body" not in message.content
+    meta = normalize_tool_message(message).additional_kwargs[TOOL_META_KEY]
+    assert (meta["status"], meta["error_type"]) == ("error", category)
+    assert message.artifact["deerflow_http_response"]["status_code"] == status
+    assert ("JINA_API_KEY" in message.content) == (status == 401)
 
 
 async def test_tool_real_extraction_preserves_output_cap(transport, monkeypatch):

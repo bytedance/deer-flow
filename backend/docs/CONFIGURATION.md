@@ -1138,10 +1138,11 @@ Enabled fetches stream and count actual content-decoded bytes (after decompressi
 before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
 The first chunk exceeding it stops consumption and closes the response, returning
 an explicit size `Error:` without body content, partial success or readability
-extraction. This applies to all statuses, including 502/503/504, and oversize never
-retries. Each retry response has its own counter within the existing shared time
-budget. Streams close on success, errors, cancellation and read failures. Responses
-within the limit retain charset decoding and existing status/retry handling.
+extraction. The tool result retains the received HTTP status. Oversize responses
+are terminal for all statuses, including 502/503/504. Each retry response has its
+own counter within the existing shared time budget. Streams close on success,
+errors, cancellation and read failures. Responses within the limit retain charset
+decoding and existing status/retry handling.
 
 This limits response retention/consumption, not wire-byte bandwidth or allocations
 inside HTTPX's decompressor; it is not a hard process-memory bound. The final
