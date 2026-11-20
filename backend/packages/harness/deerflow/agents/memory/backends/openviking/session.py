@@ -10,6 +10,7 @@ from typing import Any
 from .config import GENERATED_PEER_PREFIX, is_safe_peer_id
 
 _SESSION_NAMESPACE = "deerflow-openviking-adapter-v1"
+_TENANT_SESSION_NAMESPACE = "deerflow-openviking-adapter-v2"
 _DEFAULT_AGENT_SCOPE = "__default__"
 _CURSOR_SCHEMA_VERSION = 1
 
@@ -40,10 +41,16 @@ def _session_id(
     owner_user_id: str,
     peer_id: str,
     thread_id: str,
+    *,
+    tenant_id: str | None = None,
 ) -> str:
     """Derive one stable OpenViking session for one DeerFlow thread."""
 
-    digest = hashlib.sha256(f"{_SESSION_NAMESPACE}\0{owner_user_id}\0{peer_id}\0{thread_id}".encode()).hexdigest()
+    if tenant_id is None:
+        raw = f"{_SESSION_NAMESPACE}\0{owner_user_id}\0{peer_id}\0{thread_id}"
+    else:
+        raw = f"{_TENANT_SESSION_NAMESPACE}\0{tenant_id}\0{owner_user_id}\0{peer_id}\0{thread_id}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"df_{digest[:48]}"
 
 
