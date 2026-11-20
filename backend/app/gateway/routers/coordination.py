@@ -56,7 +56,7 @@ async def create_worker_task(body: CreateWorkerTask, request: Request):
 async def get_worker_task(task_id: str, request: Request):
     service, owner, _runs = worker_context(request)
     try:
-        return await service.repo.view(owner, task_id)
+        return await service.view(owner, task_id)
     except TaskNotFound as exc:
         raise HTTPException(404, "Task not found") from exc
 
@@ -64,12 +64,13 @@ async def get_worker_task(task_id: str, request: Request):
 @router.post("/{task_id}/inputs")
 @require_permission("runs", "create")
 async def add_worker_input(task_id: str, body: WorkerInput, request: Request):
-    service, owner, runs = worker_context(request)
+    service, owner, _runs = worker_context(request)
     try:
+        runs, grant_id = await service.authority(owner, task_id)
         item = await service.repo.append_input(owner, task_id, request_id="input:" + sha256(body.request_id.encode()).hexdigest(), content=body.content)
-        service.watch(runs, owner, task_id)
+        service.watch(runs, owner, task_id, grant_id)
         return item
-    except (TaskNotFound, TaskConflict) as exc:
+    except (TaskNotFound, TaskConflict, AgentRunError) as exc:
         raise worker_error(exc) from exc
 
 
@@ -94,6 +95,27 @@ async def cancel_worker_task(task_id: str, body: CancelTask, request: Request, r
     if task["status"] == TaskStatus.CANCELLING:
         response.status_code = 202
     return task
+
+
+@router.put("/{task_id}/authorization")
+@require_permission("runs", "create")
+async def authorize_worker_task(task_id: str, request: Request):
+    service, owner, runs = worker_context(request)
+    try:
+        return await service.authorize(runs, owner, task_id)
+    except (TaskNotFound, TaskConflict, AgentRunError) as exc:
+        raise worker_error(exc) from exc
+
+
+@router.delete("/{task_id}/authorization", status_code=204)
+@require_permission("runs", "cancel")
+async def revoke_worker_task(task_id: str, request: Request):
+    service, owner, _runs = worker_context(request)
+    try:
+        await service.repo.set_grant(owner, task_id, None)
+    except (TaskNotFound, TaskConflict) as exc:
+        raise worker_error(exc) from exc
+    return Response(status_code=204)
 
 
 @router.get("/{task_id}/artifacts")

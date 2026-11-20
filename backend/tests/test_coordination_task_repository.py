@@ -176,25 +176,27 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
     await asyncio.to_thread(command.upgrade, config, "0057_coordination_workers")
+    repo = CoordinationTaskRepository(async_sessionmaker(engine))
+    task = await repo.create("alice", request_id="root", objective="Test the upgraded schema")
+    await asyncio.to_thread(command.upgrade, config, "0058_coordination_grants")
     async with engine.connect() as conn:
 
         def diff(sync):
             context = MigrationContext.configure(
                 sync,
-                opts={"compare_type": True, "include_object": lambda _, name, kind, *_args: kind != "table" or name in {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts"}},
+                opts={"compare_type": True, "include_object": lambda _, name, kind, *_args: kind != "table" or name in {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts", "coord_task_grants"}},
             )
             return compare_metadata(context, Base.metadata)
 
         assert await conn.run_sync(diff) == []
-    repo = CoordinationTaskRepository(async_sessionmaker(engine))
-    task = await repo.create("alice", request_id="root", objective="Test the upgraded schema")
+    assert (await repo.get("alice", task["id"]))["status"] == TaskStatus.QUEUED
     await repo.append_input("alice", task["id"], request_id="update", content="Record an input")
     await asyncio.to_thread(command.downgrade, config, "0055_thread_shares")
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
     assert "threads_meta" in tables
-    assert not {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts"} & tables
-    await asyncio.to_thread(command.upgrade, config, "0057_coordination_workers")
+    assert not {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts", "coord_task_grants"} & tables
+    await asyncio.to_thread(command.upgrade, config, "0058_coordination_grants")
     assert (await repo.create("alice", request_id="root", objective="After re-upgrade"))["status"] == TaskStatus.QUEUED
 
 
@@ -246,3 +248,33 @@ async def test_worker_admission_is_atomic_with_cancellation_and_replay(database)
         assert (receipt["status"], receipt["run_id"]) == ("admitted", "native")
     with pytest.raises(ConflictError):
         await runs.create_thread_operation_atomic("late", **kwargs, idempotency_key=RUN_KEY_PREFIX + uuid4().hex)
+
+
+@pytest.mark.asyncio
+async def test_worker_admission_rechecks_grant_generation_and_session_version(database):
+    from time import time
+
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, RUN_KEY_PREFIX, CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.runtime.runs.manager import ConflictError
+
+    engine, dialect, schema = database
+    await bootstrap.bootstrap_schema(engine, backend=dialect, postgres_schema=schema)
+    sessions = async_sessionmaker(engine)
+    workers, runs = CoordinationWorkerRepository(sessions), RunRepository(sessions)
+    async with sessions.begin() as session:
+        session.add(UserRow(id="alice", email="alice@example.com"))
+    task = await workers.create("alice", request_id="grant", objective="Review")
+    grant = {"id": "old", "authority": {"token_version": 0, "source": "session", "permissions": ["runs:create"]}, "channel": None, "expires_at": time() + 100}
+    worker, execution, _ = await workers.prepare("alice", task["id"], "lead_agent", initial_grant=grant)
+    kwargs = dict(thread_id=worker["thread_id"], user_id="alice", owner_worker_id="worker", lease_expires_at=None, idempotency_key=RUN_KEY_PREFIX + execution["id"])
+    async with sessions.begin() as session:
+        (await session.get(UserRow, "alice")).token_version = 1
+    with pytest.raises(ConflictError, match="authorization"):
+        await runs.create_thread_operation_atomic("stale-session", **kwargs, metadata={RUN_GRANT_METADATA: "old"})
+    await workers.set_grant("alice", task["id"], {**grant, "id": "new", "authority": {**grant["authority"], "token_version": 1}})
+    with pytest.raises(ConflictError, match="authorization"):
+        await runs.create_thread_operation_atomic("stale-grant", **kwargs, metadata={RUN_GRANT_METADATA: "old"})
+    await runs.create_thread_operation_atomic("authorized", **kwargs, metadata={RUN_GRANT_METADATA: "new"})
+    assert (await workers.view("alice", task["id"]))["execution"]["run_id"] == "authorized"
