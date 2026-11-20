@@ -38,6 +38,7 @@ URL_USERINFO_ERROR = "base_url must not contain username or password information
 ENV_TEMPLATE_PLACEHOLDERS = frozenset(
     {
         "your-anthropic-auth-token",
+        "your-boxd-api-key",
         "your-claude-code-oauth-token",
         "your-deepseek-api-key",
         "your-dingtalk-client-id",

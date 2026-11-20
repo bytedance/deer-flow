@@ -35,9 +35,11 @@ make format
 make test-live          # calls real APIs; needs DEER_FLOW_RUN_LIVE_TESTS=1
 ```
 
-Run `make test` and `make test-blocking-io` before and after a change. Every
-feature and bug fix ships with a test in `tests/`. Live tests stay opt-in, so the
-default suite needs no network and no API key.
+Run `make test` and `make test-blocking-io` before and after a change. Cover
+behavior changes in the owning module's existing suite under `tests/` rather
+than opening a new file per fix, and update or delete superseded tests in the
+same change. Live tests stay opt-in, so the default suite needs no network and
+no API key.
 
 ## Rules
 

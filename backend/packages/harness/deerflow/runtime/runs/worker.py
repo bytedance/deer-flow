@@ -359,6 +359,7 @@ async def _persist_delivery_receipt(
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR = "Scheduled goal cleanup failed"
 _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
 # Stream error frames and the /wait error envelope share one name for a run that
 # ends in error without an exception; the Gateway spells it the same way.
@@ -1052,6 +1053,8 @@ async def run_agent(
         lead_task_outcome,
         notify_task_start,
         notify_task_stop,
+        read_only_copy,
+        stopped_task_info,
     )
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
@@ -1274,6 +1277,7 @@ async def run_agent(
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
+                metadata=read_only_copy(record.metadata),
             )
             task_store = ExtensionData(task_id)
             # Seed the identity for every hook handed this store, not only
@@ -2072,7 +2076,9 @@ async def run_agent(
 
                 # A rejected resume has not written state; compensating it through
                 # the state-only graph would itself discard the pending Sends.
-                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_resume_rejected:
+                # A native pause has not failed: restoring the pre-run checkpoint
+                # would drop the edit and strand the interrupt behind the new head.
+                if not record.ownership_lost and _is_edit_replay_run(record) and record.status not in (RunStatus.success, RunStatus.waiting_for_input) and not checkpoint_resume_rejected:
                     if not record.finalizing:
                         await run_manager.set_finalizing(run_id, True)
                     try:
@@ -2180,7 +2186,10 @@ async def run_agent(
                         deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(cleanup_task, deferred_finalization_interrupt)
                     except Exception:
                         logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
-                        await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
+                        await run_manager.set_status(run_id, RunStatus.error, error=_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, persist=False)
+                        # Same invariant as the receipt failure above: the record
+                        # is now `error`, so the stream must not end as a success.
+                        terminal_error_frame = {"message": _SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
                     try:
@@ -2250,11 +2259,12 @@ async def run_agent(
                     except Exception:
                         logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
 
-                if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+                needs_local_title = record.status == RunStatus.interrupted or (record.status == RunStatus.error and getattr(record, "stop_reason", None) == _RECURSION_CAPPED_STOP_REASON)
+                if started and not record.ownership_lost and checkpointer is not None and needs_local_title and not _is_edit_replay_run(record):
                     try:
                         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                         if not await run_manager.has_later_started_run(thread_id, run_id):
-                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input, accessor=accessor)
                     except Exception:
                         logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
@@ -2328,7 +2338,13 @@ async def run_agent(
                         notify_task_stop(
                             extensions,
                             task_store,
-                            task_info,
+                            stopped_task_info(
+                                task_info,
+                                status=record.status.value,
+                                error=record.error,
+                                goal_verdict=record.goal_verdict,
+                                persisted=not record.ownership_lost and getattr(record, "terminal_status_persisted", True),
+                            ),
                             lead_task_outcome(
                                 aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
                                 succeeded=record.status == RunStatus.success,
@@ -2414,7 +2430,12 @@ async def run_agent(
 
                 terminal_stream_authorized = not record.ownership_lost and record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True)
                 if terminal_stream_authorized:
-                    if terminal_error_frame is not None:
+                    # A staged frame predates the final outcome, and a cancellation
+                    # can still win after it was staged: an interrupt replaces the
+                    # status and a rollback replaces the message (both can land
+                    # while scheduled-goal cleanup runs). Publish only the error
+                    # the record actually committed.
+                    if terminal_error_frame is not None and record.status == RunStatus.error and record.error == terminal_error_frame.get("message"):
                         await bridge.publish(
                             run_id,
                             "error",
@@ -3759,8 +3780,8 @@ async def _persist_run_duration(
     )
 
 
-async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:
-    """Persist a local fallback title for interrupted first-turn runs.
+async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None, accessor: CheckpointStateAccessor | None = None) -> str | None:
+    """Persist a local fallback title for interrupted or recursion-capped first turns.
 
     Returns the title that is now persisted (existing or newly written), or
     ``None`` when no checkpoint is available or no title text can be derived.
@@ -3780,6 +3801,10 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
         if existing_title:
             return existing_title
 
+        if ckpt_tuple is not None and accessor is not None and accessor.mode == "delta":
+            # Reconstruct messages at this exact checkpoint before checking which turn stopped.
+            snapshot = await accessor.aget(ckpt_tuple.config)
+            channel_values = snapshot.values
         result = middleware._generate_title_result(_title_generation_state(channel_values, graph_input), allow_partial_exchange=True)
         title = result.get("title") if isinstance(result, dict) else None
         if not title:

@@ -166,6 +166,12 @@ submitted reference with a missing or unrecognized extension raises a clear erro
 before API submission. Filenames must match their contents; image bytes are not
 validated or converted, and provider-specific format restrictions still apply.
 
+The [image-generation skill](../../skills/public/image-generation/SKILL.md#output-handling)
+decodes Gemini base64 image data before opening the output file,
+preserving an existing image when decoding fails. With the legacy MiniMax
+`/v1/image_generation` endpoint, a decode failure can still erase an existing
+output image. Use a fresh `--output-file` path to keep the previous image.
+
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
 The bundled skill-creator trigger evaluator drains CLI output through EOF, so a completed subprocess does not turn a recorded skill trigger into a false negative.
