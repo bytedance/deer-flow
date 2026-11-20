@@ -143,7 +143,9 @@ budget when the request does not include an explicit value. It defaults to
 Valid request values take precedence, while invalid values fall back to the
 configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the
-next request without a Gateway restart.
+next request without a Gateway restart. For long-horizon evaluations, the
+[benchmark recursion profiles](../scripts/benchmark/recursion_profiles/README.md)
+generate reproducible run configs.
 
 A run that reaches its limit ends with status `error` and
 `stop_reason: recursion_capped`. Its error message lists up to five outputs it
