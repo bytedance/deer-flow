@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import errno
+import json
 import logging
 import os
 import re
@@ -26,11 +27,19 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from langgraph.runtime import Runtime
 
 from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
 from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
+from deerflow.config import ExtensionsConfig, SkillsConfig
+from deerflow.config.extensions_config import SkillStateConfig
 from deerflow.config.paths import Paths
+from deerflow.sandbox.middleware import SandboxMiddleware
+from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
+from deerflow.skills.projection import get_thread_skill_projection_paths
+from deerflow.skills.storage import get_or_new_user_skill_storage
 
 
 @dataclass
@@ -254,12 +263,13 @@ class _TerminalApiError(RuntimeError):
 
 def _stub_config(attrs: dict[str, Any] | None = None) -> types.SimpleNamespace:
     values = {"idle_timeout": 0, **(attrs or {})}
-    return types.SimpleNamespace(sandbox=types.SimpleNamespace(**values))
+    return types.SimpleNamespace(sandbox=types.SimpleNamespace(**values), skills=SkillsConfig())
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, *, sdk: _FakeSandboxClass | None = None, config: dict[str, Any] | None = None) -> tuple[OpenSandboxProvider, _FakeSandboxClass]:
     fake_sdk = sdk or _FakeSandboxClass()
     monkeypatch.setattr("deerflow.community.opensandbox.provider.get_app_config", lambda: _stub_config(config))
+    monkeypatch.setattr(OpenSandboxProvider, "_prepare_new_skill_view", lambda *a, **kw: None)
     monkeypatch.setattr(
         "deerflow.community.opensandbox.provider._import_sdk",
         lambda: (fake_sdk, _FakeConnectionConfig, _FakeRunCommandOpts),
@@ -537,6 +547,196 @@ def test_release_and_same_scope_warm_reclaim(monkeypatch: pytest.MonkeyPatch) ->
     assert len(sdk.create_calls) == 1
     assert sdk.remotes[0].commands.calls[-1][0] == "true"
     provider.shutdown()
+
+
+@pytest.fixture
+def opensandbox_skill_view(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    shell = shutil.which("sh")
+    if os.name != "posix" or shell is None:
+        pytest.skip("requires a POSIX remote filesystem and shell")
+    paths = Paths(base_dir=tmp_path / "host")
+    canonical = tmp_path / "skills"
+    remote_roots = tmp_path / "remote"
+    remote_roots.mkdir()
+    skills_root = "/mnt/team skills"
+    config = _stub_config()
+    config.skills = SkillsConfig(path=str(canonical), container_path=skills_root)
+    extensions = ExtensionsConfig(skills={"disabled": SkillStateConfig(enabled=False)})
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.extensions_config.ExtensionsConfig.from_file", lambda *a, **kw: extensions)
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: extensions)
+
+    def create_remote(index):
+        remote = _FakeRemote(f"remote-{index}")
+        remote.skill_root = (remote_roots / remote.id).resolve()
+        run_fallback = remote.commands.run
+
+        def run(command, *, opts=None):
+            if skills_root not in command:
+                return run_fallback(command, opts=opts)
+            command = command.replace(shlex.quote(skills_root), shlex.quote(str(remote.skill_root)))
+            command = command.replace(skills_root + "/", str(remote.skill_root) + "/")
+            proc = subprocess.run([shell, "-c", command], capture_output=True, text=True, encoding="utf-8", check=False, timeout=5)
+            return _execution(stdout=tuple(proc.stdout.splitlines()), stderr=(proc.stderr,), exit_code=proc.returncode)
+
+        def write(path, data, *, mode):
+            remote.files.calls.append(("write_file", path))
+            target = remote.skill_root / path.removeprefix(skills_root + "/")
+            target.write_bytes(data)
+            target.chmod(int(str(mode), 8))
+
+        remote.commands.run = run
+        remote.files.write_file = write
+        return remote
+
+    sdk = _FakeSandboxClass(create_remote)
+    monkeypatch.setattr("deerflow.community.opensandbox.provider.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.sandbox.middleware.authorize_sandbox_execution", lambda **_: None)
+    monkeypatch.setattr("deerflow.community.opensandbox.provider._import_sdk", lambda: (sdk, _FakeConnectionConfig, _FakeRunCommandOpts))
+    provider = OpenSandboxProvider()
+    set_sandbox_provider(provider)
+
+    def skill(name, *, owner=None):
+        root = canonical / "public" if owner is None else paths.user_custom_skills_dir(owner)
+        file = root / name / "SKILL.md"
+        file.parent.mkdir(parents=True)
+        file.write_text(f"---\nname: {name}\ndescription: Demo skill\n---\n\n{name}\n", encoding="utf-8")
+        return file.parent
+
+    try:
+        yield types.SimpleNamespace(provider=provider, sdk=sdk, paths=paths, config=config, skill=skill)
+    finally:
+        reset_sandbox_provider()
+        provider.shutdown()
+
+
+def _remote_skills(remote):
+    return {item.parent.name for item in remote.skill_root.rglob("SKILL.md")}
+
+
+def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
+    env = opensandbox_skill_view
+    package = env.skill("alpha")
+    helper = package / "helper's script"
+    helper.write_bytes(b"#!/bin/sh\n")
+    helper.chmod(0o755)
+    env.skill("beta")
+    env.skill("disabled")
+    env.skill("alice-only", owner="alice")
+    env.skill("bob-only", owner="bob")
+
+    alice_id = env.provider.acquire("thread", user_id="alice")
+    alice = env.sdk.remotes[0]
+    assert _remote_skills(alice) == {"alpha", "beta", "alice-only"}
+    assert (alice.skill_root / "public" / "alpha" / helper.name).read_bytes() == helper.read_bytes()
+    assert os.access(alice.skill_root / "public" / "alpha" / helper.name, os.X_OK)
+    bob_id = env.provider.acquire("thread", user_id="bob")
+    bob = env.sdk.remotes[1]
+    assert bob_id != alice_id
+    assert _remote_skills(bob) == {"alpha", "beta", "bob-only"}
+    bob_projection = get_thread_skill_projection_paths(get_or_new_user_skill_storage("bob", app_config=env.config), "thread")
+    with pytest.raises(RuntimeError, match="scope"):
+        env.provider.sync_agent_skills(alice_id, thread_id="thread", user_id="bob", projection=bob_projection)
+    with pytest.raises(RuntimeError, match="scope"):
+        env.provider.sync_agent_skills(alice_id, thread_id="thread", user_id="alice", projection=bob_projection)
+    assert _remote_skills(alice) == {"alpha", "beta", "alice-only"}
+    env.provider.release(alice_id)
+
+    for allowlist, expected in [({"alpha"}, {"alpha"}), (set(), set()), (None, {"alpha", "beta", "alice-only"})]:
+        runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
+        update = SandboxMiddleware(lazy_init=True, available_skills=allowlist).before_agent({}, runtime)
+        assert update == {"sandbox": {"sandbox_id": alice_id}}
+        assert _remote_skills(alice) == expected
+        assert {p.name for p in alice.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
+        env.provider.release(alice_id)
+    assert len(env.sdk.remotes) == 2
+    assert _remote_skills(bob) == {"alpha", "beta", "bob-only"}
+
+
+def test_opensandbox_skill_partial_upload_discards_warm_remote(opensandbox_skill_view, monkeypatch):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    env.skill("beta")
+    allowed = env.skill("allowed", owner="alice")
+    (allowed / "asset").write_bytes(b"asset")
+    sandbox_id = env.provider.acquire("thread", user_id="alice")
+    remote = env.sdk.remotes[0]
+    env.provider.release(sandbox_id)
+    calls = []
+    write = remote.files.write_file
+
+    def fail_second_write(path, data, *, mode):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("upload interrupted")
+        write(path, data, mode=mode)
+
+    monkeypatch.setattr(remote.files, "write_file", fail_second_write)
+    runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
+    middleware = SandboxMiddleware(lazy_init=True, available_skills={"allowed"})
+    with pytest.raises(RuntimeError, match="skill projection"):
+        middleware.before_agent({}, runtime)
+    assert len(calls) == 2
+    assert "sandbox_id" not in runtime.context
+    assert env.provider.get(sandbox_id) is None
+    assert sandbox_id not in env.provider._warm_pool
+    assert remote.destroy_calls == 1
+    assert not (remote.skill_root / "custom" / "allowed").exists()
+
+    assert middleware.before_agent({}, runtime) == {"sandbox": {"sandbox_id": sandbox_id}}
+    assert _remote_skills(env.sdk.remotes[1]) == {"allowed"}
+
+
+def test_opensandbox_skill_sync_refuses_symlinked_remote_root(opensandbox_skill_view, tmp_path):
+    env = opensandbox_skill_view
+    sandbox_id = env.provider.acquire("thread", user_id="alice")
+    remote = env.sdk.remotes[0]
+    env.provider.release(sandbox_id)
+    shutil.rmtree(remote.skill_root)
+    destination = tmp_path / "unmanaged"
+    destination.mkdir()
+    marker = destination / "public"
+    marker.write_bytes(b"keep")
+    remote.skill_root.symlink_to(destination, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="skill projection"):
+        env.provider.acquire("thread", user_id="alice")
+    assert marker.read_bytes() == b"keep"
+    assert remote.destroy_calls == 1
+    assert env.provider.get(sandbox_id) is None
+
+
+@pytest.mark.parametrize("use_server_proxy", [False, True])
+def test_opensandbox_skill_file_binary_sdk_payload(use_server_proxy):
+    pytest.importorskip("opensandbox")
+    from opensandbox.config.connection_sync import ConnectionConfigSync
+    from opensandbox.models.sandboxes import SandboxEndpoint
+    from opensandbox.sync.adapters.filesystem_adapter import FilesystemAdapterSync
+
+    path = "/mnt/team skills/public/example/executable"
+    content = b"\x00\xff\r\n"
+    requests = []
+
+    def reply(request):
+        requests.append(request)
+        assert request.url.path.endswith("/files/upload")
+        body = request.read()
+        assert content in body
+        metadata = json.dumps({"path": path, "owner": None, "group": None, "mode": 755}).encode()
+        assert metadata in body
+        return httpx.Response(200)
+
+    remote = _FakeRemote("wire")
+    remote.files = FilesystemAdapterSync(
+        ConnectionConfigSync(transport=httpx.MockTransport(reply), use_server_proxy=use_server_proxy),
+        SandboxEndpoint(endpoint="execd.test"),
+    )
+    try:
+        _box(remote)._upload_skill_file(path, content, executable=True)
+    finally:
+        remote.files._httpx_client.close()
+    assert len(requests) == 1
 
 
 def test_release_mirrors_outputs_for_gateway_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

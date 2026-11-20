@@ -89,6 +89,12 @@ Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
 
+OpenSandbox also uploads enabled skills to `skills.container_path`. An explicit
+Agent skill list replaces the managed skill directories before tools run; an
+empty list exposes no skills there. Switching Agents in the same thread
+refreshes the managed view. It does not delete files already copied to the
+workspace.
+
 The optional [boxd provider](../../backend/packages/harness/deerflow/community/boxd_sandbox/README.md)
 runs each user/thread scope in an isolated boxd machine. A new machine receives
 the thread's files and skills before it is handed out, and release copies
