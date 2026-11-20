@@ -3,16 +3,22 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
 
 # Intentional private import: these tests lock the OpenAI serialization boundary
 # that strict providers reject when assistant tool-call names or arguments are malformed.
 from langchain_openai.chat_models.base import _convert_message_to_dict
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import (
     DanglingToolCallMiddleware,
 )
+from deerflow.agents.thread_state import ThreadState
+from deerflow.models.openai_response import GuardedChatOpenAI
 
 
 def _ai_with_tool_calls(tool_calls):
@@ -39,6 +45,70 @@ def _invalid_tc(name="write_file", tc_id="write_file:36", error="Failed to parse
         "args": '{"description":"write report","path":"/mnt/user-data/outputs/report.md","content":"bad {"json"}"}',
         "error": error,
     }
+
+
+def test_checkpoint_replay_does_not_move_new_tool_result_to_interrupted_call():
+    @tool
+    def earlier() -> str:
+        """Return the earlier result."""
+        return "earlier result"
+
+    @tool
+    def later() -> str:
+        """Return the later result."""
+        return "later result"
+
+    requests = []
+
+    def reply(request):
+        requests.append(json.loads(request.content)["messages"])
+        step = len(requests)
+        message = {"role": "assistant", "content": "done"}
+        if step <= 2:
+            name = ("earlier", "later")[step - 1]
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": name, "arguments": "{}"}}],
+            }
+        return httpx.Response(
+            200,
+            json={
+                "id": f"completion-{step}",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test",
+                "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if step <= 2 else "stop"}],
+            },
+        )
+
+    saver = InMemorySaver()
+    config = {"configurable": {"thread_id": "reused-call-id"}}
+    with httpx.Client(transport=httpx.MockTransport(reply)) as client:
+        model = GuardedChatOpenAI(model="test", api_key="test", http_client=client)
+
+        def build_agent(**kwargs):
+            return create_agent(
+                model,
+                tools=[earlier, later],
+                middleware=[DanglingToolCallMiddleware()],
+                state_schema=ThreadState,
+                checkpointer=saver,
+                **kwargs,
+            )
+
+        paused = build_agent(interrupt_before=["tools"])
+        paused.invoke({"messages": [HumanMessage(content="first", id="first")]}, config)
+        assert paused.get_state(config).next == ("tools",)
+        build_agent().invoke({"messages": [HumanMessage(content="second", id="second")]}, config)
+
+    assert len(requests) == 3
+    wire = requests[-1]
+    tool_results = [(wire[i - 1]["tool_calls"][0]["function"]["name"], msg["content"]) for i, msg in enumerate(wire) if msg["role"] == "tool"]
+    assert len(tool_results) == 2
+    assert tool_results[1] == ("later", "later result")
+    assert tool_results[0][0] == "earlier"
+    assert "interrupted" in tool_results[0][1]
 
 
 class TestBuildPatchedMessagesNoPatch:
