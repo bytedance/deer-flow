@@ -662,7 +662,14 @@ class ThreadHistoryRequest(BaseModel):
     """Request body for checkpoint history."""
 
     limit: int = Field(default=10, ge=1, le=100, description="Maximum entries")
-    before: str | None = Field(default=None, description="Cursor for pagination")
+    before: str | None = Field(
+        default=None,
+        description=(
+            "Inclusive pagination cursor (a checkpoint ID): the response starts with this checkpoint, "
+            "then strictly older ones, up to `limit` entries. Unlike LangGraph's exclusive `before`, "
+            "the cursor checkpoint itself is returned, so skip it when continuing from a previous page."
+        ),
+    )
 
 
 class ThreadBranchRequest(BaseModel):
