@@ -69,6 +69,14 @@ class InboundMessageType(StrEnum):
     COMMAND = "command"
 
 
+@dataclass(frozen=True, slots=True)
+class InboundDedupeClaim:
+    """One admission's immutable cleanup receipt, never provider metadata."""
+
+    key: tuple[str, str, str, str]
+    token: str
+
+
 @dataclass
 class InboundMessage:
     """A message arriving from an IM channel toward the agent dispatcher.
@@ -112,6 +120,8 @@ class InboundMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     dedupe_claimed: bool = False
+    # Manager-owned; copies used by commands or pre-claimed adapters must retain the original receipt.
+    _inbound_dedupe_claim: InboundDedupeClaim | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -338,8 +348,9 @@ class MessageBus:
 
         For an adapter whose side effect a duplicate delivery must not repeat
         (Discord creating a thread): ``False`` means another delivery owns the
-        message. On ``True`` the adapter copies ``msg.dedupe_claimed`` onto the
-        message it publishes, and calls ``release_inbound_claim`` if it never
+        message. On ``True`` the adapter copies ``msg.dedupe_claimed`` and
+        ``msg._inbound_dedupe_claim`` onto the message it publishes, and calls
+        ``release_inbound_claim`` with that claimed message if it never
         publishes one. Without a dispatcher every message may proceed. Must run
         on the Gateway loop, where the dedupe store's engine lives.
         """

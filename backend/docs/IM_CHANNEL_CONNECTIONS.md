@@ -763,7 +763,11 @@ message. A Discord session on every instance receives every message, so the
 adapter claims that key before it creates a Discord thread for the message:
 only the instance that wins the claim creates one. A claimed message that is
 never processed (a failed or cancelled hand-off, a shutdown that discards it
-from the queue) gives the key back, so a peer can still take it.
+from the queue) gives the key back, so a peer can still take it. Cleanup is
+scoped to that admission's `claim_token` receipt, so late failure or
+cancellation cleanup cannot erase a newer admission of the same message within
+the dedupe window (upgrade every PostgreSQL Gateway replica before relying on
+per-admission isolation, since older replicas still delete by message key).
 
 Past the dedupe window, after a restart, or while the dedupe store is down, a
 redelivery still reaches the run request. Every run request for a message
