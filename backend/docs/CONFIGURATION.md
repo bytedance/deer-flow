@@ -996,6 +996,15 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+#### Hosted reader URLs
+
+Jina, Tavily, InfoQuest and the official Exa API accept absolute HTTP(S) URLs
+for `web_fetch`. The tool checks the URL locally before contacting the reader.
+Malformed URLs, embedded user credentials, local hostnames such as `localhost`,
+known metadata hosts and non-public IP literals return a tool error.
+The reader receives an accepted URL exactly as supplied, including its encoded
+path and query string, and resolves the hostname in its own network.
+
 #### Jina fetch retries
 
 Jina's `web_fetch` keeps one attempt by default. Configure retries on its existing

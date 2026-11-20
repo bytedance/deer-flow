@@ -4,7 +4,48 @@ import ipaddress
 
 import pytest
 
-from deerflow.community.url_safety import is_blocked_address, validate_delegated_backend_url, validate_public_http_url
+from deerflow.community.url_safety import is_blocked_address, validate_delegated_backend_url, validate_hosted_fetch_url, validate_public_http_url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "relative/path",
+        "ftp://example.com/report",
+        "https:///report",
+        "https://example.com:invalid/report",
+        "https://example.com:65536/report",
+        "https://example.com/report\n",
+        "https://example.com/one\x7ftwo",
+        "https://reader@example.com/report",
+        "https://reader:password@example.com/report",
+        "http://localhost/",
+        "http://app.localhost./",
+        "http://metadata.google.internal/",
+        "http://192.168.1.1/",
+        "http://[::1]/",
+    ],
+)
+def test_hosted_fetch_rejects_unsupported_targets(url):
+    error = validate_hosted_fetch_url(url)
+
+    assert error is not None
+    assert url not in error
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://docs.example/report%2F2026?sig=Ab%2B0%3D",
+        "http://bücher.example:8080/katalog",
+        "https://8.8.8.8/",
+        "https://[2606:4700:4700::1111]/",
+    ],
+)
+def test_hosted_fetch_accepts_public_targets_without_dns(monkeypatch, url):
+    monkeypatch.setattr("socket.getaddrinfo", lambda *args: pytest.fail("hosted reader target was resolved locally"))
+
+    assert validate_hosted_fetch_url(url) is None
 
 
 @pytest.mark.parametrize(
