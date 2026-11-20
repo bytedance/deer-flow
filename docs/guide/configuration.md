@@ -119,6 +119,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
+   [DeepSeek web search](../../backend/docs/CONFIGURATION.md#deepseek-web-search) uses `deerflow.community.deepseek.tools:web_search_tool`. Configure `DEEPSEEK_API_KEY` in the Gateway environment and replace the active `web_search` entry with the example in `config.example.yaml`. Set `thinking: true` for multi-step thinking search, independently of the main DeerFlow model. The default is `false`. Results include a generated answer and screened, deduplicated source links.
+
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
 
    Several providers, including You.com, GroundRoute, Webz, InfoQuest and Jsonify, initialize HTTPX clients in a worker thread so synchronous TLS trust loading does not block the agent event loop; requests and session cleanup remain asynchronous.

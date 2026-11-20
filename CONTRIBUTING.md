@@ -350,7 +350,7 @@ before review.
 python -m pip install -r tests/skills/requirements.txt
 python -m pytest tests/skills -q
 
-# Default backend tests (four parallel shards; excludes live, blocking-I/O and bundled-extension tests)
+# Default backend tests (six parallel shards matching CI; excludes live, blocking-I/O and bundled-extension tests)
 cd backend
 make test
 
@@ -406,7 +406,7 @@ setup also verifies SSL and SQLite imports before launching fixture gateways.
 
 ### Test and diagnostics notes
 
-Backend `make test` runs four duration-balanced shards concurrently and reports
+Backend `make test` runs six duration-balanced shards concurrently (matching CI) and reports
 failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
 It excludes live external-API, blocking-I/O and bundled-extension coverage.
 Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.

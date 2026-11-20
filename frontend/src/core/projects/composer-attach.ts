@@ -43,6 +43,22 @@ function safeSessionStorage(): Storage | null {
   }
 }
 
+function safeSetItem(storage: Storage, key: string, value: string): void {
+  try {
+    storage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable or full. The caller keeps its in-memory state.
+  }
+}
+
+function safeRemoveItem(storage: Storage, key: string): void {
+  try {
+    storage.removeItem(key);
+  } catch {
+    // Storage can be unavailable. The caller keeps its in-memory state.
+  }
+}
+
 function isAttachment(value: unknown): value is AttachProjectDocumentResult {
   return (
     value !== null &&
@@ -67,13 +83,15 @@ export function stageProjectAttachment(
   if (!storage) {
     return;
   }
-  const pending = readProjectAttachments(threadId).filter(
+  const key = storageKey(threadId);
+  const pending = readStoredAttachments(storage, key);
+  if (pending === null) {
+    return;
+  }
+  const remaining = pending.filter(
     (candidate) => candidate.virtual_path !== attachment.virtual_path,
   );
-  storage.setItem(
-    storageKey(threadId),
-    JSON.stringify([...pending, attachment]),
-  );
+  safeSetItem(storage, key, JSON.stringify([...remaining, attachment]));
 }
 
 /**
@@ -84,11 +102,25 @@ export function stageProjectAttachment(
 export function readProjectAttachments(
   threadId: string,
 ): AttachProjectDocumentResult[] {
-  const storage = safeSessionStorage();
+  return (
+    readStoredAttachments(safeSessionStorage(), storageKey(threadId)) ?? []
+  );
+}
+
+function readStoredAttachments(
+  storage: Storage | null,
+  key: string,
+): AttachProjectDocumentResult[] | null {
   if (!storage) {
-    return [];
+    return null;
   }
-  const raw = storage.getItem(storageKey(threadId));
+  let raw: string | null;
+  try {
+    raw = storage.getItem(key);
+  } catch {
+    // The list is unknown. Mutating callers must leave the stored value intact.
+    return null;
+  }
   if (raw === null) {
     return [];
   }
@@ -103,7 +135,7 @@ export function readProjectAttachments(
   } catch {
     // Corrupt payload: drop it.
   }
-  storage.removeItem(storageKey(threadId));
+  safeRemoveItem(storage, key);
   return [];
 }
 
@@ -121,14 +153,19 @@ export function retireProjectAttachments(
   if (!storage) {
     return;
   }
+  const key = storageKey(threadId);
+  const pending = readStoredAttachments(storage, key);
+  if (pending === null) {
+    return;
+  }
   const sentPaths = new Set(sent.map((attachment) => attachment.virtual_path));
-  const remaining = readProjectAttachments(threadId).filter(
+  const remaining = pending.filter(
     (attachment) => !sentPaths.has(attachment.virtual_path),
   );
   if (remaining.length === 0) {
-    storage.removeItem(storageKey(threadId));
+    safeRemoveItem(storage, key);
   } else {
-    storage.setItem(storageKey(threadId), JSON.stringify(remaining));
+    safeSetItem(storage, key, JSON.stringify(remaining));
   }
 }
 
@@ -149,11 +186,16 @@ export function useStagedProjectAttachments(threadId: string) {
     AttachProjectDocumentResult[]
   >([]);
   const pendingRef = useRef<AttachProjectDocumentResult[]>([]);
+  const loadedThreadRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const pending = readProjectAttachments(threadId);
-    pendingRef.current = pending;
-    setAttachmentsState(pending);
+    const pending = readStoredAttachments(
+      safeSessionStorage(),
+      storageKey(threadId),
+    );
+    loadedThreadRef.current = pending === null ? null : threadId;
+    pendingRef.current = pending ?? [];
+    setAttachmentsState(pendingRef.current);
   }, [threadId]);
 
   const setAttachments = useCallback(
@@ -161,12 +203,13 @@ export function useStagedProjectAttachments(threadId: string) {
       const next =
         typeof value === "function" ? value(pendingRef.current) : value;
       pendingRef.current = next;
-      const storage = safeSessionStorage();
+      const storage =
+        loadedThreadRef.current === threadId ? safeSessionStorage() : null;
       if (storage) {
         if (next.length === 0) {
-          storage.removeItem(storageKey(threadId));
+          safeRemoveItem(storage, storageKey(threadId));
         } else {
-          storage.setItem(storageKey(threadId), JSON.stringify(next));
+          safeSetItem(storage, storageKey(threadId), JSON.stringify(next));
         }
       }
       setAttachmentsState(next);

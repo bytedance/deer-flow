@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.benchmark
+
 
 def _load_module(name: str, relative: str):
     path = Path(__file__).resolve().parents[1] / relative

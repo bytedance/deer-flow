@@ -2818,11 +2818,15 @@ class ChannelManager:
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
             # for the dedupe TTL -- unless the run may already be executing.
+            # Decided from this error, before the reply, so a shutdown that
+            # cancels the reply cannot turn a rejected run into a kept key.
             # Stale /model pin admission failures are handled at the
             # run-creation sites, which know the selection the run used.
-            if not self._keep_dedupe_key_after(msg, exc):
-                await self._release_inbound_dedupe_key(msg)
-            await self._send_error(msg, "An internal error occurred. Please try again.")
+            await self._send_error_then_release_dedupe(
+                msg,
+                "An internal error occurred. Please try again.",
+                release=not self._keep_dedupe_key_after(msg, exc),
+            )
 
     # -- chat handling -----------------------------------------------------
 
@@ -3497,16 +3501,14 @@ class ChannelManager:
                     logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
                     if policy.buffer_followups_on_busy:
                         self._buffer_followup(thread_id, msg)
-                    else:
-                        # Swallowed like the generic handler would not be: release the
-                        # key so the provider's redelivery can retry once the thread
-                        # frees, instead of being dropped for the dedupe TTL.
-                        await self._release_inbound_dedupe_key(msg)
-                    await self._send_error(msg, THREAD_BUSY_MESSAGE)
+                    # Swallowed like the generic handler would not be: release the
+                    # key so the provider's redelivery can retry once the thread
+                    # frees, instead of being dropped for the dedupe TTL. A
+                    # buffered follow-up keeps it.
+                    await self._send_error_then_release_dedupe(msg, THREAD_BUSY_MESSAGE, release=not policy.buffer_followups_on_busy)
                     return
                 if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
-                    await self._send_error(msg, recovery.text)
-                    await self._release_inbound_dedupe_key(msg)
+                    await self._send_error_then_release_dedupe(msg, recovery.text)
                     return
                 raise
             _note_run_confirmed()
@@ -3538,20 +3540,16 @@ class ChannelManager:
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
                 # Same reason as the fire-and-forget branch above: this error is
                 # handled here rather than re-raised, so release explicitly.
-                await self._release_inbound_dedupe_key(msg)
-                await self._send_error(msg, THREAD_BUSY_MESSAGE)
+                await self._send_error_then_release_dedupe(msg, THREAD_BUSY_MESSAGE)
                 return
             if step_limit_text := _step_limit_text(exc):
                 _note_run_confirmed()
                 logger.warning("[Manager] run stopped at its step limit: thread_id=%s", thread_id)
-                await self._send_error(msg, step_limit_text)
-                # The run ended, as after a terminal error frame: release the key
-                # only after the reply, so a redelivery cannot overtake it.
-                await self._release_inbound_dedupe_key(msg)
+                # The run ended, as after a terminal error frame: release the key.
+                await self._send_error_then_release_dedupe(msg, step_limit_text)
                 return
             if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
-                await self._release_inbound_dedupe_key(msg)
-                await self._send_error(msg, recovery.text)
+                await self._send_error_then_release_dedupe(msg, recovery.text)
                 return
             raise
         _note_run_confirmed()
@@ -4383,6 +4381,28 @@ class ChannelManager:
         return str(data)
 
     # -- error helper ------------------------------------------------------
+
+    async def _send_error_then_release_dedupe(self, msg: InboundMessage, error_text: str, *, release: bool = True) -> None:
+        """Send a failed run's reply, then release *msg*'s dedupe key if *release*.
+
+        The release comes after the reply, so a provider redelivery cannot
+        overtake it. The caller decides *release* from the run's own failure;
+        a reply that raises or is cancelled (shutdown cancels the worker while
+        the channel send is in flight) still releases, because the worker's
+        cancellation handler would otherwise read the cancellation as a
+        possibly admitted run and keep the key for the dedupe TTL.
+        """
+        try:
+            await self._send_error(msg, error_text)
+        except BaseException:
+            if release:
+                try:
+                    await self._release_inbound_dedupe_key(msg)
+                except Exception:
+                    logger.exception("[Manager] failed to release inbound dedupe key after a failed reply")
+            raise
+        if release:
+            await self._release_inbound_dedupe_key(msg)
 
     async def _send_error(self, msg: InboundMessage, error_text: str) -> None:
         outbound = OutboundMessage(
