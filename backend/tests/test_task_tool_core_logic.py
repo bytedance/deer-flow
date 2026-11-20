@@ -1756,6 +1756,55 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     assert events[-1]["type"] == "task_timed_out"
 
 
+def test_polling_timeout_rechecks_terminal_status_after_final_sleep(monkeypatch):
+    """A subagent that finishes during the final poll sleep is not reported stuck."""
+    config = _make_subagent_config()
+    config.timeout_seconds = 1
+    events = []
+    completed = False
+    poll_sleeps = 0
+
+    monkeypatch.setattr(task_tool_module, "configured_subagent_queue_timeout_seconds", lambda: 300)
+    budget = task_tool_module._main_wait_poll_budget(config.timeout_seconds)
+
+    async def final_sleep_wins(seconds):
+        nonlocal completed, poll_sleeps
+        if seconds == 5:
+            poll_sleeps += 1
+            if poll_sleeps >= budget + 1:
+                completed = True
+
+    def current_result(_):
+        if completed:
+            return _make_result(FakeSubagentStatus.COMPLETED, result="done")
+        return _make_result(FakeSubagentStatus.RUNNING)
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name, **_kwargs: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", current_result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", final_sleep_wins)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    output = _run_task_tool(
+        runtime=_make_runtime(),
+        description="finish during the final sleep",
+        prompt="complete at the boundary",
+        subagent_type="general-purpose",
+        tool_call_id="tc-terminal-during-sleep",
+    )
+
+    message = _task_tool_message(output)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert message.content == "Task Succeeded. Result: done"
+    assert events[-1]["type"] == "task_completed"
+
+
 def test_cleanup_called_on_completed(monkeypatch):
     """Verify cleanup_background_task is called when task completes."""
     config = _make_subagent_config()

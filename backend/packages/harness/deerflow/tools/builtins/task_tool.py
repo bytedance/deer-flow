@@ -1434,6 +1434,17 @@ async def task_tool(
             # Set to queue wait + execution timeout + 60s buffer, in 5s poll intervals
             # This catches edge cases where the background task gets stuck
             if poll_count > max_poll_count:
+                # A terminal write can land during the final sleep. Re-read
+                # before declaring a timeout so a finished subagent is not
+                # reported as stuck and cancelled.
+                result = get_background_task_result(execution_id)
+                if result is None or result.status in {
+                    SubagentStatus.COMPLETED,
+                    SubagentStatus.FAILED,
+                    SubagentStatus.CANCELLED,
+                    SubagentStatus.TIMED_OUT,
+                }:
+                    continue
                 # Report the window this poller actually waited: the execution
                 # timeout alone understates it by the whole queue allowance.
                 timeout_minutes = int(max_poll_count * _SUBAGENT_POLL_INTERVAL_SECONDS // 60)
