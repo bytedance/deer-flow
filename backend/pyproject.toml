@@ -90,6 +90,7 @@ markers = [
     "integration: tests that require an external service (e.g. Redis); skipped when unavailable",
     "live: tests that call real external APIs and require explicit opt-in",
     "bundled_extension: behavior tests owned by a bundled extension example; excluded from the core shards and run by the bundled extension CI job",
+    "benchmark: tests for offline benchmark scripts under backend/scripts/benchmark/; excluded from the core shards and run by the benchmark CI job",
 ]
 
 [tool.uv]

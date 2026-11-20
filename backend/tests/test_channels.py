@@ -1673,6 +1673,182 @@ class TestChannelManager:
             else:
                 CHANNEL_RUN_POLICY[channel_name] = original
 
+    @staticmethod
+    def _thread_busy_conflict():
+        from langgraph_sdk.errors import ConflictError
+
+        request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs")
+        return ConflictError(
+            "Thread is already running a task.",
+            response=httpx.Response(409, request=request),
+            body={"message": "Thread is already running a task."},
+        )
+
+    @staticmethod
+    def _failed_run_inbound(method: str, channel_name: str) -> InboundMessage:
+        if method == "create":
+            return InboundMessage(channel_name=channel_name, chat_id="owner/repo", user_id="dev", owner_user_id="agent-owner-1", workspace_id="owner/repo", text="hi", metadata={"message_id": "delivery-1:dev:agent"})
+        return InboundMessage(channel_name=channel_name, chat_id="wx_user_1", user_id="wx_user_1", text="hi", metadata={"message_id": "m-1"})
+
+    _HANDLED_RUN_ERRORS = {
+        # case id: (client method, exception factory, stale /model pin recovery, reply text)
+        "wait-generic-error": ("wait", lambda: RuntimeError("boom"), False, "An internal error occurred. Please try again."),
+        "wait-thread-busy": ("wait", "busy", False, None),
+        "wait-stale-pin": ("wait", lambda: RuntimeError("model gone"), True, "pin reset"),
+        "wait-step-limit": ("wait", lambda: Exception("GraphRecursionError: The run stopped at its step limit."), False, "The run stopped at its step limit."),
+        "fire-and-forget-thread-busy": ("create", "busy", False, None),
+        "fire-and-forget-stale-pin": ("create", lambda: RuntimeError("model gone"), True, "pin reset"),
+    }
+
+    @pytest.mark.parametrize("case", list(_HANDLED_RUN_ERRORS))
+    def test_failed_run_reply_is_published_before_dedupe_release(self, tmp_path, monkeypatch, case):
+        """A run that failed to start releases its key only after the failure reply.
+
+        Publishing awaits the channel's send. A key released before it lets a
+        provider redelivery start over on another worker while the earlier
+        attempt's reply is still on its way, so the two replies can arrive out
+        of order. The key is still released, so the redelivery retries.
+        """
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+        method, make_exc, stale_pin, reply = self._HANDLED_RUN_ERRORS[case]
+        if make_exc == "busy":
+            make_exc, reply = self._thread_busy_conflict, THREAD_BUSY_MESSAGE
+        channel_name = "wechat"
+        if method == "create":
+            channel_name = "test-fire-and-forget-reply-order"
+            monkeypatch.setitem(
+                CHANNEL_RUN_POLICY,
+                channel_name,
+                ChannelRunPolicy(is_interactive=False, fire_and_forget=True, requires_bound_identity=False, buffer_followups_on_busy=False),
+            )
+
+        def _inbound() -> InboundMessage:
+            return self._failed_run_inbound(method, channel_name)
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "store.json"))
+            key = manager._inbound_dedupe_key(_inbound())
+            replies: list[tuple[str, bool]] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                replies.append((msg.text, key in manager._inbound_dedupe_store._store))
+
+            bus.subscribe_outbound(capture_outbound)
+            manager._client = _make_mock_langgraph_client()
+            run_call = AsyncMock(side_effect=make_exc())
+            setattr(manager._client.runs, method, run_call)
+            if stale_pin:
+                monkeypatch.setattr(manager, "_stale_pin_recovery", AsyncMock(return_value=SimpleNamespace(text="pin reset")))
+            await manager.start()
+            try:
+                await bus.publish_inbound(_inbound())
+                await asyncio.wait_for(bus.join_inbound(), timeout=5)
+                assert replies == [(reply, True)]
+
+                # The key was released after the reply: the redelivery runs again.
+                await bus.publish_inbound(_inbound())
+                await asyncio.wait_for(bus.join_inbound(), timeout=5)
+                assert run_call.call_count == 2
+            finally:
+                await manager.stop()
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        ("case", "key_kept"),
+        [(case, False) for case in _HANDLED_RUN_ERRORS] + [("wait-connect-error", False), ("wait-read-timeout", True)],
+    )
+    def test_shutdown_during_failed_run_reply_keeps_the_release_decision(self, tmp_path, monkeypatch, case, key_kept):
+        """Shutdown cancelling the failure reply must not change whether the key is released.
+
+        A run the Gateway rejected or that ended still releases its key, so the
+        redelivery retries. A ``/wait`` read timeout keeps it, because the run
+        may have been admitted and may still be running.
+        """
+        from app.channels.manager import ChannelManager
+        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+        request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs/wait")
+        transport_errors = {
+            "wait-connect-error": ("wait", lambda: httpx.ConnectError("refused", request=request), False),
+            "wait-read-timeout": ("wait", lambda: httpx.ReadTimeout("timed out", request=request), False),
+        }
+        if case in transport_errors:
+            method, make_exc, stale_pin = transport_errors[case]
+        else:
+            method, make_exc, stale_pin, _ = self._HANDLED_RUN_ERRORS[case]
+        if make_exc == "busy":
+            make_exc = self._thread_busy_conflict
+        channel_name = "wechat"
+        if method == "create":
+            channel_name = "test-fire-and-forget-reply-cancel"
+            monkeypatch.setitem(
+                CHANNEL_RUN_POLICY,
+                channel_name,
+                ChannelRunPolicy(is_interactive=False, fire_and_forget=True, requires_bound_identity=False, buffer_followups_on_busy=False),
+            )
+        msg = self._failed_run_inbound(method, channel_name)
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "store.json"), shutdown_grace_period_seconds=0.05)
+            key = manager._inbound_dedupe_key(msg)
+            assert key is not None
+            reply_started = asyncio.Event()
+
+            async def block_outbound(_: OutboundMessage) -> None:
+                reply_started.set()
+                await asyncio.Event().wait()
+
+            bus.subscribe_outbound(block_outbound)
+            manager._client = _make_mock_langgraph_client()
+            setattr(manager._client.runs, method, AsyncMock(side_effect=make_exc()))
+            if stale_pin:
+                monkeypatch.setattr(manager, "_stale_pin_recovery", AsyncMock(return_value=SimpleNamespace(text="pin reset")))
+            await manager.start()
+            try:
+                await bus.publish_inbound(msg)
+                await asyncio.wait_for(reply_started.wait(), timeout=5)
+            finally:
+                await manager.stop()
+
+            assert (key in manager._inbound_dedupe_store._store) is key_kept
+
+        _run(go())
+
+    @pytest.mark.parametrize("case", ["wait-generic-error", "wait-thread-busy"])
+    def test_failed_run_reply_that_cannot_be_sent_still_releases_dedupe_key(self, tmp_path, monkeypatch, case):
+        """Replying first must not strand the key when the reply itself raises."""
+        from app.channels.manager import ChannelManager
+
+        make_exc = self._thread_busy_conflict if case == "wait-thread-busy" else (lambda: RuntimeError("boom"))
+
+        def _inbound() -> InboundMessage:
+            return InboundMessage(channel_name="wechat", chat_id="wx_user_1", user_id="wx_user_1", text="hi", metadata={"message_id": "m-1"})
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "store.json"))
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.wait = AsyncMock(side_effect=make_exc())
+            monkeypatch.setattr(manager, "_send_error", AsyncMock(side_effect=RuntimeError("channel store unavailable")))
+            await manager.start()
+            try:
+                await bus.publish_inbound(_inbound())
+                await asyncio.wait_for(bus.join_inbound(), timeout=5)
+                assert manager._inbound_dedupe_key(_inbound()) not in manager._inbound_dedupe_store._store
+
+                await bus.publish_inbound(_inbound())
+                await asyncio.wait_for(bus.join_inbound(), timeout=5)
+                assert manager._client.runs.wait.call_count == 2
+            finally:
+                await manager.stop()
+
+        _run(go())
+
     @pytest.mark.asyncio
     async def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
         """A redelivered GitHub webhook must dispatch the agent only once.

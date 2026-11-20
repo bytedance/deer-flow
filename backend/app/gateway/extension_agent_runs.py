@@ -305,11 +305,11 @@ class _BoundAgentRuns:
 
             return await asyncio.to_thread(snapshot)
 
-    async def create_thread(self, *, assistant_id="lead_agent", thread_id=None, metadata=None) -> str:
+    async def create_thread(self, *, assistant_id="lead_agent", thread_id=None, metadata=None, project_id=None) -> str:
         from app.gateway.routers.threads import ThreadCreateRequest, create_thread
 
         async with self._request("threads:write") as request:
-            response = await create_thread(ThreadCreateRequest(assistant_id=assistant_id, thread_id=thread_id, metadata=_json_object(metadata) or {}), request)
+            response = await create_thread(ThreadCreateRequest(assistant_id=assistant_id, thread_id=thread_id, project_id=project_id, metadata=_json_object(metadata) or {}), request)
             return response.thread_id
 
     async def _start(self, *, thread_id, input=None, resume=None, context=None, idempotency_key=None, execution_fence=None, artifact_imports=None):
@@ -349,6 +349,93 @@ class _BoundAgentRuns:
 
     async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None, artifact_imports=None) -> AgentRun:
         return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence, artifact_imports=artifact_imports)
+
+    async def start_coordination_worker(self, *, task_id, execution_id):
+        from app.gateway.run_models import RunCreateRequest
+        from app.gateway.services import start_run
+        from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
+        from deerflow.persistence.coordination.workers import RUN_KEY_PREFIX
+        from deerflow.persistence.thread_meta.base import THREAD_PROJECT_METADATA_KEY
+
+        async with self._request("runs:create") as request:
+            try:
+                worker, frozen, project_id = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
+            except TaskNotFound as exc:
+                raise AgentRunError(404, "Worker task unavailable") from exc
+            except TaskConflict as exc:
+                raise AgentRunError(409, str(exc)) from exc
+        thread_id = worker["thread_id"]
+        async with self._request("runs:create", thread_id) as request:
+            record = await request.app.state.thread_store.get(thread_id, user_id=self._user_id)
+            if record is None or record.get("assistant_id") != worker["assistant_id"] or (record.get("metadata") or {}).get(THREAD_PROJECT_METADATA_KEY) != project_id:
+                raise AgentRunError(409, "Worker thread binding changed")
+            body = RunCreateRequest(
+                assistant_id=worker["assistant_id"],
+                input=None if "command" in frozen else frozen,
+                command=frozen.get("command"),
+                context={"subagent_enabled": True},
+                on_disconnect="continue",
+            )
+            request.state.coordination_execution_id = execution_id
+            record = await start_run(body, thread_id, request, require_existing_thread=True, idempotency_key=RUN_KEY_PREFIX + execution_id)
+            return _view(record)
+
+    async def wait_coordination_worker(self, *, thread_id, run_id, timeout=60):
+        """Observe the committed terminal status, written after the delivery receipt."""
+        from app.gateway.deps import get_run_store
+
+        async with asyncio.timeout(timeout):
+            delay = 0.25
+            while True:
+                async with self._request("runs:read", thread_id) as request:
+                    row = await get_run_store(request).get(run_id, user_id=self._user_id)
+                    if row is None or row["thread_id"] != thread_id:
+                        raise AgentRunError(404, "Worker run unavailable")
+                    if row["status"] not in ("pending", "running"):
+                        return AgentRun(thread_id, run_id, row["status"], row.get("assistant_id"), row.get("stop_reason"))
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 4)
+
+    async def cancel_worker_batch(self, *, thread_id, batch_id):
+        from app.gateway.deps import get_subagent_batch_service
+
+        async with self._request("runs:cancel", thread_id) as request:
+            await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=self._user_id, continuation_authority=self)
+
+    async def coordination_artifacts(self, *, thread_id, run_id):
+        from app.gateway.artifact_archive import MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES
+        from app.gateway.deps import get_run_event_store
+        from app.gateway.extension_artifacts import read_snapshot
+        from app.gateway.routers.artifacts import reserve_artifact_write
+        from deerflow.constants import DELIVERY_PRESENTATION_TOOL_NAMES
+        from deerflow.runtime.runs.manager import ConflictError
+        from deerflow.utils.file_io import await_drained
+
+        async with self._request("runs:read", thread_id) as request:
+            events = await get_run_event_store(request).list_events(thread_id, run_id, event_types=["run.delivery"], limit=2, user_id=self._user_id)
+        if len(events) != 1:
+            raise AgentRunError(409, "Run delivery receipt is unavailable")
+        by_tool = (events[0].get("content") or {}).get("by_tool")
+        if not isinstance(by_tool, dict) or any(not isinstance(paths, list) or any(not isinstance(path, str) for path in paths) for paths in by_tool.values()):
+            raise AgentRunError(409, "Invalid run delivery receipt")
+        paths = dict.fromkeys(path for tool in DELIVERY_PRESENTATION_TOOL_NAMES for path in by_tool.get(tool, []))
+        if not paths:
+            return []
+        if len(paths) > MAX_FILES:
+            raise AgentRunError(422, "Too many task artifacts")
+        artifacts = []
+        remaining = MAX_TOTAL_BYTES
+        async with self._request("threads:read", thread_id) as request:
+            try:
+                async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
+                    for path in paths:
+                        content = await await_drained(read_snapshot(request, self._user_id, thread_id, path, max_bytes=min(MAX_FILE_BYTES, remaining)))
+                        digest = await asyncio.to_thread(hashlib.sha256, content)
+                        artifacts.append((path, digest.hexdigest(), content))
+                        remaining -= len(content)
+            except ConflictError as exc:
+                raise AgentRunError(503, "Worker artifacts are temporarily busy") from exc
+        return artifacts
 
     async def start_batch_followup(self, *, thread_id, batch_id, input, context, config, execution_fence, goal_wakeup=None):
         """Native single follow-up; the existing SQL admission fences cancellation."""
