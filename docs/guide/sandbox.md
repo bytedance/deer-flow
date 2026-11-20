@@ -7,6 +7,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+Local bash tool status follows the process exit code, including timeout failures.
+Successful commands may print `Error:` or JSON containing an `error` field without
+being marked as failed. Output is still subject to the configured redaction and
+size limits; those transformations do not change the execution status.
+
 The optional [Tenki provider](../../backend/packages/harness/deerflow/community/tenki/README.md)
 retains failed termination handles for retry and rejects late acquisitions after
 reset or shutdown. If shutdown reports outstanding work, retry after its SDK

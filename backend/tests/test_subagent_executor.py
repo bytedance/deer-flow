@@ -18,6 +18,8 @@ import asyncio
 import importlib
 import inspect
 import logging
+import os
+import shlex
 import sys
 import threading
 import time
@@ -170,6 +172,13 @@ def _setup_executor_classes():
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
     sandbox_prewarm_module = importlib.import_module("deerflow.sandbox.prewarm")
+    for module_name in (
+        "deerflow.agents.middlewares.tool_call_args",
+        "deerflow.agents.middlewares.tool_error_handling_middleware",
+        "deerflow.sandbox.tools",
+        "deerflow.sandbox.local.local_sandbox",
+    ):
+        importlib.import_module(module_name)
     for module_name in ("deerflow.models.factory", "deerflow.models.openai_codex_provider", "deerflow.agents.assembly_descriptor"):
         importlib.import_module(module_name)
 
@@ -6949,6 +6958,99 @@ class TestBashExecutionHarvest:
         executions = executor_module._harvest_bash_executions(state)
 
         assert executions[0]["status"] == "error"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX shell probe")
+    @pytest.mark.parametrize("passes,reporter_exit_code", [(True, None), (True, 7), (False, None), (False, 0)])
+    def test_provider_exit_code_reaches_parent_acceptance(self, classes, monkeypatch, tmp_path, passes, reporter_exit_code):
+        from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+        from deerflow.sandbox.local import local_sandbox
+        from deerflow.sandbox.tools import _bash_command_result
+        from deerflow.subagents.acceptance_checks import check_acceptance_criteria
+
+        monkeypatch.setattr(local_sandbox, "build_sandbox_env", lambda _injected: {"PATH": os.defpath, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"})
+        test_file = tmp_path / "test_probe.py"
+        test_file.write_text(f"def test_probe():\n    assert {passes}\n", encoding="utf-8")
+        if reporter_exit_code is not None:
+            (tmp_path / "conftest.py").write_text(
+                f"def pytest_unconfigure(config):\n    reporter = config.pluginmanager.get_plugin('terminalreporter')\n    if reporter is not None:\n        reporter.write_line('Exit Code: {reporter_exit_code}')\n",
+                encoding="utf-8",
+            )
+        command = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {shlex.quote(str(test_file))}"
+        sandbox = local_sandbox.LocalSandbox("provider-exit-probe")
+        output = sandbox.execute_command(command, timeout=20)
+        assert output.exit_code == (0 if passes else 1)
+        if reporter_exit_code is not None:
+            assert f"Exit Code: {reporter_exit_code}" in output
+        errors = ToolErrorHandlingMiddleware()
+        request = SimpleNamespace(tool_call={"id": "tc-1", "name": "bash", "args": {"command": command}})
+        message = ToolReceiptMiddleware().wrap_tool_call(
+            request,
+            lambda req: errors.wrap_tool_call(req, lambda _: _bash_command_result(SimpleNamespace(tool_call_id="tc-1"), output, str(output))),
+        )
+        assert message.additional_kwargs["deerflow_tool_receipt"]["status"] == ("success" if passes else "error")
+        # Checkpoint round trips must retain the provider's numeric exit code.
+        message = classes["ToolMessage"].model_validate_json(message.model_dump_json())
+        state = self._final_state(classes)
+        state["messages"][1].tool_calls[0]["args"]["command"] = command
+        state["messages"][2] = message
+        state["sandbox"] = {"sandbox_id": sandbox.id}
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: sandbox))
+
+        executions = importlib.import_module("deerflow.subagents.executor")._harvest_bash_executions(state)
+        assert executions[0]["status"] == ("success" if passes else "error")
+        assert executions[0]["status_marker"] is None
+        verdict = check_acceptance_criteria([f"tests_passed:{command}"], bash_executions=executions)
+        assert verdict["leaves"][0]["checked"] is True
+        assert verdict["all_hold"] is passes
+
+    @pytest.mark.parametrize(
+        "exit_code,output,checked,holds",
+        [
+            (0, "12 passed\nExit Code: 7", True, True),
+            (7, "12 passed\nExit Code: 0", True, False),
+            (-9, "12 passed\nExit Code: 0", True, False),
+            (124, "12 passed\nExit Code: 0", True, False),
+            (0, "1 failed\nExit Code: 7", True, False),
+            (0, "collected 0 items\nExit Code: 7", False, False),
+            (0, "ordinary output\nExit Code: 7", False, False),
+        ],
+    )
+    def test_provider_exit_code_precedes_text_without_bypassing_test_summary(self, classes, monkeypatch, exit_code, output, checked, holds):
+        from deerflow.subagents.acceptance_checks import check_acceptance_criteria
+
+        state = self._final_state(classes)
+        state["messages"][1].tool_calls[0]["args"]["command"] = "pytest -q"
+        state["messages"][2].content = output
+        state["messages"][2].additional_kwargs["deerflow_tool_meta"] = {"source": "tool_return", "status": "success", "exit_code": exit_code}
+        state["sandbox"] = {"sandbox_id": "provider-exit-probe"}
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: SimpleNamespace(persistent_shell_sessions=False)))
+
+        executions = importlib.import_module("deerflow.subagents.executor")._harvest_bash_executions(state)
+        assert executions[0]["status"] == ("success" if exit_code == 0 else "error")
+        assert executions[0]["status_marker"] is None
+        verdict = check_acceptance_criteria(["tests_passed:pytest -q"], bash_executions=executions)
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (checked, holds)
+
+    @pytest.mark.parametrize(
+        "meta",
+        [
+            {"status": "success", "source": "tool_return"},
+            *({"status": "success", "source": "tool_return", "exit_code": code} for code in (None, False, True, "0", 0.0, [], {})),
+            {"status": "success", "source": "content_analysis", "exit_code": 0},
+            {"status": "success", "exit_code": 0},
+            ["malformed metadata"],
+        ],
+    )
+    def test_legacy_or_invalid_provider_exit_code_keeps_text_fallback(self, classes, meta):
+        state = self._final_state(classes)
+        state["messages"][2].content = "12 passed\nExit Code: 7"
+        state["messages"][2].additional_kwargs["deerflow_tool_meta"] = meta
+
+        executions = importlib.import_module("deerflow.subagents.executor")._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+        assert executions[0]["status_marker"] == "Exit Code: 7"
 
     def test_nonzero_exit_code_marker_overrides_meta_success(self, classes, monkeypatch):
         """PR review: a failing test run returns ordinary text ending in
