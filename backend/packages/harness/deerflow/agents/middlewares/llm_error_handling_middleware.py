@@ -24,7 +24,7 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.agents.middlewares.model_response import append_visible_text, finish_reason, has_tool_call_intent, has_visible_content, last_ai_message
+from deerflow.agents.middlewares.model_response import append_visible_text, is_empty_stop_response, last_ai_message
 from deerflow.config.app_config import AppConfig
 from deerflow.models.request_admission import AdmissionError
 from deerflow.models.response_errors import EmptyModelResponseError
@@ -45,14 +45,8 @@ class _CircuitAdmission:
 
 def _raise_for_empty_response(response: ModelCallResult) -> None:
     """在响应写入图状态前把零内容 stop 转换为可重试错误。"""
-    message = last_ai_message(response)
-    if message is None:
-        raise EmptyModelResponseError()
-    if has_visible_content(message) or has_tool_call_intent(message):
-        return
-    reason = finish_reason(message)
-    if reason in (None, "", "stop", "end_turn"):
-        raise EmptyModelResponseError(response_message=message)
+    if is_empty_stop_response(response):
+        raise EmptyModelResponseError(response_message=last_ai_message(response))
 
 
 def _consume_empty_response_retry(request: ModelRequest) -> bool:
