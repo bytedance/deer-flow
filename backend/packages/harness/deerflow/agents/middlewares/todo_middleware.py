@@ -389,8 +389,12 @@ def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
 
     Like the persisted reminder, the framework text stays inside the
     ``<system_reminder>`` block and the caller-influenced items render
-    after it as data, formatted by `_format_todos`. Blocked and waiting
-    items are terminal for this run, so they are not chased here.
+    after it as data, formatted by `_format_todos` — framed with the
+    user-input boundary markers, so they read as user data under the lead
+    prompt's trust rule instead of borrowing framework authority.
+    `_format_todos` already neutralizes forged markers inside item text.
+    Blocked and waiting items are terminal for this run, so they are not
+    chased here.
     """
     incomplete_text = _format_todos(todo for todo in todos if _stored_todo_status(todo) not in _TODO_TERMINAL_STATUSES)
     return (
@@ -399,7 +403,7 @@ def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
         "Please continue working on these tasks. Call `write_todos` to mark items as completed "
         "as you finish them, and only respond when all items are done.\n"
         "</system_reminder>\n\n"
-        f"{incomplete_text}"
+        f"{_USER_INPUT_BEGIN}\n{incomplete_text}\n{_USER_INPUT_END}"
     )
 
 
