@@ -98,6 +98,8 @@ class OpenVikingConfig:
 
         if provider_config and credential_provider is None:
             raise ValueError("OpenViking credential_provider_config requires credential_provider in backend_config")
+        if client_pool and not is_multi_user:
+            raise ValueError("OpenViking client_pool is only supported in multi-user mode with user_credentials or credential_provider")
 
         user_credential_unknowns: list[str] = []
         if is_multi_user:
@@ -271,24 +273,26 @@ def _resolve_user_credentials(raw_user_credentials: dict[str, dict[str, Any]]) -
             raise ValueError(f"OpenViking user_credentials.{uid} must specify exactly one of 'api_key' or 'api_key_env'")
 
         raw_tenant = spec.get("tenant_id")
+        env_name: str | None = None
         if has_env:
             raw_env = spec["api_key_env"]
             if not isinstance(raw_env, str) or not raw_env.strip():
                 raise ValueError(f"OpenViking user_credentials.{uid}.api_key_env must be a non-empty string")
             env_name = raw_env.strip()
-            env_key = os.environ.get(env_name, "").strip()
-            if not env_key:
+            api_key_value = os.environ.get(env_name, "").strip()
+            if not api_key_value:
                 raise ValueError(f"OpenViking USER API key is missing for user {uid!r}; set {env_name}")
+        else:
+            api_key_value = spec["api_key"]
+
+        try:
             cred = OpenVikingCredential(
-                api_key=env_key,
+                api_key=api_key_value,
                 tenant_id=raw_tenant,
                 api_key_env=env_name,
             )
-        else:
-            cred = OpenVikingCredential(
-                api_key=spec["api_key"],
-                tenant_id=raw_tenant,
-            )
+        except ValueError as exc:
+            raise ValueError(f"Invalid OpenViking user_credentials.{uid}: {exc}") from exc
 
         existing_uid = seen_fingerprints.get(cred.key_fingerprint)
         if existing_uid is not None:
