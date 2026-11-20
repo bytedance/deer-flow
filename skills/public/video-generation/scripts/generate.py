@@ -1,11 +1,24 @@
 import base64
 import os
+import re
 import sys
 import time
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
 MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
+GEMINI_API_HOST = "generativelanguage.googleapis.com"
+MINIMAX_VIDEO_HOSTS = {
+    "api.minimaxi.com",
+    "api.minimax.io",
+    "api.minimax.cn",
+    "filecdn.minimax.chat",
+    "cdn.hailuoai.video",
+    "video-product.cdn.minimax.io",
+}
+MINIMAX_OSS_ENDPOINTS = {"oss-cn-wulanchabu.aliyuncs.com", "oss-cn-shanghai.aliyuncs.com"}
+MAX_DOWNLOAD_REDIRECTS = 5
 
 
 def _resolve_provider(override_env: str, existing_provider: str, has_existing_creds: bool) -> str:
@@ -37,6 +50,12 @@ def _check_base_resp(payload: dict) -> None:
         raise Exception(f"MiniMax error {base.get('status_code')}: {base.get('status_msg')}")
 
 
+def _require_success(response: requests.Response) -> None:
+    response.raise_for_status()
+    if not 200 <= response.status_code < 300:
+        raise ValueError(f"Unexpected HTTP status {response.status_code} from video provider")
+
+
 def _guess_mime(image_path: str) -> str:
     ext = os.path.splitext(image_path)[1].lower()
     mime_types = {
@@ -66,8 +85,9 @@ def _poll_video_task(host: str, auth: str, task_id: str, max_attempts: int = 120
             headers={"Authorization": auth},
             params={"task_id": task_id},
             timeout=30,
+            allow_redirects=False,
         )
-        response.raise_for_status()
+        _require_success(response)
         payload = response.json()
         status = payload.get("status")
         if status == "Success":
@@ -91,11 +111,12 @@ def _poll_gemini_operation(api_key: str, operation_name: str, max_attempts: int 
     """
     for _ in range(max_attempts):
         response = requests.get(
-            f"https://generativelanguage.googleapis.com/v1beta/{operation_name}",
+            f"https://{GEMINI_API_HOST}/v1beta/{operation_name}",
             headers={"x-goog-api-key": api_key},
             timeout=30,
+            allow_redirects=False,
         )
-        response.raise_for_status()
+        _require_success(response)
         payload = response.json()
         if not payload.get("done", False):
             time.sleep(interval)
@@ -123,19 +144,58 @@ def _retrieve_file_url(host: str, auth: str, file_id: str) -> str:
         headers={"Authorization": auth},
         params={"file_id": file_id},
         timeout=30,
+        allow_redirects=False,
     )
-    response.raise_for_status()
+    _require_success(response)
     payload = response.json()
     _check_base_resp(payload)
     return payload["file"]["download_url"]
 
 
-def _download(url: str, output_file: str) -> None:
-    response = requests.get(url, timeout=300)
-    response.raise_for_status()
-    _ensure_output_dir(output_file)
-    with open(output_file, "wb") as f:
-        f.write(response.content)
+def _download_host(url: str, *, gemini: bool) -> str:
+    if not isinstance(url, str) or re.search(r"[\x00-\x20\x7f\\]", url):
+        raise ValueError("Invalid video download URL")
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if parsed.scheme != "https" or not host or parsed.netloc.lower() not in {host, f"{host}:443"}:
+        raise ValueError("Video downloads require an HTTPS host on port 443 without user information")
+    if not re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z][a-z0-9-]*", host):
+        raise ValueError("Invalid video download hostname")
+
+    # Only the storage provider controls DNS for bucket endpoints under these
+    # exact suffixes. A bucket name is one DNS label.
+    endpoint = host.partition(".")[2]
+    if gemini:
+        trusted = host in {GEMINI_API_HOST, "storage.googleapis.com"}
+        storage_endpoints = {"storage.googleapis.com"}
+    else:
+        extra_hosts = os.getenv("MINIMAX_VIDEO_DOWNLOAD_HOSTS", "").split(",")
+        trusted = host in MINIMAX_VIDEO_HOSTS or host in {name.strip().lower() for name in extra_hosts}
+        storage_endpoints = MINIMAX_OSS_ENDPOINTS
+    if trusted or endpoint in storage_endpoints:
+        return host
+    raise ValueError(f"Video download host {host!r} is outside the provider allowlist")
+
+
+def _download(url: str, output_file: str, *, gemini_api_key: str = "") -> None:
+    headers = {"x-goog-api-key": gemini_api_key} if gemini_api_key else {}
+    for _ in range(MAX_DOWNLOAD_REDIRECTS + 1):
+        host = _download_host(url, gemini=bool(gemini_api_key))
+        if host != GEMINI_API_HOST:
+            headers = {}
+        response = requests.get(url, headers=headers, timeout=300, allow_redirects=False)
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("Location")
+            if not location:
+                raise ValueError("Video download redirect has no destination")
+            url = urljoin(url, location)
+            continue
+        _require_success(response)
+        _ensure_output_dir(output_file)
+        with open(output_file, "wb") as f:
+            f.write(response.content)
+        return
+    raise ValueError("Too many video download redirects")
 
 
 def _generate_video_minimax(prompt: str, reference_images: list[str], output_file: str) -> str:
@@ -168,8 +228,9 @@ def _generate_video_minimax(prompt: str, reference_images: list[str], output_fil
         headers={"Authorization": auth, "Content-Type": "application/json"},
         json=body,
         timeout=60,
+        allow_redirects=False,
     )
-    response.raise_for_status()
+    _require_success(response)
     payload = response.json()
     _check_base_resp(payload)
     task_id = payload["task_id"]
@@ -183,11 +244,7 @@ def download(url: str, output_file: str) -> None:
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
         raise ValueError("GEMINI_API_KEY is not set")
-    response = requests.get(url, headers={"x-goog-api-key": gemini_api_key}, timeout=300)
-    response.raise_for_status()
-    _ensure_output_dir(output_file)
-    with open(output_file, "wb") as f:
-        f.write(response.content)
+    _download(url, output_file, gemini_api_key=gemini_api_key)
 
 
 def _generate_video_gemini(prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str = "16:9") -> str:
@@ -206,12 +263,13 @@ def _generate_video_gemini(prompt: str, reference_images: list[str], output_file
     if not gemini_api_key:
         raise ValueError("GEMINI_API_KEY is not set")
     response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning",
+        f"https://{GEMINI_API_HOST}/v1beta/models/veo-3.1-generate-preview:predictLongRunning",
         headers={"x-goog-api-key": gemini_api_key, "Content-Type": "application/json"},
         json=request_json,
         timeout=60,
+        allow_redirects=False,
     )
-    response.raise_for_status()
+    _require_success(response)
     data = response.json()
     operation_name = data["name"]
     download_url = _poll_gemini_operation(gemini_api_key, operation_name)

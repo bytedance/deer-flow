@@ -171,6 +171,12 @@ MiniMax uses `MINIMAX_API_HOST` (default `https://api.minimaxi.com`) and
 `MINIMAX_VIDEO_MODEL` (default `MiniMax-Hailuo-2.3`). It uses the first reference
 image as `first_frame_image`.
 
+The skill downloads video files from allowlisted HTTPS hosts on port 443.
+MiniMax deployments using additional storage hosts can set
+`MINIMAX_VIDEO_DOWNLOAD_HOSTS` to a comma-separated list of exact hostnames
+approved by the operator. Configure these names in the deployment environment.
+Every redirect must also use an approved host.
+
 Set `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds) to
 override the API defaults. With Hailuo 2.3, use `768P` at 6 or 10 seconds, or
 `1080P` at 6 seconds. For a draft and final pass, start at `768P` and switch to
