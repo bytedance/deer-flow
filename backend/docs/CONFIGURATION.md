@@ -1027,6 +1027,11 @@ Authentication, payment/credit and other statuses remain terminal even with hint
 error-body prose never enables retries. Empty successful responses, read/write
 timeouts and arbitrary exceptions are not retried.
 
+When Jina returns a terminal HTTP error, `web_fetch` passes its status code to
+the harness for error classification. On HTTP 401, the tool result points to
+`JINA_API_KEY` and advises the agent to use another available source or report
+the fetch limitation.
+
 `Retry-After` accepts non-negative ASCII integer seconds or an HTTP-date
 (including obsolete HTTP date forms); past dates mean a zero server floor.
 Signed/fractional delays and non-HTTP dates are invalid. Local backoff ceilings
