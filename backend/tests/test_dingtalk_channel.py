@@ -1265,6 +1265,15 @@ class TestAdaptMarkdownForDingtalk:
 
 
 class TestConvertMarkdownTable:
+    @pytest.mark.parametrize("separator", ["|---|---|", "|---|---|---|---|", "|---||---|"])
+    def test_invalid_three_column_table_preserves_text(self, separator):
+        text = f"| A | B | C |\n{separator}\n| 1 | 2 | 3 |"
+        assert _adapt_markdown_for_dingtalk(text) == text
+
+    def test_table_in_fenced_code_remains_literal(self):
+        text = "```text\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        assert _adapt_markdown_for_dingtalk(text) == "> **text**\n> | A | B |\n> |---|---|\n> | 1 | 2 |\n"
+
     def test_tab_padded_delimiter_cells(self):
         text = "| Key | Value |\n|\t---\t|\t:---:\t|\n| a | b |"
         assert _adapt_markdown_for_dingtalk(text) == "> **Key**: a\n> **Value**: b\n"

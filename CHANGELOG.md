@@ -51,6 +51,8 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **dingtalk:** Render tables with tab-padded delimiters and preserve pipe-delimited text when the delimiter cells are malformed or differ in count from the header.
+
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
