@@ -93,6 +93,11 @@ make test-blocking-io
   `PATHEXT` lookup on Windows, so a bare npm launcher is not found.
 - **Results contain message chunks only.** Thought chunks stay internal.
 
+## Run inspection
+
+`inspect_run_status` counts todo mappings with missing or null status as
+pending. Keep the snapshot free of message and todo text.
+
 ## Web search recency
 
 `time_range` maps to a different parameter for each provider, and omitting it
