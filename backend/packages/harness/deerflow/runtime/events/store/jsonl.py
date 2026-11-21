@@ -375,6 +375,8 @@ class JsonlRunEventStore(RunEventStore):
             raise
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
+        if limit == 0:
+            return []
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
         messages = [e for e in all_events if e.get("category") == "message"]
 
@@ -439,6 +441,8 @@ class JsonlRunEventStore(RunEventStore):
         return events[:limit]
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
+        if limit == 0:
+            return []
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
         filtered = [e for e in events if e.get("category") == "message"]
         if before_seq is not None:

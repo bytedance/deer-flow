@@ -172,6 +172,8 @@ class RunEventStore(abc.ABC):
     ) -> list[dict]:
         """Return displayable messages (category=message) for a thread, ordered by seq ascending.
 
+        A zero ``limit`` returns no records, with or without cursors.
+
         Supports bidirectional cursor pagination:
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
@@ -285,6 +287,8 @@ class RunEventStore(abc.ABC):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
+
+        A zero ``limit`` returns no records, with or without cursors.
 
         Supports bidirectional cursor pagination:
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
