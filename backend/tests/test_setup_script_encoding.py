@@ -19,7 +19,7 @@ ENCODINGS = ["ascii", "cp1252", "cp936", "utf-8"]
 def setup_checkout(tmp_path: Path) -> Path:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("doctor.py", "setup_wizard.py"):
+    for name in ("doctor.py", "setup_wizard.py", "startup_diagnostics.py"):
         shutil.copyfile(REPO_ROOT / "scripts" / name, scripts / name)
     shutil.copytree(REPO_ROOT / "scripts" / "wizard", scripts / "wizard")
     (tmp_path / ".env.example").write_text("# test environment\n", encoding="utf-8")

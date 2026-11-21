@@ -88,6 +88,7 @@ Open http://localhost:2026.
 
 - All configuration options, providers and manual setup: [Configuration](docs/guide/configuration.md)
 - Docker details, sizing, upgrades, startup modes and production deployment: [Running the Application](docs/guide/deployment.md)
+- Docker engine and port checks, support bundles and Windows recovery: [Startup Diagnostics](docs/STARTUP_DIAGNOSTICS.md)
 - Running on a server or exposing it beyond localhost: read the [Security Notice](docs/guide/security.md) first
 
 ## From Deep Research to Super Agent Harness
