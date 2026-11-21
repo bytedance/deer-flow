@@ -61,6 +61,8 @@ with a reason when the binary is missing.
   Permission tests also skip as root, where mode bits do not restrict access.
 - **Write fixtures with an explicit newline mode and encoding.** Platform
   defaults change LF/CRLF hashes and non-ASCII paths.
+- **Decode captured UTF-8 script output explicitly as UTF-8.** Host locale
+  decoding can fail on Unicode diagnostics even when the script exits successfully.
 - **Do not import another test module's private fixtures.** Shared code moves to
   `support/` or `conftest.py`.
 - **Circular imports are solved in `conftest.py`** with a `sys.modules` stub; see
