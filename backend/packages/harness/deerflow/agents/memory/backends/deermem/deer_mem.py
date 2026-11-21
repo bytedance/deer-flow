@@ -29,7 +29,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager
+from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryDuplicateFactIdError, MemoryManager
 
 from .deermem.config import DeerMemConfig
 from .deermem.core.eviction import EVICTION_POLICY_HYBRID_V1
@@ -45,7 +45,7 @@ from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_
 from .deermem.core.queue import MemoryUpdateQueue, QueueFull
 from .deermem.core.relevance import build_idf, order_facts_for_query, tokenize, warm_tokenizer
 from .deermem.core.storage import MemoryRevisionConflict, MemoryStorageCorruption, create_storage
-from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
+from .deermem.core.updater import DuplicateFactIdError, MemoryUpdater, _coerce_source_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +56,15 @@ def _resolve_agent_name(agent_name: str | None) -> str:
 
 
 def _call_backend(operation):
-    """Translate DeerMem-private storage errors into the public manager contract."""
+    """Translate DeerMem-private errors into the public manager contract."""
     try:
         return operation()
     except MemoryRevisionConflict as exc:
         raise MemoryConflictError(str(exc)) from exc
     except MemoryStorageCorruption as exc:
         raise MemoryCorruptionError(str(exc)) from exc
+    except DuplicateFactIdError as exc:
+        raise MemoryDuplicateFactIdError(str(exc)) from exc
 
 
 def _legacy_source_value(source: Any) -> str:
@@ -175,7 +177,7 @@ class DeerMem(MemoryManager):
         ``model_post_init`` (shared with direct construction).
         """
         config_dict = dict(backend_config or {})
-        for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback", "judge"):
+        for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback", "judge", "project_memory"):
             if key not in config_dict and key in host_hooks:
                 config_dict[key] = host_hooks[key]
         if "host_llm" not in config_dict:

@@ -18,11 +18,14 @@ make test-blocking-io
 Batch and result-reader tests run against SQLite and, when `TEST_POSTGRES_URI` is
 set, against an isolated PostgreSQL schema. They need no paid model.
 
+Run input delivery and parent context snapshots share `SUBAGENT_RESULT_MESSAGE_NAME`
+from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
+
 ## Terminal state
 
-- **The first terminal write wins.** Cancellation, timeout and completion race.
-  A late cancellation must not replace a recorded timeout, and a cancelled or
-  stale attempt must not publish a result or evidence.
+- **The first terminal write wins.** Check the deadline under the result lock
+  before publishing success. Cancelled or stale attempts cannot publish
+  results or evidence.
 - **Clean up before you notify.** Stream cleanup and the final usage snapshot come
   before the terminal notification, because callbacks can arrive before the last
   values chunk.
@@ -54,6 +57,16 @@ set, against an isolated PostgreSQL schema. They need no paid model.
 
 ## Isolation from the parent
 
+- **Apply name policies to middleware tools after assembly**, even without global
+  authorization. Preserve shared middleware and allowed callables; require
+  Sequence declarations and reject one-shot iterators unconsumed. Discovery
+  helpers keep filtered catalogs; provider validation remains independent.
+- **Audit immediately before `create_agent`.** Check explicit and middleware
+  tools, failing on unexpected names rather than silently re-filtering. Exempt
+  only actual generated discovery helpers in the explicit list, never name
+  matches or middleware tools. Reuse callable name conversion within this build;
+  recheck new or renamed tools. Errors identify `disallowed_tools` hits or missing
+  `tools` allowlist entries; denylists win.
 - **A subagent inherits scope, not state.** It gets the parent's identity, the
   user's skill storage, the knowledge execution scope and a deep copy of the
   uploaded-file list at dispatch. It does not share the parent's message history.
@@ -65,9 +78,8 @@ set, against an isolated PostgreSQL schema. They need no paid model.
 - **Sandbox use is leased.** An admitted subagent carries a stable lease owner ID
   and command scope ID derived from its task, so the shared sandbox can stop only
   that subagent's processes.
-- **All native subagents share one persistent event loop.** Keep loop and thread
-  ownership until the worker has stopped. A bounded join does not prove that it
-  stopped.
+- **Retain loop/thread ownership until subagents stop; a bounded join is insufficient.**
+  See [checkpoint lifetimes](../../../../../docs/guide/subagents.md#checkpoint-resource-ownership).
 - **Delegation is not the default.** The routing policy permits `task` only when
   parallel latency, a specialist skill or context isolation clearly outweighs the
   startup cost and the duplicated discovery.

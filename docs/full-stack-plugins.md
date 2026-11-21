@@ -174,6 +174,29 @@ strict validation.
 
 ## Packaged resources (`assets-v1`)
 
+### Artifact previews
+
+Browser modules can declare `artifactPreviews: [{ id, extensions, mount }]` to
+render otherwise unsupported binary files in the artifact panel and separate reader.
+`extensions` contains 1–32 exact lowercase extensions without dots (for example
+`["xlsx", "docx", "pptx"]`); there may be at most 16 uniquely named renderers per
+module. Built-in text and browser media readers take precedence. The first enabled
+matching contribution for the current viewer is selected.
+
+`mount(root, { filename, locale, signal, readFile, onError })` runs synchronously and
+returns `{ dispose() }`. The host places the root inside a shadow tree and remounts
+on viewer, file, conversation, locale or contribution changes. `readFile()` uses the
+current conversation's authenticated artifact route and enforces a 25 MiB streamed
+limit. Observe the abort signal during asynchronous work; call `onError()` for a
+localized download fallback, and release all resources in `dispose()`. Shadow DOM
+isolates styling, not plugin privileges. Third-party parsers must ship in the trusted
+package and apply their own expansion/render limits.
+
+Optional `getReadingState()` and `saveReadingState(state)` callbacks become available
+after `readFile()` and retain bounded JSON in memory for unchanged content in the
+current viewer session. They are scoped to viewer, thread, file, renderer and content
+hash. Do not store document contents or credentials in reading preferences.
+
 Register a package-owned directory alongside the Python implementation:
 
 ```python

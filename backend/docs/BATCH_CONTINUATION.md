@@ -39,6 +39,20 @@ suppress pending work; a failed, cancelled or hard-stopped source Run cannot res
 
 ## Authority, cancellation and recovery
 
+Each Gateway batch item rechecks its owner before tool discovery and again after
+acquiring native execution capacity. This applies to the first attempt and to
+recovery after a restart. Missing, disabled or reset accounts cannot start work.
+A changed role rejects the old item; submit a new batch with current permissions.
+Custom roles have no general ordering, so this rule prevents both stale privileges
+after demotion and additional privileges after promotion. OAuth identity comes from
+the current account; serialized authorization attributes are not restored.
+
+Explicit local auth-disabled mode and unmapped trusted internal owners retain their
+existing identity semantics. A deleted local account cannot become an unmapped
+internal owner. These checks govern admission, not cancellation of already admitted
+work. Standalone harness hosts with mutable accounts can supply the same
+`resolve_principal` callback without importing the Gateway.
+
 Follow-up needs a session-authorized Gateway AgentRuns capability or local auth-disabled
 mode. Internal/PAT callers and unsupported embedded runtimes retain ordinary batches.
 Persist only the original permission ceiling, account token version and auth source;

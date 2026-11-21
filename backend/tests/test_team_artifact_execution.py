@@ -247,6 +247,8 @@ async def test_resumed_task_registers_files_with_its_active_execution_key(plugin
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["import", "capture"])
 async def test_artifact_transfer_can_exceed_the_poll_deadline(plugin, monkeypatch, operation):
+    from deerflow_extension_agent_teams import artifacts
+
     if operation == "import":
         _, _, service, runs, team, _, target = await ready_attachment(plugin)
         method = "import_artifact"
@@ -258,16 +260,27 @@ async def test_artifact_transfer_can_exceed_the_poll_deadline(plugin, monkeypatc
         runs.finish(target["id"])
         method = "read_artifact"
     transfer = getattr(runs, method)
-    calls = 0
+    advance = service.advance
+    poll_deadline = None
+    transfer_deadlines = []
 
-    async def slow_transfer(**kwargs):
-        nonlocal calls
-        calls += 1
-        await asyncio.sleep(10.1)
+    async def observe_poll_deadline(*args, **kwargs):
+        nonlocal poll_deadline
+        timeout = artifacts.worker_deadline.get()
+        poll_deadline = timeout.when() if timeout is not None else None
+        return await advance(*args, **kwargs)
+
+    async def observe_transfer_deadline(**kwargs):
+        timeout = artifacts.worker_deadline.get()
+        transfer_deadlines.append(timeout.when() if timeout is not None else None)
         return await transfer(**kwargs)
 
-    monkeypatch.setattr(runs, method, slow_transfer)
+    monkeypatch.setattr(service, "advance", observe_poll_deadline)
+    monkeypatch.setattr(runs, method, observe_transfer_deadline)
     await service.tick()
+    assert poll_deadline is not None
+    (transfer_deadline,) = transfer_deadlines
+    assert transfer_deadline is not None and transfer_deadline > poll_deadline
     saved = await service.db("get", "alice", team["id"])
     job = next(j for j in saved["jobs"] if j["id"] == target["id"])
     if operation == "import":
@@ -275,7 +288,7 @@ async def test_artifact_transfer_can_exceed_the_poll_deadline(plugin, monkeypatc
     else:
         assert job["status"] == "completed" and saved["artifacts"][0]["status"] == "ready"
     await service.tick()
-    assert calls == 1
+    assert len(transfer_deadlines) == 1
 
 
 @pytest.mark.asyncio

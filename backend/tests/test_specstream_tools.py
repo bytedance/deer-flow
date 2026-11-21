@@ -2,6 +2,7 @@
 
 import json
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -260,22 +261,39 @@ class TestWebSearchTool:
 
 
 class TestWebFetchTool:
-    def _fetch(self, data):
-        with patch(f"{_MODULE}.httpx.Client") as mock_client_cls:
-            mock_request = mock_client_cls.return_value.__enter__.return_value.request
-            mock_request.return_value = _make_response(data)
+    def _fetch(self, data, *, url="https://example.com/post"):
+        from deerflow.community.specstream.tools import web_fetch_tool
 
-            from deerflow.community.specstream.tools import web_fetch_tool
+        requests = []
 
-            return web_fetch_tool.invoke({"url": "https://example.com/post"}), mock_request
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json={"data": data})
+
+        transport = httpx.MockTransport(respond)
+        provider_httpx = SimpleNamespace(Client=lambda **kwargs: httpx.Client(transport=transport, **kwargs), HTTPStatusError=httpx.HTTPStatusError)
+        with patch(f"{_MODULE}.httpx", provider_httpx):
+            return web_fetch_tool.invoke({"url": url}), requests
 
     def test_returns_title_and_content(self, mock_config_with_key):
-        result, mock_request = self._fetch({"results": [{"url": "https://example.com/post", "status": "ok", "title": "Example", "text": "Hello world"}]})
+        target = "https://docs.example/pages%2Fsummary?ref=one&ref=two"
+        result, requests = self._fetch({"results": [{"url": target, "status": "ok", "title": "Example", "text": "Hello world"}]}, url=target)
 
         assert result == "# Example\n\nHello world"
-        assert mock_request.call_args.args == ("POST", "https://api.specstream.ai/v1/extract")
-        assert mock_request.call_args.kwargs["headers"]["Authorization"] == "Bearer test-specstream-key"
-        assert mock_request.call_args.kwargs["json"] == {"urls": ["https://example.com/post"], "format": "markdown"}
+        [request] = requests
+        assert request.method == "POST"
+        assert str(request.url) == "https://api.specstream.ai/v1/extract"
+        assert request.headers["Authorization"] == "Bearer test-specstream-key"
+        assert json.loads(request.content) == {"urls": [target], "format": "markdown"}
+
+    def test_fetch_rejects_private_url_before_any_request(self, mock_config_with_key, caplog):
+        caplog.set_level(logging.DEBUG, logger=_MODULE)
+        marker = "private-fetch-marker"
+        result, requests = self._fetch({"results": []}, url=f"https://127.0.0.1/{marker}")
+
+        assert requests == []
+        assert result.startswith("Error:")
+        assert marker not in result and marker not in caplog.text
 
     def test_truncates_long_content(self, mock_config_with_key):
         result, _ = self._fetch({"results": [{"status": "ok", "title": "T", "text": "x" * 10000}]})

@@ -3,10 +3,13 @@
 import asyncio
 import json
 import logging
+import math
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+import httpx
 import pytest
+import pytest_asyncio
 import yaml
 from pydantic import ValidationError
 
@@ -219,6 +222,155 @@ def test_group_sharing_isolation_and_conflict(registry, clock):
         admission.get_request_admission("a", config.model_copy(update={"requests_per_minute": 30}))
 
 
+@pytest_asyncio.fixture
+async def admission_graphs(monkeypatch, registry, clock):
+    """Keep the graph, factory and OpenAI SDK real; replace only HTTP transport."""
+    from langchain.agents import create_agent
+
+    from deerflow.agents.middlewares import llm_error_handling_middleware as errors
+    from deerflow.config.app_config import AppConfig
+    from deerflow.models.factory import create_chat_model
+
+    monkeypatch.setattr(errors, "_PROCESS_LIMITER", None)
+    monkeypatch.setattr(errors, "_CAP_RESOLVED", False)
+    clients = []
+    async_clients = []
+
+    def build(name, *, group="shared", status=200, headers=None, max_wait_seconds=300):
+        requests = []
+
+        def respond(request):
+            requests.append((clock[0], json.loads(request.content)))
+            if status != 200:
+                return httpx.Response(status, headers=headers or {}, json={"error": {"message": "offline provider failure", "type": "rate_limit_error"}})
+            return httpx.Response(200, json={"id": "offline", "model": name, "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}]})
+
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        clients.append(client)
+        async_clients.append(async_client)
+        config = AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "llm_call": {"retry_max_attempts": 1},
+                "models": [{"name": name, "use": "langchain_openai:ChatOpenAI", "model": name, "api_key": "offline-test-key", "request_admission": {"requests_per_minute": 6000, "group": group, "max_wait_seconds": max_wait_seconds}}],
+            }
+        )
+        model = create_chat_model(name, app_config=config, attach_tracing=False, http_client=client, http_async_client=async_client, use_responses_api=False, disable_streaming=True)
+        graph = create_agent(model=model, middleware=[errors.LLMErrorHandlingMiddleware(app_config=config)])
+        return graph, model.rate_limiter, requests
+
+    try:
+        yield build
+    finally:
+        for client in clients:
+            client.close()
+        for client in async_clients:
+            await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("status,headers,paused", [(429, {"retry-after": "10"}, True), (429, {"retry-after-ms": "10000"}, True), (429, {"retry-after": "invalid"}, False), (429, {}, False), (503, {"retry-after": "10"}, False)])
+async def test_provider_cooldown_reaches_peers_even_on_final_attempt(admission_graphs, clock, mode, status, headers, paused):
+    graph, limiter, requests = admission_graphs("research", status=status, headers=headers)
+    _, peer, _ = admission_graphs("writer")
+    _, independent, _ = admission_graphs("other", group="other")
+    payload = {"messages": [("user", "Research this topic")]}
+    if mode == "sync":
+        graph.invoke(payload)
+    else:
+        await graph.ainvoke(payload)
+    assert len(requests) == 1  # The provider failure really fired; no SDK retry.
+    assert peer is limiter
+    clock[0] = 1  # Normal RPM spacing has elapsed, but the provider's hint has not.
+    assert peer.acquire(blocking=False) is not paused
+    assert independent.acquire(blocking=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_first", [False, True], ids=["fifo", "cancelled-head"])
+async def test_agent_graphs_resume_after_shared_cooldown(admission_graphs, monkeypatch, clock, cancel_first):
+    owner, limiter, failed_requests = admission_graphs("research", status=429, headers={"retry-after": "10"})
+    first, _, first_requests = admission_graphs("writer")
+    last, _, last_requests = admission_graphs("reviewer")
+    payload = {"messages": [("user", "Continue work")]}
+    await owner.ainvoke(payload)
+    assert len(failed_requests) == 1
+    clock[0] = 1
+    parked = asyncio.Event()
+    original_enqueue = limiter._try_or_enqueue
+
+    def observe_enqueue(*, blocking):
+        result = original_enqueue(blocking=blocking)
+        if result[1] is not None:
+            parked.set()
+        return result
+
+    monkeypatch.setattr(limiter, "_try_or_enqueue", observe_enqueue)
+    tasks = []
+    try:
+        tasks.append(asyncio.create_task(first.ainvoke(payload)))
+        await asyncio.wait_for(parked.wait(), 2)
+        parked.clear()
+        tasks.append(asyncio.create_task(last.ainvoke(payload)))
+        await asyncio.wait_for(parked.wait(), 2)
+        assert not first_requests and not last_requests
+        assert len(limiter._waiters) == 2
+        if cancel_first:
+            tasks[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[0]
+            assert len(limiter._waiters) == 1
+        clock[0] = 10
+        completed = tasks[1] if cancel_first else tasks[0]
+        assert (await asyncio.wait_for(completed, 2))["messages"][-1].content == "done"
+        if not cancel_first:
+            assert not last_requests
+            clock[0] = 11
+            await asyncio.wait_for(tasks[1], 2)
+        assert [at for at, _ in first_requests] == ([] if cancel_first else [10])
+        assert [at for at, _ in last_requests] == ([10] if cancel_first else [11])
+        assert not limiter._waiters
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def test_cooldown_extends_schedule_without_spending_a_permit(clock):
+    limiter = admission.RequestAdmission(RequestAdmissionConfig(requests_per_minute=60))
+    limiter.defer_for(10)
+    clock[0] = 1
+    limiter.defer_for(2)
+    assert not limiter.acquire(blocking=False)
+    clock[0] = 10
+    assert limiter.acquire(blocking=False)
+    assert not limiter.acquire(blocking=False)
+    clock[0] = 11
+    assert limiter.acquire(blocking=False)
+
+
+@pytest.mark.parametrize("delay", [math.inf, math.nan, -1])
+def test_invalid_cooldown_preserves_admission(clock, delay):
+    limiter = admission.RequestAdmission(RequestAdmissionConfig(requests_per_minute=60))
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        limiter.defer_for(delay)
+    assert limiter.acquire(blocking=False)
+
+
+def test_cooldown_polling_is_bounded_and_deadline_still_applies(clock, monkeypatch):
+    limiter = admission.RequestAdmission(RequestAdmissionConfig(requests_per_minute=60000, max_wait_seconds=1))
+    limiter.defer_for(10)
+    assert limiter._delay(1) == pytest.approx(0.05)
+    monkeypatch.setattr(admission.time, "sleep", lambda _: clock.__setitem__(0, 2))
+    with pytest.raises(admission.AdmissionError, match="timed out"):
+        limiter.acquire()
+    assert not limiter._waiters
+    clock[0] = 10
+    assert limiter.acquire(blocking=False)
+
+
 def make_model(monkeypatch, *, name="a", policy=None, provider=False):
     from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
@@ -402,9 +554,15 @@ async def test_codex_factory_retry_policy_respects_admission(monkeypatch, regist
         event = {"type": "response.completed", "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "unexpected retry"}]}], "usage": {}}}
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(event)}\n\n")
 
-    client_class = httpx.Client
-    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    client_name = "AsyncClient" if mode == "async" else "Client"
+    client_class = getattr(httpx, client_name)
+    monkeypatch.setattr(provider.httpx, client_name, lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
     monkeypatch.setattr(provider.time, "sleep", sleeps.append)
+
+    async def async_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", async_sleep)
 
     if enabled:
         with pytest.raises(httpx.HTTPStatusError) as caught:
@@ -484,8 +642,9 @@ async def test_codex_529_middleware_retry_reenters_admission(monkeypatch, regist
         sleep(delay)
         await real_async_sleep(0)
 
-    client_class = httpx.Client
-    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    client_name = "AsyncClient" if mode == "async" else "Client"
+    client_class = getattr(httpx, client_name)
+    monkeypatch.setattr(provider.httpx, client_name, lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
     monkeypatch.setattr(provider.time, "sleep", sleep)
     monkeypatch.setattr(asyncio, "sleep", async_sleep)
     agent = create_agent(model=model, tools=[], middleware=[errors.LLMErrorHandlingMiddleware(app_config=config)])

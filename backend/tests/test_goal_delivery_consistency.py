@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -53,6 +54,11 @@ async def _run_goal_delivery(
     tool body. Its deterministic node emits the tool callbacks normally supplied
     by the agent; only the evaluator model response is fixed, without provider/network access.
     """
+    if shared_handoff and os.name != "posix":
+        # The handoff tool answers "requires POSIX" on a native Windows host, so
+        # the shared-artifact case cannot exercise delivery there. The sibling
+        # test_shared_artifact_handoff.py skips non-POSIX for the same reason.
+        pytest.skip("shared artifact handoff requires POSIX")
     checkpointer = InMemorySaver()
     failed_terminal_writes = []
 

@@ -43,8 +43,8 @@ make test-blocking-io
 - **Read the run context from `request.runtime`** in an interceptor. Context
   variables are not reliable there, because the adapter may call from another
   task.
-- **Three credential sources** exist for HTTP and SSE servers: deployment OAuth,
-  per-user `user_auth`, and per-request `headers_from_context`. A missing
+- **Credential sources** include deployment OAuth, agent grants, per-user
+  `user_auth`, and per-request `headers_from_context`. A missing
   credential fails the call. It never falls back to another user's or to the
   deployment credential.
 - **The OAuth store keeps refresh tokens only**, encrypted and keyed by scope,
@@ -57,11 +57,20 @@ make test-blocking-io
   retry.
 - **Background task calls have no request.** `McpTaskToolCaller` binds the task
   owner's identity for the call and restores the previous value afterwards.
+- **Agent grants are live policy, not run snapshots.** Every protected call
+  rechecks the operator binding even with a cached token. Durable references
+  retain the admitted definition revision; definition rollouts preserve them,
+  while grant revocation denies them. See the per-agent section in the MCP guide.
 
 ## Results
 
 - **Never put base64 payloads in text.** Unsupported content (inline audio) raises
-  a recoverable tool error.
+  a recoverable tool error, and the stdio conversion reports an error result with
+  no text block by content shape, never the payload. sse/http tools keep
+  `langchain-mcp-adapters`' conversion, which still stringifies that fallback;
+  `ToolErrorHandlingMiddleware` redacts inline `base64` fields and `data:`
+  payloads from tool error messages before truncation, so neither the
+  model-visible message nor the checkpoint carries the bytes.
 - **`ResourceLink` items do not become URL-sourced `file` blocks.** Chat
   Completions serialization rejects them, and a checkpointed block would break
   every later turn of the thread.

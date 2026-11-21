@@ -24,9 +24,9 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.agents.middlewares.model_response import append_visible_text, finish_reason, has_tool_call_intent, has_visible_content, last_ai_message
+from deerflow.agents.middlewares.model_response import append_visible_text, is_empty_stop_response, last_ai_message
 from deerflow.config.app_config import AppConfig
-from deerflow.models.request_admission import AdmissionError
+from deerflow.models.request_admission import AdmissionError, RequestAdmission
 from deerflow.models.response_errors import EmptyModelResponseError
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
@@ -45,14 +45,8 @@ class _CircuitAdmission:
 
 def _raise_for_empty_response(response: ModelCallResult) -> None:
     """在响应写入图状态前把零内容 stop 转换为可重试错误。"""
-    message = last_ai_message(response)
-    if message is None:
-        raise EmptyModelResponseError()
-    if has_visible_content(message) or has_tool_call_intent(message):
-        return
-    reason = finish_reason(message)
-    if reason in (None, "", "stop", "end_turn"):
-        raise EmptyModelResponseError(response_message=message)
+    if is_empty_stop_response(response):
+        raise EmptyModelResponseError(response_message=last_ai_message(response))
 
 
 def _consume_empty_response_retry(request: ModelRequest) -> bool:
@@ -832,6 +826,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 self._release_half_open_probe(admission=admission)
                 raise
             except Exception as exc:
+                _share_rate_limit_cooldown(request, exc)
                 retriable, reason = self._classify_error(exc)
                 max_attempts = self._max_attempts_for(exc, reason)
                 should_retry = retriable and attempt < max_attempts
@@ -897,6 +892,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     self._release_half_open_probe(admission=admission)
                     raise
                 except Exception as exc:
+                    _share_rate_limit_cooldown(request, exc)
                     retriable, reason = self._classify_error(exc)
                     max_attempts = self._max_attempts_for(exc, reason)
                     should_retry = retriable and attempt < max_attempts
@@ -1031,6 +1027,21 @@ def _as_http_status(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and 400 <= value <= 599:
         return value
     return None
+
+
+def _share_rate_limit_cooldown(request: ModelRequest, exc: BaseException) -> None:
+    """Publish a 429 hint even when this call has exhausted its retry budget."""
+    if _extract_status_code(exc) != 429:
+        return
+    try:
+        limiter = getattr(request.model, "rate_limiter", None)
+        if isinstance(limiter, RequestAdmission):
+            wait_ms = _extract_retry_after_ms(exc)
+            if wait_ms is not None:
+                limiter.defer_for(wait_ms / 1000)
+    except Exception:
+        # Bookkeeping must not replace the provider's original error outcome.
+        logger.debug("Could not share provider cooldown with model admission")
 
 
 def _extract_retry_after_ms(exc: BaseException) -> int | None:

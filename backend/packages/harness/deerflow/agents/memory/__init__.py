@@ -15,6 +15,7 @@ them directly from ``deerflow.agents.memory.backends.deermem.deermem.core.*``.
 from deerflow.agents.memory.manager import (
     MemoryConflictError,
     MemoryCorruptionError,
+    MemoryDuplicateFactIdError,
     MemoryManager,
     MemoryManagerError,
     MemoryReadError,
@@ -29,6 +30,7 @@ __all__ = [
     "MemoryReadError",
     "MemoryConflictError",
     "MemoryCorruptionError",
+    "MemoryDuplicateFactIdError",
     "get_memory_manager",
     "memory_read_failures_are_fatal",
     "reset_memory_manager",

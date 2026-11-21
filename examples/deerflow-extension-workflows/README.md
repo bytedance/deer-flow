@@ -399,8 +399,32 @@ and is distinct from this configuration preflight check.
 Phase 3 and Phase 4 share the design: stable step/attempt and idempotency identities,
 conditional record revisions, a durable intent/result journal, and fresh authority
 support the leases and fenced dispatch in Phase 4 below. SQLite retains the Phase 3
-single-owner contract and exclusive process lock. Both modes require explicit
-session authorization for recovery; neither reconstructs credentials from records.
+single-owner contract and exclusive process lock. Neither mode reconstructs
+credentials from records; recovery authority comes from a live session or, on the
+single-Gateway SQLite store, from the opt-in grant below.
+
+
+### Opt-in unattended recovery after restart
+
+A workflow launched from an authenticated browser session may set
+`unattended_recovery: true`. The launch then captures the session's existing
+authority ceiling (token version, source, permission set) into a grant on the
+workflow record, bounded by `pause_timeout_seconds` from launch time. Nothing is
+captured for internal, PAT or model-tool launches; those never mint a grant.
+
+After a Gateway restart, the single-Gateway SQLite store scans `recoverable`
+records and resumes the ones holding an unexpired, unrevoked grant without a
+sign-in: journal replay, completed-step reuse and the uncertain-admission fence
+behave exactly as in the explicit browser flow above. Clustered (PostgreSQL)
+stores keep the manual recovery path. Cancellation revokes the grant; the next
+delegated operation fails closed.
+
+The host re-validates the owner's user row on every delegated operation, keeps
+the ceiling intersected with the owner's current route permissions, and re-checks
+expiry and revocation per operation. Restoring a grant never creates authority
+the owner did not have at launch: a demoted, disabled or reset account stops
+recovered work at its next operation. Unfinished child effects and
+`needs_reconciliation` outcomes remain manual in every mode.
 
 
 ## Phase 4: shared PostgreSQL deployment

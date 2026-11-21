@@ -14,6 +14,8 @@ from scripts.benchmark.deermem_scope_isolation.grading import grade_routing_row,
 from scripts.benchmark.deermem_scope_isolation.report import RowIntegrityError, build_report, collect_rows, write_report
 from scripts.benchmark.deermem_scope_isolation.runner import ROOT, ensure_run_identity, run
 
+pytestmark = pytest.mark.benchmark
+
 MANIFEST = ROOT / "manifest.json"
 
 

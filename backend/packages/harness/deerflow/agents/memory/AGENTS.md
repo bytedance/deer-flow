@@ -40,6 +40,10 @@ client or the real storage, because the payload shape is the contract.
 - **Invalid extraction output is dropped per item.** Filter a bad fact before the
   storage validation can abort the whole batch. A removal that is paired with a
   replacement applies only when the replacement passes every write gate.
+- **Keep project extraction scoped to the captured membership.** User edits
+  fence queued writes, and project injection follows memory opt-outs. After
+  the user pool commits, a project write failure consumes the batch. See
+  [project memory](../../../../../../docs/guide/projects.md#project-memory).
 - **Confirmation needs human evidence.** Extraction must not raise confirmation
   counters from lexical or model hints. Search raises access heat only for the
   facts it returns.
@@ -65,6 +69,9 @@ client or the real storage, because the payload shape is the contract.
   files at any time. Storage updates it after the durable locks are released, and
   search falls back to substring matching until a rebuild succeeds. Recreate index
   files only for SQLite corruption codes; an operational error is not corruption.
+- **A full rebuild reads only the memory buckets.** The host's storage root is
+  the runtime home, which also holds sandbox-writable thread workspaces; walking
+  the whole root would index files a sandbox wrote as the user's memory.
 - **Sidecars do not touch canonical files.** Usage, audit and watermark data must
   not change a fact's timestamps or revisions. User delete and clear remove them.
 

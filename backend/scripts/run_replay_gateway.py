@@ -29,6 +29,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8011)
     parser.add_argument("--fixture", default=str(_BACKEND / "tests" / "fixtures" / "replay" / "write_read_file.ultra.json"))
     parser.add_argument("--cors", default="http://localhost:3000")
+    parser.add_argument("--workspace-search", action="store_true", help="Enable the packaged workspace search provider for full-stack search tests")
     args = parser.parse_args()
 
     from _replay_fixture import REPLAY_MODEL_BLOCK, build_config_yaml, prepare_hermetic_extras
@@ -36,6 +37,10 @@ def main() -> int:
     home = Path(tempfile.mkdtemp(prefix="replay-gw-"))
     cfg = home / "config.yaml"
     cfg.write_text(build_config_yaml(model_block=REPLAY_MODEL_BLOCK, home=home), encoding="utf-8")
+    if args.workspace_search:
+        sys.path.insert(0, str(_BACKEND.parent / "examples/deerflow-extension-workspace-search"))
+        with cfg.open("a", encoding="utf-8") as stream:
+            stream.write("\nplugins:\n  - name: workspace-search\n    use: deerflow_workspace_search:install\n    table_prefix: extension_workspace_search_\n    required: true\n")
 
     # Override (not setdefault): the replay gateway must be hermetic, so an outer
     # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.

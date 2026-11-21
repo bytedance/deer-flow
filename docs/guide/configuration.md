@@ -119,6 +119,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
+   [DeepSeek web search](../../backend/docs/CONFIGURATION.md#deepseek-web-search) uses `deerflow.community.deepseek.tools:web_search_tool`. Configure `DEEPSEEK_API_KEY` in the Gateway environment and replace the active `web_search` entry with the example in `config.example.yaml`. Set `thinking: true` for multi-step thinking search, independently of the main DeerFlow model. The default is `false`. Results include a generated answer and screened, deduplicated source links.
+
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
 
    Several providers, including You.com, GroundRoute, Webz, InfoQuest and Jsonify, initialize HTTPX clients in a worker thread so synchronous TLS trust loading does not block the agent event loop; requests and session cleanup remain asynchronous.
@@ -381,6 +383,7 @@ fences, including unclosed fences, in complete and streamed replies.
    `ClaudeChatModel` normalizes manual extended-thinking budgets when `auto_thinking_budget: true` (the default). An omitted or null budget gets 80% of `max_tokens`, with a minimum of 1024 tokens. Explicit budgets must be integers of at least 1024 and, for ordinary thinking, strictly below `max_tokens`; output limits of 1024 or less fail locally. For supported manual interleaved thinking, configure tools and `betas: ["interleaved-thinking-2025-05-14"]`: the thinking budget may equal or exceed the positive output limit. See [Anthropic's interleaved-thinking rules](https://platform.claude.com/docs/en/build-with-claude/extended-thinking#interleaved-thinking-in-manual-mode) for supported models. `auto_thinking_budget: false` bypasses this normalization and validation; disabled and adaptive thinking are unchanged.
 
    - Codex CLI reads `~/.codex/auth.json`
+   - Codex async model calls close their HTTP connection when cancelled, including while waiting for a response; retry waits are cancellable too. This releases local resources and does not guarantee that the remote service stops generation or billing.
    - Codex function tools preserve explicit `strict: true` or `strict: false` in wrapped or flat dictionary definitions. Missing or null settings keep the provider default. `bind_tools` applies the same conversion to dictionaries and `BaseTool` schemas.
    - Codex honors `tool_choice` in `bind_tools` and direct calls: `auto`, `none`, `required`, or a function name/selection. `any` and `True` mean `required`; `None` and `False` keep the provider default. Per-call choices override the bound policy. Bound choices are validated when binding; direct calls and overrides are validated before HTTP. `required` needs at least one function tool, and named selections must match a supplied function. `auto` and `none` also work without tools.
    - Completed Codex responses still return their text and tool calls when token usage is null, omitted, or empty; usage metadata remains unavailable.
@@ -411,6 +414,26 @@ fences, including unclosed fences, in complete and streamed replies.
    ```
 
    `mcode` must be on the Gateway process's `PATH`; installing it only on the Docker host does not make it available inside the Gateway container. DeerFlow invokes it through `invoke_acp_agent` in a per-thread ACP workspace and forwards enabled MCP servers. Keep `auto_approve_permissions: false` for untrusted tasks; enable it only when mcode must edit files or run commands and you trust the task.
+
+   Pi can be used as an external coding agent through the community `pi-acp` adapter. The adapter launches the separate `pi` executable, so install both packages in the Gateway environment before starting DeerFlow. `pi-acp` currently requires Node.js 22+ and pi 0.81.0+:
+
+   ```bash
+   npm install --global @earendil-works/pi-coding-agent
+   npm install --global pi-acp
+   ```
+
+   Configure pi's model provider and API key separately for the user that runs the Gateway. For interactive providers, start `pi` in that same environment, then run `/login` in Pi's terminal UI and select your provider. Alternatively, provide the provider's documented environment variables. The `pi` executable and its credentials must be available inside the Gateway container; installing or authenticating them only on the Docker host is not sufficient.
+
+   ```yaml
+   acp_agents:
+     pi:
+       command: pi-acp
+       args: []
+       description: Pi coding agent for repository tasks and code generation
+       auto_approve_permissions: false
+   ```
+
+   Node.js and both `pi-acp` and `pi` must be available on the Gateway process's `PATH`. When the Gateway runs in Docker, install them inside the Gateway image or container. Pi executes its filesystem and shell tools directly in its working environment. `auto_approve_permissions` only controls permission requests sent through ACP; leaving it disabled does not sandbox these direct operations. Run untrusted Pi tasks in an independently isolated process, container, or VM with only the required files, credentials, and network access. Keep `auto_approve_permissions: false` for untrusted tasks. Alternatively, set `command: npx` and `args: ["-y", "pi-acp"]` to fetch the adapter on demand; this requires `npx` on the Gateway's `PATH` and may require network access at startup. Preinstalling the adapter lets deployment tooling control its version without fetching it during an invocation.
    - On macOS, export Claude Code auth explicitly if needed:
 
    ```bash

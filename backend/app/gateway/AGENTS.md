@@ -22,6 +22,7 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
 
 ## Trust boundary
 
+- **Share tokens read only frozen snapshots.** See [sharing](../../../docs/guide/sharing.md).
 - **Server-owned run context.** A client can send run context in `body.context`
   and in `body.config`. Admit server-owned keys only from internally authenticated
   callers and strip them from both places for everyone else. When you add a
@@ -55,7 +56,15 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
   and a delete are all thread operations that share one durable uniqueness
   constraint. Reserve through `RunManager.reserve_thread_operation()` or
   `services.reserve_checkpoint_write()`. A separate lock would let two workers
-  write the same thread.
+  write the same thread. Outside run execution, checkpoint mutations — manual
+  compaction, `POST /threads/{id}/state`, both goal routes (`PUT` / `DELETE
+  /threads/{id}/goal`), and the `/goal from-chat` save (`POST
+  /threads/{id}/goal/from-chat`) — use `services.reserve_checkpoint_write()`.
+  `PUT /goal` creates a missing checkpoint; from-chat does not. From-chat
+  saves with `expected_checkpoint_id` pinned to the head its synthesis read:
+  a write that landed during the model call rejects the stale objective
+  instead of clobbering the newer state, and the model call itself passes the
+  same `authorize_model_use` admission as the suggestions route.
 - **Several workers.** In-memory run records exist only on the worker that owns the
   run. Cancel, takeover and orphan recovery are compare-and-set operations on the
   run store; use the store's claim and cancel primitives so that a lease renewal
@@ -77,6 +86,9 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
 
 ## Lifecycle
 
+- **Probe file-backed managed subagent storage once during startup, off the
+  event loop.** Probe failures warn operators before their first create request;
+  atomic create stays fail-closed rather than falling back to an overwrite.
 - **Shutdown order matters.** `lifespan` drains runs and extensions first, then
   closes MCP, then shuts the sandbox provider down off the event loop. Cleanup code
   keeps running after cancellation, allocates nothing new, and logs failures

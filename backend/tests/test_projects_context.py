@@ -47,6 +47,7 @@ class TestResolveProjectContext:
             "project_id": project["id"],
             "name": "Roadmap",
             "instructions": "Prefer boring solutions.",
+            "memory": {"enabled": True, "revision": 0, "facts": []},
         }
 
     @pytest.mark.anyio
