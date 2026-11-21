@@ -151,7 +151,11 @@ def load_run_results(benchmark_dir: Path) -> dict:
 
                 # Read recorded tokens independently of the grading duration.
                 timing = grading.get("timing", {})
-                result["time_seconds"] = timing.get("total_duration_seconds", 0.0)
+                if not isinstance(timing, dict):
+                    print(f"Warning: ignoring non-object timing data in {grading_file}")
+                    timing = {}
+                grading_duration = _read_timing_number(timing, "total_duration_seconds", grading_file)
+                result["time_seconds"] = grading_duration if grading_duration is not None else 0.0
                 timing_file = run_dir / "timing.json"
                 try:
                     if timing_file.exists():
