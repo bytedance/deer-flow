@@ -210,7 +210,8 @@ OpenAI-compatible settings:
 Text-to-image calls use `POST {base_url}/images/generations`. Reference-image calls
 use multipart `POST {base_url}/images/edits`; a relay may support generation without
 supporting edits. Responses may contain base64 image data, a data URL, or a downloadable
-URL. Aspect ratios map to `1024x1024`, `1536x1024`, or `1024x1536` unless
+URL. A download URL must use HTTPS on port 443 and must not point at a loopback,
+private, or link-local address; redirects are re-validated hop by hop. Aspect ratios map to `1024x1024`, `1536x1024`, or `1024x1536` unless
 `IMAGE_GENERATION_SIZE` is set. The output extension selects the API `output_format`:
 `.jpg`/`.jpeg` uses `jpeg`, `.webp` uses `webp`, and all other extensions use `png`.
 When `dall-e-2` or `dall-e-3` is configured instead, the request uses the model's

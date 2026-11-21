@@ -294,6 +294,128 @@ def test_openai_compatible_generation_downloads_url(monkeypatch, tmp_path):
     assert output_file.read_bytes() == b"downloaded-image"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://cdn.example/image.png",
+        "https://user@cdn.example/image.png",
+        "https://cdn.example:8443/image.png",
+        "https://127.0.0.1/image.png",
+        "https://169.254.169.254/latest/meta-data",
+        "https://10.0.0.1/image.png",
+        "https://localhost/image.png",
+        "https://cdn.example\\@evil.example/image.png",
+    ],
+    ids=[
+        "plain-http",
+        "userinfo",
+        "non-443-port",
+        "loopback-ip",
+        "link-local-ip",
+        "private-ip",
+        "localhost-name",
+        "backslash-host",
+    ],
+)
+def test_openai_compatible_download_rejects_unsafe_urls(monkeypatch, tmp_path, url):
+    """A provider-supplied URL is untrusted: unsafe targets must not be fetched."""
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp({"data": [{"url": url}]}),
+    )
+
+    def fail_get(*args, **kwargs):
+        raise AssertionError("an unsafe download URL must not be fetched")
+
+    monkeypatch.setattr(img.requests, "get", fail_get)
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a red deer", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "image.png"), "1:1")
+
+
+def test_openai_compatible_download_revalidates_each_redirect(monkeypatch, tmp_path):
+    """A public host must not be able to redirect the fetch to an internal one."""
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests,
+        "get",
+        lambda *args, **kwargs: FakeResp(
+            status_code=302,
+            headers={"Location": "https://169.254.169.254/latest/meta-data"},
+        ),
+    )
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a red deer", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not a public address"):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "image.png"), "1:1")
+
+
+def test_openai_compatible_download_follows_a_valid_redirect(monkeypatch, tmp_path):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    responses = iter(
+        [
+            FakeResp(
+                status_code=302, headers={"Location": "https://cdn2.example/image.png"}
+            ),
+            FakeResp(content=b"redirected-image"),
+        ]
+    )
+    monkeypatch.setattr(img.requests, "get", lambda *args, **kwargs: next(responses))
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a red deer", encoding="utf-8")
+    output_file = tmp_path / "image.png"
+
+    img.generate_image(str(prompt_file), [], str(output_file), "1:1")
+
+    assert output_file.read_bytes() == b"redirected-image"
+
+
+def test_openai_compatible_download_rejects_a_redirect_without_location(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests,
+        "get",
+        lambda *args, **kwargs: FakeResp(status_code=302),
+    )
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a red deer", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="redirect has no destination"):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "image.png"), "1:1")
+
+
 def test_openai_compatible_dall_e_uses_response_format(monkeypatch, tmp_path):
     monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
     monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")

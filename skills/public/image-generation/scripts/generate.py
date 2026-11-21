@@ -1,13 +1,17 @@
 import base64
 from contextlib import ExitStack
+import ipaddress
 import json
 import os
+import re
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
 MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 OPENAI_DEFAULT_MODEL = "gpt-image-2.5-flare"
+MAX_DOWNLOAD_REDIRECTS = 5
 # MiniMax image-01 caps the prompt at 1500 characters and rejects longer requests
 # with a generic "invalid params" error, so validate before calling the API.
 MINIMAX_PROMPT_MAX_CHARS = 1500
@@ -129,6 +133,55 @@ def _ensure_output_dir(output_file: str) -> None:
     output_dir = os.path.dirname(output_file)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
+
+
+def _download_host(url: str) -> str:
+    """Validate one provider-supplied image URL before fetching it.
+
+    The URL comes from the configured provider, so it is untrusted input: only
+    HTTPS on port 443 without user information is allowed, and IP literals must
+    be public. Redirects are followed manually and re-validated by the caller so
+    a public host cannot bounce the fetch to an internal service.
+    """
+    if not isinstance(url, str) or re.search(r"[\x00-\x20\x7f\\]", url):
+        raise ValueError("Invalid image download URL")
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.netloc.lower() not in {host, f"{host}:443"}
+    ):
+        raise ValueError(
+            "Image downloads require an HTTPS host on port 443 without user information"
+        )
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if host == "localhost" or not re.fullmatch(
+            r"(?:[a-z0-9-]+\.)+[a-z][a-z0-9-]*", host
+        ):
+            raise ValueError("Invalid image download hostname")
+    else:
+        if not address.is_global:
+            raise ValueError(f"Image download host {host!r} is not a public address")
+    return host
+
+
+def _download_image(url: str) -> bytes:
+    """Download a provider image URL, validating the target and every redirect."""
+    for _ in range(MAX_DOWNLOAD_REDIRECTS + 1):
+        _download_host(url)
+        response = requests.get(url, timeout=120, allow_redirects=False)
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = (getattr(response, "headers", None) or {}).get("Location")
+            if not location:
+                raise ValueError("Image download redirect has no destination")
+            url = urljoin(url, location)
+            continue
+        response.raise_for_status()
+        return response.content
+    raise ValueError("Too many image download redirects")
 
 
 def _minimax_prompt(raw: str) -> str:
@@ -267,9 +320,7 @@ def _write_openai_image(payload: dict, output_file: str) -> str:
             _, encoded = image_url.split(",", 1)
             image_bytes = base64.b64decode(encoded)
         else:
-            download = requests.get(image_url, timeout=120)
-            download.raise_for_status()
-            image_bytes = download.content
+            image_bytes = _download_image(image_url)
 
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
