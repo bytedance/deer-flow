@@ -240,6 +240,9 @@ async def test_reply_without_running_card_and_push_without_source_split_too(feis
         ("plain answer", "plain answer", False),
         # Code renders literally in a card, so the shown source must not change.
         ("inline `![a](b)` keeps its marker", "inline `![a](b)` keeps its marker", True),
+        ("example ``![a](b)`` and ![c](d)", "example ``![a](b)`` and [c](d)", True),
+        ("example ``use ` before ![a](b)`` and ![c](d)", "example ``use ` before ![a](b)`` and [c](d)", True),
+        ("unclosed `` before ![c](d)", "unclosed `` before [c](d)", False),
         ("```\n![a](b)\n```", "```\n![a](b)\n```", True),
         # A snapshot streamed before the closing fence arrives keeps its open block literal.
         ("```\n![a](b)", "```\n![a](b)", True),
