@@ -443,8 +443,11 @@ turn's restrictions. They preserve a later selection for new requests.
 Regenerating a reply or editing and resending its prompt uses the original
 turn's mode and its recorded reasoning, planning, and delegation options.
 For example, a Flash turn with an attachment can be regenerated after
-selecting Chat for the next message. Older turns use the settings available
-in their source run and otherwise fall back to the ordinary agent defaults.
+selecting Chat for the next message. Older turns recover settings from their
+source run or the mode from the checkpoint that introduced the response. If
+neither records a mode or options, an explicitly selected ordinary mode can
+be used. Selecting Chat in this case replays the turn with ordinary agent
+defaults. A temporary error reading the source mode returns a retryable `503`.
 When regenerating an interrupted answer, forward the checkpoint and metadata
 returned by `runs/regenerate/prepare`. Submitting a run whose original turn
 can no longer be identified returns `409`.

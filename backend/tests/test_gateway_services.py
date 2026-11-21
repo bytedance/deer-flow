@@ -441,17 +441,19 @@ async def test_regenerate_recovers_chat_mode_after_switching_modes(_stub_app_con
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["regenerate", "edit"])
 @pytest.mark.parametrize(
-    ("original", "selection", "with_file"),
+    ("original", "selection", "with_file", "legacy_summary"),
     [
-        ({"mode": "flash", "thinking_enabled": False}, {"mode": "chat"}, True),
-        ({"mode": "chat"}, {"mode": "flash", "thinking_enabled": False}, False),
-        ({"mode": "ultra", "is_plan_mode": True, "subagent_enabled": True, "reasoning_effort": "low"}, {"mode": "flash"}, False),
-        ({"mode": "thinking", "reasoning_effort": "high"}, {}, False),
-        ({}, {"mode": "chat"}, False),
+        ({"mode": "flash", "thinking_enabled": False}, {"mode": "chat"}, True, False),
+        ({"mode": "chat"}, {"mode": "flash", "thinking_enabled": False}, False, False),
+        ({"mode": "ultra", "is_plan_mode": True, "subagent_enabled": True, "reasoning_effort": "low"}, {"mode": "flash"}, False, False),
+        ({"mode": "thinking", "reasoning_effort": "high"}, {}, False, False),
+        ({}, {"mode": "chat"}, False, False),
+        ({"mode": "thinking", "thinking_enabled": 0, "reasoning_effort": None}, {"mode": "chat"}, False, False),
+        ({"mode": "flash", "thinking_enabled": False}, {"mode": "chat"}, True, True),
     ],
-    ids=["flash-attachment-to-chat", "chat-to-flash", "ultra-to-flash", "omitted-selection", "ordinary-default"],
+    ids=["flash-attachment-to-chat", "chat-to-flash", "ultra-to-flash", "omitted-selection", "ordinary-default", "explicit-falsy", "legacy-answer-summary"],
 )
-async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, monkeypatch, operation, original, selection, with_file):
+async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, monkeypatch, operation, original, selection, with_file, legacy_summary):
     from unittest.mock import AsyncMock
 
     from httpx import ASGITransport, AsyncClient
@@ -470,14 +472,22 @@ async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, mon
         message["additional_kwargs"]["files"] = [{"filename": "data.csv"}]
     path = f"/api/threads/{tid}/runs"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(path, json={"input": {"messages": [message]}, "context": original})
+        payload = {"input": {"messages": [message]}, "context": original}
+        if legacy_summary:
+            payload["config"] = {"context": original}
+        response = await client.post(path, json=payload)
         assert response.status_code == 200, response.text
         manager = app.state.run_manager
         source = await manager.get(response.json()["run_id"], user_id=owner)
         await source.task
         await manager.set_status(source.run_id, services.RunStatus.success)
         human = worker.await_args.kwargs["graph_input"]["messages"][0]
-        human.additional_kwargs["run_id"] = source.run_id
+        if legacy_summary:
+            human.additional_kwargs.pop("deerflow_mode_options", None)
+            human.additional_kwargs.pop("run_id", None)
+            source.last_ai_message = "Answer"
+        else:
+            human.additional_kwargs["run_id"] = source.run_id
         checkpoint_config = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
         for version, messages in enumerate(([], [human, AIMessage(content="Answer", id="answer")]), start=1):
             checkpoint = empty_checkpoint()
@@ -540,6 +550,90 @@ async def test_replay_recovers_only_the_legacy_source_runs_options(_stub_app_con
     options = worker.await_args.kwargs["config"]["configurable"]
     expected = {"mode": "pro", "thinking_enabled": True, "reasoning_effort": "medium"} if source_thread == "legacy" else {}
     assert {key: options[key] for key in ("mode", "thinking_enabled", "reasoning_effort") if key in options} == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin", "selection", "expected"),
+    [
+        ("pruned-checkpoint", {"mode": "ultra"}, {"mode": "flash"}),
+        ("unknown", {"mode": "ultra", "subagent_enabled": True}, {"mode": "ultra", "subagent_enabled": True}),
+        ("unknown", {"mode": "chat"}, {}),
+        ("incomplete-journal", {"mode": "chat"}, {"mode": "flash", "thinking_enabled": False}),
+        ("ambiguous-summary", {"mode": "chat"}, {}),
+        ("ownerless-cache", {"mode": "chat"}, {}),
+        ("store-error", {"mode": "chat"}, None),
+    ],
+)
+async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, selection, expected):
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    from app.gateway import services
+    from deerflow.runtime.events.store.base import IncompleteMessageRunLookupError
+    from deerflow.runtime.user_context import get_current_user
+
+    request, store, threads = _make_start_run_persistence_context()
+    tid = "legacy-fallback"
+    await threads.create(tid)
+    owner = str(get_current_user().id)
+    runtime = request.app.state
+    human = HumanMessage(id="question", content="First question", additional_kwargs={"run_id": "source"})
+    if origin == "ambiguous-summary":
+        human.additional_kwargs.pop("run_id")
+    answer = AIMessage(id="answer", content="First answer")
+    messages = [human, answer]
+    states = [([], None), (messages, "flash" if origin == "pruned-checkpoint" else None)]
+    if origin == "pruned-checkpoint":
+        states.append((messages + [HumanMessage(id="later", content="Later question"), AIMessage(id="later-answer", content="Later answer")], "chat"))
+    checkpoint_config = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
+    for version, (turn_messages, mode) in enumerate(states, start=1):
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {"messages": turn_messages}
+        checkpoint["channel_versions"] = {"messages": version}
+        metadata = {"source": "loop", "step": version}
+        if mode:
+            metadata["mode"] = mode
+        checkpoint_config = await runtime.checkpointer.aput(checkpoint_config, checkpoint, metadata, {"messages": version})
+
+    metadata = {"regenerate_from_message_id": "answer", "regenerate_from_run_id": "source"}
+    if origin == "incomplete-journal":
+        await store.put("source", thread_id=tid, user_id=owner, status="success", metadata={"mode": "flash"}, kwargs={"config": {"context": {"thinking_enabled": False}}})
+        metadata["regenerate_from_run_id"] = "unconfirmed"
+        lookup = AsyncMock(side_effect=IncompleteMessageRunLookupError("missing cursor"))
+        monkeypatch.setattr(runtime.run_event_store, "find_latest_ai_message_run_ids", lookup)
+    elif origin == "ambiguous-summary":
+        for run_id in ("older", "source"):
+            await store.put(run_id, thread_id=tid, user_id=owner, status="success", metadata={"mode": "ultra"})
+            await store.update_run_completion(run_id, status="success", last_ai_message="First answer")
+    elif origin == "ownerless-cache":
+        await store.put("source", thread_id=tid, user_id=None, status="success", metadata={"mode": "ultra"})
+        cached = await runtime.run_manager.get("source", user_id=None)
+        monkeypatch.setitem(runtime.run_manager._runs, "source", cached)
+    elif origin == "store-error":
+        lookup = AsyncMock(side_effect=OSError("transient storage error"))
+        monkeypatch.setattr(store, "get", lookup)
+
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    body = _run_create_request("First question", context=selection, metadata=metadata)
+    if expected is None:
+        with pytest.raises(HTTPException) as failure:
+            await services.start_run(body, tid, request)
+        assert failure.value.status_code == 503
+        lookup.assert_awaited()
+        worker.assert_not_awaited()
+        return
+    run = await services.start_run(body, tid, request)
+    await run.task
+    if origin == "incomplete-journal":
+        lookup.assert_awaited_once()
+    for name in ("context", "configurable"):
+        config = worker.await_args.kwargs["config"].get(name, {})
+        assert {key: config[key] for key in ("mode", "subagent_enabled", "thinking_enabled") if key in config} == expected
 
 
 @pytest.mark.asyncio

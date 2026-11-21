@@ -31,6 +31,7 @@ from langgraph.types import Command
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
+from app.gateway.checkpoint_lineage import CheckpointLineageError, find_checkpoint_introducing_message
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
@@ -120,7 +121,8 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.llm_text import strip_leading_think_blocks
+from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY, message_to_text
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -2370,33 +2372,60 @@ async def _matches_interrupted_answer(run_mgr: RunManager, events: RunEventStore
         records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size, before_created_at=last.created_at, before_run_id=last.run_id)
 
 
-def _mode_options(section: object) -> dict[str, str | bool]:
+def _mode_options(section: object) -> dict[str, Any]:
     if not isinstance(section, Mapping):
         return {}
-    options = {key: section[key] for key in _MODE_OPTIONS if isinstance(section.get(key), (str, bool))}
+    options = {key: section[key] for key in _MODE_OPTIONS if key in section}
     if selected_mode(options) is None:
         options.pop("mode", None)
     return options
 
 
-async def _legacy_turn_mode_options(request: Request, thread_id: str, message_id: str, source: Mapping[str, Any], target_run_id: str | None) -> dict[str, Any]:
+def replay_runs_matching_answer(records: list[RunRecord], message: Any) -> list[RunRecord]:
+    """Match stored raw or visible answer summaries in the order supplied by the run store."""
+    text = message_to_text(message)
+    if not text:
+        return []
+    answers = (text.strip(), strip_leading_think_blocks(text))
+    matches = []
+    for record in records:
+        if record.status != RunStatus.success:
+            continue
+        summary = (record.last_ai_message or "").strip()
+        if summary and any(answer.startswith(summary) for answer in answers):
+            matches.append(record)
+    return matches
+
+
+async def _legacy_turn_mode_options(request: Request, thread_id: str, message_id: str, source: Mapping[str, Any], target_run_id: str | None, answer: Any) -> dict[str, Any] | None:
     """Older checkpoints may only carry the source run ID or the original Chat marker."""
     user = get_current_user()
     owner = get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
+    manager = get_run_manager(request)
     run_id = source.get("run_id")
     if not run_id or (target_run_id and target_run_id != run_id):
         # A regenerated answer can belong to a different run from its copied prompt.
         # The prepare response is a hint; verify a different ID against the journal.
         try:
             origins = await get_run_event_store(request).find_latest_ai_message_run_ids(thread_id, {message_id}, user_id=owner)
-        except IncompleteMessageRunLookupError as exc:
-            raise HTTPException(409, "Could not identify the source run for this replay") from exc
+        except IncompleteMessageRunLookupError:
+            # The source stamp or the same answer match used by prepare can
+            # still identify the run when a legacy journal cannot page back.
+            origins = {}
         run_id = origins.get(message_id, run_id)
-    if not isinstance(run_id, str) or not run_id:
-        return {}
-    record = await get_run_manager(request).get(run_id, user_id=owner, raise_on_store_error=True)
-    if record is None or record.thread_id != thread_id or record.user_id not in (None, owner):
-        return {}
+    if isinstance(run_id, str) and run_id:
+        record = await manager.get(run_id, user_id=owner, raise_on_store_error=True)
+    elif answer is not None and target_run_id:
+        records = await manager.list_by_thread(thread_id, user_id=owner, limit=10)
+        matches = replay_runs_matching_answer([row for row in records if row.user_id == owner], answer)
+        if len(matches) != 1 or matches[0].run_id != target_run_id:
+            return None
+        record = matches[0]
+    else:
+        return None
+    # get() can return a cached run without applying the store's owner filter.
+    if record is None or record.thread_id != thread_id or record.user_id != owner:
+        return None
     config = (record.kwargs or {}).get("config") or {}
     # Match build_run_config: when both raw sections were sent, only context was admitted.
     options = _mode_options(config.get("context", config.get("configurable")))
@@ -2436,12 +2465,14 @@ async def _recover_source_message_metadata(
         messages = []
 
     source: Any | None = None
+    answer: Any | None = None
     if target_message_id:
         target_index = next(
             (index for index, message in enumerate(messages) if _message_identifier(message) == target_message_id),
             None,
         )
         if target_index is not None:
+            answer = messages[target_index]
             source = next(
                 (message for message in reversed(messages[:target_index]) if _is_scope_source_human_message(message)),
                 None,
@@ -2476,8 +2507,22 @@ async def _recover_source_message_metadata(
     if source is not None:
         metadata = _message_additional_kwargs(source)
         if target_message_id and _TURN_MODE_OPTIONS not in metadata:
-            options = await _legacy_turn_mode_options(request, thread_id, target_message_id, metadata, target_run_id)
-            return {**metadata, _TURN_MODE_OPTIONS: options}
+            try:
+                options = await _legacy_turn_mode_options(request, thread_id, target_message_id, metadata, target_run_id, answer)
+                if options is None and answer is not None and not metadata.get(CHAT_MODE_KEY):
+                    # A later turn can have changed the head's mode. Only the
+                    # checkpoint which introduced this exact answer can supply it.
+                    origin = await find_checkpoint_introducing_message(accessor, snapshot, target_message_id, max_depth=32)
+                    origin_metadata = getattr(origin, "metadata", None) or {}
+                    if origin_metadata.get("source") in {"input", "loop"} and (mode := selected_mode(origin_metadata)):
+                        options = {"mode": mode}
+            except CheckpointLineageError:
+                options = None
+            except Exception as exc:
+                logger.warning("Could not read source mode for replay", exc_info=True)
+                raise HTTPException(503, "Source run mode is temporarily unavailable") from exc
+            if options is not None:
+                return {**metadata, _TURN_MODE_OPTIONS: options}
         return metadata
     if selected_mode(getattr(snapshot, "metadata", None)) == "chat":
         return {CHAT_MODE_KEY: "chat"}
@@ -2867,16 +2912,18 @@ async def start_run(
         requested_mode = selected_mode(body_context) or selected_mode(config.get("context")) or selected_mode(config.get("configurable"))
         continuing_mode = is_replay or getattr(request.state, "run_input_dispatch", False) is True
         mode = requested_mode
-        if isinstance(target_message_id, str) and target_message_id:
+        source_options = (source_metadata or {}).get(_TURN_MODE_OPTIONS)
+        source_chat = (source_metadata or {}).get(CHAT_MODE_KEY) == "chat"
+        if isinstance(target_message_id, str) and target_message_id and (source_options is not None or source_chat or requested_mode == "chat"):
             # A regenerate or edit replays one human turn. The browser sends
             # its current composer settings, including derived reasoning flags.
-            options = _mode_options((source_metadata or {}).get(_TURN_MODE_OPTIONS))
+            options = _mode_options(source_options)
             for section in (config.setdefault("context", {}), config["configurable"]):
                 for key in _MODE_OPTIONS:
                     section.pop(key, None)
                 section.update(options)
             mode = selected_mode(options)
-        if (source_metadata or {}).get(CHAT_MODE_KEY) == "chat":
+        if source_chat:
             mode = "chat"
         if admitted_run is not None:
             mode = selected_mode(admitted_run.metadata)
@@ -2920,13 +2967,10 @@ async def start_run(
         scope_runtime_config = dict(config.get("configurable") or {})
         if isinstance(config.get("context"), dict):
             scope_runtime_config.update(config["context"])
-        if current_human_message is not None:
-            # Branches and keyed retries retain the turn even when its run is gone.
-            options = _mode_options(scope_runtime_config)
-            if options:
-                current_human_message.additional_kwargs[_TURN_MODE_OPTIONS] = options
-            else:
-                current_human_message.additional_kwargs.pop(_TURN_MODE_OPTIONS, None)
+        if current_human_message is not None and is_genuine_user_message(current_human_message):
+            # An empty marker on a real user turn preserves the agent defaults
+            # across branches and retries even after its run is gone.
+            current_human_message.additional_kwargs[_TURN_MODE_OPTIONS] = _mode_options(scope_runtime_config)
         scope_assistant_id = scope_runtime_config.get("agent_name") or _DEFAULT_ASSISTANT_ID
         # Bootstrap assembly intentionally does not load an agent config: the
         # new agent may not exist yet and setup_agent creates its definition.

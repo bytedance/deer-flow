@@ -387,7 +387,15 @@ async def find_checkpoint_before_message(
     represent an addressable conversation state and are skipped, and so are
     checkpoints that still have pending tasks (see :func:`has_pending_tasks`).
     """
+    return await _find_message_boundary(accessor, head_checkpoint, message_id, max_depth=max_depth, before=True)
 
+
+async def find_checkpoint_introducing_message(accessor: Any, head_checkpoint: Any, message_id: str, *, max_depth: int) -> Any:
+    """Return the checkpoint that added the message on this branch, including pending graph steps."""
+    return await _find_message_boundary(accessor, head_checkpoint, message_id, max_depth=max_depth, before=False)
+
+
+async def _find_message_boundary(accessor: Any, head_checkpoint: Any, message_id: str, *, max_depth: int, before: bool) -> Any:
     if message_id not in {_message_id(message) for message in checkpoint_messages(head_checkpoint)}:
         raise CheckpointLineageIntegrityError("Target message is not present in the checkpoint head")
 
@@ -429,6 +437,12 @@ async def find_checkpoint_before_message(
             if parent_identity in visited:
                 raise CheckpointLineageIntegrityError("Checkpoint lineage contains a cycle")
             visited.add(parent_identity)
+
+        if not before:
+            if all(_message_id(message) != message_id for message in checkpoint_messages(parent)):
+                return current
+            current = parent
+            continue
 
         grandparent = None
         versions = None

@@ -66,6 +66,7 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
     build_thread_checkpoint_state_accessor,
+    replay_runs_matching_answer,
     serialize_wait_run_status,
     sse_consumer,
     start_run,
@@ -85,7 +86,6 @@ from deerflow.runtime.runs.store.base import format_run_cursor_created_at, norma
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
-from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -694,17 +694,6 @@ def _event_message_id(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
-    last_ai_message = (record.last_ai_message or "").strip()
-    if not last_ai_message:
-        return False
-    target_text = _message_text(message)
-    if not target_text:
-        return False
-    # Match both historical raw summaries and newer visible-answer summaries.
-    return any(last_ai_message == text[: len(last_ai_message)] for text in (target_text.strip(), strip_leading_think_blocks(target_text)))
-
-
 async def _find_target_run_id(
     thread_id: str,
     message_id: str,
@@ -729,12 +718,9 @@ async def _find_target_run_id(
 
     run_mgr = get_run_manager(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
-    fallback_record = next(
-        (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
-        None,
-    )
-    if fallback_record is not None:
-        return fallback_record.run_id
+    matches = replay_runs_matching_answer(records, target_message)
+    if matches:
+        return matches[0].run_id
     if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
