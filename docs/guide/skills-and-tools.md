@@ -160,6 +160,10 @@ accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds
 Unset overrides use the provider defaults. Invalid duration strings fail before
 the script submits a request.
 
+MiniMax submission, status polling, and file lookup each follow up to five
+HTTP 307 or 308 redirects within the configured API origin (scheme, hostname,
+and effective port). Each redirect preserves the request method and body.
+
 Generated videos download over HTTPS on port 443. The skill checks the
 provider's download-host allowlist before the first request and after each
 redirect, up to five redirects. Gemini sends its API key only to its API host
@@ -210,7 +214,9 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
-For standalone skill exports, the bundled skill creator's `scripts/package_skill.py` can be run by file path from any directory, or as `python -m scripts.package_skill` from the skill-creator directory. Both entry points validate the skill before writing a `.skill` archive.
+For standalone skill creation, `scripts/init_skill.py <skill-name> --path <directory>` creates a new direct child of the chosen directory. Names can be up to 40 characters long and consist of lowercase ASCII letters and digits, optionally grouped with single hyphens (for example, `data-analyzer`). The creator and packager write progress to stdout and report errors on stderr.
+
+For standalone skill exports, the bundled skill creator's `scripts/package_skill.py` can be run by file path from any directory, or as `python -m scripts.package_skill` from the skill-creator directory. Both entry points validate the skill before writing a `.skill` archive. The packager requires a regular `SKILL.md` file and skips symbolic links to files and directories in the skill. Copy any linked resources the skill needs into its directory before packaging.
 
 Custom-skill writes and security-scan staging preserve submitted line endings
 on every platform, so the scanner checks the bytes that will be stored.
@@ -418,6 +424,16 @@ If a trusted operator manages the configured skills directory through an externa
 Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Code files (anything under `scripts/`, a script suffix such as `.py`, `.sh`, or `.js`, or an extensionless file starting with `#!`) that are not NUL-free UTF-8 text raise a warning and are still analyzed over a lossy decode, so a single stray byte cannot hide them from `CRITICAL` checks. The moderation adapter normalizes both plain-text model responses and LangChain Responses API text blocks before parsing the required JSON decision. Python instance-client exfiltration checks follow a minimal same-scope evidence chain: a simple name bound to a known client constructor, optional name-to-name aliases, and an actual outbound method or context-manager use supported by that constructor. Constructor roots must be proven imports; bare canonical-looking names are not inferred as modules. Nested scopes do not inherit client handles and inherit only constructor import aliases that are never rebound in the enclosing scope. Comprehensions, walrus-bearing statements, annotations, complex binding targets, unsupported operations, and ambiguous branch flows produce no finding from this signal; skipped constructs conservatively invalidate every name they may bind so stale client state cannot create a finding. A deterministic work budget or recursion limit reached by this best-effort analysis does not discard findings already collected for the file. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
 
 Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`), HTML applications (`.hta`), and scriptlets (`.sct`) count as code even outside `scripts/`, regardless of filename case. They receive both SkillScan analysis and the installer's executable-code policy.
+
+SkillScan also inspects text for Python and shell code when the file has an unfamiliar name or no shebang.
+Shell terminology in a reference document can go to the model for contextual review. A critical shell finding in inferred code needs command evidence.
+For inferred Python, the sensitive-read and network rule requires evidence of a file read and an outbound network operation. Configuration values can contain a path and a help URL without triggering this rule.
+For text over 131,072 characters without a Python filename or shebang, it reports a Python analysis limit and continues the other checks.
+During archive installation, NUL-free UTF-8 files outside the usual script and prompt paths go to the configured review model and require an explicit `allow`.
+The installer rejects additional files containing recognized credentials or sensitive configuration before sending their contents to the model.
+Before the first model call, the installer checks that each additional text file is at most 128 KiB and that the package contains at most 32 of these files totaling at most 1 MiB. Exceeding any limit stops installation.
+These model-review safeguards also apply when `skill_scan.enabled` is false.
+
 SkillScan warns about remote downloads piped into common shells, including `env` launchers, sudo, interpreter paths, and shell line continuations. It distinguishes environment dumps from `env` commands, including assignments and GNU split-string escapes. Shell parsing and split expansion are bounded; reaching a limit preserves critical findings already detected. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
 SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
