@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -188,6 +189,121 @@ async def test_reader_hides_runs_outside_scope_and_rejects_cursor_from_another_s
         await other.list_changed_runs(cursor=first.next_cursor, limit=1)
     assert await other.get_run_status(thread_id="thread-a", run_id="run-a") is None
     assert (await other.list_run_events(thread_id="thread-a", run_id="run-a", after_seq=None, limit=10)).items == ()
+
+
+@pytest.mark.asyncio
+async def test_memory_fact_counts_reach_owner_evidence_and_reuse_the_frozen_snapshot(tmp_path, monkeypatch):
+    from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, messages_from_dict, messages_to_dict
+    from langgraph.graph.message import add_messages
+    from langgraph.runtime import Runtime
+
+    from deerflow.agents import memory
+    from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+    from deerflow.runtime.journal import RunJournal
+
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path / "memory"), "token_counting": "char", "max_injection_tokens": 100})
+    selected_content = "first scoped fact " + "a" * 220
+    withheld_content = "second scoped fact " + "b" * 220
+    manager.create_fact(selected_content, confidence=0.9, user_id="user-1", agent_name="lead")
+    manager.create_fact(withheld_content, confidence=0.8, user_id="user-1", agent_name="lead")
+    manager.create_fact("another agent's fact", user_id="user-1", agent_name="other")
+    manager.create_fact("another owner's fact", user_id="user-2", agent_name="lead")
+    monkeypatch.setattr(memory, "get_memory_manager", lambda: manager)
+    config = AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, memory={"enabled": True, "injection_enabled": True})
+    runs = MemoryRunStore()
+    events = MemoryRunEventStore()
+    readers = StoreRunEvidenceReaderFactory(runs, events)
+    owner = readers.for_principal(ExtensionPrincipal(user_id="user-1"))
+    outsider = readers.for_principal(ExtensionPrincipal(user_id="user-2"))
+    model = FakeListChatModel(responses=["response"])
+    delivered = []
+
+    def model_handler(request):
+        delivered.append(list(request.messages))
+        return ModelResponse(result=[AIMessage(content="response")])
+
+    await _put_run(runs, "fresh-run", "thread-a")
+    journal = RunJournal("fresh-run", "thread-a", events)
+    try:
+        runtime = Runtime(context={"run_id": "fresh-run", "user_id": "user-1", "__run_journal": journal})
+        middleware = DynamicContextMiddleware(agent_name="lead", app_config=config)
+        initial = [HumanMessage(content="Use what you remember", id="first-user")]
+        update = middleware.before_agent({"messages": initial}, runtime)
+        messages = add_messages(initial, update["messages"])
+        memory_message = next(message for message in messages if str(message.id).endswith("__memory"))
+        request = ModelRequest(model=model, messages=messages, runtime=runtime, tools=[])
+        middleware.wrap_model_call(request, model_handler)
+        middleware.wrap_model_call(request, model_handler)
+        await journal.flush()
+
+        page = await owner.list_run_events(thread_id="thread-a", run_id="fresh-run", after_seq=None, limit=10)
+        assert len(page.items) == 1
+        event = page.items[0]
+        assert event.event_type == "context:memory"
+        assert event.category == "context"
+        fingerprint = hashlib.sha256(memory_message.content.encode("utf-8")).hexdigest()
+        assert event.content == {
+            "content_sha256": fingerprint,
+            "project_context_revision": None,
+            "project_shelf_revision": None,
+            "memory_injection": {"status": "fresh", "eligible": 2, "selected": 1, "injected": 1, "withheld": 1},
+        }
+        assert selected_content in memory_message.content
+        assert withheld_content not in memory_message.content
+        assert all(any(message.content == memory_message.content for message in request_messages) for request_messages in delivered)
+        assert (await outsider.list_run_events(thread_id="thread-a", run_id="fresh-run", after_seq=None, limit=10)).items == ()
+    finally:
+        await journal.close()
+
+    manager.create_fact("new fact after the frozen snapshot", confidence=0.95, user_id="user-1", agent_name="lead")
+    assert len(manager.get_memory(user_id="user-1", agent_name="lead")["facts"]) == 3
+    messages = messages_from_dict(messages_to_dict(messages))
+    reloads = []
+
+    def reject_backend_reload():
+        reloads.append("reload")
+        raise AssertionError("A reused snapshot must not consult the memory backend")
+
+    monkeypatch.setattr(memory, "get_memory_manager", reject_backend_reload)
+    await _put_run(runs, "reused-run", "thread-a")
+    journal = RunJournal("reused-run", "thread-a", events)
+    try:
+        runtime = Runtime(
+            context={
+                "run_id": "reused-run",
+                "user_id": "user-1",
+                "__run_journal": journal,
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset(message.id for message in messages),
+            }
+        )
+        middleware = DynamicContextMiddleware(agent_name="lead", app_config=config)
+        messages = add_messages(messages, [AIMessage(content="response"), HumanMessage(content="Continue", id="second-user")])
+        update = middleware.before_agent({"messages": messages}, runtime)
+        if update is not None:
+            messages = add_messages(messages, update["messages"])
+        request = ModelRequest(model=model, messages=messages, runtime=runtime, tools=[])
+        middleware.wrap_model_call(request, model_handler)
+        middleware.wrap_model_call(request, model_handler)
+        await journal.flush()
+
+        page = await owner.list_run_events(thread_id="thread-a", run_id="reused-run", after_seq=None, limit=10)
+        assert len(page.items) == 1
+        assert page.items[0].content == {
+            "content_sha256": fingerprint,
+            "project_context_revision": None,
+            "project_shelf_revision": None,
+            "memory_injection": {"status": "reused", "eligible": 2, "selected": 1, "injected": 1, "withheld": 1},
+        }
+        assert reloads == []
+        assert "new fact after the frozen snapshot" not in "\n".join(str(message.content) for message in delivered[-1])
+        assert (await outsider.list_run_events(thread_id="thread-a", run_id="reused-run", after_seq=None, limit=10)).items == ()
+    finally:
+        await journal.close()
 
 
 @pytest.mark.parametrize(

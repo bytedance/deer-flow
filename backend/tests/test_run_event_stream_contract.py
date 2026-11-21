@@ -45,6 +45,36 @@ def _contract_events() -> dict[str, dict]:
     return {event["event_type"]: event for event in _load_contract()["events"]}
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"status": "invented", "eligible": 3, "selected": 2, "injected": 2, "withheld": 1},
+        {"status": "fresh", "eligible": True, "selected": 1, "injected": 1, "withheld": 0},
+        {"status": "fresh", "eligible": 3, "selected": 2, "injected": -1, "withheld": 1},
+        {"status": "fresh"},
+        {"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None, "facts": ["private"]},
+    ],
+)
+def test_memory_injection_statistics_contract_rejects_invalid_fields(invalid):
+    schema = _contract_events()["context:memory"]["content_schema"]
+    assert not Draft202012Validator(schema).is_valid({"content_sha256": None, "memory_injection": invalid})
+
+
+@pytest.mark.parametrize(
+    "statistics",
+    [
+        {"status": "fresh", "eligible": 3, "selected": 2, "injected": 2, "withheld": 1},
+        {"status": "reused", "eligible": 3, "selected": 3, "injected": 3, "withheld": 0},
+        {"status": "empty", "eligible": 4, "selected": 0, "injected": 0, "withheld": 4},
+        {"status": "disabled", "eligible": None, "selected": 0, "injected": 0, "withheld": None},
+        {"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None},
+    ],
+)
+def test_memory_injection_statistics_contract_accepts_scoped_observations(statistics):
+    schema = _contract_events()["context:memory"]["content_schema"]
+    _assert_schema_valid(schema, {"content_sha256": None, "memory_injection": statistics})
+
+
 def _assert_schema_valid(schema: dict | bool, instance: object) -> None:
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema, format_checker=FormatChecker())

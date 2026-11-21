@@ -47,7 +47,7 @@ from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
-from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY, MEMORY_INJECTION_STATS_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
@@ -185,6 +185,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             # scheduled run prompt.
             SCHEDULED_ORIGIN_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
+            MEMORY_INJECTION_STATS_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,

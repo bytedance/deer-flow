@@ -313,6 +313,57 @@ the structured versioned summary, file list, and limits live in
 The JSON contract defines required and optional payload fields using JSON
 Schema. It is the authoritative field-level reference.
 
+### Memory injection statistics
+
+`context:memory` can include `content.memory_injection`, recorded once per run
+after successful model handling by `DynamicContextMiddleware`. Query it through
+the existing owner-scoped endpoint:
+
+```text
+GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context%3Amemory
+```
+
+For example, an observation can contain:
+
+```json
+{"status":"fresh","eligible":12,"selected":7,"injected":7,"withheld":5}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `eligible` | Valid, nonempty fact records in the authorized user/agent snapshot before injection selection. Summaries and other owners' facts are excluded. |
+| `selected` | Fact lines retained by the backend's injection formatter. |
+| `injected` | Selected snapshot facts represented in the effective memory block at the successful model-handling boundary. |
+| `withheld` | `eligible - injected`, when both quantities describe the same known snapshot. |
+
+DeerMem produces both backend counts during its existing scoped read and
+formatting pass. Selection, ranking, token budgets and rendered text are
+unchanged. In tool mode, facts stay behind memory search, so a summaries-only
+injection has zero fact counts. Counts describe records represented by fact
+lines; a line can contain shortened text, and the count does not establish full
+fact preservation or answer correctness.
+
+`fresh` identifies a newly produced nonempty snapshot; `reused` identifies a
+checkpoint snapshot used again without reloading memory. `empty` is a newly
+observed empty block, including a budget that selected no facts even when
+`eligible` is positive. A reused empty snapshot reports `reused` with its
+original counts. `disabled` means no read was requested: `selected` and
+`injected` are zero, while `eligible` and `withheld` remain null.
+
+`unknown` covers unsupported backends, legacy or malformed checkpoint metadata,
+and failed reads. Unknown counts are null; when no memory block was supplied,
+`injected` can still be known zero. These values are never reconstructed by
+parsing backend text or reading today's store. The optional
+`MemoryManager.get_context_result()` defaults to the existing string-returning
+`get_context()` with unknown counts, so third-party backends need no change.
+
+Explicit empty or disabled observations can produce this event even when
+`content_sha256` is null. No event means unobserved, not zero. Historical events
+are not backfilled. Metadata is server-owned and stripped from external run and
+state-write messages. Events contain counts and fingerprints, without fact IDs
+or memory text. The observation shares the existing middleware boundary:
+arbitrary later custom-extension or provider transformations are not measured.
+
 ## Consumers
 
 | Consumer | Read path and behavior |
@@ -321,7 +372,7 @@ Schema. It is the authoritative field-level reference.
 | Per-run message clients | Thread-scoped and stateless run message endpoints call `list_messages_by_run()`. |
 | Run debug/audit | `GET /api/threads/{thread_id}/runs/{run_id}/events` calls `list_events()` and supports `event_types`, `task_id`, `limit`, and `after_seq`. |
 | Historical subtask cards | Fetch `subagent.step` through the run-events endpoint, filtered and paginated by `task_id`. |
-| Memory audit | Filters run events to `context:memory` and compares `content_sha256`; full memory text is not duplicated into the event store. |
+| Memory audit | Filters run events to `context:memory`, compares `content_sha256` and reads optional `memory_injection` counts; full memory text is not duplicated into the event store. |
 | Workspace review | `GET /api/threads/{thread_id}/runs/{run_id}/workspace-changes` projects the latest `workspace_changes` payload. |
 
 Token and cost summaries are not reconstructed by reading event rows.

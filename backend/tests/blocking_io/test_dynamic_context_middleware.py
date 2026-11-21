@@ -423,6 +423,7 @@ async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:
         content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
         project_context_revision=None,
         project_shelf_revision=None,
+        memory_injection={"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None},
     )
     journal.record_memory_context.assert_called_once()
 

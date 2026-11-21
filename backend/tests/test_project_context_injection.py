@@ -493,6 +493,7 @@ def test_journal_memory_only_run_records_null_project_revision():
         content_sha256=hashlib.sha256(memory.encode("utf-8")).hexdigest(),
         project_context_revision=None,
         project_shelf_revision=None,
+        memory_injection={"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None},
     )
 
 
@@ -519,6 +520,7 @@ def test_journal_both_contexts_recorded_together():
         content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
         project_context_revision=hashlib.sha256(expected_block.encode("utf-8")).hexdigest(),
         project_shelf_revision=None,
+        memory_injection={"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None},
     )
 
 
