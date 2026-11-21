@@ -713,7 +713,13 @@ const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
 
 function getFileTypeLabel(filename: string): string {
   const ext = getFileExt(filename);
-  return FILE_TYPE_MAP[ext] ?? (ext.toUpperCase() || "FILE");
+  // The map is a plain object, so a prototype key (`__proto__`,
+  // `constructor`) would leak an inherited value into the card (#8380);
+  // only own keys may label the file, matching core/utils/files.tsx.
+  const mapped = Object.hasOwn(FILE_TYPE_MAP, ext)
+    ? FILE_TYPE_MAP[ext]
+    : undefined;
+  return mapped ?? (ext.toUpperCase() || "FILE");
 }
 
 function isImageFile(filename: string): boolean {
