@@ -6,10 +6,11 @@ import asyncio
 import io
 import json
 import logging
+import re
 import threading
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -34,6 +35,139 @@ from deerflow.utils.file_io import await_drained
 logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
+
+# Discord's client does not follow CommonMark for code blocks. A block starts
+# at a run of three backticks anywhere in a line, takes a language tag only when
+# a line break follows it directly, and ends at the next three backticks, even
+# right after the last code text. There are no tilde fences, and a longer run
+# does not nest a shorter one. A backslash escapes a backtick outside a block.
+# The pattern mirrors the client's code-block rule; a run with nothing but
+# line breaks before the next run opens no block. The client's parser turns
+# CRLF and a lone CR into LF first, so each counts as one line break here.
+_CODE_FENCE = "```"
+_LINE_BREAK = r"(?:\r\n?|\n)"
+_CODE_BLOCK_RE = re.compile(rf"```(?:([a-z0-9_+\-.#]+?){_LINE_BREAK})?{_LINE_BREAK}*([^\r\n][\s\S]*?){_LINE_BREAK}*```", re.IGNORECASE)
+_CODE_LANGUAGE_RE = re.compile(rf"([a-z0-9_+\-.#]+?){_LINE_BREAK}", re.IGNORECASE)
+_FENCE_OR_ESCAPE_RE = re.compile(r"\\[^0-9A-Za-z\s]|```")
+_CODE_FENCE_RE = re.compile(_CODE_FENCE)
+# Appended to a message that ends inside a block; the client drops the line
+# break before the closing run.
+_CODE_FENCE_CLOSE_LEN = len("\n" + _CODE_FENCE)
+
+
+class _CodeBlock(NamedTuple):
+    """A code block of the reply as Discord renders the whole reply."""
+
+    start: int  # index of the opening run
+    end: int | None  # index after the closing run; None when the reply never closes it
+    opener: str  # the opening run and its language tag, repeated to reopen the block
+
+
+def _code_blocks(text: str) -> list[_CodeBlock]:
+    """The code blocks of *text*, in order.
+
+    Parsed once over the whole reply: which run closes a block can depend on
+    text far past a split, so a single message cannot tell.
+    """
+    blocks: list[_CodeBlock] = []
+    pos = 0
+    while (match := _FENCE_OR_ESCAPE_RE.search(text, pos)) is not None:
+        start = match.start()
+        if match.group() != _CODE_FENCE:
+            pos = match.end()
+            continue
+        if (block := _CODE_BLOCK_RE.match(text, start)) is not None:
+            blocks.append(_CodeBlock(start, block.end(), _CODE_FENCE + (block.group(1) or "")))
+            pos = block.end()
+            continue
+        if text.find(_CODE_FENCE, start + len(_CODE_FENCE)) < 0:
+            language = _CODE_LANGUAGE_RE.match(text, start + len(_CODE_FENCE))
+            blocks.append(_CodeBlock(start, None, _CODE_FENCE + (language.group(1) if language else "")))
+            break
+        # An empty block is plain text; a later run may still open one.
+        pos = start + 1
+    return blocks
+
+
+def _block_at(blocks: list[_CodeBlock], index: int) -> _CodeBlock | None:
+    """The block that a cut of the reply at *index* falls inside."""
+    for block in blocks:
+        if block.start >= index:
+            break
+        if block.end is None or index < block.end:
+            return block
+    return None
+
+
+def _fence_is_carried(block: _CodeBlock | None) -> bool:
+    """Whether a split closes *block* and reopens it in the next message.
+
+    The added lines must leave most of the next message for content; a longer
+    language tag is split like plain text.
+    """
+    return block is not None and len(block.opener) + 1 + _CODE_FENCE_CLOSE_LEN <= _DISCORD_MAX_MESSAGE_LEN // 4
+
+
+def _close_code_block(piece: str) -> str:
+    return piece + ("" if piece.endswith("\n") else "\n") + _CODE_FENCE
+
+
+def _hard_split_point(text: str, start: int, budget: int) -> int:
+    """Cut *text* *budget* characters after *start*, moved back so it splits no backtick run, escape or CRLF.
+
+    Any of these cuts would change which runs open and close code blocks.
+    """
+    split_at = start + budget
+    while split_at > start and (text[split_at - 1] == "\\" or text[split_at - 1 : split_at + 1] in ("``", "\r\n")):
+        split_at -= 1
+    return split_at if split_at > start else start + budget
+
+
+def _line_split_point(text: str, start: int, budget: int) -> int:
+    """Where to end a message of *text* from *start* within *budget* characters, preferring a line break."""
+    split_at = text.rfind("\n", start, start + budget)
+    if split_at <= start:
+        return _hard_split_point(text, start, budget)
+    # Keep the delimiter on this chunk's tail so consecutive Discord messages
+    # reconstruct the original text exactly.
+    return split_at + 1
+
+
+def _next_split(text: str, start: int, budget: int, blocks: list[_CodeBlock]) -> tuple[int, _CodeBlock | None]:
+    """Where to end the message of *text* that starts at *start*, and the block open there.
+
+    *budget* is the room left after any reopened language tag.
+    """
+    split_at = _line_split_point(text, start, budget)
+    block = _block_at(blocks, split_at)
+    if not _fence_is_carried(block):
+        return split_at, block
+    # The cut falls inside a block, which this message closes and the next one
+    # reopens. Take the latest line end or closing run where this message's
+    # block holds code after its language tag and the reopened one will too. A
+    # block opening on the message's last line, or a cut just before the block's
+    # own closing run, would leave one of them empty: Discord shows an empty
+    # block as plain backticks, or its language tag as the code.
+    end = start + budget
+    candidates = {index + 1 for index in range(start, end) if text[index] == "\n"}
+    candidates.update(run.end() for run in _CODE_FENCE_RE.finditer(text, start, end))
+    for candidate in sorted(candidates, reverse=True):
+        block = _block_at(blocks, candidate)
+        if not _fence_is_carried(block):
+            return candidate, block
+        holds_code = text[max(start, block.start + len(block.opener)) : candidate].strip("\r\n")
+        next_holds_code = block.end is None or text[candidate : block.end - len(_CODE_FENCE)].strip("\r\n")
+        if candidate <= end - _CODE_FENCE_CLOSE_LEN and holds_code and next_holds_code:
+            return candidate, block
+    # The block's first line in this message does not fit: cut into it.
+    split_at = _hard_split_point(text, start, budget - _CODE_FENCE_CLOSE_LEN)
+    block = _block_at(blocks, split_at)
+    if _fence_is_carried(block) and block.start > start and not text[block.start + len(block.opener) : split_at].strip("\r\n"):
+        # The cut lands in the block's opening run or language tag, or before its
+        # first code: end the message before the opening run instead.
+        return block.start, None
+    return split_at, block
+
 
 # Bound for outbound work scheduled onto the Discord client's event loop.
 # Discord API calls normally return in well under a second; anything still
@@ -1320,23 +1454,33 @@ class DiscordChannel(Channel):
 
     @staticmethod
     def _split_text(text: str) -> list[str]:
+        """Split *text* into messages within Discord's length limit.
+
+        Splits prefer line breaks. A code block that a split cuts is closed at
+        the end of the message and reopened with its language tag at the start
+        of the next, so both halves render as code. Apart from those added
+        fences, the messages join back to *text*.
+        """
         if not text:
             return [""]
 
         chunks: list[str] = []
-        remaining = text
-        while len(remaining) > _DISCORD_MAX_MESSAGE_LEN:
-            split_at = remaining.rfind("\n", 0, _DISCORD_MAX_MESSAGE_LEN)
-            if split_at <= 0:
-                split_at = _DISCORD_MAX_MESSAGE_LEN
+        blocks = _code_blocks(text)
+        start = 0
+        reopen = ""  # the language tag line of a block carried into this message
+        while True:
+            budget = _DISCORD_MAX_MESSAGE_LEN - len(reopen)
+            if len(text) - start <= budget:
+                chunks.append(reopen + text[start:])
+                break
+            split_at, block = _next_split(text, start, budget, blocks)
+            chunk = reopen + text[start:split_at]
+            if _fence_is_carried(block):
+                chunks.append(_close_code_block(chunk))
+                reopen = f"{block.opener}\n"
             else:
-                # Keep the delimiter on this chunk's tail so consecutive
-                # Discord messages reconstruct the original text exactly.
-                split_at += 1
-            chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:]
-
-        if remaining:
-            chunks.append(remaining)
+                chunks.append(chunk)
+                reopen = ""
+            start = split_at
 
         return chunks
