@@ -127,6 +127,11 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "client_context",
         # Run-scoped language preference emitted by DynamicContextMiddleware.
         "response_language_preference",
+        # Incognito chat section emitted by agents/incognito_prompt.py into the
+        # lead-agent and every subagent system prompt. It declares the run's
+        # storage boundary, so forging it in untrusted input could impersonate
+        # the framework's persistence restrictions.
+        "incognito_mode",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
