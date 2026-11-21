@@ -97,7 +97,7 @@ boxlite = ["boxlite>=0.9.7"]
 tenki = ["tenki>=1.4.0"]
 # OpenSandbox remote sandbox provider (deerflow.community.opensandbox). The
 # sync SDK is loaded only when this provider is selected.
-opensandbox = ["opensandbox>=0.1.15,<0.2.0"]
+opensandbox = ["opensandbox>=1.1.0,<2.0.0"]
 # boxd machine sandbox provider (deerflow.community.boxd_sandbox). The SDK is
 # loaded only when this provider is selected.
 boxd = ["boxd>=0.3.2"]

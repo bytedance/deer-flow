@@ -388,12 +388,21 @@ must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks
 
-Every pull request triggers the following CI workflows:
+Pull requests trigger the following CI workflows:
 
-- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
+- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml) (skipped only when every changed file is one the backend suite never reads)
 - **Bundled extension tests** — [.github/workflows/bundled-extension-tests.yml](.github/workflows/bundled-extension-tests.yml) (triggered by example packages, `backend/packages/**`, `backend/app/gateway/**` and the marked test modules)
-- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
+- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml) (run when `frontend/` or a file it reads changes)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+
+[scripts/ci_changed_scopes.py](scripts/ci_changed_scopes.py) holds the path rules
+for the unit test and lint workflows. Pushes to `main` and changes under
+`.github/` run every scope. When a test starts reading a file outside its own
+tree, add that path to the script. On every pull request, the
+`frontend-scope-reads` lint job flags literal references outside the frontend
+scope, including paths based on `import.meta.url`. The backend guard in
+`backend/tests/test_ci_changed_scopes.py` flags frontend paths that would skip
+the backend suite, including paths built from module-level Python constants.
 
 The browser E2E and full-stack replay jobs use the official Playwright image,
 which includes Chromium and its system libraries. When upgrading the locked

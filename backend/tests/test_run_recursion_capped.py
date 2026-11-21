@@ -145,6 +145,7 @@ async def test_recursion_cap_reports_a_plain_stop_with_unpresented_outputs(tmp_p
     assert len(result["deliveries"]) == 1
     assert result["deliveries"][0]["produced_paths"] == produced
     assert result["deliveries"][0]["satisfied"] is False
+    assert result["deliveries"][0]["enforcement"] == "advisory"
 
 
 @pytest.mark.asyncio
@@ -162,6 +163,10 @@ async def test_recursion_cap_stands_the_goal_down_without_an_evaluator_call(tmp_
     assert record.goal_verdict is not None
     assert record.goal_verdict["stand_down_reason"] == "recursion_capped"
     assert json.dumps(record.goal_verdict)  # stored as plain data on the run record
+    # The receipt is built before the continuation call records the verdict;
+    # it must be normalized to required for this goal run.
+    assert len(result["deliveries"]) == 1
+    assert result["deliveries"][0]["enforcement"] == "required"
 
 
 def test_recursion_cap_message_without_outputs_or_limit():

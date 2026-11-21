@@ -10,6 +10,9 @@ connection's latest tokens in ``mcp_oauth_tokens`` (see
 credentials key (``DEER_FLOW_CREDENTIALS_KEY``), and arbitrates refreshes
 between processes with a short lease.
 
+Browser OAuth grants use the same cipher, database and refresh lease with a
+separate scope and grant epoch. Only that scope can store access-only grants.
+
 The host installs one store per process (:func:`set_mcp_oauth_token_store`);
 without one, tokens stay in process memory as before. Every method blocks
 (SQL, possibly the first key-file read): call it through ``asyncio.to_thread``.
@@ -24,7 +27,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Literal, NamedTuple
 
@@ -56,7 +59,7 @@ class McpOAuthTokenKeyUnavailable(McpOAuthTokenStoreUnavailable):
 class McpOAuthTokenKey:
     """Row key: personal connections never share a row with a same-named deployment one."""
 
-    scope: Literal["deployment", "personal"]
+    scope: Literal["deployment", "personal", "delegated"]
     owner_user_id: str
     server_key: str
 
@@ -65,6 +68,10 @@ class McpOAuthTokenKey:
         if owner_user_id is None:
             return cls(scope="deployment", owner_user_id="", server_key=server_name)
         return cls(scope="personal", owner_user_id=owner_user_id, server_key=server_name)
+
+    @classmethod
+    def for_delegated(cls, server_name: str, owner_user_id: str) -> McpOAuthTokenKey:
+        return cls(scope="delegated", owner_user_id=owner_user_id, server_key=server_name)
 
 
 @dataclass(frozen=True)
@@ -84,6 +91,42 @@ class StoredTokenLookup(NamedTuple):
     token: PersistedOAuthToken | None
     #: The row matched this chain but no configured key could decrypt it.
     undecryptable: bool = False
+
+
+@dataclass(frozen=True)
+class DelegatedOAuthContext:
+    issuer: str
+    resource: str
+    token_url: str
+    scope: str | None = None
+
+
+@dataclass(frozen=True)
+class DelegatedOAuthAttempt:
+    key: McpOAuthTokenKey
+    fingerprint: str
+    grant_epoch: int
+    context: DelegatedOAuthContext
+    code_verifier: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class DelegatedOAuthToken:
+    access_token: str = field(repr=False)
+    expires_at: datetime | None
+    refresh_token: str | None = field(repr=False)
+
+
+@dataclass(frozen=True)
+class DelegatedOAuthGrant:
+    grant_epoch: int
+    version: int
+    context: DelegatedOAuthContext
+    token: DelegatedOAuthToken
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _server_subject(key: McpOAuthTokenKey) -> str:
@@ -174,7 +217,120 @@ class McpOAuthTokenStore:
         expires_at = datetime.fromtimestamp(row.access_expires_at, UTC) if row.access_expires_at is not None else None
         return StoredTokenLookup(row.version, PersistedOAuthToken(access_token=access_token, token_type=row.token_type, expires_at=expires_at, refresh_token=refresh_token))
 
-    def claim(self, key: McpOAuthTokenKey, *, fingerprint: str, expected_version: int | None) -> str | None:
+    def begin_delegated(
+        self,
+        key: McpOAuthTokenKey,
+        *,
+        fingerprint: str,
+        state: str,
+        browser_binding: str,
+        code_verifier: str,
+        context: DelegatedOAuthContext,
+        ttl_seconds: int = 300,
+    ) -> int:
+        """Begin the latest authorization attempt and invalidate the old grant."""
+        verifier_enc = self._cipher().encrypt_text(code_verifier)
+        return self._call(
+            _server_subject(key),
+            "begin OAuth authorization for",
+            lambda: self._repo.begin_delegated(
+                key.owner_user_id,
+                key.server_key,
+                fingerprint=fingerprint,
+                state_digest=_digest(state),
+                browser_digest=_digest(browser_binding),
+                verifier_enc=verifier_enc,
+                context=json.dumps(asdict(context)),
+                ttl_seconds=ttl_seconds,
+            ),
+        )
+
+    def consume_delegated(self, state: str, *, owner_user_id: str, browser_binding: str) -> DelegatedOAuthAttempt | None:
+        """Claim this browser's state, releasing database resources before token exchange."""
+        attempt = self._call(
+            "MCP browser authorization",
+            "claim",
+            lambda: self._repo.consume_delegated(_digest(state), owner_user_id=owner_user_id, browser_digest=_digest(browser_binding)),
+        )
+        if attempt is None:
+            return None
+        try:
+            return DelegatedOAuthAttempt(
+                McpOAuthTokenKey.for_delegated(attempt.server_key, attempt.owner_user_id),
+                attempt.config_fingerprint,
+                attempt.grant_epoch,
+                DelegatedOAuthContext(**json.loads(attempt.grant_context)),
+                self._cipher().decrypt_text(attempt.verifier_enc),
+            )
+        except CredentialsDecryptError:
+            raise McpOAuthTokenKeyUnavailable("The MCP browser authorization cannot be decrypted") from None
+
+    def complete_delegated(
+        self,
+        attempt: DelegatedOAuthAttempt,
+        *,
+        access_token: str,
+        expires_at: datetime | None,
+        refresh_token: str | None = None,
+    ) -> bool:
+        """Publish tokens if this attempt still owns the grant epoch."""
+        key = attempt.key
+        cipher = self._cipher()
+        return self._call(
+            _server_subject(key),
+            "complete OAuth authorization for",
+            lambda: self._repo.complete_delegated(
+                key.owner_user_id,
+                key.server_key,
+                grant_epoch=attempt.grant_epoch,
+                fingerprint=attempt.fingerprint,
+                context=json.dumps(asdict(attempt.context)),
+                access_token_enc=cipher.encrypt_text(access_token),
+                access_expires_at=expires_at.timestamp() if expires_at is not None else None,
+                refresh_token_enc=cipher.encrypt_text(refresh_token) if refresh_token else None,
+            ),
+        )
+
+    def get_delegated(self, key: McpOAuthTokenKey, *, fingerprint: str) -> DelegatedOAuthGrant | None:
+        """Read the current grant from shared storage before using any delegated token."""
+        row = self._call(_server_subject(key), "read", lambda: self._repo.get("delegated", key.owner_user_id, key.server_key))
+        if row is None or row.config_fingerprint != fingerprint or row.token_request_fingerprint != fingerprint or row.access_token_enc is None or row.grant_context is None or row.grant_epoch is None:
+            return None
+        cipher = self._cipher()
+        try:
+            token = DelegatedOAuthToken(
+                access_token=cipher.decrypt_text(row.access_token_enc),
+                expires_at=datetime.fromtimestamp(row.access_expires_at, UTC) if row.access_expires_at is not None else None,
+                refresh_token=cipher.decrypt_text(row.refresh_token_enc) if row.refresh_token_enc else None,
+            )
+        except CredentialsDecryptError:
+            raise McpOAuthTokenKeyUnavailable("The MCP browser grant cannot be decrypted") from None
+        return DelegatedOAuthGrant(row.grant_epoch, row.version, DelegatedOAuthContext(**json.loads(row.grant_context)), token)
+
+    def list_delegated_servers(self, owner_user_id: str) -> list[str]:
+        return self._call("MCP browser connections", "list", lambda: self._repo.list_delegated_servers(owner_user_id))
+
+    def delegated_needs_reconnect(self, key: McpOAuthTokenKey, *, fingerprint: str) -> bool:
+        row = self._call(_server_subject(key), "read", lambda: self._repo.get("delegated", key.owner_user_id, key.server_key))
+        return bool(row and row.config_fingerprint == fingerprint and row.grant_context is not None and row.access_token_enc is None)
+
+    def disconnect_delegated(self, key: McpOAuthTokenKey, *, expected_epoch: int | None = None, lease_owner: str | None = None) -> bool:
+        """Disconnect, or mark reconnect-required if the refresh lease holder failed."""
+        return self._call(
+            _server_subject(key),
+            "disconnect",
+            lambda: self._repo.disconnect_delegated(key.owner_user_id, key.server_key, expected_epoch=expected_epoch, lease_owner=lease_owner),
+        )
+
+    def mark_delegated_reconnect(self, key: McpOAuthTokenKey, *, expected_epoch: int, expected_version: int) -> bool:
+        """Retire a rejected access-only token if it still belongs to this grant."""
+        return self._call(
+            _server_subject(key),
+            "mark reconnect-required",
+            lambda: self._repo.disconnect_delegated(key.owner_user_id, key.server_key, expected_epoch=expected_epoch, access_only_version=expected_version),
+        )
+
+    def claim(self, key: McpOAuthTokenKey, *, fingerprint: str, expected_version: int | None, grant_epoch: int | None = None) -> str | None:
         """Claim the next refresh; returns the lease token, or ``None`` while a peer holds it or wrote since the read."""
         lease_owner = str(uuid.uuid4())
         claimed = self._call(
@@ -189,6 +345,7 @@ class McpOAuthTokenStore:
                 lease_owner=lease_owner,
                 lease_seconds=REFRESH_LEASE_SECONDS,
                 now=time.time(),
+                grant_epoch=grant_epoch,
             ),
         )
         return lease_owner if claimed else None
@@ -202,9 +359,10 @@ class McpOAuthTokenStore:
         request_fingerprint: str,
         access_token: str,
         token_type: str,
-        expires_at: datetime,
+        expires_at: datetime | None,
         refresh_token: str,
         rotated: bool,
+        grant_epoch: int | None = None,
     ) -> bool:
         """Store a refreshed token under the claim; ``False`` when the lease was lost meanwhile."""
         cipher = self._cipher()
@@ -222,10 +380,11 @@ class McpOAuthTokenStore:
                 access_token_enc=access_token_enc,
                 token_request_fingerprint=request_fingerprint,
                 token_type=token_type,
-                access_expires_at=expires_at.timestamp(),
+                access_expires_at=expires_at.timestamp() if expires_at is not None else None,
                 refresh_token_enc=refresh_token_enc,
                 rotated=rotated,
                 now=time.time(),
+                grant_epoch=grant_epoch,
             ),
         )
 
