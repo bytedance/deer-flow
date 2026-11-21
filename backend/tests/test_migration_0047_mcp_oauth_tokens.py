@@ -45,11 +45,10 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_0047_remains_in_the_single_migration_chain():
-    assert bootstrap._get_head_revision() == HEAD
+    assert bootstrap._get_head_revision() == "0058_coordination_grants"
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [HEAD]
-    assert script.get_revision(HEAD).down_revision == "0057_coordination_workers"
-    assert script.get_revision("0057_coordination_workers").down_revision == "0056_coordination_task_state"
+    assert script.get_heads() == ["0058_coordination_grants"]
+    assert script.get_revision("0058_coordination_grants").down_revision == "0057_coordination_workers"
     assert script.get_revision("0056_coordination_task_state").down_revision == "0055_thread_shares"
     assert script.get_revision("0055_thread_shares").down_revision == "0054_project_memory"
     assert script.get_revision("0054_project_memory").down_revision == "0053_tool_approvals"

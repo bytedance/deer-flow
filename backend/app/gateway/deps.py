@@ -965,14 +965,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         stack.callback(reset_login_throttle_store)
 
         if sf is not None:
-            from app.gateway.coordination_workers import CoordinationWorkers
-            from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
             from deerflow.persistence.run import RunRepository
 
-            app.state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(sf))
-            stack.push_async_callback(app.state.coordination_workers.close)
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
             from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
@@ -1164,6 +1160,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.agent_runs_host = GatewayAgentRunsHost(app, load_user=SQLiteUserRepository(sf).get_user_by_id if sf is not None else None)
         stack.callback(app.state.agent_runs_host.close)
+        if sf is not None:
+            from app.gateway.coordination_workers import CoordinationWorkers
+            from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
+            from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
+
+            app.state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(sf), app.state.agent_runs_host, ChannelConnectionRepository(sf))
+            stack.push_async_callback(app.state.coordination_workers.close)
         # Extension unattended recovery waits on this before restoring grants;
         # past it, the whole run-admission stack above is ready.
         agent_runs_host_installed.set()

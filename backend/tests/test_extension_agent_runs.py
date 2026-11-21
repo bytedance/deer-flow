@@ -790,8 +790,10 @@ async def worker_gateway(runtime, tmp_path):
     from app.gateway.coordination_workers import CoordinationWorkers
     from app.gateway.routers import coordination, thread_runs
     from deerflow.persistence.bootstrap import bootstrap_schema
+    from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
     from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
     from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
     from deerflow.runtime import RunManager
     from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -799,10 +801,12 @@ async def worker_gateway(runtime, tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'workers.db'}")
     await bootstrap_schema(engine, backend="sqlite")
     factory = async_sessionmaker(engine)
+    async with factory.begin() as session:
+        session.add(UserRow(id=str(request.state.user.id), email=request.state.user.email))
     state.run_store = RunRepository(factory)
     await state.run_manager.shutdown()
     state.run_manager = RunManager(store=state.run_store)
-    workers = state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(factory))
+    state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(factory), state.agent_runs_host, ChannelConnectionRepository(factory))
     state.release_worker = asyncio.Event()
     request.app.include_router(coordination.router)
     request.app.include_router(thread_runs.router)
@@ -818,7 +822,7 @@ async def worker_gateway(runtime, tmp_path):
         async with AsyncClient(transport=ASGITransport(app=authenticated), base_url="http://gateway") as client:
             yield client, runs, state, entered, str(request.state.user.id)
     finally:
-        await workers.close()
+        await state.coordination_workers.close()
         await state.run_manager.shutdown()
         await engine.dispose()
 
@@ -983,3 +987,140 @@ async def test_managed_worker_cancel_returns_cancelling_and_finishes_in_backgrou
     assert calls == [run_id, run_id]
     assert final["execution"]["status"] == "cancelled"
     assert (await runs.get(thread_id=first["assignment"]["thread_id"], run_id=run_id)).status == "interrupted"
+
+
+async def _restart_coordination(state):
+    from app.gateway.coordination_workers import CoordinationWorkers
+    from deerflow.runtime import RunManager
+
+    previous = state.coordination_workers
+    await previous.close()
+    await state.run_manager.shutdown()
+    state.agent_runs_host.close()
+    host = GatewayAgentRunsHost(state.agent_runs_host.app, load_user=state.agent_runs_host.load_user)
+    state.agent_runs_host = host
+    state.run_manager = RunManager(store=state.run_store)
+    state.coordination_workers = CoordinationWorkers(previous.repo, host, previous._connections)
+    await state.coordination_workers.recover_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_outcome", ["completed", "shutdown", "cancel-takeover", "orphan-no-checkpoint"])
+async def test_managed_worker_restart_reconciles_the_persisted_task(worker_gateway, tmp_path, previous_outcome):
+    import asyncio
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON
+    from deerflow.runtime.runs.manager import STARTUP_ORPHAN_RECOVERY_ERROR
+
+    client, runs, state, entered, _ = worker_gateway
+    path = str(tmp_path / "checkpoints.sqlite")
+    async with AsyncSqliteSaver.from_conn_string(path) as saver:
+        if previous_outcome != "orphan-no-checkpoint":
+            state.checkpointer = saver
+        first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart"})).raise_for_status().json()
+        task_id, run_id, thread = first["task"]["id"], first["execution"]["run_id"], first["assignment"]["thread_id"]
+        await asyncio.wait_for(entered.wait(), 10)
+        await state.coordination_workers.close()
+        if previous_outcome == "completed":
+            state.release_worker.set()
+            assert (await runs.wait_coordination_worker(thread_id=thread, run_id=run_id)).status == "success"
+        await state.run_manager.shutdown()
+        if previous_outcome == "cancel-takeover":
+            await state.run_store.update_status(run_id, "error", error="Run reclaimed by worker during cancellation", stop_reason=ORPHAN_RECOVERY_STOP_REASON)
+        elif previous_outcome == "orphan-no-checkpoint":
+            await state.run_store.update_status(run_id, "error", error=STARTUP_ORPHAN_RECOVERY_ERROR, stop_reason=ORPHAN_RECOVERY_STOP_REASON)
+    async with AsyncSqliteSaver.from_conn_string(path) as saver:
+        state.checkpointer = saver
+        await _restart_coordination(state)
+        state.release_worker.set()
+        finished = await _wait_for_worker(client, task_id, "task", "status", "failed" if previous_outcome in ("cancel-takeover", "orphan-no-checkpoint") else "succeeded")
+    assert finished["assignment"]["thread_id"] == thread
+    assert finished["execution"]["turn"] == (2 if previous_outcome == "shutdown" else 1)
+    assert (finished["execution"]["run_id"] != run_id) is (previous_outcome == "shutdown")
+    if previous_outcome == "orphan-no-checkpoint":
+        assert finished["execution"]["status"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denial", ["runs:create", "threads:write", "revoked"])
+async def test_managed_worker_admission_waits_for_restored_authorization(worker_gateway, monkeypatch, denial):
+    client, runs, state, _, owner = worker_gateway
+    service = state.coordination_workers
+    task = await service.repo.create(owner, request_id="pending-admission", objective="continue")
+    task_id = task["id"]
+    grant = service._new_grant(runs.capture_authority())
+    turn = await service.repo.prepare(owner, task_id, "lead_agent", initial_grant=grant)
+    authorized, grant_id = await service.authority(owner, task_id)
+    permissions = grant["authority"]["permissions"]
+    policy = AsyncMock(return_value=[permission for permission in permissions if permission != denial])
+    monkeypatch.setattr("app.gateway.extension_agent_runs.resolve_route_permissions", policy)
+    if denial == "revoked":
+        await service.repo.set_grant(owner, task_id, None)
+
+    driver = service.watch(authorized, owner, task_id, grant_id)
+    with pytest.raises(AgentRunError) as exc:
+        await driver
+    assert exc.value.status_code == 403
+    url = f"/api/coordination/tasks/{task_id}"
+    view = (await client.get(url)).raise_for_status().json()
+    assert view["execution"]["id"] == turn[1]["id"]
+    assert view["execution"]["run_id"] is None
+    assert view["task"]["status"] == "running"
+    assert view["execution"]["status"] == "admitting"
+    assert view["authorization_required"] is True
+    await service.recover_once()
+    assert (owner, task_id) not in service._drivers
+
+    policy.return_value = permissions
+    if denial == "revoked":
+        assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
+    else:
+        assert (await service.repo.grant(owner, task_id))["id"] == grant_id
+    await service.recover_once()
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert finished["authorization_required"] is False
+    assert finished["execution"]["id"] == turn[1]["id"]
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_restart_finishes_a_previously_fenced_cancellation(worker_gateway):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart-cancel"})).raise_for_status().json()
+    task_id = first["task"]["id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    await state.coordination_workers.repo.request_cancel(owner, task_id, expected_revision=first["task"]["revision"])
+    await _restart_coordination(state)
+    finished = await _wait_for_worker(client, task_id, "task", "status", "cancelled")
+    assert finished["execution"]["run_id"] == first["execution"]["run_id"]
+    assert finished["execution"]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_bound_channel_grant_is_invalid_after_reconnect_and_owner_can_reauthorize(worker_gateway):
+    import asyncio
+
+    from app.channels.message_bus import InboundMessage
+
+    client, _, state, entered, owner = worker_gateway
+    service = state.coordination_workers
+    binding = {"owner_user_id": owner, "provider": "telegram", "external_account_id": "sender"}
+    connection = await service._connections.upsert_connection(**binding)
+    message = InboundMessage(channel_name="telegram", chat_id="chat", user_id="sender", text="wait", connection_id=connection["id"], owner_user_id=owner)
+    first = await service.dispatch_bound_channel(message, request_id="event", objective="wait")
+    task_id = first["task"]["id"]
+    assert (await service.dispatch_bound_channel(message, request_id="event", objective="wait"))["execution"]["run_id"] == first["execution"]["run_id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    await service._connections.disconnect_connection(connection_id=connection["id"], owner_user_id=owner)
+    with pytest.raises(AgentRunError, match="no longer bound"):
+        await service.dispatch_bound_channel(message, request_id="another-event", objective="wait")
+    await service._connections.upsert_connection(**binding)
+    url = f"/api/coordination/tasks/{task_id}"
+    assert (await client.get(url)).json()["authorization_required"] is True
+    assert (await client.post(f"{url}/inputs", json={"request_id": "new", "content": "retry"})).status_code == 403
+    assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
+    assert (await client.delete(f"{url}/authorization")).status_code == 204
+    assert (await client.get(url)).json()["authorization_required"] is True

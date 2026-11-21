@@ -92,7 +92,31 @@ through them. Files presented under the same path in different turns
 have separate IDs and URLs. The task detail's `execution.artifacts` lists
 deliveries produced by that execution.
 
-Worker observation uses the initiating session's process-local run handle.
-The task, frozen inputs, native run IDs and artifact contents survive a Gateway
-restart. Automatic reauthorization and restart reconciliation are tracked in
-the next stage of [RFC #8345](https://github.com/bytedance/deer-flow/issues/8345).
+## Authorization and restart recovery
+
+Dispatch saves a task-scoped grant alongside the first Worker assignment. The
+grant expires after 24 hours. The Gateway revalidates the owner's account,
+session version, permissions and current grant on each host operation.
+Grant replacement and Run admission share the task tree lock.
+
+The Gateway can also mint a grant for an authenticated IM adapter after looking
+up the sender's current channel connection. Disconnecting or replacing the
+binding invalidates the grant. The adapter entry point runs inside the Gateway.
+IM commands and delivery are covered by a later stage of
+[RFC #8345](https://github.com/bytedance/deer-flow/issues/8345).
+
+On startup and periodically, the Gateway reconciles open tasks with grants.
+It observes live Runs, records results from committed terminal Run evidence,
+and retries frozen admissions with their original idempotency key. A Run
+interrupted by Gateway shutdown can continue from a pending checkpoint written
+by that Run. When the checkpoint is missing, the Gateway settles the execution
+from the Run's durable outcome. Pending approvals still require an
+explicit response. Recovery also continues work already fenced for cancellation.
+
+The task view reports `authorization_required` when an open task lacks a
+valid grant or its current permissions no longer cover the work. Recovery
+waits for permission to return and can then continue with the same grant if
+it remains valid. Older tasks created before the migration need a grant.
+An authorized owner can renew with `PUT /api/coordination/tasks/{task_id}/authorization`
+or revoke with `DELETE /api/coordination/tasks/{task_id}/authorization`.
+The Grant table stores only authority metadata and the binding generation.
