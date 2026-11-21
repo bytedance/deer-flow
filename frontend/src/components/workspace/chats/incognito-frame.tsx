@@ -83,7 +83,10 @@ export function IncognitoNotices({ idleTtlSeconds }: IncognitoNoticesProps) {
   const duration =
     idleTtlSeconds === null
       ? null
-      : incognitoLifetimeLabel(incognitoLifetimeParts(idleTtlSeconds), t.incognito);
+      : incognitoLifetimeLabel(
+          incognitoLifetimeParts(idleTtlSeconds),
+          t.incognito,
+        );
   return (
     <div
       className="text-muted-foreground mx-auto mt-4 max-w-xl space-y-1 text-center text-[13px] leading-relaxed"

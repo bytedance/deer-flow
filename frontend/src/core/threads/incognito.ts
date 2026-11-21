@@ -41,7 +41,9 @@ const MAX_HOUR_UNIT_VALUE = 72;
  * the rounded value, so 72h40m reads as "about 3 days 1 hour" rather than
  * "73 hours".
  */
-export function incognitoLifetimeParts(seconds: number): IncognitoLifetimeParts {
+export function incognitoLifetimeParts(
+  seconds: number,
+): IncognitoLifetimeParts {
   const total = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
 
   if (total < HOUR_SECONDS) {
