@@ -10,7 +10,7 @@ from langchain.tools import InjectedToolCallId
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents import thread_state as thread_state_module
 from deerflow.agents.lead_agent import agent as lead_agent_module
@@ -1258,6 +1258,21 @@ class TestSkillContextInjection:
 
 
 class TestDurableContextInjection:
+    def test_message_only_turn_skips_malformed_checkpoint_delegations(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="ok")])
+        agent = create_agent(model=model, tools=[], middleware=[DurableContextMiddleware()], state_schema=ThreadState, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "legacy-ledger"}}
+        valid = {"id": "call-1", "status": "completed", "description": "prior research", "subagent_type": "general-purpose"}
+        invalid = {**valid, "description": "invalid dispatch", "dispatch_message_id": {"id": "msg-1"}}
+        agent.update_state(config, {"delegations": Overwrite([valid, invalid])}, as_node="model")
+
+        state = agent.invoke({"messages": [HumanMessage(content="continue")]}, config)
+
+        assert state["delegations"] == [valid]
+        data = next(message.content for message in model.received[-1] if message.additional_kwargs.get("durable_context_data"))
+        assert "prior research" in data
+        assert "invalid dispatch" not in data
+
     def test_injects_summary_and_ledger_together(self):
         model = RecordingFakeModel(responses=[AIMessage(content="ok")])
         agent = create_agent(

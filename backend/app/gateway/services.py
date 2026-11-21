@@ -822,18 +822,16 @@ def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[s
     """Reject ledger entries the reducer and renderer cannot read.
 
     ``delegations`` is a reducer channel a caller may Overwrite. ``merge_delegations``
-    keys on ``id`` and indexes ``status``, and the ledger renderer reads
-    ``description``/``subagent_type`` on every model call. A non-list value, a
-    non-object entry or a missing field raises while the state update merges —
-    failing the run with an unhandled ``TypeError``/``KeyError`` instead of a
-    400 at this boundary. On the thread-state route the bad shape would also be
-    persisted, so every later genuine ledger write would keep failing on it.
+    keys on ``(run_id, id, dispatch_message_id)`` and indexes ``status``. The
+    ledger renderer reads ``description``/``subagent_type`` on every model call.
+    Validating before run admission or checkpoint overwrite lets callers
+    correct a malformed entry before it reaches the ledger.
 
     The id must be non-empty because it is the reducer's identity key (an empty
     id can never be matched by the runtime's write-back), and the status must be
     one the runtime produces so a caller cannot inject its own steering line into
     the model-visible ledger. Optional fields the reducer and renderer read as
-    text are validated when present: an unhashable ``run_id`` breaks the
+    text are validated when present. An unhashable run or dispatch ID breaks the
     reducer's identity key, a non-string ``result_brief`` breaks the renderer's
     length bound, and an unknown ``stop_reason`` renders guardrail-cap guidance
     the runtime never stamped.
@@ -857,7 +855,7 @@ def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[s
         status = entry.get("status")
         if not isinstance(status, str) or status not in _DELEGATION_STATUSES:
             raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be one of {', '.join(sorted(_DELEGATION_STATUSES))}")
-        for field in ("run_id", "result_brief"):
+        for field in ("run_id", "dispatch_message_id", "result_brief"):
             optional_text = entry.get(field)
             if optional_text is not None and not isinstance(optional_text, str):
                 raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string or null")
