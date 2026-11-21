@@ -494,11 +494,14 @@ async def test_overlapping_close_keeps_admission_fenced_until_every_drain_exits(
 
 @pytest.mark.asyncio
 async def test_close_preserves_retirement_gap_while_later_run_is_still_draining(monkeypatch):
-    bridge = MemoryStreamBridge()
+    bridge = MemoryStreamBridge(queue_maxsize=1)
     first_run = "close-gap-first"
     second_run = "close-gap-second"
+    live_run = "close-gap-live"
     await bridge.publish(first_run, "before", {})
     await bridge.publish(second_run, "before", {})
+    await bridge.publish(live_run, "before", {})
+    await bridge.publish(live_run, "after", {})
     first_stream = bridge.subscribe(first_run)
     first_condition = bridge._streams[first_run].condition
     second_condition = bridge._streams[second_run].condition
@@ -539,6 +542,9 @@ async def test_close_preserves_retirement_gap_while_later_run_is_still_draining(
             await asyncio.wait_for(close_queued_on_second.wait(), 1)
             assert bridge._closing
             assert await asyncio.wait_for(asyncio.shield(subscriber_task), 1) == StreamGap(None, None, None)
+            assert not bridge._streams[live_run].retired
+            with pytest.raises(RuntimeError, match="closing"):
+                await anext(bridge.subscribe(live_run, last_event_id="0-0"))
             with pytest.raises(StopAsyncIteration):
                 await anext(first_stream)
 
