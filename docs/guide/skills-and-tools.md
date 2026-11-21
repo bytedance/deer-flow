@@ -160,6 +160,10 @@ accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds
 Unset overrides use the provider defaults. Invalid duration strings fail before
 the script submits a request.
 
+MiniMax submission, status polling, and file lookup each follow up to five
+HTTP 307 or 308 redirects within the configured API origin (scheme, hostname,
+and effective port). Each redirect preserves the request method and body.
+
 Generated videos download over HTTPS on port 443. The skill checks the
 provider's download-host allowlist before the first request and after each
 redirect, up to five redirects. Gemini sends its API key only to its API host
