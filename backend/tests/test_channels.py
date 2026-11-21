@@ -7983,6 +7983,21 @@ class TestDiscordChannel:
                 ["```py\n" + "line of code\n" * 5 + "```", "```py\n" + "line of code\n" * 5],
                 id="unterminated-block-stays-unterminated",
             ),
+            pytest.param(
+                "w" * 70 + "```python\n" + "print(1)\n" * 8 + "```",
+                ["w" * 70, "```python\n" + "print(1)\n" * 7 + "```", "```python\nprint(1)\n```"],
+                id="cut-in-the-language-tag-moves-the-block-to-the-next-message",
+            ),
+            pytest.param(
+                "w" * 66 + "```python\n" + "print(1)\n" * 8 + "```",
+                ["w" * 66, "```python\n" + "print(1)\n" * 7 + "```", "```python\nprint(1)\n```"],
+                id="cut-before-the-first-code-moves-the-block-to-the-next-message",
+            ),
+            pytest.param(
+                "```py\r\n" + "line of code\r\n" * 8 + "```\r\nafter\r\n",
+                ["```py\r\n" + "line of code\r\n" * 4 + "```", "```py\n" + "line of code\r\n" * 4 + "```\r\nafter\r\n"],
+                id="crlf-block-reopens-with-its-language-tag",
+            ),
         ],
     )
     def test_split_text_closes_and_reopens_a_cut_code_block(self, monkeypatch, text: str, expected: list[str]):
@@ -8006,10 +8021,11 @@ class TestDiscordChannel:
         [
             pytest.param("w" * 78 + "```code```", ["w" * 78, "```code```"], id="backtick-run"),
             pytest.param("w" * 79 + "\\```code", ["w" * 79, "\\```code"], id="escape"),
+            pytest.param("w" * 79 + "\r\nmore", ["w" * 79, "\r\nmore"], id="crlf"),
         ],
     )
-    def test_split_text_cut_inside_a_line_keeps_backtick_runs_and_escapes_whole(self, monkeypatch, text: str, expected: list[str]):
-        """A cut through ``` or a backslash escape would change which runs open a block."""
+    def test_split_text_cut_inside_a_line_keeps_backtick_runs_escapes_and_crlf_whole(self, monkeypatch, text: str, expected: list[str]):
+        """A cut through ```, a backslash escape or a CRLF would change which runs open a block."""
         from app.channels import discord as discord_module
 
         monkeypatch.setattr(discord_module, "_DISCORD_MAX_MESSAGE_LEN", 80)
@@ -8040,6 +8056,8 @@ class TestDiscordChannel:
     @classmethod
     def _discord_render(cls, text: str) -> tuple[str, str, bool]:
         """(prose, code, ends inside a block) of *text* as the Discord client shows it, line breaks dropped."""
+        # The client's parser turns CRLF and a lone CR into LF before it parses.
+        text = re.sub(r"\r\n?", "\n", text)
         prose, code, index = [], [], 0
         while index < len(text):
             if text[index] == "\\" and re.match(r"[^0-9A-Za-z\s]", text[index + 1 : index + 2]):
@@ -8073,13 +8091,13 @@ class TestDiscordChannel:
         limit = 120
         monkeypatch.setattr(discord_module, "_DISCORD_MAX_MESSAGE_LEN", limit)
         rng = random.Random(8086)
-        pieces = ["```", "```py\n", "x```", "\\```", "~~~\n", "````", "\n", "\n\n"]
+        pieces = ["```", "```py\n", "```py\r\n", "x```", "\\```", "~~~\n", "````", "\n", "\n\n", "\r\n"]
 
         for _ in range(300):
             parts = []
             for _ in range(rng.randint(1, 60)):
                 # Prose has spaces, so no prose run after backticks reads as a language tag.
-                parts.append(rng.choice(pieces) if rng.random() < 0.2 else "ww " * rng.randint(0, 20) + "\n")
+                parts.append(rng.choice(pieces) if rng.random() < 0.2 else "ww " * rng.randint(0, 20) + rng.choice(("\n", "\r\n")))
             text = "".join(parts)
 
             chunks = discord_module.DiscordChannel._split_text(text)

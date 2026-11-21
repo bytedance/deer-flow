@@ -42,10 +42,12 @@ _DISCORD_MAX_MESSAGE_LEN = 2000
 # right after the last code text. There are no tilde fences, and a longer run
 # does not nest a shorter one. A backslash escapes a backtick outside a block.
 # The pattern mirrors the client's code-block rule; a run with nothing but
-# line breaks before the next run opens no block.
+# line breaks before the next run opens no block. The client's parser turns
+# CRLF and a lone CR into LF first, so each counts as one line break here.
 _CODE_FENCE = "```"
-_CODE_BLOCK_RE = re.compile(r"```(?:([a-z0-9_+\-.#]+?)\n)?\n*([^\n][\s\S]*?)\n*```", re.IGNORECASE)
-_CODE_LANGUAGE_RE = re.compile(r"([a-z0-9_+\-.#]+?)\n", re.IGNORECASE)
+_LINE_BREAK = r"(?:\r\n?|\n)"
+_CODE_BLOCK_RE = re.compile(rf"```(?:([a-z0-9_+\-.#]+?){_LINE_BREAK})?{_LINE_BREAK}*([^\r\n][\s\S]*?){_LINE_BREAK}*```", re.IGNORECASE)
+_CODE_LANGUAGE_RE = re.compile(rf"([a-z0-9_+\-.#]+?){_LINE_BREAK}", re.IGNORECASE)
 _FENCE_OR_ESCAPE_RE = re.compile(r"\\[^0-9A-Za-z\s]|```")
 _CODE_FENCE_RE = re.compile(_CODE_FENCE)
 # Appended to a message that ends inside a block; the client drops the line
@@ -111,12 +113,12 @@ def _close_code_block(piece: str) -> str:
 
 
 def _hard_split_point(text: str, start: int, budget: int) -> int:
-    """Cut *text* *budget* characters after *start*, moved back so it splits no backtick run or escape.
+    """Cut *text* *budget* characters after *start*, moved back so it splits no backtick run, escape or CRLF.
 
-    Either cut would change which runs open and close code blocks.
+    Any of these cuts would change which runs open and close code blocks.
     """
     split_at = start + budget
-    while split_at > start and (text[split_at - 1] == "\\" or text[split_at - 1] == "`" == text[split_at : split_at + 1]):
+    while split_at > start and (text[split_at - 1] == "\\" or text[split_at - 1 : split_at + 1] in ("``", "\r\n")):
         split_at -= 1
     return split_at if split_at > start else start + budget
 
@@ -153,13 +155,18 @@ def _next_split(text: str, start: int, budget: int, blocks: list[_CodeBlock]) ->
         block = _block_at(blocks, candidate)
         if not _fence_is_carried(block):
             return candidate, block
-        holds_code = text[max(start, block.start + len(block.opener)) : candidate].strip("\n")
-        next_holds_code = block.end is None or text[candidate : block.end - len(_CODE_FENCE)].strip("\n")
+        holds_code = text[max(start, block.start + len(block.opener)) : candidate].strip("\r\n")
+        next_holds_code = block.end is None or text[candidate : block.end - len(_CODE_FENCE)].strip("\r\n")
         if candidate <= end - _CODE_FENCE_CLOSE_LEN and holds_code and next_holds_code:
             return candidate, block
     # The block's first line in this message does not fit: cut into it.
     split_at = _hard_split_point(text, start, budget - _CODE_FENCE_CLOSE_LEN)
-    return split_at, _block_at(blocks, split_at)
+    block = _block_at(blocks, split_at)
+    if _fence_is_carried(block) and block.start > start and not text[block.start + len(block.opener) : split_at].strip("\r\n"):
+        # The cut lands in the block's opening run or language tag, or before its
+        # first code: end the message before the opening run instead.
+        return block.start, None
+    return split_at, block
 
 
 # Bound for outbound work scheduled onto the Discord client's event loop.
