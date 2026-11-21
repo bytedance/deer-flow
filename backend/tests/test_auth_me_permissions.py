@@ -17,27 +17,12 @@ from fastapi.testclient import TestClient
 
 os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-auth-me-permissions-min-32")
 
-from app.gateway.authz import Permissions  # noqa: E402
+from app.gateway.authz import _ALL_PERMISSIONS, _DISABLED_AUTHORIZATION_ADMIN_ONLY, Permissions  # noqa: E402
 from deerflow.authz.provider import AuthzDecision, AuthzReason  # noqa: E402
 from deerflow.config.authorization_config import AuthorizationConfig  # noqa: E402
 
 _TEST_SECRET = "test-secret-key-auth-me-permissions-min-32"
-
-_ALL_PERMISSIONS = [
-    Permissions.THREADS_READ,
-    Permissions.THREADS_WRITE,
-    Permissions.THREADS_DELETE,
-    Permissions.RUNS_CREATE,
-    Permissions.RUNS_READ,
-    Permissions.RUNS_CANCEL,
-    Permissions.MEMORY_READ,
-    Permissions.MEMORY_WRITE,
-    Permissions.AGENTS_READ,
-    Permissions.AGENTS_WRITE,
-    Permissions.PROJECTS_READ,
-    Permissions.PROJECTS_WRITE,
-    Permissions.PROJECTS_DELETE,
-]
+_DISABLED_NON_ADMIN_PERMISSIONS = [permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY]
 
 
 class _RecordingProvider:
@@ -152,7 +137,7 @@ def test_account_preferences_use_registered_auth_and_csrf_middleware(client):
 def test_me_reuses_middleware_resolved_permissions(client, monkeypatch):
     """One provider decision per registered permission — /me reads the
     AuthContext AuthMiddleware already stamped instead of re-resolving."""
-    denied = {Permissions.THREADS_DELETE, Permissions.RUNS_CANCEL}
+    denied = {Permissions.THREADS_DELETE, Permissions.RUNS_CANCEL, Permissions.SKILLS_MANAGE}
     provider = _RecordingProvider(denied=denied)
     _enable_authorization(monkeypatch, provider)
     _initialize_admin(client)
@@ -214,7 +199,7 @@ async def test_me_falls_back_to_fresh_resolution_without_middleware_context():
 
     response = await get_me(_fallback_request(_stub_user(), "session"))
 
-    assert response.permissions == _ALL_PERMISSIONS
+    assert response.permissions == _DISABLED_NON_ADMIN_PERMISSIONS
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,7 @@ from uuid import UUID
 import pytest
 from fastapi import HTTPException, Request
 
+from app.gateway.authz import AuthContext
 from app.gateway.routers.skills import CustomSkillUpdateRequest, SkillRollbackRequest, _install_skill_archive, delete_custom_skill, rollback_custom_skill, update_custom_skill
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
@@ -53,9 +54,10 @@ def _isolate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _admin_request() -> Request:
-    # AuthMiddleware normally supplies this state; keep the real admin check.
+    # Direct calls need the same effective grant normally stamped by middleware.
     user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
-    return Request({"type": "http", "headers": [], "state": {"user": user}})
+    auth = AuthContext(user=user, permissions=["skills:manage"])
+    return Request({"type": "http", "headers": [], "state": {"user": user, "auth": auth}})
 
 
 def _install_skill() -> None:
@@ -180,8 +182,8 @@ async def test_delete_does_not_block_event_loop() -> None:
 
 
 async def test_archive_install_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
-    """The helper behind both install routes builds the caller's storage off the
-    loop before awaiting the (already offloaded) archive pipeline."""
+    """The helper behind every install route builds the caller's storage off
+    the loop before awaiting the (already offloaded) archive pipeline."""
     archive = tmp_path / f"{_SKILL_NAME}.skill"
 
     def _build_archive() -> None:

@@ -15,6 +15,7 @@ from support.skill_export_platform import requires_safe_capture
 
 from app.gateway import skill_export as service
 from app.gateway.auth.models import User
+from app.gateway.authz import AuthContext
 from app.gateway.deps import get_config
 from app.gateway.routers import skills
 from deerflow.skills.export import SkillExportArchive
@@ -35,9 +36,13 @@ def app(tmp_path, monkeypatch):
 
     @app.middleware("http")
     async def identity(request, call_next):
-        if request.headers.get("x-role") != "anonymous":
-            request.state.user = User(id=uuid4(), email="test@example.com", password_hash="x", system_role=request.headers.get("x-role", "admin"))
-        request.state.auth_source = request.headers.get("x-auth-source")
+        role = request.headers.get("x-role", "admin")
+        auth_source = request.headers.get("x-auth-source")
+        user = None if role == "anonymous" else User(id=uuid4(), email="test@example.com", password_hash="x", system_role=role)
+        permissions = ["skills:manage"] if user is not None and role == "admin" and auth_source is None else []
+        request.state.user = user
+        request.state.auth = AuthContext(user=user, permissions=permissions)
+        request.state.auth_source = auth_source
         return await call_next(request)
 
     app.dependency_overrides[get_config] = lambda: SimpleNamespace()
@@ -75,7 +80,7 @@ def test_manifest_download_and_changed_revision(app):
 
 @pytest.mark.parametrize("headers,status", [({"x-role": "user"}, 403), ({"x-auth-source": "pat"}, 403), ({"x-role": "anonymous"}, 401)])
 def test_auth_before_storage(app, monkeypatch, headers, status):
-    monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: pytest.fail("storage reached without admin"))
+    monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: pytest.fail("storage reached without skills:manage"))
     with TestClient(app) as client:
         for suffix in ("export-manifest", "export?expected_revision=" + "a" * 64):
             assert client.get("/api/skills/custom/demo/" + suffix, headers=headers).status_code == status
@@ -256,10 +261,6 @@ async def test_disconnect_exits_router_without_asgi_error(app, monkeypatch, suff
             await asyncio.sleep(0.001)
         return {"type": "http.disconnect"}
 
-    async def admin(*args, **kwargs):
-        pass
-
-    monkeypatch.setattr(skills, "require_admin_user", admin)
     monkeypatch.setattr(skills, "export_manifest", work)
     monkeypatch.setattr(skills, "build_skill_export", work)
     plain_app = FastAPI()
@@ -267,6 +268,8 @@ async def test_disconnect_exits_router_without_asgi_error(app, monkeypatch, suff
     plain_app.include_router(skills.router)
     path, _, query = ("/api/skills/custom/demo/" + suffix).partition("?")
     scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}, "http_version": "1.1", "method": "GET", "scheme": "http", "path": path, "query_string": query.encode(), "headers": []}
+    user = User(id=uuid4(), email="test@example.com", password_hash="x", system_role="admin")
+    scope["state"] = {"user": user, "auth": AuthContext(user=user, permissions=["skills:manage"])}
     messages = []
 
     async def send(message):

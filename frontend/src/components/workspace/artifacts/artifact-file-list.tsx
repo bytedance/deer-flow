@@ -12,9 +12,9 @@ import {
   getArtifactArchiveManifest,
   MAX_ARTIFACT_ARCHIVE_FILES,
 } from "@/core/artifacts/api";
-import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
+import { useSkillManagement } from "@/core/skills/hooks";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { getFileExtensionDisplayName, getFileName } from "@/core/utils/files";
 import { cn } from "@/lib/utils";
@@ -36,8 +36,7 @@ export function ArtifactFileList({
   threadId: string;
 }) {
   const { t } = useI18n();
-  const { user } = useAuth();
-  const isAdmin = user?.system_role === "admin";
+  const { canManage } = useSkillManagement();
   const { select: selectArtifact, setOpen } = useArtifacts();
   const [downloadingArchive, setDownloadingArchive] = useState(false);
   const [installingFile, setInstallingFile] = useState<string | null>(null);
@@ -76,14 +75,14 @@ export function ArtifactFileList({
         if (result.success) {
           toast.success(result.message);
         } else {
-          toast.error(result.message || "Failed to install skill");
+          toast.error(result.message || t.settings.skills.installFailed);
         }
       } catch (error) {
         console.error("Failed to install skill:", error);
-        if (error instanceof SkillRequestError && error.isAdminRequired) {
-          toast.error(t.settings.skills.installAdminRequired);
+        if (error instanceof SkillRequestError && error.status === 403) {
+          toast.error(t.settings.skills.skillManageRequired);
         } else {
-          toast.error("Failed to install skill");
+          toast.error(t.settings.skills.installFailed);
         }
       } finally {
         setInstallingFile(null);
@@ -174,7 +173,7 @@ export function ArtifactFileList({
               </span>
             </button>
             <div className="flex shrink-0 items-center">
-              {file.endsWith(".skill") && isAdmin && (
+              {file.endsWith(".skill") && canManage && (
                 <Button
                   variant="ghost"
                   disabled={installingFile === file}

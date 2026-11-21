@@ -139,7 +139,7 @@ class LocalSkillStorage(SkillStorage):
 
         logger.info("Installing skill from %s", archive_path)
         path = Path(archive_path)
-        custom_dir = self._host_root / "custom"
+        custom_dir = self.get_custom_skill_dir("skill").parent
 
         # The per-file security scan is an async LLM call and must stay on the
         # event loop; every filesystem phase around it runs in a worker thread.
@@ -180,11 +180,10 @@ class LocalSkillStorage(SkillStorage):
 
         from deerflow.skills.installer import (
             SkillAlreadyExistsError,
-            resolve_skill_dir_from_archive,
+            resolve_and_validate_skill_dir,
             safe_extract_skill_archive,
             scan_archive_preflight_or_raise,
         )
-        from deerflow.skills.validation import _validate_skill_frontmatter
 
         if not path.is_file():
             if not path.exists():
@@ -206,16 +205,7 @@ class LocalSkillStorage(SkillStorage):
             scan_archive_preflight_or_raise(path, app_config=self._app_config)
             safe_extract_skill_archive(zf, tmp_path)
 
-        skill_dir = resolve_skill_dir_from_archive(tmp_path)
-
-        is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
-        if not is_valid:
-            raise ValueError(f"Invalid skill: {message}")
-        if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
-            raise ValueError(f"Invalid skill name: {skill_name}")
-        # The skill name becomes ``custom/<name>``; refuse names that cannot be
-        # created as a host path component (Windows reserved device names) so
-        # the install fails here instead of mid-write on the target host.
+        skill_dir, skill_name, _description = resolve_and_validate_skill_dir(tmp_path)
         self.validate_skill_name(skill_name, for_creation=True)
 
         target = custom_dir / skill_name

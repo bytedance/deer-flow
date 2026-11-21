@@ -59,6 +59,7 @@ import { useArtifactPreviewRenderer } from "@/core/extensions/artifact-previews"
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
+import { useSkillManagement } from "@/core/skills/hooks";
 import {
   canBrowserPreviewFile,
   checkCodeFile,
@@ -96,7 +97,7 @@ export function ArtifactFileDetail({
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const isAdmin = user?.system_role === "admin";
+  const { canManage } = useSkillManagement();
   const {
     artifacts,
     setOpen,
@@ -448,14 +449,14 @@ export function ArtifactFileDetail({
       if (result.success) {
         toast.success(result.message);
       } else {
-        toast.error(result.message ?? "Failed to install skill");
+        toast.error(result.message || t.settings.skills.installFailed);
       }
     } catch (error) {
       console.error("Failed to install skill:", error);
-      if (error instanceof SkillRequestError && error.isAdminRequired) {
-        toast.error(t.settings.skills.installAdminRequired);
+      if (error instanceof SkillRequestError && error.status === 403) {
+        toast.error(t.settings.skills.skillManageRequired);
       } else {
-        toast.error("Failed to install skill");
+        toast.error(t.settings.skills.installFailed);
       }
     } finally {
       setIsInstalling(false);
@@ -605,16 +606,13 @@ export function ArtifactFileDetail({
             {!isEditing &&
               !isWriteFile &&
               filepath.endsWith(".skill") &&
-              isAdmin && (
+              canManage && (
                 <Tooltip content={t.toolCalls.skillInstallTooltip}>
                   <ArtifactAction
                     icon={isInstalling ? LoaderIcon : PackageIcon}
                     label={t.common.install}
                     tooltip={t.common.install}
-                    disabled={
-                      isInstalling ||
-                      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-                    }
+                    disabled={isInstalling}
                     onClick={handleInstallSkill}
                   />
                 </Tooltip>

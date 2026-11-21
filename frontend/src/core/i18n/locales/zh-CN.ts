@@ -2596,13 +2596,72 @@ export const zhCN: Translations = {
       emptyDescription:
         "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",
       emptyButton: "创建你的第一个技能",
-      adminRequired: "需要管理员权限才能管理 Agent Skill。",
-      installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
-      installFromFile: "安装 .skill",
+      skillManageRequired: "需要 skills:manage 权限才能管理你的自定义技能。",
+      installSkill: "安装技能",
+      installFromSource: "从来源安装",
+      installFromFile: "从 .skill 文件安装",
       installingArchive: "正在安装…",
       invalidArchive: "请选择扩展名为 .skill 的文件。",
       archiveTooLarge: "技能包大小不能超过 100 MiB。",
       installFailed: "安装技能包失败。",
+      skillSecurityScanFailed: "安全检查阻止了安装，请查看下方检查结果。",
+      sourceDialogTitle: "从来源安装技能",
+      sourceDialogDescription:
+        "输入 skills.sh 的 owner/repo@skill 来源，检查快照后确认安装。",
+      sourceLabel: "技能来源",
+      sourcePlaceholder: "owner/repo@skill",
+      sourceInspect: "预览技能",
+      sourceInspecting: "正在检查来源…",
+      sourceFiles: "文件数",
+      sourceSize: "总大小",
+      sourceDigest: "快照摘要",
+      sourceUpstreamHash: "上游哈希",
+      sourceImmediateEffect:
+        "安装会立即启用此自定义技能，并在你的后续 Agent 运行中生效。",
+      sourceFinalScanNotice:
+        "预览已通过确定性兼容性检查；最终内容扫描将在安装时执行。",
+      sourceInstall: "安装技能",
+      sourceInstalling: "正在安装技能…",
+      sourceBack: "返回",
+      sourceRetry: "修改来源",
+      sourceErrorTitle: "无法安装技能",
+      sourceInvalid:
+        "请输入一个有效的 owner/repo@skill 来源，不支持 URL、本地路径或私有 Git 来源。",
+      sourceNotConfigured:
+        "当前部署不具备 skills.sh 来源安装能力，请改用 .skill 文件安装。",
+      sourceAuthFailed:
+        "skills.sh 拒绝了部署凭据，请联系部署维护者检查 Vercel OIDC 凭据来源及有效期。",
+      sourceUnavailable: "skills.sh 暂时不可用或请求超时，请稍后重试。",
+      sourceRateLimited: (retryAfter: string | null) =>
+        retryAfter
+          ? `来源请求已触发限流，请在 ${retryAfter} 后重试。`
+          : "来源请求已触发限流，请稍后重试。",
+      sourceNotFound: "请求的技能来源不存在。",
+      sourceSnapshotUnusable:
+        "来源快照不是有效的 DeerFlow 技能。请查看下方原因，或改用本地 .skill 文件安装。",
+      sourceChanged: "来源在预览后已变化，请重新检查后再安装。",
+      sourceRequestFailed: "来源请求失败，请重试。",
+      sourceSuccessTitle: "技能已安装",
+      sourceSuccessDescription:
+        "此自定义技能已启用，并会立即在你的后续 Agent 运行中生效。",
+      sourceVisibilityNotice:
+        "如果当前可见性策略过滤了此技能，它仍已安装，但可能不会显示在“我的技能”中。",
+      sourceEnabled: "技能已启用",
+      skillContent: "SKILL.md",
+      skillContentLoading: "正在加载技能内容…",
+      editSkill: "编辑技能",
+      saveSkill: "保存更改",
+      cancelEdit: "取消",
+      deleteSkill: "删除技能",
+      deleteConfirm:
+        "确定删除此自定义技能吗？这将从你的自定义技能空间中移除它。",
+      confirmDelete: "永久删除",
+      skillSaved: "技能更改已保存。",
+      skillDeleted: "自定义技能已删除。",
+      skillLoadFailed: "无法加载此自定义技能。",
+      skillSaveFailed: "无法保存此自定义技能。",
+      skillDeleteFailed: "无法删除此自定义技能。",
+      retry: "重试",
     },
     notification: {
       title: "通知",

@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
+from app.gateway.authz import AuthContext
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers import uploads as uploads_router
@@ -35,6 +36,11 @@ def _make_member_user() -> User:
     from uuid import uuid4
 
     return User(email="member-test@example.com", password_hash="x", system_role="user", id=uuid4())
+
+
+def _direct_manage_request() -> SimpleNamespace:
+    user = _make_admin_user()
+    return SimpleNamespace(state=SimpleNamespace(user=user, auth=AuthContext(user=user, permissions=["skills:manage"])))
 
 
 def _skill_content(name: str, description: str = "Demo skill") -> str:
@@ -1625,7 +1631,7 @@ async def test_update_custom_skill_drains_mutation_tail_across_cancellation(monk
 
     monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _blocked_write)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    request = _direct_manage_request()
     body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
 
     task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
@@ -1695,7 +1701,7 @@ async def test_delete_custom_skill_drains_mutation_tail_across_cancellation(monk
 
     monkeypatch.setattr(UserScopedSkillStorage, "delete_custom_skill", _blocked_delete)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    request = _direct_manage_request()
 
     task = asyncio.create_task(skills_router.delete_custom_skill("demo-skill", request, config))
     try:
@@ -1764,7 +1770,7 @@ async def test_update_custom_skill_logs_failed_drained_mutation_after_cancellati
 
     monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _failing_write)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    request = _direct_manage_request()
     body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
 
     task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
@@ -1840,7 +1846,7 @@ async def test_update_skill_drains_state_write_and_cache_refresh_across_cancella
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
     monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", _refresh)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    request = _direct_manage_request()
     body = skills_router.SkillUpdateRequest(enabled=False)
 
     task = asyncio.create_task(skills_router.update_skill("demo-skill", body, request, SimpleNamespace()))

@@ -85,6 +85,9 @@ class Permissions:
     AGENTS_READ = "agents:read"
     AGENTS_WRITE = "agents:write"
 
+    # Per-user custom skill installation and lifecycle management
+    SKILLS_MANAGE = "skills:manage"
+
 
 class AuthContext:
     """Authentication context for the current request.
@@ -172,7 +175,12 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,
+    Permissions.SKILLS_MANAGE,
 ]
+
+# Route permissions that do not become generally available when authorization
+# is disabled. Internal callers are deliberately not implicit administrators.
+_DISABLED_AUTHORIZATION_ADMIN_ONLY: frozenset[str] = frozenset({Permissions.SKILLS_MANAGE})
 
 
 def _make_test_request_stub() -> Any:
@@ -278,10 +286,33 @@ def _get_cached_route_provider(config: AuthorizationConfig) -> AuthorizationProv
     return provider
 
 
+_route_permission_upgrade_diagnostics: set[tuple[str, str, str]] = set()
+
+
+def _log_route_permission_upgrade(config: AuthorizationConfig, *, role: str, target: str) -> None:
+    """Warn once per provider configuration and role about a new route grant."""
+    if id(config) == _route_provider_config_id and _route_provider_config_sig is not None:
+        signature = _route_provider_config_sig
+    else:
+        # The cache normally computed this already. The fallback also covers a
+        # provider-resolution failure and focused tests with a patched cache.
+        signature = repr(sorted(config.model_dump().items()))
+    key = (signature, role, target)
+    if key in _route_permission_upgrade_diagnostics:
+        return
+    _route_permission_upgrade_diagnostics.add(key)
+    logger.warning(
+        "Authorization upgrade audit: route permission %s is allowed for role %s; review the route policy and explicitly deny newly introduced targets that must remain restricted",
+        target,
+        role,
+    )
+
+
 async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[str]:
     """Return the route permissions granted to an authenticated user.
 
-    Disabled authorization preserves the legacy all-permissions behavior.
+    Disabled authorization preserves the legacy permissions, with explicit
+    admin-only grants filtered out for non-admin and internal callers.
     When enabled, every registered ``resource:action`` permission is evaluated
     independently so a provider failure affects only the route being checked.
     Provider instances are cached per config signature (hot-reload safe).
@@ -290,15 +321,9 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     """
     config = await _route_authorization_config_async()
     if config.enabled is not True:
-        return list(_ALL_PERMISSIONS)
-
-    try:
-        provider = _get_cached_route_provider(config)
-        if provider is None:
-            raise ValueError("authorization is enabled but provider resolution returned None")
-    except Exception:
-        logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
-        return [] if config.fail_closed else list(_ALL_PERMISSIONS)
+        if not is_internal and getattr(user, "system_role", None) == "admin":
+            return list(_ALL_PERMISSIONS)
+        return [permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY]
 
     # Align with Phase 1B's tool path: internal callers (IM channel workers,
     # scheduler) have system_role="internal", which is not a real RBAC role.
@@ -309,6 +334,18 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     user_role = getattr(user, "system_role", None)
     if user_role == INTERNAL_SYSTEM_ROLE:
         user_role = None
+    resolved_role = user_role or config.default_role
+
+    try:
+        provider = _get_cached_route_provider(config)
+        if provider is None:
+            raise ValueError("authorization is enabled but provider resolution returned None")
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
+        if not config.fail_closed:
+            _log_route_permission_upgrade(config, role=resolved_role, target=Permissions.SKILLS_MANAGE)
+            return list(_ALL_PERMISSIONS)
+        return []
 
     principal = build_principal_from_context(
         {
@@ -342,7 +379,11 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
                 permission,
                 exc_info=True,
             )
+            if not config.fail_closed and permission == Permissions.SKILLS_MANAGE:
+                _log_route_permission_upgrade(config, role=resolved_role, target=permission)
             return permission if not config.fail_closed else None
+        if decision.allow and permission == Permissions.SKILLS_MANAGE:
+            _log_route_permission_upgrade(config, role=resolved_role, target=permission)
         return permission if decision.allow else None
 
     results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])

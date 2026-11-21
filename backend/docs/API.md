@@ -1113,7 +1113,7 @@ PUT /api/skills/{skill_name}
 Content-Type: application/json
 ```
 
-Requires an authenticated admin session.
+Requires `skills:manage` for the caller's own custom skill. Public, legacy and integration skill changes still require an authenticated admin session.
 
 **Request Body:**
 ```json
@@ -1136,8 +1136,8 @@ Requires an authenticated admin session.
 
 #### Install Skill
 
-Install a `.skill` archive that already exists in a thread's user-data directory.
-Requires an authenticated administrator.
+Install a `.skill` archive that already exists in the caller's user-data directory.
+Requires the `skills:manage` permission. PAT credentials are not admitted.
 
 ```http
 POST /api/skills/install
@@ -1163,8 +1163,8 @@ Content-Type: application/json
 
 #### Upload and Install Skill
 
-Upload a local `.skill` archive and install it for the current user. Requires an
-authenticated administrator.
+Upload a local `.skill` archive and install it for the current user. Requires the
+`skills:manage` permission. PAT credentials are not admitted.
 
 ```http
 POST /api/skills/install/upload
@@ -1177,6 +1177,40 @@ Content-Type: multipart/form-data
 **Response:** the same shape as [Install Skill](#install-skill). An upload beyond
 the archive limit returns `413`. A missing `archive` field returns `422`; a
 non-file `archive` part is rejected during multipart parsing and returns `400`.
+
+#### Inspect and Install from Source
+
+On deployments with a valid Vercel project OIDC credential for skills.sh, users
+with `skills:manage` can inspect an `owner/repo@skill` source before installing:
+
+```http
+POST /api/skills/install/source/inspect
+Content-Type: application/json
+
+{"source":"vercel-labs/skills@find-skills"}
+```
+
+The response includes the normalized source, skill metadata, file counts and a
+`snapshot_digest`. Inspection applies the installer's deterministic archive,
+path and frontmatter rules plus enabled static checks. It does not guarantee
+that the final content security scan or installation will succeed.
+
+Install the exact inspected snapshot with:
+
+```http
+POST /api/skills/install/source
+Content-Type: application/json
+
+{"source":"vercel-labs/skills@find-skills","expected_snapshot_digest":"<64 hex>"}
+```
+
+The Gateway fetches the source again and returns `409` with code
+`skill_source_changed` if its digest changed. Source errors use
+`{"detail":{"code":"...","message":"..."}}`; security errors may also include
+`findings`. Source downloads never execute `npx` or downloaded code, reuse the
+normal archive installation pipeline, and install into the caller's custom
+skill storage. Ordinary self-hosted deployments without Vercel OIDC do not
+expose this capability. Source provenance is not persisted in this version.
 
 #### List Custom Skills
 
@@ -1193,8 +1227,8 @@ GET /api/skills/custom
 
 #### Get Custom Skill Content
 
-Return a custom skill's metadata plus its raw `SKILL.md` content. Requires an
-authenticated administrator.
+Return a custom skill's metadata plus its raw `SKILL.md` content. Requires the
+`skills:manage` permission for the caller's own custom skill.
 
 ```http
 GET /api/skills/custom/{skill_name}
@@ -1217,7 +1251,7 @@ GET /api/skills/custom/{skill_name}
 
 Replace a custom skill's `SKILL.md`. The content is validated and security
 scanned; a blocked scan returns `400` and nothing is written. Each accepted edit
-appends a history entry. Requires an authenticated administrator.
+appends a history entry. Requires `skills:manage` for the caller's own custom skill.
 
 ```http
 PUT /api/skills/custom/{skill_name}
@@ -1240,8 +1274,8 @@ frontmatter with a nonempty `description` and a `name` that matches
 
 #### Delete Custom Skill
 
-Delete a custom skill and record the deletion in its history. Requires an
-authenticated administrator.
+Delete a custom skill and record the deletion in its history. Requires
+`skills:manage` for the caller's own custom skill.
 
 ```http
 DELETE /api/skills/custom/{skill_name}
@@ -1256,8 +1290,8 @@ DELETE /api/skills/custom/{skill_name}
 
 #### Get Custom Skill History
 
-Return the custom skill's recorded changes, oldest first. Requires an
-authenticated administrator.
+Return the custom skill's recorded changes, oldest first. Requires
+`skills:manage` for the caller's own custom skill.
 
 ```http
 GET /api/skills/custom/{skill_name}/history
@@ -1288,7 +1322,7 @@ recorded history returns `404`.
 
 Restore a custom skill's `SKILL.md` from a history entry. The restored content is
 validated and security scanned before it is written, and the rollback is itself
-recorded as a history entry. Requires an authenticated administrator.
+recorded as a history entry. Requires `skills:manage` for the caller's own custom skill.
 
 ```http
 POST /api/skills/custom/{skill_name}/rollback
@@ -1311,7 +1345,7 @@ latest change). An out-of-range index returns `400`.
 
 #### Export a Custom Skill
 
-Admin session authentication is required for both requests. PAT credentials cannot export. Only the current user's custom skill is eligible; public, legacy and integration fallback is never used. A disabled custom skill remains eligible.
+`skills:manage` is required for both requests. PAT credentials cannot export. Only the current user's custom skill is eligible; public, legacy and integration fallback is never used. A disabled custom skill remains eligible.
 
 1. `GET /api/skills/custom/{skill_name}/export-manifest` returns `skill_name`, `revision` (SHA-256 or null), `can_export`, `file_count`, `directory_count`, `total_bytes`, `files` (`path`, `type`, `size`, `executable`), `requirements` (`compatibility`, `allowed_tools`, `required_secrets` names and optional flags), and structured `warnings`/`blockers`. Paths are relative; `.` is the package root, counted in directory/entry totals. Structural blockers return a non-downloadable manifest. Declarations are not credential values or dependency verification.
 2. `GET /api/skills/custom/{skill_name}/export?expected_revision=<64 lowercase hex characters>` recaptures content and rejects stale previews with 409 before sending ZIP headers. Successful responses carry `application/zip`, attachment `<skill_name>.skill`, accurate `Content-Length`, `Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`.

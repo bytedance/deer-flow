@@ -10,10 +10,15 @@ rs.mock("@/core/config", () => ({
 
 import { fetch as fetcher } from "@/core/api/fetcher";
 import {
-  formatSkillSecurityFindings,
-  SkillRequestError,
+  deleteCustomSkill,
   enableSkill,
+  formatSkillSecurityFindings,
+  inspectSkillSource,
+  installSkillSource,
+  loadCustomSkill,
   loadSkills,
+  SkillRequestError,
+  updateCustomSkill,
   uploadSkillArchive,
 } from "@/core/skills/api";
 
@@ -82,7 +87,7 @@ describe("skills api", () => {
     expect((init?.body as FormData).get("archive")).toBe(archive);
   });
 
-  test("preserves the admin-required error contract", async () => {
+  test("preserves the permission-denied error contract", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(403, { detail: "Admin privileges required" }),
     );
@@ -256,5 +261,150 @@ describe("skills api", () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(409, {}, ""));
 
     await expect(enableSkill("foo", false)).rejects.toThrow("HTTP 409");
+  });
+
+  test("normalizes legacy string errors to a null code", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(403, { detail: "Permission denied" }),
+    );
+    const error = await enableSkill("demo", true).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({ code: null, retryAfter: null });
+  });
+
+  test("inspects a source through the CSRF-capable fetch wrapper", async () => {
+    const preview = {
+      source: "vercel-labs/skills@find-skills",
+      source_url: "https://skills.sh/vercel-labs/skills/find-skills",
+      skill_name: "find-skills",
+      description: "Find skills",
+      snapshot_digest: "a".repeat(64),
+      upstream_hash: null,
+      file_count: 1,
+      total_bytes: 42,
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, preview));
+
+    await expect(inspectSkillSource(preview.source)).resolves.toEqual(preview);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/backend/api/skills/install/source/inspect",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: preview.source }),
+        signal: undefined,
+      },
+    );
+  });
+
+  test("returns structured source codes, findings, and Retry-After", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "skill_source_rate_limited",
+            message: "Slow down",
+          },
+        }),
+        { status: 429, headers: { "Retry-After": "17" } },
+      ),
+    );
+    await expect(inspectSkillSource("owner/repo@skill")).rejects.toMatchObject({
+      name: "SkillRequestError",
+      code: "skill_source_rate_limited",
+      retryAfter: "17",
+      findings: [],
+    });
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(400, {
+        detail: {
+          code: "skill_security_scan_failed",
+          message: "Blocked",
+          findings: [
+            {
+              rule_id: "shell",
+              severity: "HIGH",
+              file: "SKILL.md",
+              line: 3,
+              message: "Shell execution",
+              remediation: null,
+            },
+          ],
+        },
+      }),
+    );
+    await expect(
+      installSkillSource({
+        source: "owner/repo@skill",
+        expected_snapshot_digest: "a".repeat(64),
+      }),
+    ).rejects.toMatchObject({
+      code: "skill_security_scan_failed",
+      findings: [expect.objectContaining({ rule_id: "shell" })],
+    });
+  });
+
+  test("installs the exact inspected snapshot digest", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        success: true,
+        skill_name: "demo",
+        message: "Installed",
+      }),
+    );
+    const request = {
+      source: "owner/repo@demo",
+      expected_snapshot_digest: "b".repeat(64),
+    };
+    await installSkillSource(request);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/backend/api/skills/install/source",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+        signal: undefined,
+      },
+    );
+  });
+
+  test("loads, edits, and deletes encoded custom skill paths", async () => {
+    const skill = {
+      name: "my skill",
+      description: "Demo",
+      category: "custom",
+      license: "",
+      enabled: true,
+      editable: true,
+      content: "---\nname: demo\n---\n",
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, skill));
+    await expect(loadCustomSkill("my skill")).resolves.toEqual(skill);
+    expect(mockedFetch).toHaveBeenLastCalledWith(
+      "/backend/api/skills/custom/my%20skill",
+      { signal: undefined, cache: "no-store" },
+    );
+
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, skill));
+    await updateCustomSkill("my skill", skill.content);
+    expect(mockedFetch).toHaveBeenLastCalledWith(
+      "/backend/api/skills/custom/my%20skill",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: skill.content }),
+      },
+    );
+
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, { success: true }));
+    await expect(deleteCustomSkill("my skill")).resolves.toEqual({
+      success: true,
+    });
+    expect(mockedFetch).toHaveBeenLastCalledWith(
+      "/backend/api/skills/custom/my%20skill",
+      { method: "DELETE" },
+    );
   });
 });

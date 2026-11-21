@@ -93,7 +93,11 @@ async def _permissions(client: httpx.AsyncClient) -> list[str]:
 @pytest.mark.parametrize(
     ("config_yaml", "expected"),
     [
-        pytest.param(_DISABLED, list(authz._ALL_PERMISSIONS), id="disabled"),
+        pytest.param(
+            _DISABLED,
+            [permission for permission in authz._ALL_PERMISSIONS if permission not in authz._DISABLED_AUTHORIZATION_ADMIN_ONLY],
+            id="disabled-internal",
+        ),
         pytest.param(_RBAC, [Permissions.THREADS_READ, Permissions.RUNS_READ], id="rbac"),
     ],
 )

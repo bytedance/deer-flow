@@ -1,6 +1,12 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
+export interface SkillManagementFeature {
+  lifecycle_permissions: true;
+  can_manage: boolean;
+  source_install_available: boolean;
+}
+
 export interface FeaturesResponse {
   run_inputs?: boolean;
   tool_approval?: {
@@ -34,6 +40,7 @@ export interface FeaturesResponse {
   thread_activity?: {
     available?: boolean;
   };
+  skill_management?: SkillManagementFeature | null;
 }
 
 export interface ScheduledTasksFeature {

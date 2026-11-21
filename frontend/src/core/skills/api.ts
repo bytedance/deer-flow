@@ -22,6 +22,8 @@ export class SkillRequestError extends Error {
   readonly status: number;
   readonly skillName?: string;
   readonly findings: SkillSecurityFinding[];
+  readonly code: string | null;
+  readonly retryAfter: string | null;
 
   constructor(
     status: number,
@@ -29,6 +31,8 @@ export class SkillRequestError extends Error {
     options: {
       skillName?: string;
       findings?: SkillSecurityFinding[];
+      code?: string | null;
+      retryAfter?: string | null;
     } = {},
   ) {
     super(message);
@@ -36,10 +40,8 @@ export class SkillRequestError extends Error {
     this.status = status;
     this.skillName = options.skillName;
     this.findings = options.findings ?? [];
-  }
-
-  get isAdminRequired(): boolean {
-    return this.status === 403;
+    this.code = options.code ?? null;
+    this.retryAfter = options.retryAfter ?? null;
   }
 }
 
@@ -47,6 +49,8 @@ interface SkillErrorDetail {
   message: string;
   skillName?: string;
   findings: SkillSecurityFinding[];
+  code: string | null;
+  retryAfter: string | null;
 }
 
 function parseSecurityFindings(value: unknown): SkillSecurityFinding[] {
@@ -95,8 +99,10 @@ export function formatSkillSecurityFindings(
 
 async function readErrorDetail(response: Response): Promise<SkillErrorDetail> {
   const detail = await readSkillErrorDetail(response);
+  const retryAfter =
+    response.status === 429 ? response.headers.get("Retry-After") : null;
   if (typeof detail === "string") {
-    return { message: detail, findings: [] };
+    return { message: detail, findings: [], code: null, retryAfter };
   }
   if (isErrorDetailRecord(detail) && typeof detail.message === "string") {
     return {
@@ -104,11 +110,15 @@ async function readErrorDetail(response: Response): Promise<SkillErrorDetail> {
       skillName:
         typeof detail.skill_name === "string" ? detail.skill_name : undefined,
       findings: parseSecurityFindings(detail.findings),
+      code: typeof detail.code === "string" ? detail.code : null,
+      retryAfter,
     };
   }
   return {
     message: `HTTP ${response.status}${response.statusText ? `: ${response.statusText}` : ""}`,
     findings: [],
+    code: null,
+    retryAfter,
   };
 }
 
@@ -193,12 +203,10 @@ export async function installSkill(
 
   if (!response.ok) {
     const detail = await readErrorDetail(response);
-    // Surface authorization failures so callers can show an admin-only hint
-    // instead of a generic failure.
+    // Preserve the legacy soft-failure contract except for authorization.
     if (response.status === 403) {
       throw new SkillRequestError(response.status, detail.message, detail);
     }
-    // Other HTTP errors keep the existing soft-failure contract.
     return {
       success: false,
       skill_name: "",
@@ -240,4 +248,112 @@ export async function uploadSkillArchive(
   }
 
   return response.json();
+}
+
+export interface SkillSourcePreview {
+  source: string;
+  source_url: string;
+  skill_name: string;
+  description: string;
+  snapshot_digest: string;
+  upstream_hash: string | null;
+  file_count: number;
+  total_bytes: number;
+}
+
+export interface InstallSkillSourceRequest {
+  source: string;
+  expected_snapshot_digest: string;
+}
+
+export async function inspectSkillSource(
+  source: string,
+  signal?: AbortSignal,
+): Promise<SkillSourcePreview> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/install/source/inspect`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source }),
+      signal,
+    },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  return response.json() as Promise<SkillSourcePreview>;
+}
+
+export async function installSkillSource(
+  request: InstallSkillSourceRequest,
+  signal?: AbortSignal,
+): Promise<InstallSkillResponse> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/install/source`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal,
+    },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  return response.json() as Promise<InstallSkillResponse>;
+}
+
+export interface CustomSkillContent extends Skill {
+  content: string;
+}
+
+export async function loadCustomSkill(
+  skillName: string,
+  signal?: AbortSignal,
+): Promise<CustomSkillContent> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}`,
+    { signal, cache: "no-store" },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  return response.json() as Promise<CustomSkillContent>;
+}
+
+export async function updateCustomSkill(
+  skillName: string,
+  content: string,
+): Promise<CustomSkillContent> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  return response.json() as Promise<CustomSkillContent>;
+}
+
+export async function deleteCustomSkill(
+  skillName: string,
+): Promise<{ success: boolean }> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  return response.json() as Promise<{ success: boolean }>;
 }

@@ -33,6 +33,28 @@ Open **Capability Center** from the workspace sidebar to manage **Plugins**
 search; skill cards show concise descriptions with full descriptions in a detail
 view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
+
+### Installing and managing custom skills
+
+The `skills:manage` route permission controls installation and the lifecycle of
+the caller's own custom skills: view, edit, enable/disable, export, history,
+rollback and delete. With authorization disabled, only administrators receive
+this permission. With authorization enabled, the configured provider evaluates
+`resource="route"`, `action="manage"`, `target="skills:manage"`; role policies
+can grant or deny it. Skill catalog visibility remains a separate `skills`
+resource policy. PAT credentials cannot install or manage skills.
+
+Users with this permission can choose **Install skill → From .skill file** and
+upload an archive. Imported custom skills are enabled immediately and can be
+disabled or deleted from the same page. Public and integration skill management
+remains administrator-only.
+
+**Install skill → From source** is available only when the Gateway has a valid
+Vercel project OIDC credential for skills.sh. Enter `owner/repo@skill`, inspect
+the deterministic compatibility checks, then confirm installation. The final
+content security scan still runs during installation. Ordinary self-hosted
+deployments without this credential show only file installation. Source names
+and snapshot digests are not persisted as queryable provenance in this version.
 General preferences remain in Settings.
 
 Failed skill requests retain their HTTP error status and a readable fallback
@@ -517,7 +539,7 @@ news rather than the general web: date filters cannot extend the provider's
 
 ## Exporting Custom Skills
 
-Administrators can export their own custom skills from **Capability Center → Skills → My skills → View details → Export**. Review the file list and declared environment requirements, then choose **Download .skill**. The archive contains the currently saved skill, including supporting files and empty directories; disabled skills can also be exported. If the skill changes after preview, refresh the file list before downloading. Import the archive on another DeerFlow instance with **Install .skill**; existing-name conflicts and normal installation security checks still apply.
+Users with `skills:manage` can export their own custom skills from **Capability Center → Skills → My skills → View details → Export**. Review the file list and declared environment requirements, then choose **Download .skill**. The archive contains the currently saved skill, including supporting files and empty directories; disabled skills can also be exported. If the skill changes after preview, refresh the file list before downloading. Import the archive on another DeerFlow instance with **Install .skill**; existing-name conflicts and normal installation security checks still apply.
 
 Account settings, conversations and history outside the skill folder are excluded. Files inside the folder are preserved unchanged, including any credentials an author placed there; filename notices are advisory. Configure dependencies and credentials on the destination. Linked folders/files, hard links, unsupported executable binaries, nested `SKILL.md` files and nonportable paths cannot be exported. Export supports hosts with descriptor-relative no-follow filesystem APIs (Linux/macOS); unsupported hosts fail explicitly. Limits: 4096 ZIP entries, 64 MiB per file, 100 MiB total content/archive and 1 MiB frontmatter. YAML aliases and excessively complex declarations are not supported. Ordinary script executable semantics are preserved on POSIX import, without restoring special permissions. See [the export API contract](../../backend/docs/API.md#export-a-custom-skill).
 

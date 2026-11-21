@@ -12,11 +12,13 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.authz import Permissions, get_auth_context
 from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
 from app.gateway.routers.thread_activity import thread_activity_available
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
+from app.gateway.skill_source import source_install_available
 from deerflow.config.app_config import AppConfig
 from deerflow.knowledge.providers import get_knowledge_capabilities
 from deerflow.scheduler.runtime import scheduler_tools_enabled
@@ -90,6 +92,14 @@ class ToolApprovalFeature(BaseModel):
     allowed_modes: list[Literal["ask", "auto", "full"]] = Field(default_factory=list)
 
 
+class SkillManagementFeature(BaseModel):
+    """Per-user custom skill lifecycle and source-install capabilities."""
+
+    lifecycle_permissions: bool = Field(default=True, description="Whether skill lifecycle routes use skills:manage")
+    can_manage: bool = Field(..., description="Whether the current request may manage its own custom skills")
+    source_install_available: bool = Field(..., description="Whether this deployment has Vercel OIDC source-install credentials")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -101,6 +111,7 @@ class FeaturesResponse(BaseModel):
     knowledge_base: KnowledgeBaseFeature
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
+    skill_management: SkillManagementFeature
     run_inputs: bool = False
     tool_approval: ToolApprovalFeature = Field(default_factory=ToolApprovalFeature)
 
@@ -116,6 +127,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     browser = browser_capability(config)
     approval = getattr(config, "hitl_approval", None)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
+    auth = get_auth_context(request)
     return FeaturesResponse(
         tool_approval=ToolApprovalFeature(enabled=approval.enabled, default_mode=approval.default_mode, allowed_modes=approval.allowed_modes) if approval is not None else ToolApprovalFeature(),
         run_inputs=getattr(getattr(request.app.state, "run_manager", None), "input_store", None) is not None,
@@ -147,6 +159,10 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         scheduled_tasks=_scheduled_tasks_feature(request, config),
         # Startup-scoped: the read repository exists only with SQL persistence.
         thread_activity=ThreadActivityFeature(available=thread_activity_available(request.app.state)),
+        skill_management=SkillManagementFeature(
+            can_manage=bool(auth and Permissions.SKILLS_MANAGE in auth.permissions),
+            source_install_available=source_install_available(),
+        ),
     )
 
 

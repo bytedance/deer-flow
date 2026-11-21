@@ -109,6 +109,11 @@ class _Form:
         return self.archive
 
 
+def _permission_bypass_request() -> SimpleNamespace:
+    """Bypass auth only; these cases exercise cleanup, not authorization."""
+    return SimpleNamespace(_deerflow_test_bypass_auth=True, state=SimpleNamespace())
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["success", "install_error"])
 @pytest.mark.parametrize("failure", ["none", "unlink", "logging"])
@@ -117,9 +122,6 @@ async def test_upload_finally_preserves_install_outcome(tmp_path, monkeypatch, c
     archive.write_bytes(b"archive-bytes")
     response = skills_router.SkillInstallResponse(success=True, skill_name="demo", message="installed")
     install_error = RuntimeError("install failed")
-
-    async def _admin(*_args, **_kwargs):
-        return None
 
     async def _parse(_request):
         return _Form()
@@ -133,7 +135,6 @@ async def test_upload_finally_preserves_install_outcome(tmp_path, monkeypatch, c
             raise install_error
         return response
 
-    monkeypatch.setattr(skills_router, "require_admin_user", _admin)
     monkeypatch.setattr(skills_router, "_parse_skill_archive_form", _parse)
     monkeypatch.setattr(skills_router, "_copy_uploaded_skill_archive", _copy)
     monkeypatch.setattr(skills_router, "_install_skill_archive", _install)
@@ -157,11 +158,11 @@ async def test_upload_finally_preserves_install_outcome(tmp_path, monkeypatch, c
     try:
         with caplog.at_level(logging.WARNING, logger="deerflow.utils.atomic_write"):
             if outcome == "success":
-                result = await skills_router.upload_and_install_skill(SimpleNamespace(), SimpleNamespace())
+                result = await skills_router.upload_and_install_skill(_permission_bypass_request(), SimpleNamespace())
                 assert result == response
             else:
                 with pytest.raises(RuntimeError) as raised:
-                    await skills_router.upload_and_install_skill(SimpleNamespace(), SimpleNamespace())
+                    await skills_router.upload_and_install_skill(_permission_bypass_request(), SimpleNamespace())
                 assert raised.value is install_error
         if failure == "none":
             assert not archive.exists()
@@ -187,9 +188,6 @@ async def test_upload_finally_close_failure_still_discards_and_preserves_outcome
     close_error = RuntimeError("form close failed")
     form = _Form(close_error=close_error)
 
-    async def _admin(*_args, **_kwargs):
-        return None
-
     async def _parse(_request):
         return form
 
@@ -202,7 +200,6 @@ async def test_upload_finally_close_failure_still_discards_and_preserves_outcome
             raise install_error
         return response
 
-    monkeypatch.setattr(skills_router, "require_admin_user", _admin)
     monkeypatch.setattr(skills_router, "_parse_skill_archive_form", _parse)
     monkeypatch.setattr(skills_router, "_copy_uploaded_skill_archive", _copy)
     monkeypatch.setattr(skills_router, "_install_skill_archive", _install)
@@ -220,11 +217,11 @@ async def test_upload_finally_close_failure_still_discards_and_preserves_outcome
     try:
         with caplog.at_level(logging.WARNING, logger="deerflow.utils.atomic_write"):
             if outcome == "success":
-                result = await skills_router.upload_and_install_skill(SimpleNamespace(), SimpleNamespace())
+                result = await skills_router.upload_and_install_skill(_permission_bypass_request(), SimpleNamespace())
                 assert result == response
             else:
                 with pytest.raises(RuntimeError) as raised:
-                    await skills_router.upload_and_install_skill(SimpleNamespace(), SimpleNamespace())
+                    await skills_router.upload_and_install_skill(_permission_bypass_request(), SimpleNamespace())
                 assert raised.value is install_error
         assert form.closed
         assert "form close failed" not in caplog.text

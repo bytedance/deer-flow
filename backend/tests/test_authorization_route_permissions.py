@@ -1,5 +1,6 @@
 """Route-level authorization tests for the Gateway permission decorators."""
 
+import logging
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +12,8 @@ from fastapi.testclient import TestClient
 from app.gateway.auth.models import User
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.authz import (
+    _ALL_PERMISSIONS,
+    _DISABLED_AUTHORIZATION_ADMIN_ONLY,
     Permissions,
     _authenticate,
     _get_cached_route_provider,
@@ -77,69 +80,59 @@ def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True) ->
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", lambda c: provider)
 
 
+@pytest.fixture(autouse=True)
+def _reset_upgrade_diagnostics(monkeypatch):
+    monkeypatch.setattr("app.gateway.authz._route_permission_upgrade_diagnostics", set())
+
+
+def test_disabled_authorization_admin_only_set_is_exact():
+    assert _DISABLED_AUTHORIZATION_ADMIN_ONLY == frozenset({Permissions.SKILLS_MANAGE})
+
+
 @pytest.mark.asyncio
-async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch):
+@pytest.mark.parametrize(
+    ("role", "is_internal", "expected"),
+    [
+        pytest.param("admin", False, list(_ALL_PERMISSIONS), id="admin"),
+        pytest.param(
+            "user",
+            False,
+            [permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY],
+            id="non-admin",
+        ),
+        pytest.param(
+            "admin",
+            True,
+            [permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY],
+            id="internal-is-not-admin",
+        ),
+    ],
+)
+async def test_route_permissions_disabled_apply_explicit_role_defaults(monkeypatch, role, is_internal, expected):
     config = AuthorizationConfig(enabled=False)
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
     # Bypass cache + ensure provider is never resolved when disabled.
     cached = AsyncMock(side_effect=AssertionError("disabled authorization must not resolve a provider"))
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", cached)
 
-    permissions = await resolve_route_permissions(_user(), is_internal=False)
+    permissions = await resolve_route_permissions(_user(system_role=role), is_internal=is_internal)
 
-    assert permissions == [
-        Permissions.THREADS_READ,
-        Permissions.THREADS_WRITE,
-        Permissions.THREADS_DELETE,
-        Permissions.RUNS_CREATE,
-        Permissions.RUNS_READ,
-        Permissions.RUNS_CANCEL,
-        Permissions.MEMORY_READ,
-        Permissions.MEMORY_WRITE,
-        Permissions.AGENTS_READ,
-        Permissions.AGENTS_WRITE,
-        Permissions.PROJECTS_READ,
-        Permissions.PROJECTS_WRITE,
-        Permissions.PROJECTS_DELETE,
-    ]
+    assert permissions == expected
     cached.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_route_permissions_use_async_provider_and_trusted_principal(monkeypatch):
-    provider = _RecordingProvider(denied={Permissions.THREADS_DELETE, Permissions.RUNS_CANCEL})
+    denied = {Permissions.THREADS_DELETE, Permissions.RUNS_CANCEL}
+    provider = _RecordingProvider(denied=denied)
     _enable_authorization(monkeypatch, provider)
 
     permissions = await resolve_route_permissions(_user(), is_internal=True)
 
-    assert permissions == [
-        Permissions.THREADS_READ,
-        Permissions.THREADS_WRITE,
-        Permissions.RUNS_CREATE,
-        Permissions.RUNS_READ,
-        Permissions.MEMORY_READ,
-        Permissions.MEMORY_WRITE,
-        Permissions.AGENTS_READ,
-        Permissions.AGENTS_WRITE,
-        Permissions.PROJECTS_READ,
-        Permissions.PROJECTS_WRITE,
-        Permissions.PROJECTS_DELETE,
-    ]
-    assert [(request.resource, request.action, request.target) for request in provider.requests] == [
-        ("route", "read", Permissions.THREADS_READ),
-        ("route", "write", Permissions.THREADS_WRITE),
-        ("route", "delete", Permissions.THREADS_DELETE),
-        ("route", "create", Permissions.RUNS_CREATE),
-        ("route", "read", Permissions.RUNS_READ),
-        ("route", "cancel", Permissions.RUNS_CANCEL),
-        ("route", "read", Permissions.MEMORY_READ),
-        ("route", "write", Permissions.MEMORY_WRITE),
-        ("route", "read", Permissions.AGENTS_READ),
-        ("route", "write", Permissions.AGENTS_WRITE),
-        ("route", "read", Permissions.PROJECTS_READ),
-        ("route", "write", Permissions.PROJECTS_WRITE),
-        ("route", "delete", Permissions.PROJECTS_DELETE),
-    ]
+    assert permissions == [permission for permission in _ALL_PERMISSIONS if permission not in denied]
+    assert [(request.resource, request.action, request.target) for request in provider.requests] == [("route", permission.split(":", maxsplit=1)[1], permission) for permission in _ALL_PERMISSIONS]
+    manage_request = next(request for request in provider.requests if request.target == Permissions.SKILLS_MANAGE)
+    assert (manage_request.resource, manage_request.action, manage_request.target) == ("route", "manage", "skills:manage")
     principal = provider.requests[0].principal
     assert principal.user_id == "user-123"
     assert principal.role == "user"
@@ -155,44 +148,19 @@ async def test_route_permissions_fail_closed_denies_only_the_failed_permission(m
 
     permissions = await resolve_route_permissions(_user(), is_internal=False)
 
-    assert permissions == [
-        Permissions.THREADS_READ,
-        Permissions.THREADS_WRITE,
-        Permissions.THREADS_DELETE,
-        Permissions.RUNS_CREATE,
-        Permissions.RUNS_READ,
-        Permissions.MEMORY_READ,
-        Permissions.MEMORY_WRITE,
-        Permissions.AGENTS_READ,
-        Permissions.AGENTS_WRITE,
-        Permissions.PROJECTS_READ,
-        Permissions.PROJECTS_WRITE,
-        Permissions.PROJECTS_DELETE,
-    ]
+    assert permissions == [permission for permission in _ALL_PERMISSIONS if permission != Permissions.RUNS_CANCEL]
 
 
 @pytest.mark.asyncio
-async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypatch):
-    provider = _RecordingProvider(errors={Permissions.RUNS_CANCEL})
+async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypatch, caplog):
+    provider = _RecordingProvider(errors={Permissions.RUNS_CANCEL, Permissions.SKILLS_MANAGE})
     _enable_authorization(monkeypatch, provider, fail_closed=False)
 
-    permissions = await resolve_route_permissions(_user(), is_internal=False)
+    with caplog.at_level(logging.WARNING, logger="app.gateway.authz"):
+        permissions = await resolve_route_permissions(_user(), is_internal=False)
 
-    assert permissions == [
-        Permissions.THREADS_READ,
-        Permissions.THREADS_WRITE,
-        Permissions.THREADS_DELETE,
-        Permissions.RUNS_CREATE,
-        Permissions.RUNS_READ,
-        Permissions.RUNS_CANCEL,
-        Permissions.MEMORY_READ,
-        Permissions.MEMORY_WRITE,
-        Permissions.AGENTS_READ,
-        Permissions.AGENTS_WRITE,
-        Permissions.PROJECTS_READ,
-        Permissions.PROJECTS_WRITE,
-        Permissions.PROJECTS_DELETE,
-    ]
+    assert permissions == list(_ALL_PERMISSIONS)
+    assert any("Authorization upgrade audit" in record.message and Permissions.SKILLS_MANAGE in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -200,27 +168,10 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
     ("fail_closed", "expected"),
     [
         (True, []),
-        (
-            False,
-            [
-                Permissions.THREADS_READ,
-                Permissions.THREADS_WRITE,
-                Permissions.THREADS_DELETE,
-                Permissions.RUNS_CREATE,
-                Permissions.RUNS_READ,
-                Permissions.RUNS_CANCEL,
-                Permissions.MEMORY_READ,
-                Permissions.MEMORY_WRITE,
-                Permissions.AGENTS_READ,
-                Permissions.AGENTS_WRITE,
-                Permissions.PROJECTS_READ,
-                Permissions.PROJECTS_WRITE,
-                Permissions.PROJECTS_DELETE,
-            ],
-        ),
+        (False, list(_ALL_PERMISSIONS)),
     ],
 )
-async def test_route_permissions_apply_failure_mode_to_provider_resolution(monkeypatch, fail_closed, expected):
+async def test_route_permissions_apply_failure_mode_to_provider_resolution(monkeypatch, caplog, fail_closed, expected):
     config = AuthorizationConfig(
         enabled=True,
         fail_closed=fail_closed,
@@ -233,7 +184,11 @@ async def test_route_permissions_apply_failure_mode_to_provider_resolution(monke
 
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", fail_cached)
 
-    assert await resolve_route_permissions(_user(), is_internal=False) == expected
+    with caplog.at_level(logging.WARNING, logger="app.gateway.authz"):
+        assert await resolve_route_permissions(_user(), is_internal=False) == expected
+
+    upgrade_warnings = [record for record in caplog.records if "Authorization upgrade audit" in record.message]
+    assert len(upgrade_warnings) == (0 if fail_closed else 1)
 
 
 @pytest.mark.asyncio
@@ -252,6 +207,39 @@ async def test_route_permissions_use_builtin_rbac_route_policy(monkeypatch):
     permissions = await resolve_route_permissions(_user(), is_internal=False)
 
     assert permissions == [Permissions.THREADS_READ, Permissions.RUNS_READ]
+
+
+@pytest.mark.asyncio
+async def test_route_permissions_warn_once_for_custom_provider_allow_per_role(monkeypatch, caplog):
+    provider = _RecordingProvider()
+    _enable_authorization(monkeypatch, provider)
+
+    with caplog.at_level(logging.WARNING, logger="app.gateway.authz"):
+        await resolve_route_permissions(_user(), is_internal=False)
+        await resolve_route_permissions(_user(), is_internal=False)
+        await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
+
+    warnings = [record for record in caplog.records if "Authorization upgrade audit" in record.message]
+    assert len(warnings) == 2
+    assert all(Permissions.SKILLS_MANAGE in record.message for record in warnings)
+    assert sum("role user" in record.message for record in warnings) == 1
+    assert sum("role admin" in record.message for record in warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_route_permissions_warn_once_for_unrestricted_rbac_manage_grant(monkeypatch, caplog):
+    provider = RbacAuthorizationProvider(roles={"user": {}})
+    _enable_authorization(monkeypatch, provider)
+
+    with caplog.at_level(logging.WARNING, logger="app.gateway.authz"):
+        first = await resolve_route_permissions(_user(), is_internal=False)
+        second = await resolve_route_permissions(_user(), is_internal=False)
+
+    assert Permissions.SKILLS_MANAGE in first
+    assert second == first
+    warnings = [record for record in caplog.records if "Authorization upgrade audit" in record.message]
+    assert len(warnings) == 1
+    assert Permissions.SKILLS_MANAGE in warnings[0].message
 
 
 @pytest.mark.asyncio
