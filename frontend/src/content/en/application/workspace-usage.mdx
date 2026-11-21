@@ -25,6 +25,8 @@ Use the model picker in the input bar to choose which configured model to use fo
 
 The selected model applies to the next message only. You can switch models between messages in the same thread.
 
+A message can also name a model directly, for example `use chat-default for this turn: analyze these sales figures`. The server checks that name against your configured models before the run starts. Text that describes a method rather than a model, such as `use a regression model to analyze these sales figures`, stays part of the task.
+
 If a model supports **thinking mode**, a toggle appears next to the model selector. When thinking is enabled, the agent's internal reasoning steps are shown inline in the response.
 
 ## Selecting a skill

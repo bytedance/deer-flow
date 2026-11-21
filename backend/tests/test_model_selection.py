@@ -84,6 +84,63 @@ def test_ordinary_tasks_quotes_and_conditional_text_are_not_controls(text):
     assert resolve_model_control(text, [DS, OPUS])["status"] == "none"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use a regression model to analyze these sales figures",
+        "Use a data model to design the database schema",
+        "Use the attached model to forecast next month's revenue",
+        "Please use a statistical model to explain the results",
+        "Use Python 3.11 to run the script",
+        "用回归模型分析这些销售数据",
+    ],
+)
+def test_model_as_a_common_noun_stays_task_text(text):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "none"
+    assert result["task_offset"] == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use the v2 API to fetch the data",
+        "Use v2 of the API to fetch the data",
+        "Use v2 endpoints to paginate the results",
+        "Use v2 API for this turn: fetch the data",
+        "Use the v12 API to fetch the data",
+        "Use v2.1.3 SDK to fetch the data",
+        "Use API v12 to fetch the data",
+        "Use SDK v2.1.3 to fetch the data",
+        "这次用 v10 接口帮我测试",
+    ],
+)
+def test_versioned_tool_reference_in_a_task_stays_task_text(text):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "none"
+    assert result["task_offset"] == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use the Claude Sonnet model for this turn: summarize this report",
+        "Use Claude Sonnet model for this turn: summarize this report",
+        "用 GPT-4 模型总结这段内容",
+    ],
+)
+def test_explicitly_named_model_outside_the_catalog_is_unavailable(text):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "unavailable"
+    assert result["model_name"] is None
+
+
+def test_scoped_versioned_name_still_asks_instead_of_using_the_default():
+    result = resolve_model_control("Use v9.2 for this turn: summarize the document", [model("chat-default", "Chat Default")])
+    assert result["status"] == "unavailable"
+    assert result["model_name"] is None
+
+
 def test_name_without_scope_requires_a_scope_choice():
     result = resolve_model_control("用 ds flash 帮我算一下", [DS, OPUS])
     assert result["status"] == "ambiguous"
