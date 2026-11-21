@@ -3240,7 +3240,7 @@ async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
                 tool_name="act",
                 arguments={},
                 call_kwargs={},
-            )
+            ),
         )
         try:
             await asyncio.wait_for(exit_started.wait(), timeout=0.5)
