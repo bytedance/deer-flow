@@ -771,6 +771,29 @@ def test_error_message_redacts_data_uri_payloads_case_insensitively(encode):
     assert payload[:64] not in result.text
 
 
+def test_error_message_does_not_backtrack_quadratically_on_comma_free_text():
+    r"""The data-URI params window is bounded, so many `data:` starts stay linear.
+
+    `[^,\s]*` rescanned to the end of one comma-free run for every start
+    position; 160K characters of crafted text took seconds before the bound.
+    """
+    import time
+
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_fetch", tool_call_id="tc-adversarial")
+    detail = "data:x;y" * 20_000
+
+    def _boom(_req):
+        raise ToolException(detail)
+
+    started = time.perf_counter()
+    result = middleware.wrap_tool_call(req, _boom)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 2.0, f"redaction took {elapsed:.2f}s on a 160K comma-free string"
+    assert "data:x;y" in result.text
+
+
 def test_error_message_leaves_plain_text_unchanged():
     middleware = ToolErrorHandlingMiddleware()
     req = _request(name="web_search", tool_call_id="tc-plain")

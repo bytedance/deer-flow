@@ -64,7 +64,7 @@ _TOOL_RESULT_CONTRACT = (
 # Values below the threshold (a short diagnostic token) stay readable.
 _INLINE_BASE64_MIN_CHARS = 64
 _INLINE_BASE64_RE = re.compile(
-    rf"(?P<prefix>(?:['\"]base64['\"]\s*:\s*['\"]|data:[^,\s]*;base64,))[A-Za-z0-9+/=_-]{{{_INLINE_BASE64_MIN_CHARS},}}",
+    rf"(?P<prefix>(?:['\"]base64['\"]\s*:\s*['\"]|data:[^,\s]{{0,200}};base64,))[A-Za-z0-9+/=_-]{{{_INLINE_BASE64_MIN_CHARS},}}",
     re.IGNORECASE,
 )
 
