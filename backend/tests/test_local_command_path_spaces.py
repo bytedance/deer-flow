@@ -207,3 +207,30 @@ def test_public_bash_tool_preserves_thread_path_argument(powershell, tmp_path, m
     assert "needle" in result
     assert "Exit Code:" not in result
     assert not result.startswith("Error:"), result
+
+
+def test_apply_cwd_prefix_separator_follows_the_shell():
+    """The OS-default Windows shell has no '&&' statement separator, so the cwd
+    prefix must chain with ';' when the local shell is in the PowerShell family."""
+    from deerflow.sandbox.tools import _apply_cwd_prefix
+
+    thread_data = {"workspace_path": r"C:\tmp\thread data\workspace"}
+    command = "Get-Content marker.txt"
+
+    posix_result = _apply_cwd_prefix(command, thread_data, shell="/bin/bash")
+    assert " && " in posix_result
+
+    default_result = _apply_cwd_prefix(command, thread_data)
+    assert " && " in default_result
+
+    windows_result = _apply_cwd_prefix(
+        command,
+        thread_data,
+        shell=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.EXE",
+    )
+    assert " && " not in windows_result
+    assert "; " in windows_result
+
+    pwsh_result = _apply_cwd_prefix(command, thread_data, shell="pwsh.exe")
+    assert " && " not in pwsh_result
+    assert "; " in pwsh_result
