@@ -46,7 +46,8 @@ class SearxngClient:
             query: The search query.
             max_results: Maximum number of results to return. SearXNG returns
                 one page per request, so a value larger than a page is collected
-                across ``pageno`` pages. A falsy value means "no cap".
+                across ``pageno`` pages using one HTTP client per search. A falsy
+                value means "no cap".
             categories: Search categories to use.
             time_range: Optional relative publication/update window.
 
@@ -57,26 +58,27 @@ class SearxngClient:
 
         collected: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for pageno in range(1, self._MAX_PAGES + 1):
-            rows = await self._search_page(query, pageno=pageno, categories=categories, time_range=time_range)
-            if not rows:
-                break
+        async with await asyncio.to_thread(httpx.AsyncClient, timeout=30) as client:
+            for pageno in range(1, self._MAX_PAGES + 1):
+                rows = await self._search_page(client, query, pageno=pageno, categories=categories, time_range=time_range)
+                if not rows:
+                    break
 
-            added = 0
-            for row in rows:
-                key = str(row.get("url") or row.get("title") or "")
-                if key and key in seen:
-                    continue
-                seen.add(key)
-                collected.append(row)
-                added += 1
-                if limit is not None and len(collected) >= limit:
-                    return collected
+                added = 0
+                for row in rows:
+                    key = str(row.get("url") or row.get("title") or "")
+                    if key and key in seen:
+                        continue
+                    seen.add(key)
+                    collected.append(row)
+                    added += 1
+                    if limit is not None and len(collected) >= limit:
+                        return collected
 
-            # A page that adds nothing new means the instance is repeating
-            # itself or the query is exhausted -- ask for no more.
-            if added == 0:
-                break
+                # A page that adds nothing new means the instance is repeating
+                # itself or the query is exhausted -- ask for no more.
+                if added == 0:
+                    break
 
         return collected
 
@@ -118,6 +120,7 @@ class SearxngClient:
 
     async def _search_page(
         self,
+        client: httpx.AsyncClient,
         query: str,
         pageno: int,
         categories: list[str] | None,
@@ -142,22 +145,21 @@ class SearxngClient:
 
         logger.debug(f"Searching SearXNG at {self.base_url} with query: {query} (page {pageno})")
         try:
-            async with await asyncio.to_thread(httpx.AsyncClient, timeout=30) as client:
-                resp = await client.get(
-                    f"{self.base_url}/search",
-                    params=params,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (compatible; DeerFlow/1.0)",
-                        "Accept": "application/json",
-                    },
-                )
-                resp.raise_for_status()
-                try:
-                    data = resp.json()
-                except ValueError as e:
-                    logger.error("SearXNG returned a response body that is not JSON")
-                    raise SearxngResponseError("SearXNG returned an unexpected response format") from e
-                return self._response_rows(data)
+            resp = await client.get(
+                f"{self.base_url}/search",
+                params=params,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; DeerFlow/1.0)",
+                    "Accept": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+            except ValueError as e:
+                logger.error("SearXNG returned a response body that is not JSON")
+                raise SearxngResponseError("SearXNG returned an unexpected response format") from e
+            return self._response_rows(data)
         except httpx.HTTPStatusError as e:
             logger.error(f"SearXNG search returned error status: {e}")
             raise
