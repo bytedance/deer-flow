@@ -175,6 +175,21 @@ export interface Translations {
 
   capabilities: {
     toolsAndIntegrations: string;
+    mcpConnections: {
+      title: string;
+      action: (action: string, name: string) => string;
+      disconnect: string;
+      reconnect: string;
+      actionFailed: string;
+      loadFailed: string;
+      status: {
+        disconnected: string;
+        connected: string;
+        reconnect_required: string;
+        removed: string;
+        unavailable: string;
+      };
+    };
     icon: {
       title: string;
       upload: string;
@@ -358,6 +373,19 @@ export interface Translations {
     copiedToClipboard: string;
     failedToCopyToClipboard: string;
     linkCopied: string;
+  };
+
+  artifactSelection: {
+    rewrite: string;
+    instructions: string;
+    exactRequired: string;
+    review: string;
+    original: string;
+    replacement: string;
+    apply: string;
+    applied: string;
+    changed: string;
+    limit: string;
   };
 
   artifactEditing: {

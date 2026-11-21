@@ -220,6 +220,21 @@ export const enUS: Translations = {
 
   capabilities: {
     toolsAndIntegrations: "Tools & integrations",
+    mcpConnections: {
+      title: "My MCP connections",
+      action: (action, name) => `${action} ${name}`,
+      disconnect: "Disconnect",
+      reconnect: "Reconnect",
+      actionFailed: "Could not change the connection. Try again.",
+      loadFailed: "Could not load your MCP connections.",
+      status: {
+        disconnected: "Not connected",
+        connected: "Connected",
+        reconnect_required: "Reconnect to use this server.",
+        removed: "User authorization is no longer enabled for this server.",
+        unavailable: "Connection unavailable. Contact your administrator.",
+      },
+    },
     icon: {
       title: "Plugin icon",
       upload: "Upload plugin icon",
@@ -422,6 +437,20 @@ export const enUS: Translations = {
     copiedToClipboard: "Copied to clipboard",
     failedToCopyToClipboard: "Failed to copy to clipboard",
     linkCopied: "Link copied to clipboard",
+  },
+
+  artifactSelection: {
+    rewrite: "Rewrite selection",
+    instructions:
+      "Describe the change, then choose Rewrite selection. To ask a regular question, use Send.",
+    exactRequired: "Switch to source to select an exact range for rewriting.",
+    review: "Review replacement",
+    original: "Selected passage",
+    replacement: "Replacement",
+    apply: "Apply to draft",
+    applied: "Selection replaced in the draft. Review and save the artifact.",
+    changed: "The file or draft changed. Select the passage again.",
+    limit: "Select up to 12,000 characters.",
   },
 
   artifactEditing: {

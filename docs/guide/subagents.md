@@ -213,6 +213,14 @@ provider reuses a tool-call id in a later response. Each run stays a separate
 entry in execution order, so a later failing run is decisive and an earlier
 run's output is never credited to another command.
 
+When the sandbox supplies a numeric process exit code, `tests_passed` evidence
+uses it before interpreting output such as `Exit Code: 7`. A passing process
+that prints this text therefore retains its successful execution status. Older
+checkpoints and providers that return plain strings keep the existing trailing
+exit-marker fallback. A zero exit code still requires a passing test summary;
+failed summaries are rejected, and missing or zero-test summaries remain
+`UNVERIFIED`.
+
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
 Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`

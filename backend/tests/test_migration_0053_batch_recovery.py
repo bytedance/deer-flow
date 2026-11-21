@@ -16,8 +16,9 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-@pytest.mark.parametrize("previous", ["0055_thread_shares", "0053_batch_recovery"])
+@pytest.mark.parametrize("previous", ["0055_thread_shares", "0053_batch_recovery", "0058_mcp_browser_oauth", "0056_merge_batch_recovery"])
 async def test_batch_recovery_upgrade_preserves_legacy_rows_and_guards_downgrade(tmp_path, backend, previous):
+    has_recovery = previous in {"0053_batch_recovery", "0056_merge_batch_recovery"}
     schema = None
     if backend == "postgres":
         uri = os.environ.get("TEST_POSTGRES_URI")
@@ -46,15 +47,16 @@ async def test_batch_recovery_upgrade_preserves_legacy_rows_and_guards_downgrade
                     "VALUES ('i','b','k',0,'p','succeeded',1,'old report',FALSE,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
                 )
             )
-            if previous == "0053_batch_recovery":
+            if has_recovery:
                 await conn.execute(sa.text("UPDATE subagent_batch_items SET attempt_id='saved-attempt'"))
         await bootstrap.bootstrap_schema(engine, backend=backend, postgres_schema=schema or "")
         await bootstrap.bootstrap_schema(engine, backend=backend, postgres_schema=schema or "")
         async with engine.connect() as conn:
             assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == bootstrap._get_head_revision()
             assert await conn.run_sync(lambda sync: sa.inspect(sync).has_table("thread_shares"))
+            assert await conn.run_sync(lambda sync: sa.inspect(sync).has_table("mcp_oauth_attempts"))
             assert (await conn.execute(sa.text("SELECT recovery_policy FROM subagent_batches"))).scalar_one() is None
-            expected_attempt = "saved-attempt" if previous == "0053_batch_recovery" else None
+            expected_attempt = "saved-attempt" if has_recovery else None
             assert tuple((await conn.execute(sa.text("SELECT status,result,attempt_id,dispatch_started_at FROM subagent_batch_items"))).one()) == ("succeeded", "old report", expected_attempt, None)
         async with engine.begin() as conn:
             await conn.execute(sa.text("UPDATE subagent_batches SET recovery_policy='conservative', status='running'"))
@@ -64,6 +66,7 @@ async def test_batch_recovery_upgrade_preserves_legacy_rows_and_guards_downgrade
         async with engine.begin() as conn:
             assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == bootstrap._get_head_revision()
             assert await conn.run_sync(lambda sync: sa.inspect(sync).has_table("thread_shares"))
+            assert await conn.run_sync(lambda sync: sa.inspect(sync).has_table("mcp_oauth_attempts"))
             await conn.execute(sa.text("UPDATE subagent_batches SET status='cancelled'"))
         remove_recovery = "0053_batch_recovery@0052_batch_continuation"
         with pytest.raises(RuntimeError, match="outcomes remain unknown"):
@@ -82,8 +85,9 @@ async def test_batch_recovery_upgrade_preserves_legacy_rows_and_guards_downgrade
             await conn.execute(sa.text("UPDATE subagent_batch_items SET status='cancelled'"))
         await asyncio.to_thread(command.downgrade, cfg, remove_recovery)
         async with engine.connect() as conn:
-            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == "0055_thread_shares"
+            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == "0058_mcp_browser_oauth"
             assert await conn.run_sync(lambda sync: sa.inspect(sync).has_table("thread_shares"))
+            assert await conn.run_sync(lambda sync: sa.inspect(sync).has_table("mcp_oauth_attempts"))
             columns = await conn.run_sync(lambda sync: {col["name"] for col in sa.inspect(sync).get_columns("subagent_batch_items")})
             assert not {"attempt_id", "dispatch_started_at"} & columns
             assert (await conn.execute(sa.text("SELECT result FROM subagent_batch_items"))).scalar_one() == "old report"

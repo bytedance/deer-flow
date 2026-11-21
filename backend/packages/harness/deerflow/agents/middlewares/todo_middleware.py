@@ -21,16 +21,19 @@ available for a later user run. An earlier response's provider stop does not
 suppress reminders in later Goal continuation turns of the same run.
 """
 
-from __future__ import annotations
-
 import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from typing import Any, override
+from typing import Any, Literal, override
 
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain.tools import ToolRuntime
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langgraph.runtime import Runtime
+from langgraph.types import Command
+from pydantic import BaseModel
+from typing_extensions import TypedDict
 
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
@@ -47,6 +50,41 @@ _COMPLETION_REMINDER_RUN_STOP_REASONS = ("loop_capped", "token_capped")
 # continues after these, so the context alone does not mean the current
 # response was capped.
 _COMPLETION_REMINDER_RESPONSE_STOP_MARKERS = {SAFETY_CAPPED_STOP_REASON: SAFETY_TERMINATION_MARKER, MODEL_LENGTH_CAPPED_STOP_REASON: MODEL_LENGTH_TERMINATION_MARKER}
+
+_TODO_TERMINAL_STATUSES = frozenset({"completed", "blocked", "waiting"})
+_TODO_STATUSES = _TODO_TERMINAL_STATUSES | {"pending", "in_progress"}
+
+
+class ExtendedTodo(TypedDict):
+    """A todo item with statuses that describe why work is not progressing."""
+
+    content: str
+    status: Literal["pending", "in_progress", "completed", "blocked", "waiting"]
+
+
+class ExtendedWriteTodosInput(BaseModel):
+    """Input schema for the DeerFlow todo tool."""
+
+    todos: list[ExtendedTodo]
+
+
+def _write_extended_todos(runtime: ToolRuntime, todos: list[ExtendedTodo]) -> Command[Any]:
+    return Command(
+        update={
+            "todos": todos,
+            "messages": [
+                ToolMessage(
+                    f"Updated todo list ({len(todos)} items).",
+                    tool_call_id=runtime.tool_call_id,
+                    additional_kwargs={"ui_hidden": True},
+                )
+            ],
+        }
+    )
+
+
+async def _awrite_extended_todos(runtime: ToolRuntime, todos: list[ExtendedTodo]) -> Command[Any]:
+    return _write_extended_todos(runtime, todos)
 
 
 def _todos_in_messages(messages: list[Any]) -> bool:
@@ -82,26 +120,36 @@ def _usable_todos(state: ThreadState) -> list[Mapping[str, Any]]:
     return [todo for todo in todos if isinstance(todo, Mapping)]
 
 
+def _stored_todo_status(todo: Mapping[str, Any]) -> str:
+    status = todo.get("status")
+    return status if isinstance(status, str) and status in _TODO_STATUSES else "pending"
+
+
 def _format_todos(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a list of Todo items into a human-readable string."""
     lines: list[str] = []
     for todo in todos:
-        status = todo.get("status", "pending")
+        status = _stored_todo_status(todo)
         content = todo.get("content", "")
         lines.append(f"- [{status}] {content}")
     return "\n".join(lines)
 
 
 def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
-    """Format a completion reminder for incomplete todo items."""
-    incomplete = [t for t in todos if t.get("status") != "completed"]
-    incomplete_text = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in incomplete)
+    """Format a completion reminder for incomplete todo items.
+
+    The wording must match ``_TODO_TERMINAL_STATUSES``: the guard also accepts
+    ``blocked`` and ``waiting``, so the reminder offers them instead of asking
+    the model to finish everything or mark it completed.
+    """
+    incomplete_text = _format_todos(todo for todo in todos if _stored_todo_status(todo) not in _TODO_TERMINAL_STATUSES)
     return (
         "<system_reminder>\n"
-        "You have incomplete todo items that must be finished before giving your final response:\n\n"
+        "You have todo items that are not completed, blocked, or waiting:\n\n"
         f"{incomplete_text}\n\n"
         "Please continue working on these tasks. Call `write_todos` to mark items as completed "
-        "as you finish them, and only respond when all items are done.\n"
+        "as you finish them. Mark an item `blocked` or `waiting` only when it cannot continue in this run, "
+        "and only respond when every item is completed, blocked, or waiting.\n"
         "</system_reminder>"
     )
 
@@ -168,6 +216,9 @@ class TodoMiddleware(TodoListMiddleware):
         return {
             "system_prompt_hash": canonical_hash(self.system_prompt),
             "tool_description_hash": canonical_hash(self.tool_description),
+            # The fixed reminder template is model-visible instruction text too;
+            # hash it with an empty item list so per-run todo content stays out.
+            "completion_reminder_template_hash": canonical_hash(_format_completion_reminder([])),
             "state_channel": "todos",
             "skip_completion_reminder_on_length_cap": True,
             "skip_completion_reminder_on_safety_cap": True,
@@ -237,6 +288,19 @@ class TodoMiddleware(TodoListMiddleware):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        # LangChain's built-in schema only permits three statuses. Replace its
+        # generated tool with the DeerFlow contract so blocked and waiting work
+        # can be persisted without bypassing normal tool validation.
+        self.tools = [
+            StructuredTool.from_function(
+                name="write_todos",
+                description=self.tool_description,
+                func=_write_extended_todos,
+                coroutine=_awrite_extended_todos,
+                args_schema=ExtendedWriteTodosInput,
+                infer_schema=False,
+            )
+        ]
         self._lock = threading.Lock()
         self._pending_completion_reminders: dict[tuple[str, str], list[str]] = {}
         self._completion_reminder_counts: dict[tuple[str, str], int] = {}
@@ -395,9 +459,11 @@ class TodoMiddleware(TodoListMiddleware):
         if termination_metadata.get("deerflow_error_fallback"):
             return None
 
-        # 3. Allow exit when all todos are completed or there are no todos.
+        # 3. Allow exit when every todo has reached a terminal state. Blocked
+        # and waiting items explain why the work cannot continue in this run;
+        # they must not be relabeled as completed just to satisfy the guard.
         todos = _usable_todos(state)
-        if not todos or all(t.get("status") == "completed" for t in todos):
+        if not todos or all(_stored_todo_status(todo) in _TODO_TERMINAL_STATUSES for todo in todos):
             return None
 
         # 4. Enforce a reminder cap to prevent infinite re-engagement loops.

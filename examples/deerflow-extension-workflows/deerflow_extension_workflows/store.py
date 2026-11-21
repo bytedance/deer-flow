@@ -220,6 +220,10 @@ class Store:
                 )
             ]
 
+    def recoverable(self):
+        with closing(self.connect()) as db:
+            return [(row[0], row[1], json.loads(row[2])) for row in db.execute("SELECT owner,id,data FROM workflows WHERE status='recoverable'").fetchall()]
+
     def delete(self, owner, run_id):
         with closing(self.connect()) as db, db:
             row = db.execute("SELECT status FROM workflows WHERE owner=? AND id=?", (owner, run_id)).fetchone()

@@ -1,6 +1,6 @@
 """Join the batch recovery and thread sharing migration histories."""
 
-from alembic import op
+from deerflow.persistence.migrations._batch_recovery import check_recovery_downgrade
 
 revision = "0056_merge_batch_recovery"
 down_revision = ("0055_thread_shares", "0053_batch_recovery")
@@ -13,10 +13,4 @@ def upgrade():
 
 
 def downgrade():
-    # SQLite commits each revision. Check before splitting the version stamp
-    # or dropping sharing tables if this downgrade also removes recovery data.
-    context = op.get_context()
-    for step in context.script.iterate_revisions(revision, context.opts["destination_rev"], select_for_downgrade=True):
-        if step.revision == "0053_batch_recovery":
-            step.module.check_downgrade()
-            break
+    check_recovery_downgrade(revision)

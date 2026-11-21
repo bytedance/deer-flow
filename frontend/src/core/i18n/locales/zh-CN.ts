@@ -207,6 +207,21 @@ export const zhCN: Translations = {
 
   capabilities: {
     toolsAndIntegrations: "工具与集成",
+    mcpConnections: {
+      title: "我的 MCP 连接",
+      action: (action, name) => `${action} ${name}`,
+      disconnect: "断开",
+      reconnect: "重新连接",
+      actionFailed: "无法更改连接，请重试。",
+      loadFailed: "无法加载你的 MCP 连接。",
+      status: {
+        disconnected: "未连接",
+        connected: "已连接",
+        reconnect_required: "重新连接后即可使用此服务器。",
+        removed: "此服务器已停用用户授权。",
+        unavailable: "连接不可用，请联系管理员。",
+      },
+    },
     icon: {
       title: "插件图标",
       upload: "上传插件图标",
@@ -402,6 +417,19 @@ export const zhCN: Translations = {
     copiedToClipboard: "已复制到剪贴板",
     failedToCopyToClipboard: "复制到剪贴板失败",
     linkCopied: "链接已复制到剪贴板",
+  },
+
+  artifactSelection: {
+    rewrite: "改写选区",
+    instructions: "描述如何修改后，选择「改写选区」。普通追问请使用发送按钮。",
+    exactRequired: "切换到源码，选择准确范围后即可改写。",
+    review: "预览替换内容",
+    original: "选中段落",
+    replacement: "替换内容",
+    apply: "应用到草稿",
+    applied: "选区已替换到草稿，请检查后保存文件。",
+    changed: "文件或草稿已变化，请重新选择段落。",
+    limit: "请选择不超过 12,000 个字符。",
   },
 
   artifactEditing: {
