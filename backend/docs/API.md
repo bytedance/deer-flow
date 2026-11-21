@@ -451,7 +451,8 @@ selected ordinary mode can be used. Selecting Chat in this case replays the
 turn with ordinary agent defaults. A temporary storage error looking up the
 source run returns a retryable `503`. Duplicate answer summaries alone cannot
 identify an original run for preparation (`409`). Editing a backfilled
-answer still requires a successful source run on the same thread. An active
+answer requires a successful source run on the same thread owned by the
+replaying caller. This also applies to trusted internal callers. An active
 or applied steering input on the caller's original run also prevents partial
 replay of its inherited turn on a branch.
 When regenerating an interrupted answer, forward the checkpoint and metadata

@@ -739,7 +739,9 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("source_owner", "steering", "expected"), [("caller", "applied", 409), ("caller", "cancelled", 200), ("other", "applied", 200)])
-async def test_regenerating_branch_history_checks_only_the_callers_inherited_steering(_stub_app_config, mode_app, source_owner, steering, expected):
+@pytest.mark.parametrize("caller", ["session", "internal"])
+@pytest.mark.parametrize("seeded", [True, False])
+async def test_regenerating_branch_history_checks_only_the_callers_inherited_steering(_stub_app_config, mode_app, source_owner, steering, expected, caller, seeded):
     from httpx import ASGITransport, AsyncClient
     from langchain_core.messages import AIMessage, HumanMessage
     from langgraph.checkpoint.base import empty_checkpoint
@@ -748,6 +750,18 @@ async def test_regenerating_branch_history_checks_only_the_callers_inherited_ste
     from deerflow.runtime.user_context import reset_current_user, set_current_user
 
     app, owner, store, threads = mode_app
+    headers = {}
+    if caller == "internal":
+        from _router_auth_helpers import make_authed_test_app
+
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
+        from app.gateway.routers import thread_runs
+
+        internal_app = make_authed_test_app(user_factory=lambda: get_internal_user(owner_user_id=owner), bind_current_user=True)
+        internal_app.state = app.state
+        internal_app.include_router(thread_runs.router)
+        app = internal_app
+        headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] = owner
     tid = "branch-replay"
     await threads.create(tid, user_id=owner)
     source_owner = owner if source_owner == "caller" else source_owner
@@ -762,15 +776,16 @@ async def test_regenerating_branch_history_checks_only_the_callers_inherited_ste
         config = await app.state.checkpointer.aput(config, checkpoint, {"source": "update", "step": version, "branch_parent_thread_id": "parent"}, {"messages": version})
     token = set_current_user(SimpleNamespace(id=owner))
     try:
-        for event in build_branch_history_seed_events(messages, thread_id=tid, run_id_prefix=f"branch-seed-{tid}", parent_thread_id="parent"):
-            await app.state.run_event_store.put(**event)
+        if seeded:
+            for event in build_branch_history_seed_events(messages, thread_id=tid, run_id_prefix=f"branch-seed-{tid}", parent_thread_id="parent"):
+                await app.state.run_event_store.put(**event)
     finally:
         reset_current_user(token)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(f"/api/threads/{tid}/runs/regenerate/prepare", json={"message_id": "a"})
+        response = await client.post(f"/api/threads/{tid}/runs/regenerate/prepare", json={"message_id": "a"}, headers=headers)
     assert response.status_code == expected, response.text
     if expected == 200:
-        assert response.json()["target_run_id"] == f"branch-seed-{tid}-1"
+        assert response.json()["target_run_id"] == (f"branch-seed-{tid}-1" if seeded else "parent-run")
     else:
         assert "adjusted" in response.json()["detail"]
 

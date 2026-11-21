@@ -1312,11 +1312,13 @@ class RunManager:
                 raise
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return _page(memory_records)
+        dropped_out_of_scope = False
         for row in rows:
             run_id = row.get("run_id")
             if not run_id:
                 continue
             if raise_on_store_error and (row.get("thread_id") != thread_id or (user_id is not None and row.get("user_id") != user_id)):
+                dropped_out_of_scope = True
                 continue
             known = self._runs.get(run_id)
             # A hidden record means this thread was deleted while the record
@@ -1331,6 +1333,10 @@ class RunManager:
                     if raise_on_store_error:
                         raise
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+        if dropped_out_of_scope and len(rows) >= store_limit and len(records_by_id) < limit:
+            # An adapter filled its page with foreign rows. A short result here
+            # would falsely tell a strict caller that it reached the last page.
+            raise IncompleteRunPageError("Run store returned an incomplete owner-scoped page")
         return _page(list(records_by_id.values()))
 
     async def list_successful_regenerate_sources(
@@ -3705,6 +3711,10 @@ class CancelOutcome(StrEnum):
     not_cancellable = "not_cancellable"
     not_active_locally = "not_active_locally"
     unknown = "unknown"
+
+
+class IncompleteRunPageError(RuntimeError):
+    """A bounded list cannot establish that the requested owner page is complete."""
 
 
 class ConflictError(Exception):

@@ -109,6 +109,7 @@ from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import RUN_ANSWER_SUMMARY_LIMIT, build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
+from deerflow.runtime.runs.manager import IncompleteRunPageError
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.schemas import EVIDENCE_ORIGINS
 from deerflow.runtime.secret_context import (
@@ -2414,7 +2415,7 @@ def replay_source_read_errors(thread_id: str) -> Iterator[None]:
         yield
     except CHECKPOINT_MODE_ERRORS as exc:
         raise checkpoint_mode_http_error(exc, thread_id) from exc
-    except (OSError, sqlite3.OperationalError, DisconnectionError, InterfaceError, OperationalError, SQLAlchemyTimeoutError) as exc:
+    except (IncompleteRunPageError, OSError, sqlite3.OperationalError, DisconnectionError, InterfaceError, OperationalError, SQLAlchemyTimeoutError) as exc:
         logger.warning("Could not read source mode for replay", exc_info=True)
         raise HTTPException(503, "Source run mode is temporarily unavailable") from exc
 
@@ -2427,7 +2428,7 @@ def is_history_seed_run(thread_id: str, run_id: str) -> bool:
 
 def replay_owner_user_id(request: Request) -> str | None:
     """Use the same caller identity that admission stamped on the original run."""
-    user = get_current_user()
+    user = getattr(getattr(request, "state", None), "user", None) or get_current_user()
     return get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
 
 

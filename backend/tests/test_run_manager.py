@@ -1745,6 +1745,20 @@ async def test_strict_thread_page_scopes_cached_and_persisted_rows_before_trimmi
     assert "persisted" in {run.run_id for run in page}
 
 
+@pytest.mark.anyio
+async def test_strict_thread_page_rejects_a_truncated_unscoped_store_page(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    await store.put("hidden-older", thread_id="thread", user_id="owner", status="interrupted")
+    await store.put("foreign", thread_id="thread", user_id="other", status="success")
+    first_page = [await store.get("foreign")]
+    monkeypatch.setattr(store, "list_by_thread", AsyncMock(return_value=first_page))
+    with pytest.raises(RuntimeError, match="incomplete owner-scoped page"):
+        await manager.list_by_thread("thread", user_id="owner", limit=1, raise_on_store_error=True)
+
+
 # ---------------------------------------------------------------------------
 # Per-thread index (thread_id -> run_ids): keeps per-thread queries
 # O(runs-in-thread) instead of scanning every in-memory run, and stays

@@ -1671,6 +1671,46 @@ def test_prepare_requires_one_verified_run_when_looking_up_legacy_answers(monkey
 
 
 @pytest.mark.asyncio
+async def test_replay_eligibility_on_owned_internal_thread_uses_the_raw_caller():
+    from unittest.mock import AsyncMock
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
+    from app.gateway.routers.thread_runs import _require_successful_source_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    manager = RunManager(store=MemoryRunStore())
+    request = _request(None, FakeEventStore([]), run_manager=manager)
+    owner = "raw-owner@example.com"
+    request.state.user = get_internal_user(owner_user_id=owner)
+    request.headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: owner}
+    request.app.state.thread_store = SimpleNamespace(get=AsyncMock(return_value={"user_id": owner}))
+    foreign = await manager.create("thread", user_id="other")
+    await manager.set_status(foreign.run_id, RunStatus.success)
+    with pytest.raises(HTTPException) as exc:
+        await _require_successful_source_run("thread", foreign.run_id, request)
+    assert exc.value.status_code == 409
+    own = await manager.create("thread", user_id=owner)
+    await manager.set_status(own.run_id, RunStatus.success)
+    assert (await _require_successful_source_run("thread", own.run_id, request)).run_id == own.run_id
+
+
+@pytest.mark.asyncio
+async def test_steering_guard_honors_an_owner_filtered_store_projection():
+    from unittest.mock import AsyncMock
+
+    from app.gateway.routers.thread_runs import _reject_multi_input_replay
+
+    manager = FakeRunManager([])
+    fetch = AsyncMock(return_value={"run_inputs": {"items": [{"mode": "steer", "status": "applied"}]}})
+    manager.input_store = SimpleNamespace(supports_run_inputs=True, get=fetch)
+    with pytest.raises(HTTPException) as exc:
+        await _reject_multi_input_replay("run", _request(None, FakeEventStore([]), run_manager=manager), user_id="owner")
+    assert exc.value.status_code == 409 and "adjusted" in exc.value.detail
+    fetch.assert_awaited_once_with("run", user_id="owner")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["edit", "interrupted"])
 @pytest.mark.parametrize("failure", ["cached-other-owner", "store-unavailable"])
 async def test_prepare_reads_only_attributable_runs_and_distinguishes_an_outage(monkeypatch, operation, failure):
