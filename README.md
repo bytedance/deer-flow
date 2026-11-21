@@ -130,6 +130,12 @@ Each guide is the full reference for its topic. Open the one you need.
 | Trace correlation, LangSmith, Langfuse, Monocle | [Tracing and Observability](docs/guide/observability.md) |
 | Deployment risks, admin model, security recommendations | [Security Notice](docs/guide/security.md) |
 
+With `skill_evolution.enabled: true`, the lead agent can review tool-heavy
+conversations in the background and create or improve custom skills. Set
+`skill_evolution.creation_nudge_interval` in `config.yaml` to control the number
+of tool-call rounds between reviews (default: 10). Reviews make additional model
+calls; skill evolution is disabled by default.
+
 ## Recommended Models
 
 DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-compatible API. That said, it performs best with models that support:

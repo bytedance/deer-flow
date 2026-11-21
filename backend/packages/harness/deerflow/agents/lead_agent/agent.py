@@ -43,6 +43,7 @@ from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+from deerflow.agents.middlewares.skill_review_middleware import SkillReviewMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
 from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
@@ -676,6 +677,18 @@ def build_middlewares(
                     pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
                 )
             )
+
+    # Add SkillReviewMiddleware if skill_evolution is enabled (after MemoryMiddleware)
+    skill_evolution_config = getattr(resolved_app_config, "skill_evolution", None)
+    skill_evolution_enabled = getattr(skill_evolution_config, "enabled", False)
+    logger.debug(
+        "SkillReviewMiddleware check: enabled=%s",
+        skill_evolution_enabled,
+    )
+    if skill_evolution_enabled:
+        mw = SkillReviewMiddleware(config=resolved_app_config)
+        middlewares.append(mw)
+        logger.debug("SkillReviewMiddleware appended to middleware chain (total: %d)", len(middlewares))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.

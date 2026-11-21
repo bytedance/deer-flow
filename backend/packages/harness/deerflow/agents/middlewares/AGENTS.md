@@ -92,6 +92,11 @@ make test-blocking-io
 
 ## Concurrency
 
+`SkillReviewMiddleware` is lead-only and gated by `skill_evolution.enabled`.
+Its background reviewer consumes a message snapshot and inherits the caller's
+context for user-scoped skill access. It uses the resolved application config;
+review failures must not interrupt the foreground conversation.
+
 Middlewares run on the event loop that serves the run. File and network I/O goes
 off the loop, and a started operation is drained even after cancellation. Waiters
 that cross loops own separate futures; notify them outside the state lock.

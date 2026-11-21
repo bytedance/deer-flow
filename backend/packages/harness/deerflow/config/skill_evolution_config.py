@@ -12,6 +12,11 @@ class SkillEvolutionConfig(BaseModel):
         default=None,
         description="Optional model name for skill security moderation. Defaults to the primary chat model.",
     )
+    creation_nudge_interval: int = Field(
+        default=10,
+        ge=1,
+        description="Number of tool-call iterations before triggering a background skill review.",
+    )
     security_fail_closed: bool = Field(
         default=True,
         description=("When the moderation model is unavailable, block skill writes if True (fail-closed). If False, non-executable content is allowed with a warning while executable content is still blocked."),
