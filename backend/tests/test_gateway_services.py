@@ -52,7 +52,7 @@ def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None,
 
 
 def _run_create_request(content="hello", **kwargs):
-    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.run_models import RunCreateRequest
 
     return RunCreateRequest(
         input={"messages": [{"role": "user", "content": content}]},
@@ -430,6 +430,110 @@ async def test_regenerate_recovers_chat_mode_after_switching_modes(_stub_app_con
     assert retry.run_id == run.run_id
     assert admit_scope.call_args.kwargs["recovery_scope"] == scope
     assert worker.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["regenerate", "edit"])
+@pytest.mark.parametrize(
+    ("original", "selection", "with_file"),
+    [
+        ({"mode": "flash", "thinking_enabled": False}, {"mode": "chat"}, True),
+        ({"mode": "chat"}, {"mode": "flash", "thinking_enabled": False}, False),
+        ({"mode": "ultra", "is_plan_mode": True, "subagent_enabled": True, "reasoning_effort": "low"}, {"mode": "flash"}, False),
+        ({"mode": "thinking", "reasoning_effort": "high"}, {}, False),
+        ({}, {"mode": "chat"}, False),
+    ],
+    ids=["flash-attachment-to-chat", "chat-to-flash", "ultra-to-flash", "omitted-selection", "ordinary-default"],
+)
+async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, monkeypatch, operation, original, selection, with_file):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    from app.gateway import services
+
+    app, owner, _, threads = mode_app
+    tid = "replay-options"
+    await threads.create(tid, user_id=owner)
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    message = {"role": "user", "content": "Original question", "id": "question", "additional_kwargs": {"deerflow_mode_options": {"mode": "pro"}}}
+    if with_file:
+        message["additional_kwargs"]["files"] = [{"filename": "data.csv"}]
+    path = f"/api/threads/{tid}/runs"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, json={"input": {"messages": [message]}, "context": original})
+        assert response.status_code == 200, response.text
+        manager = app.state.run_manager
+        source = await manager.get(response.json()["run_id"], user_id=owner)
+        await source.task
+        await manager.set_status(source.run_id, services.RunStatus.success)
+        human = worker.await_args.kwargs["graph_input"]["messages"][0]
+        human.additional_kwargs["run_id"] = source.run_id
+        checkpoint_config = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
+        for version, messages in enumerate(([], [human, AIMessage(content="Answer", id="answer")]), start=1):
+            checkpoint = empty_checkpoint()
+            checkpoint["channel_values"] = {"messages": messages}
+            checkpoint["channel_versions"] = {"messages": version}
+            checkpoint_config = await app.state.checkpointer.aput(checkpoint_config, checkpoint, {"source": "loop", "step": version}, {"messages": version})
+
+        saved = selection.get("mode") or "pro"
+        await threads.update_metadata(tid, {"mode": saved}, user_id=owner)
+        if operation == "edit":
+            prepared = await client.post(path + "/edit-regenerate/prepare", json={"human_message_id": "question", "replacement_text": "Edited question"})
+        else:
+            prepared = await client.post(path + "/regenerate/prepare", json={"message_id": "answer"})
+        assert prepared.status_code == 200, prepared.text
+        body = {key: prepared.json()[key] for key in ("metadata", "input", "checkpoint")}
+        body["context"] = {**selection, "locale": "en-US"}
+        # All three supported context locations can carry composer options.
+        body["config"] = {"configurable": {"is_plan_mode": False}, "context": {"subagent_enabled": False}}
+        replay = await client.post(path, json=body, headers={"Idempotency-Key": "replay"})
+        assert replay.status_code == 200, replay.text
+        record = await manager.get(replay.json()["run_id"], user_id=owner)
+        await record.task
+        config = worker.await_args.kwargs["config"]
+        keys = {"mode", "thinking_enabled", "reasoning_effort", "is_plan_mode", "subagent_enabled"}
+        for section in ("configurable", "context"):
+            assert {key: value for key, value in config[section].items() if key in keys} == original
+        assert record.metadata.get("mode") == original.get("mode")
+        assert config["context"]["locale"] == "en-US"
+        assert (await threads.get(tid, user_id=owner))["metadata"]["mode"] == saved
+        retry = await client.post(path, json=body, headers={"Idempotency-Key": "replay"})
+        assert retry.status_code == 200 and retry.json()["run_id"] == record.run_id
+        assert worker.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("source_thread", "journal_match"), [("legacy", False), ("legacy", True), ("another-thread", False)])
+async def test_replay_recovers_only_the_legacy_source_runs_options(_stub_app_config, monkeypatch, source_thread, journal_match):
+    from unittest.mock import AsyncMock
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.gateway import services
+    from deerflow.runtime.user_context import get_current_user
+
+    request, runs, threads = _make_start_run_persistence_context()
+    await threads.create("legacy")
+    config = {"configurable": {"thinking_enabled": False}, "context": {"thinking_enabled": True, "reasoning_effort": "medium"}}
+    owner = str(get_current_user().id)
+    await runs.put("source", thread_id=source_thread, user_id=owner, status="success", metadata={"mode": "pro"}, kwargs={"config": config})
+    if journal_match:
+        await request.app.state.run_event_store.put(thread_id="legacy", run_id="source", event_type="llm.ai.response", category="message", content={"type": "ai", "id": "answer"})
+    stamped_id = "earlier-run" if journal_match else "source"
+    human = HumanMessage(content="Original question", additional_kwargs={"run_id": stamped_id})
+    await _seed_generic_resume_checkpoint(request.app.state.checkpointer, "legacy", messages=[human, AIMessage(id="answer", content="Original answer")])
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    body = _run_create_request(context={"mode": "chat"}, metadata={"regenerate_from_message_id": "answer", "regenerate_from_run_id": "source" if journal_match else "unrelated"})
+    run = await services.start_run(body, "legacy", request)
+    await run.task
+    options = worker.await_args.kwargs["config"]["configurable"]
+    expected = {"mode": "pro", "thinking_enabled": True, "reasoning_effort": "medium"} if source_thread == "legacy" else {}
+    assert {key: options[key] for key in ("mode", "thinking_enabled", "reasoning_effort") if key in options} == expected
 
 
 @pytest.mark.asyncio

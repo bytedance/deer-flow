@@ -181,6 +181,9 @@ _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 # (contracts/scheduled_goal_notes_contract.json "scheduled_origin_key").
 SCHEDULED_ORIGIN_KEY = "deerflow_scheduled_origin"
 
+_TURN_MODE_OPTIONS = "deerflow_mode_options"
+_MODE_OPTIONS = ("mode", "thinking_enabled", "reasoning_effort", "is_plan_mode", "subagent_enabled")
+
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
         {
@@ -188,6 +191,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             # scheduled run prompt.
             SCHEDULED_ORIGIN_KEY,
             CHAT_MODE_KEY,
+            _TURN_MODE_OPTIONS,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -2366,6 +2370,41 @@ async def _matches_interrupted_answer(run_mgr: RunManager, events: RunEventStore
         records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size, before_created_at=last.created_at, before_run_id=last.run_id)
 
 
+def _mode_options(section: object) -> dict[str, str | bool]:
+    if not isinstance(section, Mapping):
+        return {}
+    options = {key: section[key] for key in _MODE_OPTIONS if isinstance(section.get(key), (str, bool))}
+    if selected_mode(options) is None:
+        options.pop("mode", None)
+    return options
+
+
+async def _legacy_turn_mode_options(request: Request, thread_id: str, message_id: str, source: Mapping[str, Any], target_run_id: str | None) -> dict[str, Any]:
+    """Older checkpoints may only carry the source run ID or the original Chat marker."""
+    user = get_current_user()
+    owner = get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
+    run_id = source.get("run_id")
+    if not run_id or (target_run_id and target_run_id != run_id):
+        # A regenerated answer can belong to a different run from its copied prompt.
+        # The prepare response is a hint; verify a different ID against the journal.
+        try:
+            origins = await get_run_event_store(request).find_latest_ai_message_run_ids(thread_id, {message_id}, user_id=owner)
+        except IncompleteMessageRunLookupError as exc:
+            raise HTTPException(409, "Could not identify the source run for this replay") from exc
+        run_id = origins.get(message_id, run_id)
+    if not isinstance(run_id, str) or not run_id:
+        return {}
+    record = await get_run_manager(request).get(run_id, user_id=owner, raise_on_store_error=True)
+    if record is None or record.thread_id != thread_id or record.user_id not in (None, owner):
+        return {}
+    config = (record.kwargs or {}).get("config") or {}
+    # Match build_run_config: when both raw sections were sent, only context was admitted.
+    options = _mode_options(config.get("context", config.get("configurable")))
+    if mode := selected_mode(record.metadata):
+        options["mode"] = mode
+    return options
+
+
 async def _recover_source_message_metadata(
     request: Request,
     *,
@@ -2435,7 +2474,11 @@ async def _recover_source_message_metadata(
             None,
         )
     if source is not None:
-        return _message_additional_kwargs(source)
+        metadata = _message_additional_kwargs(source)
+        if target_message_id and _TURN_MODE_OPTIONS not in metadata:
+            options = await _legacy_turn_mode_options(request, thread_id, target_message_id, metadata, target_run_id)
+            return {**metadata, _TURN_MODE_OPTIONS: options}
+        return metadata
     if selected_mode(getattr(snapshot, "metadata", None)) == "chat":
         return {CHAT_MODE_KEY: "chat"}
     return None
@@ -2821,12 +2864,20 @@ async def start_run(
             )
         recovery_scope = (source_metadata or {}).get(KNOWLEDGE_SCOPE_KEY) if is_scope_recovery else None
 
-        # A fresh context.mode selects this turn. A checkpoint continuation
-        # retains a source Chat turn's restrictions even after the user selects
-        # another mode for future sends. A keyed retry uses its admitted record.
         requested_mode = selected_mode(body_context) or selected_mode(config.get("context")) or selected_mode(config.get("configurable"))
         continuing_mode = is_replay or getattr(request.state, "run_input_dispatch", False) is True
-        mode = "chat" if (source_metadata or {}).get(CHAT_MODE_KEY) == "chat" else requested_mode
+        mode = requested_mode
+        if isinstance(target_message_id, str) and target_message_id:
+            # A regenerate or edit replays one human turn. The browser sends
+            # its current composer settings, including derived reasoning flags.
+            options = _mode_options((source_metadata or {}).get(_TURN_MODE_OPTIONS))
+            for section in (config.setdefault("context", {}), config["configurable"]):
+                for key in _MODE_OPTIONS:
+                    section.pop(key, None)
+                section.update(options)
+            mode = selected_mode(options)
+        if (source_metadata or {}).get(CHAT_MODE_KEY) == "chat":
+            mode = "chat"
         if admitted_run is not None:
             mode = selected_mode(admitted_run.metadata)
         elif source_metadata is None and mode != "chat":
@@ -2869,6 +2920,13 @@ async def start_run(
         scope_runtime_config = dict(config.get("configurable") or {})
         if isinstance(config.get("context"), dict):
             scope_runtime_config.update(config["context"])
+        if current_human_message is not None:
+            # Branches and keyed retries retain the turn even when its run is gone.
+            options = _mode_options(scope_runtime_config)
+            if options:
+                current_human_message.additional_kwargs[_TURN_MODE_OPTIONS] = options
+            else:
+                current_human_message.additional_kwargs.pop(_TURN_MODE_OPTIONS, None)
         scope_assistant_id = scope_runtime_config.get("agent_name") or _DEFAULT_ASSISTANT_ID
         # Bootstrap assembly intentionally does not load an agent config: the
         # new agent may not exist yet and setup_agent creates its definition.

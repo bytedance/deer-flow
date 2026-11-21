@@ -440,6 +440,11 @@ planning, and delegation parameters.
 
 Retries and continuations of an explicitly selected Chat turn keep that
 turn's restrictions. They preserve a later selection for new requests.
+Regenerating a reply or editing and resending its prompt uses the original
+turn's mode and its recorded reasoning, planning, and delegation options.
+For example, a Flash turn with an attachment can be regenerated after
+selecting Chat for the next message. Older turns use the settings available
+in their source run and otherwise fall back to the ordinary agent defaults.
 When regenerating an interrupted answer, forward the checkpoint and metadata
 returned by `runs/regenerate/prepare`. Submitting a run whose original turn
 can no longer be identified returns `409`.
