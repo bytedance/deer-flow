@@ -1776,6 +1776,8 @@ specified instant. Unchanged live once definitions keep their previously
 accepted execution time; a changed definition or a PATCH that rearms a terminal
 task is validated again. Ordinary Resume retains the admitted stored schedule
 without revalidating its wall time; a renewed `end_at` is still checked.
+Values outside the supported date-time range after UTC conversion return the
+same 422 codes, with the offending field named in the message.
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
 `stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:
