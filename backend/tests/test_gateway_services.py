@@ -738,6 +738,44 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("source_owner", "steering", "expected"), [("caller", "applied", 409), ("caller", "cancelled", 200), ("other", "applied", 200)])
+async def test_regenerating_branch_history_checks_only_the_callers_inherited_steering(_stub_app_config, mode_app, source_owner, steering, expected):
+    from httpx import ASGITransport, AsyncClient
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    from deerflow.runtime.journal import build_branch_history_seed_events
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    app, owner, store, threads = mode_app
+    tid = "branch-replay"
+    await threads.create(tid, user_id=owner)
+    source_owner = owner if source_owner == "caller" else source_owner
+    await store.put("parent-run", thread_id="parent", user_id=source_owner, status="success")
+    await store.mutate_run_inputs("parent-run", lambda state, _: state["items"].append({"mode": "steer", "status": steering}), user_id=source_owner)
+    messages = [HumanMessage(id="q", content="Question", additional_kwargs={"run_id": "parent-run"}), AIMessage(id="a", content="Answer")]
+    config = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
+    for version, turn in enumerate(([], messages), 1):
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {"messages": turn}
+        checkpoint["channel_versions"] = {"messages": version}
+        config = await app.state.checkpointer.aput(config, checkpoint, {"source": "update", "step": version, "branch_parent_thread_id": "parent"}, {"messages": version})
+    token = set_current_user(SimpleNamespace(id=owner))
+    try:
+        for event in build_branch_history_seed_events(messages, thread_id=tid, run_id_prefix=f"branch-seed-{tid}", parent_thread_id="parent"):
+            await app.state.run_event_store.put(**event)
+    finally:
+        reset_current_user(token)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/threads/{tid}/runs/regenerate/prepare", json={"message_id": "a"})
+    assert response.status_code == expected, response.text
+    if expected == 200:
+        assert response.json()["target_run_id"] == f"branch-seed-{tid}-1"
+    else:
+        assert "adjusted" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_legacy_replay_without_an_owner_does_not_read_run_history(monkeypatch):
     from app.gateway import services
 

@@ -1702,6 +1702,8 @@ async def test_list_by_thread_store_failure_is_graceful():
     runs = await mgr.list_by_thread("thread-1")
     assert len(runs) == 1
     assert runs[0].run_id == r1.run_id
+    with pytest.raises(RuntimeError, match="db down"):
+        await mgr.list_by_thread("thread-1", raise_on_store_error=True)
 
 
 @pytest.mark.anyio
@@ -1714,6 +1716,33 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
     runs = await mgr.list_by_thread("thread-1", user_id="user-1")
     assert [r.run_id for r in runs] == ["run-1"]
+
+
+@pytest.mark.anyio
+async def test_strict_thread_page_scopes_cached_and_persisted_rows_before_trimming(monkeypatch):
+    from deerflow.runtime import user_context
+
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+    await store.put("persisted", thread_id="thread", user_id="owner", status="success")
+    await store.put("foreign", thread_id="thread", user_id="other", status="success")
+    token = user_context.set_current_user(None)
+    try:
+        for owner in ("owner", "other", None):
+            run = await mgr.create("thread", user_id=owner)
+            await mgr.set_status(run.run_id, RunStatus.success)
+    finally:
+        user_context.reset_current_user(token)
+    list_rows = store.list_by_thread
+
+    async def list_with_extra_row(thread_id, *, user_id, limit):
+        rows = await list_rows(thread_id, user_id=user_id, limit=limit)
+        return [*rows, await store.get("foreign")]
+
+    monkeypatch.setattr(store, "list_by_thread", list_with_extra_row)
+    page = await mgr.list_by_thread("thread", user_id="owner", limit=2, raise_on_store_error=True)
+    assert len(page) == 2 and all(run.user_id == "owner" for run in page)
+    assert "persisted" in {run.run_id for run in page}
 
 
 # ---------------------------------------------------------------------------

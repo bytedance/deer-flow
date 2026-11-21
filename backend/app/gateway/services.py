@@ -2342,14 +2342,14 @@ def _is_scope_source_human_message(message: Any) -> bool:
     return not _skips_input_guardrail(dict(_message_additional_kwargs(message)), message.get("name"))
 
 
-async def _matches_interrupted_answer(run_mgr: RunManager, events: RunEventStore, thread_id: str, run_id: str, message_id: str, *, user_id: str | None) -> bool:
+async def _matches_interrupted_answer(run_mgr: RunManager, events: RunEventStore, thread_id: str, run_id: str, message_id: str, *, user_id: str) -> bool:
     """Bind an uncheckpointed answer to its journal or one unambiguous interrupted run."""
     page_size = 200
-    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size)
-    record = await run_mgr.get(run_id, user_id=user_id)
+    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size, raise_on_store_error=True)
+    record = await run_mgr.get(run_id, user_id=user_id, raise_on_store_error=True)
     if record is None:
         record = next((candidate for candidate in records if candidate.run_id == run_id), None)
-    if record is None or record.thread_id != thread_id or record.status != RunStatus.interrupted:
+    if record is None or record.thread_id != thread_id or record.user_id != user_id or record.status != RunStatus.interrupted:
         return False
     try:
         origins = await events.find_latest_ai_message_run_ids(thread_id, {message_id}, user_id=user_id)
@@ -2374,7 +2374,7 @@ async def _matches_interrupted_answer(run_mgr: RunManager, events: RunEventStore
         if cursor == next_cursor:
             return False
         cursor = next_cursor
-        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size, before_created_at=last.created_at, before_run_id=last.run_id)
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size, before_created_at=last.created_at, before_run_id=last.run_id, raise_on_store_error=True)
 
 
 def _mode_options(section: object) -> dict[str, Any]:
@@ -2425,10 +2425,15 @@ def is_history_seed_run(thread_id: str, run_id: str) -> bool:
     return turn.isdecimal() and group in (f"checkpoint-seed-{thread_id}", f"branch-seed-{thread_id}")
 
 
+def replay_owner_user_id(request: Request) -> str | None:
+    """Use the same caller identity that admission stamped on the original run."""
+    user = get_current_user()
+    return get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
+
+
 async def find_legacy_replay_run(request: Request, thread_id: str, message_id: str, source: Mapping[str, Any], target_run_id: str | None, answer: Any) -> RunRecord | None:
     """Find a run attributable to this answer and caller, including before turn markers existed."""
-    user = get_current_user()
-    owner = get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
+    owner = replay_owner_user_id(request)
     if owner is None:
         return None
     manager = get_run_manager(request)
@@ -2454,7 +2459,7 @@ async def find_legacy_replay_run(request: Request, thread_id: str, message_id: s
         # A pruned run must never borrow another run's identical answer.
         return None
     records = await manager.list_by_thread(thread_id, user_id=owner, limit=10, raise_on_store_error=True)
-    matches = replay_runs_matching_answer(records, answer)
+    matches = replay_runs_matching_answer([row for row in records if row.thread_id == thread_id and row.user_id == owner], answer)
     return matches[0] if len(matches) == 1 else None
 
 
@@ -2521,16 +2526,14 @@ async def _recover_source_message_metadata(
                 (message for message in reversed(messages) if _is_scope_source_human_message(message)),
                 None,
             )
-            current_user = get_current_user()
-            if _message_additional_kwargs(source).get("run_id") != target_run_id or not await _matches_interrupted_answer(
-                get_run_manager(request),
-                get_run_event_store(request),
-                thread_id,
-                target_run_id,
-                target_message_id,
-                user_id=str(current_user.id) if current_user is not None else None,
-            ):
-                source = None
+            owner = replay_owner_user_id(request)
+            with replay_source_read_errors(thread_id):
+                if (
+                    owner is None
+                    or _message_additional_kwargs(source).get("run_id") != target_run_id
+                    or not await _matches_interrupted_answer(get_run_manager(request), get_run_event_store(request), thread_id, target_run_id, target_message_id, user_id=owner)
+                ):
+                    source = None
         if source is None:
             raise HTTPException(
                 status_code=409,

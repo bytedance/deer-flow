@@ -1316,6 +1316,8 @@ class RunManager:
             run_id = row.get("run_id")
             if not run_id:
                 continue
+            if raise_on_store_error and (row.get("thread_id") != thread_id or (user_id is not None and row.get("user_id") != user_id)):
+                continue
             known = self._runs.get(run_id)
             # A hidden record means this thread was deleted while the record
             # still had a live finalize tail; the durable row is already gone,

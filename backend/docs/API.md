@@ -448,10 +448,12 @@ source run and can recover a missing mode from the checkpoint that introduced
 the response. If only individual options were recorded, those options apply
 with the ordinary agent defaults. If both sources lack settings, an explicitly
 selected ordinary mode can be used. Selecting Chat in this case replays the
-turn with ordinary agent defaults. A temporary storage error during source
-lookup returns a retryable `503`. Duplicate answer summaries alone cannot
+turn with ordinary agent defaults. A temporary storage error looking up the
+source run returns a retryable `503`. Duplicate answer summaries alone cannot
 identify an original run for preparation (`409`). Editing a backfilled
-answer still requires a successful source run on the same thread.
+answer still requires a successful source run on the same thread. An active
+or applied steering input on the caller's original run also prevents partial
+replay of its inherited turn on a branch.
 When regenerating an interrupted answer, forward the checkpoint and metadata
 returned by `runs/regenerate/prepare`. Submitting a run whose original turn
 can no longer be identified returns `409`.

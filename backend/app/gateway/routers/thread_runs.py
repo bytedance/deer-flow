@@ -68,6 +68,7 @@ from app.gateway.services import (
     build_thread_checkpoint_state_accessor,
     find_legacy_replay_run,
     is_history_seed_run,
+    replay_owner_user_id,
     replay_runs_matching_answer,
     replay_source_read_errors,
     serialize_wait_run_status,
@@ -818,7 +819,7 @@ def _run_status_value(record: Any) -> str | None:
 
 
 async def _seeded_replay_source(thread_id: str, run_id: str, request: Request, human: Any, answer: Any) -> RunRecord | None:
-    if is_history_seed_run(thread_id, run_id) and (answer_id := _message_id(answer)):
+    if answer_id := _message_id(answer):
         # A history group can hide superseded messages, but only an actual
         # source run can prove successful completion or record steering inputs.
         with replay_source_read_errors(thread_id):
@@ -826,25 +827,30 @@ async def _seeded_replay_source(thread_id: str, run_id: str, request: Request, h
     return None
 
 
+async def _prepare_source_run_by_id(thread_id: str, run_id: str, request: Request, user_id: str | None) -> RunRecord | None:
+    manager = get_run_manager(request)
+    with replay_source_read_errors(thread_id):
+        record = await manager.get(run_id, user_id=user_id, raise_on_store_error=True)
+        if record is None:
+            records = await manager.list_by_thread(thread_id, user_id=user_id, limit=20, raise_on_store_error=True)
+            record = next((row for row in records if row.run_id == run_id), None)
+    if record is None or record.thread_id != thread_id or (user_id is not None and record.user_id != user_id):
+        return None
+    return record
+
+
 async def _require_successful_source_run(thread_id: str, run_id: str, request: Request, *, source_human: Any = None, source_ai: Any = None) -> RunRecord:
-    run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await run_mgr.get(run_id, user_id=user_id)
-    if record is None:
-        # The run-event journal is the authoritative lookup above. This fallback
-        # only covers recent in-memory/store hydration gaps for the latest turn.
-        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)
-        record = next((candidate for candidate in records if getattr(candidate, "run_id", None) == run_id), None)
-    if record is None:
+    if is_history_seed_run(thread_id, run_id):
         record = await _seeded_replay_source(thread_id, run_id, request, source_human, source_ai)
+    else:
+        record = await _prepare_source_run_by_id(thread_id, run_id, request, user_id)
     if record is None:
-        raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
-    record_thread_id = getattr(record, "thread_id", None)
-    if isinstance(record_thread_id, str) and record_thread_id and record_thread_id != thread_id:
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
     if _run_status_value(record) != RunStatus.success.value:
         raise HTTPException(status_code=409, detail="Only successful assistant runs can be edited and rerun")
-    await _reject_multi_input_replay(record.run_id, request, user_id=user_id)
+    with replay_source_read_errors(thread_id):
+        await _reject_multi_input_replay(record.run_id, request, user_id=user_id)
     return record
 
 
@@ -853,7 +859,9 @@ async def _reject_multi_input_replay(run_id: str, request: Request, *, user_id=N
     if getattr(store, "supports_run_inputs", False) is not True:
         return
     row = await store.get(run_id, user_id=user_id)
-    if row is not None and any(entry.get("mode") == "steer" and entry.get("status") != "cancelled" for entry in (row.get("run_inputs") or {}).get("items", [])):
+    if row is None or (user_id is not None and row.get("user_id") != user_id):
+        return
+    if any(entry.get("mode") == "steer" and entry.get("status") != "cancelled" for entry in (row.get("run_inputs") or {}).get("items", [])):
         raise HTTPException(409, "This Run was adjusted while working; send a new message instead of replaying part of it")
 
 
@@ -866,20 +874,9 @@ async def _find_interrupted_target_run_id(
     if not isinstance(source_run_id, str) or not source_run_id:
         return None
 
-    run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await run_mgr.get(source_run_id, user_id=user_id)
-    if record is None:
-        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)
-        record = next(
-            (candidate for candidate in records if getattr(candidate, "run_id", None) == source_run_id),
-            None,
-        )
-    if record is None:
-        return None
-    if getattr(record, "thread_id", None) != thread_id:
-        return None
-    if _run_status_value(record) != RunStatus.interrupted.value:
+    record = await _prepare_source_run_by_id(thread_id, source_run_id, request, user_id)
+    if record is None or _run_status_value(record) != RunStatus.interrupted.value:
         return None
     return source_run_id
 
@@ -938,8 +935,21 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
         raise HTTPException(status_code=409, detail="Could not find the user message for this assistant response")
     if target_run_id is None:
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
-    source = await _seeded_replay_source(thread_id, target_run_id, request, previous_human, messages[target_index] if target_index is not None else None)
-    await _reject_multi_input_replay(source.run_id if source else target_run_id, request, user_id=await _run_scope_user_id(request, thread_id))
+    steering_run_id = target_run_id
+    steering_owner = await _run_scope_user_id(request, thread_id)
+    if is_history_seed_run(thread_id, target_run_id):
+        source = await _seeded_replay_source(thread_id, target_run_id, request, previous_human, messages[target_index] if target_index is not None else None)
+        if source is not None:
+            steering_run_id = source.run_id
+        elif isinstance(stamp := _message_additional_kwargs(previous_human).get("run_id"), str) and stamp:
+            # Branches copy the original prompt's run stamp across threads.
+            # Check only this caller's steering; the seed still owns the replay.
+            steering_run_id = stamp
+            steering_owner = replay_owner_user_id(request)
+            if steering_owner is None:
+                raise HTTPException(409, "Could not verify the source run for assistant message")
+    with replay_source_read_errors(thread_id):
+        await _reject_multi_input_replay(steering_run_id, request, user_id=steering_owner)
     previous_human_id = _message_id(previous_human)
     if not previous_human_id:
         raise HTTPException(status_code=409, detail="The source user message is missing an id")
