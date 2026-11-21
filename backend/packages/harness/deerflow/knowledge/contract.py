@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, computed_field, field_validator, model_validator
 
 
 class KnowledgeCapabilities(BaseModel):
@@ -62,10 +62,20 @@ class RetrievalHit(BaseModel):
     content: str
     source: KnowledgeSource | None = None
     score: float | None = Field(default=None, allow_inf_nan=False)
+    # One-based positions in the original RetrievalResult.hits before truncation.
+    depends_on: list[Annotated[int, Field(strict=True, gt=0)]] = Field(default_factory=list, exclude_if=lambda positions: not positions)
 
 
 class RetrievalResult(BaseModel):
     hits: list[RetrievalHit] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_evidence_dependencies(self) -> RetrievalResult:
+        for index, hit in enumerate(self.hits, 1):
+            positions = hit.depends_on
+            if len(set(positions)) != len(positions) or any(position >= index for position in positions):
+                raise ValueError(f"Hit {index} dependencies must be unique positions of earlier hits")
+        return self
 
 
 class RetrievalProvider(Protocol):
