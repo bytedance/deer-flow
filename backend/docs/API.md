@@ -1205,9 +1205,11 @@ Content-Type: application/json
 ```
 
 The Gateway fetches the source again and returns `409` with code
-`skill_source_changed` if its digest changed. Source errors use
-`{"detail":{"code":"...","message":"..."}}`; security errors may also include
-`findings`. Source downloads never execute `npx` or downloaded code, reuse the
+`skill_source_changed` if its digest changed. Local or upstream rate limiting
+returns `429` with code `skill_source_rate_limited`; a valid `Retry-After`
+header is preserved and exposed to CORS-allowed browser origins. Source errors
+use `{"detail":{"code":"...","message":"..."}}`; security errors may also
+include `findings`. Source downloads never execute `npx` or downloaded code, reuse the
 normal archive installation pipeline, and install into the caller's custom
 skill storage. Ordinary self-hosted deployments without Vercel OIDC do not
 expose this capability. Source provenance is not persisted in this version.

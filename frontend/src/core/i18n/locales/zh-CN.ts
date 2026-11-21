@@ -2634,7 +2634,7 @@ export const zhCN: Translations = {
       sourceUnavailable: "skills.sh 暂时不可用或请求超时，请稍后重试。",
       sourceRateLimited: (retryAfter: string | null) =>
         retryAfter
-          ? `来源请求已触发限流，请在 ${retryAfter} 后重试。`
+          ? `来源请求已触发限流，请在 ${/^\d+$/.test(retryAfter) ? `${retryAfter} 秒` : retryAfter} 后重试。`
           : "来源请求已触发限流，请稍后重试。",
       sourceNotFound: "请求的技能来源不存在。",
       sourceSnapshotUnusable:

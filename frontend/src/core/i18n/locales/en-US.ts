@@ -2801,7 +2801,7 @@ export const enUS: Translations = {
         "skills.sh is temporarily unavailable or timed out. Try again later.",
       sourceRateLimited: (retryAfter: string | null) =>
         retryAfter
-          ? `The source request was rate limited. Retry after ${retryAfter}.`
+          ? `The source request was rate limited. Retry after ${/^\d+$/.test(retryAfter) ? `${retryAfter} seconds` : retryAfter}.`
           : "The source request was rate limited. Try again later.",
       sourceNotFound: "The requested skill source does not exist.",
       sourceSnapshotUnusable:

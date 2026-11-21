@@ -60,7 +60,7 @@ import { enUS } from "@/core/i18n/locales/en-US";
 afterEach(cleanup);
 
 describe("static skill gallery", () => {
-  it("hides all custom management and install entries even for an admin", () => {
+  it("hides all custom management and install entries in static mode", () => {
     render(<SkillGallery />);
 
     expect(screen.queryByRole("button", { name: "Install skill" })).toBeNull();
@@ -70,7 +70,12 @@ describe("static skill gallery", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "My skills" }));
     expect(screen.queryByRole("switch", { name: /custom-demo/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Details" })).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "View details custom-demo",
+        exact: true,
+      }),
+    ).toBeNull();
     expect(screen.queryByTestId("custom-skill-details")).toBeNull();
   });
 });

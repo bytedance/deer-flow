@@ -179,6 +179,12 @@ async def test_upstream_retry_after_is_validated_and_forwarded(monkeypatch):
     assert caught.value.code == "skill_source_rate_limited"
     assert caught.value.retry_after == retry
 
+    _mock_upstream(monkeypatch, lambda request: httpx.Response(429, headers={"Retry-After": "٣".encode()}))
+    with pytest.raises(SkillSourceError) as non_ascii:
+        await _fetch_snapshot_payload(parse_skill_source(_SOURCE), "user-2")
+    assert non_ascii.value.retry_after is None
+    assert skills_router._source_http_exception(non_ascii.value).headers is None
+
 
 @pytest.mark.asyncio
 async def test_network_failure_maps_to_unavailable(monkeypatch):
@@ -334,7 +340,13 @@ async def test_source_limiter_prunes_stale_users_and_releases_on_cancellation(mo
 
     task = asyncio.create_task(hold())
     await started.wait()
-    task.cancel()
+    await limiter._lock.acquire()
+    try:
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+    finally:
+        limiter._lock.release()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert limiter._active == 0

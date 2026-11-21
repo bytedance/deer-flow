@@ -305,7 +305,7 @@ def _valid_retry_after(value: str | None) -> str | None:
     if value is None:
         return None
     value = value.strip()
-    if value.isdigit():
+    if value.isascii() and value.isdigit():
         return value
     try:
         parsed = parsedate_to_datetime(value)

@@ -160,7 +160,7 @@ HTTP client 必须显式使用 `httpx.AsyncClient(trust_env=False)`，避免 `HT
 
 - `/api/features` 返回 `source_install_available=false`；
 - 前端隐藏 From source；
-- 直接 API 返回 503 `skill_source_not_configured`，文案为“当前部署没有 skills.sh 凭据”。
+- 直接 API 返回 503 `skill_source_not_configured`，文案为 “This deployment does not have skills.sh credentials.”。
 
 固定验收常量（第一版不开放配置）：
 
