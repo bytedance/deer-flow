@@ -318,6 +318,161 @@ class TestToolCallIntentOrError:
         assert tool_related_fields <= {"tool_calls", "invalid_tool_calls"}
 
 
+class TestWriteTodosIdNormalization:
+    """Malformed write_todos ids must be addressable before the tool result exists.
+
+    The base TodoListMiddleware builds one error ToolMessage per parallel
+    write_todos call from ``tool_calls[*]["id"]``; the tool node does the same
+    for a single call. A missing or non-string id used to raise a pydantic
+    ValidationError, aborting a plan-mode run before the model could retry;
+    empty and repeated ids yield results the next request cannot address.
+    """
+
+    @staticmethod
+    def _state(calls: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"messages": [AIMessage(id="ai-1", content="", tool_calls=calls)]}
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    def test_parallel_missing_ids_are_normalized_before_the_base_hook(self, invoke_async):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": None, "args": {"todos": []}},
+                {"name": "write_todos", "id": "", "args": {"todos": []}},
+            ]
+        )
+        runtime = _make_runtime()
+
+        result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        ai, *errors = result["messages"]
+        assert ai.id == "ai-1"
+        ids = [call["id"] for call in ai.tool_calls]
+        assert all(isinstance(call_id, str) and call_id for call_id in ids)
+        assert len(set(ids)) == 2
+        assert [message.tool_call_id for message in errors] == ids
+        assert all(message.status == "error" for message in errors)
+
+    def test_single_missing_id_is_normalized_for_the_tool_node(self):
+        mw = TodoMiddleware()
+        state = self._state([{"name": "write_todos", "id": None, "args": {"todos": []}}])
+
+        result = mw.after_model(state, _make_runtime())
+
+        assert len(result["messages"]) == 1
+        call_id = result["messages"][0].tool_calls[0]["id"]
+        assert isinstance(call_id, str) and call_id
+
+    def test_duplicate_ids_are_made_unique(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ai, *errors = result["messages"]
+        assert ai.tool_calls[0]["id"] == "dup"
+        assert len({call["id"] for call in ai.tool_calls}) == 2
+        assert [message.tool_call_id for message in errors] == [call["id"] for call in ai.tool_calls]
+
+    def test_whitespace_only_ids_are_treated_as_missing(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": "  ", "args": {"todos": []}},
+                {"name": "write_todos", "id": None, "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ids = [call["id"] for call in result["messages"][0].tool_calls]
+        assert all(call_id.strip() for call_id in ids)
+        assert len(set(ids)) == 2
+
+    def test_synthetic_ids_avoid_other_tools_in_the_message(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": None, "args": {"todos": []}},
+                {"name": "echo", "id": "deerflow_write_todos_synthetic_0", "args": {}},
+                {"name": "write_todos", "id": None, "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ai = result["messages"][0]
+        ids = [call["id"] for call in ai.tool_calls]
+        assert ids[1] == "deerflow_write_todos_synthetic_0"
+        assert ids[0] != ids[1] and ids[2] != ids[1]
+        assert len(set(ids)) == 3
+
+    def test_id_shared_with_another_tool_is_relabelled(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "echo", "id": "dup", "args": {}},
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ai = result["messages"][0]
+        ids = [call["id"] for call in ai.tool_calls]
+        assert ids[0] == "dup"
+        assert ids[1] != "dup"
+        assert ids[1].startswith("deerflow_write_todos_synthetic_")
+
+    def test_provider_tool_call_surfaces_are_relabelled_by_occurrence(self):
+        mw = TodoMiddleware()
+        content = [
+            {"type": "tool_use", "id": "dup", "name": "write_todos", "input": {}},
+            {"type": "tool_use", "id": "dup", "name": "write_todos", "input": {}},
+        ]
+        raw_calls = [
+            {"id": "dup", "type": "function", "function": {"name": "write_todos", "arguments": "{}"}},
+            {"id": "dup", "type": "function", "function": {"name": "write_todos", "arguments": "{}"}},
+        ]
+        message = AIMessage(
+            id="ai-2",
+            content=content,
+            tool_calls=[
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+            ],
+            additional_kwargs={"tool_calls": raw_calls},
+        )
+
+        result = mw.after_model({"messages": [message]}, _make_runtime())
+
+        ai = result["messages"][0]
+        structured = [call["id"] for call in ai.tool_calls]
+        assert structured[0] == "dup"
+        assert structured[1] != "dup"
+        assert [block["id"] for block in ai.content if block["type"] == "tool_use"] == structured
+        assert [call["id"] for call in ai.additional_kwargs["tool_calls"]] == structured
+
+    def test_well_formed_ids_are_left_to_the_base_hook(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": "a", "args": {"todos": []}},
+                {"name": "write_todos", "id": "b", "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        assert all(message.tool_call_id in {"a", "b"} for message in result["messages"])
+        assert not any(hasattr(message, "tool_calls") for message in result["messages"])
+
+
 class TestAfterModel:
     def test_all_middleware_stop_reason_writes_have_an_explicit_todo_policy(self):
         middleware_dir = Path(__file__).resolve().parents[1] / "packages/harness/deerflow/agents/middlewares"
