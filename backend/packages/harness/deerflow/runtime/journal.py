@@ -55,6 +55,7 @@ from deerflow.utils.messages import message_to_text, restore_original_human_mess
 
 logger = logging.getLogger(__name__)
 
+RUN_ANSWER_SUMMARY_LIMIT = 2000
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 # A cancelled owned write may not stop a store that ignores cancellation.
 # The wrapper waits this long for the inner call to end before returning, so
@@ -475,7 +476,7 @@ class RunJournal(BaseCallbackHandler):
         if not is_ai_message or (caller is not None and caller != "lead_agent"):
             return None
         text = strip_leading_think_blocks(self._message_text(message))
-        return text[:2000] if text else None
+        return text[:RUN_ANSWER_SUMMARY_LIMIT] if text else None
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""

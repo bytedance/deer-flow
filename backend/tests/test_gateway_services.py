@@ -521,17 +521,75 @@ async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, mon
         assert retry.status_code == 200 and retry.json()["run_id"] == record.run_id
         assert worker.await_count == 2
         if legacy_summary:
+            from app.gateway.routers import thread_runs
+
             await manager.set_status(record.run_id, services.RunStatus.success)
             # Admission backfills a legacy thread's event feed. Its synthetic
             # turn ID still identifies the superseded messages, not a RunRecord.
             origins = await app.state.run_event_store.find_latest_ai_message_run_ids(tid, {"answer"}, user_id=owner)
             assert origins["answer"] != source.run_id
+            check_inputs = AsyncMock(wraps=thread_runs._reject_multi_input_replay)
+            monkeypatch.setattr(thread_runs, "_reject_multi_input_replay", check_inputs)
+            edit = await client.post(path + "/edit-regenerate/prepare", json={"human_message_id": "question", "replacement_text": "Another edit"})
+            assert edit.status_code == 200, edit.text
+            assert edit.json()["metadata"]["regenerate_from_run_id"] == origins["answer"]
+            assert check_inputs.await_args.args[0] == source.run_id
             body["metadata"]["regenerate_from_run_id"] = origins["answer"]
             repeated = await client.post(path, json=body)
             assert repeated.status_code == 200, repeated.text
             admitted = await manager.get(repeated.json()["run_id"], user_id=owner)
             await admitted.task
             assert {key: val for key, val in worker.await_args.kwargs["config"]["context"].items() if key in keys} == original
+
+
+@pytest.mark.asyncio
+async def test_replay_uses_new_checkpoint_and_run_after_the_worker_finishes(_stub_app_config, mode_app, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    from app.gateway import services
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
+
+    app, owner, store, threads = mode_app
+    tid = "replay-worker"
+    await threads.create(tid, user_id=owner, metadata={"mode": "chat"})
+    app.state.stream_bridge = MemoryStreamBridge()
+    model = FakeMessagesListChatModel(responses=[AIMessage(id="answer-2", content="Same answer"), AIMessage(id="answer-3", content="Same answer")])
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: lambda config: create_agent(model, state_schema=ThreadState))
+    await store.put("legacy", thread_id=tid, user_id=owner, status="success", metadata={"mode": "flash"})
+    await store.update_run_completion("legacy", status="success", last_ai_message="Same answer")
+    seed = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
+    version = None
+    for step, messages in enumerate(([], [HumanMessage(id="question", content="Original"), AIMessage(id="answer-1", content="Same answer")]), start=1):
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {"messages": messages}
+        version = app.state.checkpointer.get_next_version(version, None)
+        checkpoint["channel_versions"] = {"messages": version}
+        seed = await app.state.checkpointer.aput(seed, checkpoint, {"source": "loop", "step": step}, {"messages": version})
+
+    path = f"/api/threads/{tid}/runs"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        previous_run_id = "legacy"
+        for step in (1, 2):
+            prepared = await client.post(path + "/regenerate/prepare", json={"message_id": f"answer-{step}"})
+            assert prepared.status_code == 200, prepared.text
+            assert prepared.json()["target_run_id"] == previous_run_id
+            body = {key: prepared.json()[key] for key in ("input", "checkpoint", "metadata")}
+            admitted = await client.post(path, json={**body, "context": {"mode": "chat"}})
+            assert admitted.status_code == 200, admitted.text
+            record = await app.state.run_manager.get(admitted.json()["run_id"], user_id=owner)
+            await record.task
+            assert (record.status, record.metadata.get("mode"), record.last_ai_message) == (services.RunStatus.success, "flash", "Same answer")
+            previous_run_id = record.run_id
+        latest = await client.post(path + "/regenerate/prepare", json={"message_id": "answer-3"})
+        assert latest.status_code == 200, latest.text
+        assert latest.json()["target_run_id"] == previous_run_id
+        stale = await client.post(path + "/regenerate/prepare", json={"message_id": "answer-1"})
+        assert stale.status_code in (404, 409)
 
 
 @pytest.mark.asyncio
@@ -571,10 +629,16 @@ async def test_replay_recovers_only_the_legacy_source_runs_options(_stub_app_con
         ("pruned-checkpoint", {"mode": "ultra"}, {"mode": "flash"}),
         ("unknown", {"mode": "ultra", "subagent_enabled": True}, {"mode": "ultra", "subagent_enabled": True}),
         ("unknown", {"mode": "chat"}, {}),
+        ("empty-record", {"mode": "ultra", "subagent_enabled": True}, {"mode": "ultra", "subagent_enabled": True}),
+        ("empty-record-with-checkpoint", {"mode": "ultra"}, {"mode": "flash"}),
+        ("summary-only", {"mode": "chat"}, {"mode": "flash"}),
+        ("unrelated-prefix", {"mode": "chat"}, {}),
+        ("pruned-id-same-answer", {"mode": "chat"}, {}),
         ("incomplete-journal", {"mode": "chat"}, {"mode": "flash", "thinking_enabled": False}),
         ("ambiguous-summary", {"mode": "chat"}, {}),
         ("ownerless-cache", {"mode": "chat"}, {}),
         ("store-error", {"mode": "chat"}, None),
+        ("invalid-record", {"mode": "chat"}, None),
     ],
 )
 async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, selection, expected):
@@ -594,11 +658,11 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
     owner = str(get_current_user().id)
     runtime = request.app.state
     human = HumanMessage(id="question", content="First question", additional_kwargs={"run_id": "source"})
-    if origin == "ambiguous-summary":
+    if origin in {"ambiguous-summary", "summary-only", "unrelated-prefix"}:
         human.additional_kwargs.pop("run_id")
     answer = AIMessage(id="answer", content="First answer")
     messages = [human, answer]
-    states = [([], None), (messages, "flash" if origin == "pruned-checkpoint" else None)]
+    states = [([], None), (messages, "flash" if origin in {"pruned-checkpoint", "empty-record-with-checkpoint"} else None)]
     if origin == "pruned-checkpoint":
         states.append((messages + [HumanMessage(id="later", content="Later question"), AIMessage(id="later-answer", content="Later answer")], "chat"))
     checkpoint_config = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
@@ -617,6 +681,16 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
         metadata["regenerate_from_run_id"] = "unconfirmed"
         lookup = AsyncMock(side_effect=IncompleteMessageRunLookupError("missing cursor"))
         monkeypatch.setattr(runtime.run_event_store, "find_latest_ai_message_run_ids", lookup)
+    elif origin in {"empty-record", "empty-record-with-checkpoint"}:
+        await store.put("source", thread_id=tid, user_id=owner, status="success")
+    elif origin in {"summary-only", "unrelated-prefix"}:
+        if origin == "summary-only":
+            metadata.pop("regenerate_from_run_id")
+        await store.put("source", thread_id=tid, user_id=owner, status="success", metadata={"mode": "flash"})
+        await store.update_run_completion("source", status="success", last_ai_message="First answer" if origin == "summary-only" else "First")
+    elif origin == "pruned-id-same-answer":
+        await store.put("another-run", thread_id=tid, user_id=owner, status="success", metadata={"mode": "ultra"})
+        await store.update_run_completion("another-run", status="success", last_ai_message="First answer")
     elif origin == "ambiguous-summary":
         for run_id in ("older", "source"):
             await store.put(run_id, thread_id=tid, user_id=owner, status="success", metadata={"mode": "ultra"})
@@ -625,17 +699,18 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
         await store.put("source", thread_id=tid, user_id=None, status="success", metadata={"mode": "ultra"})
         cached = await runtime.run_manager.get("source", user_id=None)
         monkeypatch.setitem(runtime.run_manager._runs, "source", cached)
-    elif origin == "store-error":
-        lookup = AsyncMock(side_effect=OSError("transient storage error"))
+    elif origin in {"store-error", "invalid-record"}:
+        lookup = AsyncMock(side_effect=OSError("transient storage error") if origin == "store-error" else TypeError("invalid stored shape"))
         monkeypatch.setattr(store, "get", lookup)
 
     worker = AsyncMock()
     monkeypatch.setattr(services, "run_agent", worker)
     body = _run_create_request("First question", context=selection, metadata=metadata)
     if expected is None:
-        with pytest.raises(HTTPException) as failure:
+        with pytest.raises(HTTPException if origin == "store-error" else TypeError) as failure:
             await services.start_run(body, tid, request)
-        assert failure.value.status_code == 503
+        if origin == "store-error":
+            assert failure.value.status_code == 503
         lookup.assert_awaited()
         worker.assert_not_awaited()
         return

@@ -66,7 +66,10 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
     build_thread_checkpoint_state_accessor,
+    find_legacy_replay_run,
+    is_history_seed_run,
     replay_runs_matching_answer,
+    replay_source_read_errors,
     serialize_wait_run_status,
     sse_consumer,
     start_run,
@@ -810,7 +813,7 @@ def _run_status_value(record: Any) -> str | None:
     return str(status) if status is not None else None
 
 
-async def _require_successful_source_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
+async def _require_successful_source_run(thread_id: str, run_id: str, request: Request, *, source_human: Any = None, source_ai: Any = None) -> RunRecord:
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
     record = await run_mgr.get(run_id, user_id=user_id)
@@ -819,6 +822,11 @@ async def _require_successful_source_run(thread_id: str, run_id: str, request: R
         # only covers recent in-memory/store hydration gaps for the latest turn.
         records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)
         record = next((candidate for candidate in records if getattr(candidate, "run_id", None) == run_id), None)
+    if record is None and is_history_seed_run(thread_id, run_id) and (answer_id := _message_id(source_ai)):
+        # Keep the synthetic ID for hiding the superseded history, but validate
+        # completion and steering against an identifiable run in this thread.
+        with replay_source_read_errors(thread_id):
+            record = await find_legacy_replay_run(request, thread_id, answer_id, _message_additional_kwargs(source_human), run_id, source_ai)
     if record is None:
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
     record_thread_id = getattr(record, "thread_id", None)
@@ -826,7 +834,7 @@ async def _require_successful_source_run(thread_id: str, run_id: str, request: R
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
     if _run_status_value(record) != RunStatus.success.value:
         raise HTTPException(status_code=409, detail="Only successful assistant runs can be edited and rerun")
-    await _reject_multi_input_replay(run_id, request, user_id=user_id)
+    await _reject_multi_input_replay(record.run_id, request, user_id=user_id)
     return record
 
 
@@ -1002,7 +1010,7 @@ async def _prepare_edit_regenerate_payload(
         head_checkpoint=latest_checkpoint,
     )
     target_run_id = await _find_target_run_id(thread_id, source_ai_id, source_ai, source_human, request)
-    source_record = await _require_successful_source_run(thread_id, target_run_id, request)
+    source_record = await _require_successful_source_run(thread_id, target_run_id, request, source_human=source_human, source_ai=source_ai)
     checkpoint = _checkpoint_response(base_checkpoint_tuple)
     replacement_human_message_id = str(uuid.uuid4())
     source_metadata = getattr(source_record, "metadata", None) or {}

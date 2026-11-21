@@ -447,7 +447,9 @@ selecting Chat for the next message. Older turns recover settings from their
 source run or the mode from the checkpoint that introduced the response. If
 neither records a mode or options, an explicitly selected ordinary mode can
 be used. Selecting Chat in this case replays the turn with ordinary agent
-defaults. A temporary error reading the source mode returns a retryable `503`.
+defaults. A temporary storage error reading the identified source run or
+checkpoint returns a retryable `503`. Editing a backfilled answer still
+requires a successful source run on the same thread.
 When regenerating an interrupted answer, forward the checkpoint and metadata
 returned by `runs/regenerate/prepare`. Submitting a run whose original turn
 can no longer be identified returns `409`.

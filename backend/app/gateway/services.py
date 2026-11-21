@@ -14,10 +14,11 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import threading
 import uuid
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -27,11 +28,14 @@ from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
+from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.checkpoint_lineage import CheckpointLineageError, find_checkpoint_introducing_message
+from app.gateway.checkpoint_mode_errors import CHECKPOINT_MODE_ERRORS, checkpoint_mode_http_error
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
@@ -101,7 +105,7 @@ from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_US
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.events.store.base import IncompleteMessageRunLookupError, RunEventStore
 from deerflow.runtime.goal import goal_thread_lock
-from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.journal import RUN_ANSWER_SUMMARY_LIMIT, build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.naming import resolve_root_run_name
@@ -2386,19 +2390,37 @@ def replay_runs_matching_answer(records: list[RunRecord], message: Any) -> list[
     text = message_to_text(message)
     if not text:
         return []
-    answers = (text.strip(), strip_leading_think_blocks(text))
+    summaries = {answer[:RUN_ANSWER_SUMMARY_LIMIT].strip() for answer in (text.strip(), strip_leading_think_blocks(text))}
     matches = []
     for record in records:
         if record.status != RunStatus.success:
             continue
         summary = (record.last_ai_message or "").strip()
-        if summary and any(answer.startswith(summary) for answer in answers):
+        if summary and summary in summaries:
             matches.append(record)
     return matches
 
 
-async def _legacy_turn_mode_options(request: Request, thread_id: str, message_id: str, source: Mapping[str, Any], target_run_id: str | None, answer: Any) -> dict[str, Any] | None:
-    """Older checkpoints may only carry the source run ID or the original Chat marker."""
+@contextmanager
+def replay_source_read_errors(thread_id: str) -> Iterator[None]:
+    """Translate checkpoint policy and storage failures at both replay entry points."""
+    try:
+        yield
+    except CHECKPOINT_MODE_ERRORS as exc:
+        raise checkpoint_mode_http_error(exc, thread_id) from exc
+    except (OSError, sqlite3.OperationalError, DisconnectionError, InterfaceError, OperationalError, SQLAlchemyTimeoutError) as exc:
+        logger.warning("Could not read source mode for replay", exc_info=True)
+        raise HTTPException(503, "Source run mode is temporarily unavailable") from exc
+
+
+def is_history_seed_run(thread_id: str, run_id: str) -> bool:
+    """History seeds group messages under numbered IDs without creating a run."""
+    group, _, turn = run_id.rpartition("-")
+    return turn.isdecimal() and group in (f"checkpoint-seed-{thread_id}", f"branch-seed-{thread_id}")
+
+
+async def find_legacy_replay_run(request: Request, thread_id: str, message_id: str, source: Mapping[str, Any], target_run_id: str | None, answer: Any) -> RunRecord | None:
+    """Find a run attributable to this answer and caller, including before turn markers existed."""
     user = get_current_user()
     owner = get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
     manager = get_run_manager(request)
@@ -2414,13 +2436,13 @@ async def _legacy_turn_mode_options(request: Request, thread_id: str, message_id
             # still identify the run when a legacy journal cannot page back.
             origins = {}
         journal_id = origins.get(message_id)
-        if journal_id and journal_id != run_id:
-            record = await manager.get(journal_id, user_id=owner, raise_on_store_error=True)
-    if record is None and isinstance(run_id, str) and run_id:
+        if journal_id and not is_history_seed_run(thread_id, journal_id):
+            run_id = journal_id
+    if isinstance(run_id, str) and run_id and not is_history_seed_run(thread_id, run_id):
         record = await manager.get(run_id, user_id=owner, raise_on_store_error=True)
-    if record is None and answer is not None and target_run_id:
-        # Backfilled events group history under synthetic IDs with no run row.
-        # Bind to the unique stored answer independently of the client's hint.
+    elif answer is not None:
+        # A summary can identify a run only when history supplies no real ID.
+        # A pruned run must never borrow another run's identical answer.
         records = await manager.list_by_thread(thread_id, user_id=owner, limit=10)
         matches = replay_runs_matching_answer([row for row in records if row.user_id == owner], answer)
         if len(matches) == 1:
@@ -2428,12 +2450,20 @@ async def _legacy_turn_mode_options(request: Request, thread_id: str, message_id
     # get() can return a cached run without applying the store's owner filter.
     if record is None or record.thread_id != thread_id or record.user_id != owner:
         return None
+    return record
+
+
+def _stored_mode_options(record: RunRecord | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
     config = (record.kwargs or {}).get("config") or {}
     # Match build_run_config: when both raw sections were sent, only context was admitted.
     options = _mode_options(config.get("context", config.get("configurable")))
     if mode := selected_mode(record.metadata):
         options["mode"] = mode
-    return options
+    # Pre-marker runs did not persist top-level body.context. An empty raw
+    # config supplies no evidence about whether the user chose an ordinary mode.
+    return options or None
 
 
 async def _recover_source_message_metadata(
@@ -2509,20 +2539,19 @@ async def _recover_source_message_metadata(
     if source is not None:
         metadata = _message_additional_kwargs(source)
         if target_message_id and _TURN_MODE_OPTIONS not in metadata:
-            try:
-                options = await _legacy_turn_mode_options(request, thread_id, target_message_id, metadata, target_run_id, answer)
+            with replay_source_read_errors(thread_id):
+                record = await find_legacy_replay_run(request, thread_id, target_message_id, metadata, target_run_id, answer)
+                options = _stored_mode_options(record)
                 if options is None and answer is not None and not metadata.get(CHAT_MODE_KEY):
                     # A later turn can have changed the head's mode. Only the
                     # checkpoint which introduced this exact answer can supply it.
-                    origin = await find_checkpoint_introducing_message(accessor, snapshot, target_message_id, max_depth=32)
+                    try:
+                        origin = await find_checkpoint_introducing_message(accessor, snapshot, target_message_id, max_depth=32)
+                    except CheckpointLineageError:
+                        return metadata
                     origin_metadata = getattr(origin, "metadata", None) or {}
                     if origin_metadata.get("source") in {"input", "loop"} and (mode := selected_mode(origin_metadata)):
                         options = {"mode": mode}
-            except CheckpointLineageError:
-                options = None
-            except Exception as exc:
-                logger.warning("Could not read source mode for replay", exc_info=True)
-                raise HTTPException(503, "Source run mode is temporarily unavailable") from exc
             if options is not None:
                 return {**metadata, _TURN_MODE_OPTIONS: options}
         return metadata
