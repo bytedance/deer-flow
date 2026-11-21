@@ -419,14 +419,6 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         """Give back the claim of a caller that never received ``sandbox_id``."""
         try:
             with self._acquire_serializer.hold(sandbox_id):
-                with self._lock:
-                    if sandbox_id not in self._sandboxes:
-                        return
-                    remaining = self._claims.get(sandbox_id, 1) - 1
-                    self._claims[sandbox_id] = remaining
-                    if remaining > 0:
-                        return
-                logger.info("Releasing boxd sandbox %s: every caller that acquired it was cancelled", sandbox_id)
                 self._release_scope_locked(sandbox_id)
         except AcquireSerializerClosed:
             pass  # reset/shutdown owns the sandbox now
@@ -738,9 +730,17 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
     def _release_scope_locked(self, sandbox_id: str) -> None:
         with self._lock:
             sandbox = self._sandboxes.get(sandbox_id)
+            if sandbox is None:
+                return
+            # Overlapping turns can hold several claims on one machine. Only the
+            # LAST release parks it: mirroring outputs and re-entering the warm
+            # pool while another claimant is mid-turn hands its files to a
+            # stranger (#8382).
+            remaining = self._claims.get(sandbox_id, 1) - 1
+            if remaining > 0:
+                self._claims[sandbox_id] = remaining
+                return
             scope = next((key for key, value in self._thread_sandboxes.items() if value == sandbox_id), None)
-        if sandbox is None:
-            return
         if scope is not None and scope[0]:
             try:
                 self._sync_outputs_to_host(sandbox, user_id=scope[0], thread_id=scope[1])

@@ -415,6 +415,29 @@ def test_release_parks_and_same_scope_reclaims_without_create(installed) -> None
     assert len(fake.created) == 1
 
 
+def test_release_keeps_the_machine_while_another_claim_is_active(installed) -> None:
+    """Overlapping turns share one machine: one release must not park it (#8382).
+
+    The second claimant is still mid-turn; parking the sandbox would mirror
+    outputs early and let a stranger reclaim the machine under it.
+    """
+    provider, fake = installed
+    first = provider.acquire("thread", user_id="owner")
+    assert provider.acquire("thread", user_id="owner") == first
+
+    provider.release(first)
+
+    assert provider.get(first) is not None  # still active for the second claimant
+    assert first not in provider._warm_pool
+    assert provider._claims[first] == 1
+
+    provider.release(first)
+
+    assert provider.get(first) is None
+    assert first in provider._warm_pool
+    assert len(fake.created) == 1
+
+
 def test_unhealthy_warm_machine_is_deleted_and_replaced(installed) -> None:
     provider, fake = installed
     sandbox_id = provider.acquire("thread", user_id="owner")
