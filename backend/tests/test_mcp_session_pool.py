@@ -3222,17 +3222,7 @@ async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
     connection = {"transport": "stdio", "command": "x", "args": []}
     with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
         pooled = await pool.get_session("srv", "scope", connection)
-        call = asyncio.create_task(
-            call_pooled_session_tool(
-                pooled,
-                pool,
-                server_name="srv",
-                scope_key="scope",
-                tool_name="act",
-                arguments={},
-                call_kwargs={},
-            ),
-        )
+        call = asyncio.create_task(call_pooled_session_tool(pooled, pool, server_name="srv", scope_key="scope", tool_name="act", arguments={}, call_kwargs={}))
         try:
             await asyncio.wait_for(exit_started.wait(), timeout=0.5)
 
