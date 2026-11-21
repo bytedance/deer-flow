@@ -1,10 +1,14 @@
 """Missing call IDs must not swallow middleware-generated tool guidance."""
 
+import ast
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_openai.chat_models.base import _convert_message_to_dict
 
-from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+from deerflow.agents.middlewares.dangling_tool_call_middleware import _ABSENT_TOOL_CALL_ID_SPELLINGS, DanglingToolCallMiddleware
 
 
 @pytest.mark.parametrize("call_id,result_id", [(None, ""), ("", None), (None, None), ("", "")])
@@ -57,9 +61,9 @@ def test_mixed_missing_ids_complete_parallel_turn_keeps_input_order():
     assert [message.tool_call_id for message in patched[1:]] == [tc["id"] for tc in patched[0].tool_calls]
 
 
-@pytest.mark.parametrize("sentinel", ["None", "missing_tool_call_id"])
+@pytest.mark.parametrize("sentinel", sorted(_ABSENT_TOOL_CALL_ID_SPELLINGS))
 def test_producer_sentinel_ids_pair_with_a_null_call_id(sentinel):
-    """Producers spell a missing ID as "None" or "missing_tool_call_id", not ""."""
+    """Producers spell a missing ID as "None" or a fallback sentinel, not ""."""
     call = AIMessage(content="", tool_calls=[{"name": "write_file", "id": None, "args": {"path": "a.md"}}])
     result = ToolMessage(content="Error: read the file before writing it", tool_call_id=sentinel, name="write_file", status="error")
     patched = DanglingToolCallMiddleware()._build_patched_messages([call, result])
@@ -92,3 +96,168 @@ def test_producer_sentinels_complete_a_parallel_turn_in_input_order():
     assert patched is not None
     assert [message.content for message in patched[1:]] == ["FIRST", "SECOND"]
     assert [message.tool_call_id for message in patched[1:]] == [tc["id"] for tc in patched[0].tool_calls]
+
+
+def _sandbox_audit_block(tool_call):
+    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+
+    return SandboxAuditMiddleware()._build_block_message(SimpleNamespace(tool_call=tool_call), "destructive command")
+
+
+def _guardrail_denial(tool_call):
+    from deerflow.guardrails.middleware import GuardrailMiddleware
+    from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason
+
+    decision = GuardrailDecision(allow=False, reasons=[GuardrailReason(code="oap.denied", message="no")])
+    return GuardrailMiddleware(provider=None)._build_denied_message(SimpleNamespace(tool_call=tool_call), decision)
+
+
+def _read_before_write_denial(tool_call):
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+    return ReadBeforeWriteMiddleware._authorization_error_result(SimpleNamespace(tool_call=tool_call), SandboxAuthorizationError())
+
+
+@pytest.mark.parametrize(
+    "producer,id_key_present,expected_id",
+    [
+        (_sandbox_audit_block, True, "missing_id"),
+        (_guardrail_denial, False, "missing_id"),
+        (_guardrail_denial, True, "None"),
+        (_read_before_write_denial, True, "missing-tool-call-id"),
+    ],
+    ids=["sandbox-audit", "guardrail-id-absent", "guardrail-id-null", "read-before-write"],
+)
+def test_producer_reply_for_a_null_call_id_survives_pairing(producer, id_key_present, expected_id):
+    """Each producer's own missing-ID spelling must pair, so its reason reaches the model."""
+    call = AIMessage(content="", tool_calls=[{"name": "bash", "id": None, "args": {"command": "rm -rf /"}}])
+    tool_call = dict(call.tool_calls[0])
+    if not id_key_present:
+        tool_call.pop("id")
+    result = producer(tool_call)
+    patched = DanglingToolCallMiddleware()._build_patched_messages([call, result])
+
+    assert result.tool_call_id == expected_id
+    assert patched is not None
+    assert len(patched) == 2
+    assert patched[1].content == result.content
+    wire_call, wire_result = map(_convert_message_to_dict, patched)
+    assert wire_call["tool_calls"][0]["id"] == wire_result["tool_call_id"]
+
+
+def _is_tool_call_id_get(node: ast.AST) -> bool:
+    """Match ``<...>tool_call.get("id"[, default])``."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"):
+        return False
+    if not (node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "id"):
+        return False
+    receiver = node.func.value
+    name = receiver.attr if isinstance(receiver, ast.Attribute) else getattr(receiver, "id", "")
+    return name == "tool_call"
+
+
+def _producer_id_fallbacks() -> dict[str, str]:
+    """Every string a ``tool_call.get("id")`` fallback can produce, keyed by where it appears."""
+    import deerflow
+
+    package_root = Path(deerflow.__file__).parent
+    found: dict[str, str] = {}
+    for path in sorted(package_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = {
+            target.id: node.value.value for node in tree.body if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str) for target in node.targets if isinstance(target, ast.Name)
+        }
+
+        def resolve(value: ast.AST) -> str | None:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return value.value
+            if isinstance(value, ast.Name):
+                return constants.get(value.id)
+            return None
+
+        for node in ast.walk(tree):
+            fallback = None
+            if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) and _is_tool_call_id_get(node.values[0]):
+                fallback = node.values[-1]
+            elif _is_tool_call_id_get(node) and len(node.args) > 1:
+                fallback = node.args[1]
+            if fallback is not None and (spelling := resolve(fallback)):
+                found[f"{path.relative_to(package_root).as_posix()}:{node.lineno}"] = spelling
+    return found
+
+
+def test_every_producer_missing_id_fallback_is_a_known_absent_spelling():
+    """A new ``tool_call.get("id") or "..."`` sentinel must be added to the pairing set."""
+    fallbacks = _producer_id_fallbacks()
+    assert fallbacks, "scanner found no producers; the AST match has drifted"
+    unknown = {where: spelling for where, spelling in fallbacks.items() if spelling and spelling not in _ABSENT_TOOL_CALL_ID_SPELLINGS}
+    assert not unknown, f"add these to _ABSENT_TOOL_CALL_ID_SPELLINGS: {unknown}"
+
+
+@pytest.mark.parametrize("spelling", sorted(_ABSENT_TOOL_CALL_ID_SPELLINGS))
+def test_explicit_call_id_matching_a_sentinel_spelling_keeps_its_result(spelling):
+    """A provider's explicit opaque ID wins over the fallback reading of the same spelling."""
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "bash", "id": spelling, "args": {"command": "explicit"}},
+            {"name": "bash", "id": None, "args": {"command": "null"}},
+        ],
+    )
+    result = ToolMessage(content="EXPLICIT", tool_call_id=spelling, name="bash")
+    patched = DanglingToolCallMiddleware()._build_patched_messages([call, result])
+
+    assert patched is not None
+    wire_call, explicit_result, null_result = map(_convert_message_to_dict, patched)
+    explicit_id, null_id = (tc["id"] for tc in wire_call["tool_calls"])
+    assert explicit_id == spelling
+    assert (explicit_result["tool_call_id"], explicit_result["content"]) == (explicit_id, "EXPLICIT")
+    assert null_result["tool_call_id"] == null_id
+    assert patched[2].status == "error"
+    assert patched[2].content != "EXPLICIT"
+
+
+@pytest.mark.parametrize("spelling", sorted(_ABSENT_TOOL_CALL_ID_SPELLINGS))
+def test_explicit_call_id_claims_first_then_sentinel_falls_back(spelling):
+    """With a result for each call, the explicit call takes its exact match and the rest fall back."""
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "bash", "id": spelling, "args": {"command": "explicit"}},
+            {"name": "bash", "id": None, "args": {"command": "null"}},
+        ],
+    )
+    results = [
+        ToolMessage(content="EXPLICIT", tool_call_id=spelling, name="bash"),
+        ToolMessage(content="NULL", tool_call_id=spelling, name="bash"),
+    ]
+    patched = DanglingToolCallMiddleware()._build_patched_messages([call, *results])
+
+    assert patched is not None
+    explicit_id, null_id = (tc["id"] for tc in patched[0].tool_calls)
+    assert explicit_id == spelling
+    assert [(message.tool_call_id, message.content) for message in patched[1:]] == [(explicit_id, "EXPLICIT"), (null_id, "NULL")]
+
+
+@pytest.mark.parametrize("spelling", sorted(_ABSENT_TOOL_CALL_ID_SPELLINGS))
+@pytest.mark.parametrize("null_result_first", [True, False])
+def test_explicit_sentinel_reservation_respects_the_tool_name(spelling, null_result_first):
+    """A null-id call's result for another tool is not reserved for the explicit call."""
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "note_lookup", "id": None, "args": {}},
+            {"name": "calendar_lookup", "id": spelling, "args": {}},
+        ],
+    )
+    note = ToolMessage(content="NOTE", tool_call_id=spelling, name="note_lookup")
+    calendar = ToolMessage(content="CALENDAR", tool_call_id=spelling, name="calendar_lookup")
+    results = [note, calendar] if null_result_first else [calendar, note]
+    patched = DanglingToolCallMiddleware()._build_patched_messages([call, *results])
+
+    assert patched is not None
+    null_id, explicit_id = (tc["id"] for tc in patched[0].tool_calls)
+    assert explicit_id == spelling
+    assert [(message.tool_call_id, message.content) for message in patched[1:]] == [(null_id, "NOTE"), (explicit_id, "CALENDAR")]
+    assert all(message.status != "error" for message in patched[1:])
