@@ -50,6 +50,22 @@ changing its configuration. Other memory backends do not consume these
 DeerMem-specific fields. Existing external memory templates remain the mechanism
 for complete template replacement; this feature adds no editing endpoint or UI.
 
+## DeepSeek cache accounting
+
+Models configured with `langchain_deepseek:ChatDeepSeek` or
+`deerflow.models.patched_deepseek:PatchedChatDeepSeek` retain DeepSeek's native
+`usage.prompt_cache_hit_tokens` as `input_token_details.cache_read` when the
+standard `prompt_tokens_details.cached_tokens` field is absent or null. An
+explicit standard count, including zero, takes precedence. Invalid native
+counts are ignored; they do not fail an otherwise successful response.
+
+This applies to synchronous, asynchronous and streaming calls. The existing
+lead-agent journal and subagent usage handoff retain that count for per-model
+cache-aware cost estimates. Cached tokens are a subset of input tokens, so
+normalization never adds them or `prompt_cache_miss_tokens` to the input total.
+Responses that already supply the standard field are unchanged. These are
+provider-reported usage estimates, not a measurement of money saved by DeerFlow.
+
 ## Model request admission
 
 For request-per-minute limits, opt into pacing on each relevant `models[]`
