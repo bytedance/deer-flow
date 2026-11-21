@@ -77,9 +77,10 @@ def records(messages, cap: int = 16000) -> list[dict]:
     return result
 
 
-def _token_spans(folded: str):
-    """Preserve indexed token positions in casefolded text without changing tokenization."""
-    for match in re.finditer(r"[^\W_]+", folded):
+def _token_spans(folded: str, *, legacy: bool = False):
+    """Keep non-Han words intact and bigram Han runs, preserving folded offsets."""
+    pattern = r"[^\W_]+" if legacy else r"[\u3400-\u9fff]+|[^\W_\u3400-\u9fff]+"
+    for match in re.finditer(pattern, folded):
         word = match.group()
         if re.search(r"[\u3400-\u9fff]", word):
             for index in range(max(1, len(word) - 1)):
@@ -88,26 +89,62 @@ def _token_spans(folded: str):
             yield word, match.start(), match.end()
 
 
-def _tokens(text: str) -> list[str]:
-    return list(dict.fromkeys(word for word, _, _ in _token_spans(text.casefold())))
+def _tokens(text: str, *, legacy: bool = False) -> list[str]:
+    return list(dict.fromkeys(word for word, _, _ in _token_spans(text.casefold(), legacy=legacy)))
 
 
-def terms(text: str) -> list[str]:
-    return _tokens(text[:500])[:32]
+def terms(text: str, *, legacy: bool = False) -> list[str]:
+    return _tokens(text[:500], legacy=legacy)[:32]
 
 
-def index_text(text: str) -> str:
-    return " ".join(_tokens(text))
+def index_text(text: str, *, legacy: bool = False) -> str:
+    return " ".join(_tokens(text, legacy=legacy))
 
 
-def _search_excerpt(text: str, keywords: list[str], *, substring: bool) -> dict:
+def _reindex_has_headroom(db: sqlite3.Connection) -> bool:
+    """Leave room for FTS shadow-table writes; failures are still recoverable."""
+    pages = db.execute("PRAGMA page_count").fetchone()[0]
+    free = db.execute("PRAGMA freelist_count").fetchone()[0]
+    ceiling = db.execute("PRAGMA max_page_count").fetchone()[0]
+    # Rewriting FTS postings can temporarily require a substantial fraction
+    # of the live database. Defer a best-effort upgrade when space is tight.
+    return ceiling - pages + free >= (pages - free) // 2
+
+
+def _upgrade_index(db: sqlite3.Connection) -> None:
+    """Reindex legacy terms under the caller's write transaction, once per archive."""
+    if db.execute("PRAGMA user_version").fetchone()[0] < 1:
+        # Bound peak memory during interactive searches of large archives.
+        last_rowid = 0
+        while rows := db.execute(
+            "SELECT rowid, payload FROM sources WHERE rowid > ? ORDER BY rowid LIMIT 64",
+            (last_rowid,),
+        ).fetchall():
+            db.executemany("UPDATE sources SET words=? WHERE rowid=?", [(index_text(json.loads(payload)["text"]), rowid) for rowid, payload in rows])
+            last_rowid = rows[-1][0]
+        db.execute("PRAGMA user_version=1")
+
+
+def _try_upgrade_index(path: Path) -> None:
+    """Attempt migration independently so failure cannot roll back capture."""
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2)) as writer, writer:
+            writer.execute("PRAGMA max_page_count=32768")
+            writer.execute("BEGIN IMMEDIATE")
+            if _reindex_has_headroom(writer):
+                _upgrade_index(writer)
+    except (OSError, sqlite3.Error):
+        logger.warning("Task history index upgrade deferred; searching existing terms", exc_info=False)
+
+
+def _search_excerpt(text: str, keywords: list[str], *, substring: bool, legacy: bool = False) -> dict:
     """Locate the first fitting casefolded keyword match in the readable source."""
     folded = text.casefold()
     if substring:
         hits = [(position, position + len(term)) for term in keywords if (position := folded.find(term)) >= 0]
     else:
         keyword_set = set(keywords)
-        hits = [(left, right) for word, left, right in _token_spans(folded) if word in keyword_set]
+        hits = [(left, right) for word, left, right in _token_spans(folded, legacy=legacy) if word in keyword_set]
     start = 0
     if hits:
         positions = [index for index, char in enumerate(text) for _ in char.casefold()]
@@ -159,6 +196,12 @@ def capture(state: dict, runtime, messages, config) -> dict:
             # against stale retention state. Rollback restores evicted rows if
             # the replacement still cannot fit within SQLite's page ceiling.
             db.execute("BEGIN IMMEDIATE")
+            # Read the index format under the same write lock as insertion:
+            # another connection may have completed migration just before it.
+            legacy_index = db.execute("PRAGMA user_version").fetchone()[0] < 1
+            if legacy_index and db.execute("SELECT 1 FROM sources LIMIT 1").fetchone() is None:
+                db.execute("PRAGMA user_version=1")
+                legacy_index = False
             exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
             created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
             expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, config.max_batches - 1)).fetchall()
@@ -167,7 +210,9 @@ def capture(state: dict, runtime, messages, config) -> dict:
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
             if not exists:
                 db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
-                db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
+                db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"], legacy=legacy_index)) for r in sources])
+        if legacy_index:
+            _try_upgrade_index(path)
         batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
         return {"scope": owner, "batches": batches, "omitted_records": omitted, "status": "available"}
     except (OSError, sqlite3.Error, ValueError):
@@ -197,6 +242,7 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     if query is not None and not keywords:
         return {"results": [], "status": "empty_query"}
     found = {}
+    legacy_archive = False
     history = normalize_task_history(state.get("task_history"))
     status = "unavailable" if history.get("status") == "unavailable" else "available"
     active_matches = []
@@ -206,6 +252,10 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     if batches:
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                legacy_archive = db.execute("PRAGMA user_version").fetchone()[0] < 1
+                if query is not None and legacy_archive:
+                    _try_upgrade_index(path)
+                    legacy_archive = db.execute("PRAGMA user_version").fetchone()[0] < 1
                 placeholders = ",".join("?" for _ in batches)
                 present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
                 if present != len(batches) and status != "unavailable":
@@ -213,7 +263,8 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 if source_id:
                     rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
                 else:
-                    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
+                    archive_keywords = terms(query or "", legacy=legacy_archive)
+                    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in archive_keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
                     parameters = [match, *batches, *([role] if role is not None else [])]
                     # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
@@ -253,7 +304,9 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
         for row in results:
             # Active text takes precedence when reading by ID, even if only archived FTS matched the source.
             row = dict(active_by_id.get(row["id"], row))
-            row.update(_search_excerpt(row.pop("text"), keywords, substring=row["id"] in active_by_id))
+            active_source = row["id"] in active_by_id
+            excerpt_keywords = keywords if active_source or not legacy_archive else terms(query or "", legacy=True)
+            row.update(_search_excerpt(row.pop("text"), excerpt_keywords, substring=active_source, legacy=legacy_archive and not active_source))
             excerpts_result.append(row)
         results = excerpts_result
     return {"results": results, "status": status}
