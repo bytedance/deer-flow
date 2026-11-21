@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.search import (
@@ -77,6 +79,33 @@ def test_an_explicit_glob_wins_inside_a_checkout(tmp_path: Path) -> None:
 
     matches, _ = find_grep_matches(checkout, "FATAL", glob_pattern="*.log")
     assert [Path(match.path).name for match in matches] == ["app.log"]
+
+
+@pytest.mark.parametrize("directory", ["logs", ".cache", "reports.log"])
+@pytest.mark.parametrize("recursive", [False, True])
+def test_explicit_data_directory_globs_reach_local_sandbox_files(tmp_path: Path, directory: str, recursive: bool) -> None:
+    checkout = tmp_path / "checkout"
+    target = checkout / directory / "report.txt"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"FATAL diagnostic\n")
+    for hidden in (".git", "node_modules"):
+        noise = checkout / hidden / directory / "noise.txt"
+        noise.parent.mkdir(parents=True)
+        noise.write_bytes(b"FATAL repository noise\n")
+    (target.parent / ".upload-pending.part").write_bytes(b"FATAL incomplete\n")
+    sandbox = LocalSandbox("local", [PathMapping("/mnt/skills/public", str(checkout))])
+    root = "/mnt/skills/public"
+    pattern = f"{'**/' if recursive else ''}{directory}/*"
+
+    files, truncated = sandbox.glob(root, pattern)
+    assert files == [f"{root}/{directory}/report.txt"]
+    assert not truncated
+    matches, truncated = sandbox.grep(root, "FATAL", glob=pattern)
+    assert [(match.path, match.line) for match in matches] == [(f"{root}/{directory}/report.txt", "FATAL diagnostic")]
+    assert not truncated
+    # An unfiltered search still treats these directories as repository noise.
+    assert sandbox.glob(root, "**/*")[0] == []
+    assert sandbox.grep(root, "FATAL")[0] == []
 
 
 def test_a_file_named_as_the_root_is_read_above_the_size_bound(tmp_path: Path) -> None:
