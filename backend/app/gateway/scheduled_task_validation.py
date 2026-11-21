@@ -95,7 +95,9 @@ def resolve_end_at(value: datetime | str | None, timezone: str) -> datetime | No
         raise scheduler_error(422, "invalid_request", "end_at must be an ISO 8601 date-time")
     try:
         return _resolve_local_datetime(value, timezone)
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
+        # A valid wall time near datetime.max moves past year 9999 in UTC;
+        # report that as an unusable end_at instead of letting it escape.
         raise scheduler_error(422, "invalid_request", f"end_at: {exc}") from exc
 
 
