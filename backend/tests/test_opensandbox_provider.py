@@ -1439,13 +1439,28 @@ def test_download_rejects_outside_virtual_prefix_before_sdk_call() -> None:
     assert remote.files.calls == []
 
 
-def test_missing_file_api_404_does_not_evict_sandbox() -> None:
+@pytest.mark.parametrize("line_range", [{}, {"start_line": 2, "end_line": 3}])
+def test_missing_file_api_404_raises_file_not_found_without_evicting(caplog: pytest.LogCaptureFixture, line_range: dict) -> None:
+    # Same contract as LocalSandbox: the read-before-write gate and read_file tell "missing" from "unreadable" by the
+    # exception type, and a file an agent is about to create is not an error worth an ERROR log line.
     invalidated: list[tuple[str, str]] = []
     remote = _FakeRemote("remote")
     remote.file_error = _TerminalApiError("file not found", status_code=404)
     box = _box(remote, on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)))
-    assert box.read_file("/mnt/user-data/workspace/missing.txt").startswith("Error:")
+    with caplog.at_level(logging.DEBUG), pytest.raises(FileNotFoundError, match="/mnt/user-data/workspace/missing.txt") as raised:
+        box.read_file("/mnt/user-data/workspace/missing.txt", **line_range)
+    assert raised.value.__cause__ is remote.file_error
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
     assert invalidated == []
+
+
+def test_unreadable_file_still_returns_the_error_string(caplog: pytest.LogCaptureFixture) -> None:
+    remote = _FakeRemote("remote")
+    remote.file_error = _TerminalApiError("internal error", status_code=500)
+    box = _box(remote)
+    with caplog.at_level(logging.ERROR):
+        assert box.read_file("/mnt/user-data/workspace/x.txt").startswith("Error:")
+    assert any("Failed to read OpenSandbox file" in record.getMessage() for record in caplog.records)
 
 
 def test_terminal_renewal_failure_evicts_before_operation() -> None:
@@ -1460,6 +1475,31 @@ def test_terminal_renewal_failure_evicts_before_operation() -> None:
     assert box.execute_command("true") == "Error: sandbox expired"
     assert invalidated == [("sandbox-id", "sandbox expired")]
     assert remote.commands.calls == []
+
+
+def test_renewal_404_on_read_reports_the_dead_sandbox_not_a_missing_file() -> None:
+    # A renewal 404 means the sandbox expired server-side: evict it and keep its error, so neither read_file's
+    # not_found answer nor the read-before-write gate mistakes a dead sandbox for a file that doesn't exist yet.
+    invalidated: list[tuple[str, str]] = []
+    remote = _FakeRemote("remote")
+    remote.renew_error = _TerminalApiError("sandbox expired")
+    box = _box(
+        remote,
+        sandbox_timeout=timedelta(minutes=5),
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+    assert box.read_file("/mnt/user-data/workspace/notes.md") == "Error: sandbox expired"
+    assert invalidated == [("sandbox-id", "sandbox expired")]
+    assert remote.files.calls == []
+
+
+def test_renewal_404_on_append_raises_instead_of_starting_an_empty_file() -> None:
+    remote = _FakeRemote("remote")
+    remote.renew_error = _TerminalApiError("sandbox expired")
+    box = _box(remote, sandbox_timeout=timedelta(minutes=5))
+    with pytest.raises(_TerminalApiError, match="sandbox expired"):
+        box.write_file("/mnt/user-data/workspace/notes.md", "more", append=True)
+    assert remote.files.calls == []
 
 
 def test_terminal_error_evicts_active_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
