@@ -16,6 +16,7 @@ from app.channels.allowed_users import parse_allowed_users, parse_string_or_int_
 from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
@@ -25,7 +26,6 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 SLACK_STOP_TIMEOUT_SECONDS = 5.0
@@ -531,7 +531,7 @@ class SlackChannel(Channel):
                 continue
 
             filename = self._safe_inbound_filename(file_info.get("filename"), "attachment")
-            declared_size = self._file_size(file_info.get("size"))
+            declared_size = coerce_file_size(file_info.get("size"))
             if declared_size is not None and declared_size > SLACK_MAX_INBOUND_FILE_BYTES:
                 logger.warning("[Slack] inbound file exceeds download limit, skipping: %s", filename)
                 unavailable.append(f"{filename} (exceeds the download limit)")
@@ -691,7 +691,7 @@ class SlackChannel(Channel):
                     "file_id": file_id if isinstance(file_id, str) else None,
                     "filename": filename,
                     "mime_type": mime_type,
-                    "size": cls._file_size(raw.get("size")),
+                    "size": coerce_file_size(raw.get("size")),
                     # Private URL only — Authorization is attached in receive_file.
                     "url_private_download": download_url.strip(),
                 }
@@ -700,27 +700,7 @@ class SlackChannel(Channel):
 
     @staticmethod
     def _safe_inbound_filename(value: Any, fallback: str) -> str:
-        if not isinstance(value, str):
-            return fallback
-        try:
-            candidate = normalize_filename(value.strip())
-        except (UnicodeError, ValueError):
-            return fallback
-        if is_upload_staging_file(candidate) or any(ord(char) < 32 for char in candidate):
-            return fallback
-        return candidate
-
-    @staticmethod
-    def _file_size(value: Any) -> int | None:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            return value if value >= 0 else None
-        if isinstance(value, float) and value.is_integer() and value >= 0:
-            return int(value)
-        if isinstance(value, str) and value.strip().isdigit():
-            return int(value.strip())
-        return None
+        return safe_inbound_filename(value, fallback)
 
     async def _publish_inbound_with_connection(
         self,
