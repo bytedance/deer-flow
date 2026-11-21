@@ -56,7 +56,7 @@ recursion_limit = max_turns × (每轮节点数) + (每次调用一次性节点�
 
 轮次用尽时执行器捕获 `GraphRecursionError`，保留最后一段助手文本作为部分结果并标记 `turn_capped`。
 
-执行超时以墙钟计算，但只计算真正执行的时间：时钟从容量控制器分到槽位时开始，而不是从委派时开始，所以排队中的子 Agent 不会损失执行时间；排队等待由 `queue_timeout_seconds` 单独约束。执行超时一到，子 Agent 被取消，状态 `timed_out`。轮次和超时是两条独立的轴：调大 `max_turns` 时通常要同步调大 `timeout_seconds`，否则失败只是从轮次换成了超时。
+执行超时从容量控制器分配槽位时开始计算，包含最终结果的处理时间。排队等待由 `queue_timeout_seconds` 单独约束。执行超时后，即使子 Agent 已准备发布成功结果，也会报告 `timed_out`。轮次和超时是两条独立的轴：调大 `max_turns` 时通常要同步调大 `timeout_seconds`，否则失败只是从轮次换成了超时。
 
 ## 失控行为防护
 

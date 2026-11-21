@@ -1434,20 +1434,18 @@ async def task_tool(
             # Set to queue wait + execution timeout + 60s buffer, in 5s poll intervals
             # This catches edge cases where the background task gets stuck
             if poll_count > max_poll_count:
-                # A terminal write can land during the final sleep. Re-read
-                # before declaring a timeout so a finished subagent is not
-                # reported as stuck and cancelled.
                 result = get_background_task_result(execution_id)
-                if result is None or result.status in {
-                    SubagentStatus.COMPLETED,
-                    SubagentStatus.FAILED,
-                    SubagentStatus.CANCELLED,
-                    SubagentStatus.TIMED_OUT,
-                }:
+                if result is None:
                     continue
                 # Report the window this poller actually waited: the execution
                 # timeout alone understates it by the whole queue allowance.
                 timeout_minutes = int(max_poll_count * _SUBAGENT_POLL_INTERVAL_SECONDS // 60)
+                message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+                # Use the executor's terminal write to decide the race before
+                # emitting an event. If it already finished, handle its result.
+                if not result.try_set_terminal(SubagentStatus.TIMED_OUT, error=message):
+                    continue
+                request_cancel_background_task(execution_id)
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
@@ -1460,12 +1458,9 @@ async def task_tool(
                     },
                     writer=writer,
                 )
-                # The task may still be running in the background. Signal cooperative
-                # cancellation and schedule deferred cleanup to remove the entry from
-                # _background_tasks once the background thread reaches a terminal state.
-                request_cancel_background_task(execution_id)
+                # Keep the entry until the background execution settles and
+                # deferred cleanup can report its final usage.
                 _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, _cleanup_poll_budget(config.timeout_seconds))
-                message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
                 return result_command(
                     tool_call_id=tool_call_id,
                     status="polling_timed_out",

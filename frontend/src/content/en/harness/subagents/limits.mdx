@@ -56,7 +56,7 @@ Nodes per turn is the number of `before_model` / `after_model` hooks implemented
 
 When the turns run out the executor catches `GraphRecursionError`, keeps the last assistant text as a partial result, and marks it `turn_capped`.
 
-The execution timeout is wall-clock time spent executing. It starts when the capacity controller grants a slot, not at delegation, so a subagent that waits in the queue does not lose execution time; that wait is bounded separately by `queue_timeout_seconds`. Once the execution timeout elapses the subagent is cancelled with status `timed_out`. Turns and timeout are independent axes: when you raise `max_turns`, usually raise `timeout_seconds` too, or the failure merely moves from turns to timeout.
+The execution timeout starts when the capacity controller grants a slot and includes result finalization. Queue wait has its own limit, `queue_timeout_seconds`. Once the execution timeout elapses, the subagent reports `timed_out` even if it was about to publish a successful result. Turns and timeout are independent axes: when you raise `max_turns`, usually raise `timeout_seconds` too, or the failure merely moves from turns to timeout.
 
 ## Runaway guards
 

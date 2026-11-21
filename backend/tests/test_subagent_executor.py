@@ -8343,3 +8343,56 @@ class TestExecutionTimeoutStartsAtAdmission:
         assert result.status is classes["SubagentStatus"].FAILED
         assert result.error == ""  # Preserve the synchronous timeout result.
         assert result.execution_done_event.wait(timeout=5)
+
+    @pytest.mark.parametrize("background", [False, True], ids=["sync", "background"])
+    @pytest.mark.parametrize("finalization_seconds", [0.5, 1.5], ids=["within-budget", "after-deadline"])
+    def test_execution_deadline_fences_success_during_finalization(self, classes, base_config, monkeypatch, background, finalization_seconds):
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        clock = 100.0
+        monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock))
+        extract = module._extract_final_result
+
+        def finalize(*args, **kwargs):
+            nonlocal clock
+            clock += finalization_seconds
+            return extract(*args, **kwargs)
+
+        async def stream(*args, **kwargs):
+            yield {"messages": [classes["AIMessage"](content="finished answer")]}
+
+        monkeypatch.setattr(module, "_extract_final_result", finalize)
+        executor = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=1),
+            thread_id="finalization-deadline",
+            capacity=self._capacity(),
+            stream=stream,
+            monkeypatch=monkeypatch,
+        )
+        if background:
+            execution_id = executor.execute_async("finish at the deadline")
+            result = module.get_background_task_result(execution_id)
+        else:
+            execution_id = None
+            result = executor.execute("finish at the deadline")
+
+        try:
+            assert result is not None
+            assert result.execution_done_event.wait(timeout=5)
+            assert clock == 100 + finalization_seconds
+            if finalization_seconds < 1:
+                assert result.status is classes["SubagentStatus"].COMPLETED
+                assert result.result == "finished answer"
+            else:
+                expected = classes["SubagentStatus"].TIMED_OUT if background else classes["SubagentStatus"].FAILED
+                assert result.status is expected
+                assert result.result is None
+                assert result.error == ("Execution timed out after 1 seconds" if background else "")
+        finally:
+            if execution_id is not None:
+                module.request_cancel_background_task(execution_id)
+                module.force_cleanup_background_task(execution_id)
