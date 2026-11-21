@@ -733,9 +733,15 @@ def test_error_message_redacts_inline_base64_before_truncation():
     assert len(result.text) < 600
 
 
+# Encodes to "-_" in the URL-safe alphabet, so the payload only redacts once
+# the pattern accepts base64url characters as well as standard base64.
+_BASE64URL_PROBE = b"\xfb\xff"
+
+
+@pytest.mark.parametrize("encode", [base64.b64encode, base64.urlsafe_b64encode], ids=["standard", "urlsafe"])
 @pytest.mark.parametrize("quote", ["'", '"'])
-def test_error_message_redacts_python_and_json_base64_fields(quote):
-    payload = base64.b64encode(b"field payload " * 20).decode("ascii")
+def test_error_message_redacts_python_and_json_base64_fields(quote, encode):
+    payload = encode(_BASE64URL_PROBE + b"field payload " * 20).decode("ascii")
     detail = f"{{{quote}base64{quote}: {quote}{payload}{quote}}}"
     middleware = ToolErrorHandlingMiddleware()
     req = _request(name="mcp_tool", tool_call_id="tc-field")
@@ -749,8 +755,9 @@ def test_error_message_redacts_python_and_json_base64_fields(quote):
     assert payload[:64] not in result.text
 
 
-def test_error_message_redacts_data_uri_payloads_case_insensitively():
-    payload = base64.b64encode(b"svg payload " * 200).decode("ascii")
+@pytest.mark.parametrize("encode", [base64.b64encode, base64.urlsafe_b64encode], ids=["standard", "urlsafe"])
+def test_error_message_redacts_data_uri_payloads_case_insensitively(encode):
+    payload = encode(_BASE64URL_PROBE + b"svg payload " * 200).decode("ascii")
     detail = f"render failed: DATA:IMAGE/SVG+XML;charset=utf-8;BASE64,{payload}"
     middleware = ToolErrorHandlingMiddleware()
     req = _request(name="web_fetch", tool_call_id="tc-data-uri")

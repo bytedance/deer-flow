@@ -56,14 +56,15 @@ _TOOL_RESULT_CONTRACT = (
 )
 
 # langchain-mcp-adapters stringifies non-text error blocks for sse/http
-# transports, so an MCP error's ToolException can carry an inline base64
-# payload: an image/file block's ``'base64': '...'`` field or a ``data:`` URI.
+# transports, so an MCP error's ToolException can carry an inline base64 or
+# base64url payload: an image/file block's ``'base64': '...'`` field or a
+# ``data:`` URI.
 # Redact the payload before truncation, because the 500-character cap alone
 # would leave a base64 prefix in the model-visible message and the checkpoint.
 # Values below the threshold (a short diagnostic token) stay readable.
 _INLINE_BASE64_MIN_CHARS = 64
 _INLINE_BASE64_RE = re.compile(
-    rf"(?P<prefix>(?:['\"]base64['\"]\s*:\s*['\"]|data:[^,\s]*;base64,))[A-Za-z0-9+/=]{{{_INLINE_BASE64_MIN_CHARS},}}",
+    rf"(?P<prefix>(?:['\"]base64['\"]\s*:\s*['\"]|data:[^,\s]*;base64,))[A-Za-z0-9+/=_-]{{{_INLINE_BASE64_MIN_CHARS},}}",
     re.IGNORECASE,
 )
 
