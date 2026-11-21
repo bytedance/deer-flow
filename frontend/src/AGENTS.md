@@ -62,6 +62,8 @@ pnpm test:e2e                    # Playwright, for anything that depends on a re
   not overwrite restored state before history loads.
 - Recover `present_shared_artifact` paths from history only when all matching
   receipts confirm the same successful handoff.
+- **Batch items with `outcome_unknown` stay unresolved.** Localize their status,
+  count and waiting follow-up, and hide retry for these items.
 - **A truncated preview is never an editing baseline.** Its ETag can equal the
   full file's. Editing and saving need the complete content.
 - **Account preferences are scoped to the account.** A late response for a

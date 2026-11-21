@@ -42,6 +42,7 @@ const clients: QueryClient[] = [];
 const noLocaleChange = () => undefined;
 let detail: SubagentBatchItemDetail;
 let compactItem: SubagentBatchItem;
+let currentBatch: SubagentBatch;
 
 const batch: SubagentBatch = {
   id: "batch-1",
@@ -87,6 +88,7 @@ const item: SubagentBatchItem = {
 beforeEach(() => {
   mocks.workerRunning = false;
   compactItem = { ...item };
+  currentBatch = { ...batch, counts: { ...batch.counts } };
   detail = {
     ...item,
     status: "succeeded",
@@ -117,7 +119,7 @@ beforeEach(() => {
     const path = new URL(input, "http://test").pathname;
     const value =
       path === BATCH_URL
-        ? [batch]
+        ? [currentBatch]
         : path === `${BATCH_URL}/batch-1/items`
           ? [compactItem]
           : path === DETAIL_URL
@@ -167,6 +169,59 @@ function detailRequests() {
 // Keep the component, query hooks, report renderer and citation dialogs real.
 // Only the HTTP boundary and unrelated worker capability are replaced.
 describe("stored batch result review", () => {
+  it.each([
+    [
+      "en-US",
+      "Outcome unknown",
+      "1 outcome unknown",
+      "The operation may have taken effect before its result was saved. It will not be retried automatically; dependent items remain blocked.",
+      "Follow-up is waiting for unknown outcomes to be resolved.",
+    ],
+    [
+      "zh-CN",
+      "结果未知",
+      "1 项结果未知",
+      "操作可能已生效，但结果尚未保存。系统不会自动重试，依赖该条目的任务将继续等待。",
+      "存在结果未知的条目，后续工作将继续等待。",
+    ],
+  ] as const)(
+    "shows an unknown outcome without retry or completed progress in %s",
+    async (locale, label, count, explanation, followUp) => {
+      mocks.workerRunning = true;
+      currentBatch = {
+        ...currentBatch,
+        total_items: 2,
+        recovery_policy: "conservative",
+        continuation_status: "pending",
+        counts: {
+          ...currentBatch.counts,
+          running: 0,
+          pending: 1,
+          outcome_unknown: 1,
+        },
+      };
+      compactItem = {
+        ...item,
+        status: "outcome_unknown",
+        error: "Execution outcome is unknown",
+      };
+      detail = { ...detail, ...compactItem, report: null, evidence: null };
+      const t = await openReview(locale);
+      const dialog = screen.getByRole("dialog", { name: t.resultTitle });
+      expect(screen.getByText(count)).toBeDefined();
+      expect(screen.getByText(t.progress(0, 2))).toBeDefined();
+      expect(screen.getByText(followUp)).toBeDefined();
+      expect(screen.queryByText(t.followUpPending)).toBeNull();
+      expect(await within(dialog).findByText(label)).toBeDefined();
+      expect(within(dialog).getByText(explanation)).toBeDefined();
+      expect(screen.queryByText("outcome_unknown")).toBeNull();
+      expect(screen.queryByText("Execution outcome is unknown")).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: t.retryItem, hidden: true }),
+      ).toBeNull();
+    },
+  );
+
   it("refreshes an open terminal detail after an external retry and completion", async () => {
     compactItem = { ...item, status: "failed", error: "Previous failure" };
     detail = {

@@ -115,7 +115,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | boxd machines, bounded output copies and cleanup retries | [boxd sandbox provider](backend/packages/harness/deerflow/community/boxd_sandbox/README.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
-| Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
+| Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions), [Batch recovery](backend/docs/BATCH_CONTINUATION.md#conservative-recovery-opt-in) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
 | Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |

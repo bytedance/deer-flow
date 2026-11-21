@@ -45,6 +45,8 @@ _ITEM_PUBLIC_FIELDS = (
     "position",
     "status",
     "attempt",
+    "attempt_id",
+    "dispatch_started_at",
     "model_name",
     "result_preview",
     "result_truncated",
@@ -57,7 +59,7 @@ _ITEM_PUBLIC_FIELDS = (
     "created_at",
     "updated_at",
 )
-_ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
+_ITEM_TIMESTAMP_FIELDS = ("started_at", "dispatch_started_at", "completed_at", "created_at", "updated_at")
 
 
 class SubagentBatchRepository:
@@ -70,6 +72,7 @@ class SubagentBatchRepository:
     def _batch_dict(row: SubagentBatchRow) -> dict[str, Any]:
         """Return the stable owner-facing projection, never execution context."""
         data = {key: getattr(row, key) for key in _BATCH_PUBLIC_FIELDS}
+        data["recovery_policy"] = row.recovery_policy or "retry"
         for key in _BATCH_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -86,6 +89,7 @@ class SubagentBatchRepository:
             "thread_id": row.thread_id,
             "run_id": row.run_id,
             "execution_spec": row.execution_spec,
+            "recovery_policy": row.recovery_policy or "retry",
         }
 
     @staticmethod
@@ -117,7 +121,10 @@ class SubagentBatchRepository:
         max_attempts: int,
         execution_spec: dict[str, Any],
         continuation: dict[str, Any] | None = None,
+        recovery_policy: str = "retry",
     ) -> dict[str, Any]:
+        if recovery_policy not in ("retry", "conservative"):
+            raise ValueError("Unknown batch recovery policy")
         dependencies = batch_dependencies(items)
         now = datetime.now(UTC)
         batch = SubagentBatchRow(
@@ -134,6 +141,7 @@ class SubagentBatchRepository:
             max_live_items=max_live_items,
             max_running_items=max_running_items,
             max_attempts=max_attempts,
+            recovery_policy=recovery_policy,
             execution_spec=execution_spec,
             continuation_json=continuation,
             continuation_status="pending" if continuation is not None else None,
@@ -194,6 +202,8 @@ class SubagentBatchRepository:
         counts = await self._counts(session, batch.id)
         data = self._batch_dict(batch)
         data["counts"] = {status: counts.get(status, 0) for status in ("pending", "queued", "leased", "running", "succeeded", "failed", "cancelled")}
+        if counts["outcome_unknown"]:
+            data["counts"]["outcome_unknown"] = counts["outcome_unknown"]
         return data
 
     async def get_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
@@ -467,6 +477,12 @@ class SubagentBatchRepository:
                     terminal = item.cancel_requested_at is not None or item.attempt >= batch.max_attempts
                     if item.cancel_requested_at is not None:
                         values.update(status="cancelled", completed_at=now)
+                    elif batch.recovery_policy == "conservative" and item.dispatch_started_at is not None:
+                        # The intent commits before executor admission. A missing
+                        # result cannot establish that its tools had no effect,
+                        # even if the running-status acknowledgement was lost.
+                        terminal = False
+                        values.update(status="outcome_unknown", error="Execution lease expired after dispatch; outcome unknown. Automatic replay is blocked.")
                     elif item.attempt >= batch.max_attempts:
                         values.update(status="failed", error=item.error or "Execution lease expired after the maximum retry count", completed_at=now)
                     else:
@@ -478,6 +494,7 @@ class SubagentBatchRepository:
                             SubagentBatchItemRow.status.in_(("leased", "running")),
                             SubagentBatchItemRow.lease_owner == item.lease_owner,
                             SubagentBatchItemRow.lease_expires_at == item.lease_expires_at,
+                            SubagentBatchItemRow.dispatch_started_at == item.dispatch_started_at,
                         )
                         .values(**values)
                         .execution_options(synchronize_session=False)
@@ -569,7 +586,9 @@ class SubagentBatchRepository:
                             SubagentBatchItemRow.cancel_requested_at.is_(None),
                             SubagentBatchItemRow.batch_id.in_(runnable_batch),
                         )
-                        .values(status="leased", attempt=SubagentBatchItemRow.attempt + 1, lease_owner=lease_owner, lease_expires_at=expires_at, started_at=now, updated_at=now, error=None)
+                        .values(
+                            status="leased", attempt=SubagentBatchItemRow.attempt + 1, attempt_id=uuid.uuid4().hex, dispatch_started_at=None, lease_owner=lease_owner, lease_expires_at=expires_at, started_at=now, updated_at=now, error=None
+                        )
                         .execution_options(synchronize_session=False)
                     )
                     if won.rowcount != 1:
@@ -648,6 +667,49 @@ class SubagentBatchRepository:
             await session.commit()
             return valid
 
+    async def mark_item_dispatch_started(self, item_id: str, *, lease_owner: str, now: datetime) -> bool:
+        """Commit the one-shot dispatch intent before calling the child executor."""
+        async with self._sf() as session:
+            # Use the same parent-before-item lock order as recovery and control.
+            item, batch = await self._owned_item_for_update(session, item_id, lease_owner, statuses=("leased",))
+            if item is None or batch is None:
+                return False
+            live_parent = select(SubagentBatchRow.id).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.status.in_(BATCH_ACTIVE_STATUSES))
+            result = await session.execute(
+                update(SubagentBatchItemRow)
+                .where(
+                    SubagentBatchItemRow.id == item_id,
+                    SubagentBatchItemRow.lease_owner == lease_owner,
+                    SubagentBatchItemRow.status == "leased",
+                    SubagentBatchItemRow.lease_expires_at >= now,
+                    SubagentBatchItemRow.cancel_requested_at.is_(None),
+                    SubagentBatchItemRow.dispatch_started_at.is_(None),
+                    SubagentBatchItemRow.batch_id.in_(live_parent),
+                )
+                .values(dispatch_started_at=now, updated_at=now)
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+            return result.rowcount == 1
+
+    async def mark_item_outcome_unknown(self, item_id: str, *, lease_owner: str, error: str, now: datetime) -> bool:
+        """Quarantine an unconfirmed dispatched attempt without replaying it."""
+        async with self._sf() as session:
+            item, batch = await self._owned_item_for_update(session, item_id, lease_owner)
+            if item is None or batch is None or batch.recovery_policy != "conservative" or item.dispatch_started_at is None:
+                return False
+            if not await self._write_owned_item(
+                session,
+                item_id,
+                lease_owner,
+                {"status": "outcome_unknown", "error": error, "lease_owner": None, "lease_expires_at": None, "updated_at": now},
+            ):
+                return False
+            await session.refresh(batch)
+            await self._refresh_batch_status(session, batch, now=now)
+            await session.commit()
+            return True
+
     async def finalize_item(
         self,
         item_id: str,
@@ -693,7 +755,7 @@ class SubagentBatchRepository:
                     error=None,
                     completed_at=completed_at,
                 )
-            elif item.attempt < batch.max_attempts:
+            elif item.attempt < batch.max_attempts and not (batch.recovery_policy == "conservative" and item.dispatch_started_at is not None):
                 values.update(status="queued", error=error, started_at=None)
             else:
                 values.update(status="failed", error=error, completed_at=completed_at)
@@ -718,7 +780,7 @@ class SubagentBatchRepository:
             if cancelled:
                 values.update(status="cancelled", error="Cancelled by user", completed_at=now)
             else:
-                values.update(status="queued", attempt=max(0, item.attempt - 1), started_at=None, error=error)
+                values.update(status="queued", attempt=max(0, item.attempt - 1), attempt_id=None, dispatch_started_at=None, started_at=None, error=error)
             if not await self._write_owned_item(session, item_id, lease_owner, values):
                 return False
             if batch is not None:
@@ -781,10 +843,11 @@ class SubagentBatchRepository:
                     ).scalars()
                 )
                 for item in items:
+                    unknown = item.status == "outcome_unknown"
                     item.cancel_requested_at = now
                     item.updated_at = now
                     item.status = "cancelled"
-                    item.error = "Cancelled by user"
+                    item.error = "Cancelled by user; previous execution outcome remains unknown" if unknown else "Cancelled by user"
                     item.lease_owner = None
                     item.lease_expires_at = None
                     item.completed_at = now
@@ -803,6 +866,8 @@ class SubagentBatchRepository:
                 return None
             item.status = "pending"
             item.attempt = 0
+            item.attempt_id = None
+            item.dispatch_started_at = None
             item.error = None
             item.result = None
             item.result_artifact = None

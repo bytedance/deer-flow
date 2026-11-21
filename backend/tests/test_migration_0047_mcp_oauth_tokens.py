@@ -21,7 +21,7 @@ from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0047_mcp_oauth_tokens"
-HEAD = "0058_mcp_browser_oauth"
+HEAD = "0059_merge_batch_recovery"
 PREVIOUS = "0046_skill_mutations"
 TABLE = "mcp_oauth_tokens"
 COLUMNS = {
@@ -48,7 +48,10 @@ async def test_0047_remains_in_the_single_migration_chain():
     assert bootstrap._get_head_revision() == HEAD
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [HEAD]
-    assert script.get_revision(HEAD).down_revision == "0057_coordination_workers"
+    assert set(script.get_revision(HEAD).down_revision) == {"0058_mcp_browser_oauth", "0056_merge_batch_recovery"}
+    assert set(script.get_revision("0056_merge_batch_recovery").down_revision) == {"0055_thread_shares", "0053_batch_recovery"}
+    assert script.get_revision("0053_batch_recovery").down_revision == "0052_batch_continuation"
+    assert script.get_revision("0058_mcp_browser_oauth").down_revision == "0057_coordination_workers"
     assert script.get_revision("0057_coordination_workers").down_revision == "0056_coordination_task_state"
     assert script.get_revision("0056_coordination_task_state").down_revision == "0055_thread_shares"
     assert script.get_revision("0055_thread_shares").down_revision == "0054_project_memory"

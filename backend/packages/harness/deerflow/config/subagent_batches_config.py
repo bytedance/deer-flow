@@ -1,5 +1,7 @@
 """Startup-only configuration for durable native-subagent batches."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -7,6 +9,7 @@ class SubagentBatchesConfig(BaseModel):
     """Durable batch scheduler limits and recovery settings."""
 
     enabled: bool = Field(default=False)
+    recovery_policy: Literal["retry", "conservative"] = "retry"
     poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=60.0)
     lease_seconds: int = Field(default=120, ge=10, le=3600)
     max_items_per_batch: int = Field(default=5_000, ge=1, le=100_000)

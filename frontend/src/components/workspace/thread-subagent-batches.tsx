@@ -176,6 +176,7 @@ function BatchCard({
   const completed = completedSubagentBatchItems(batch);
   const active = isActiveSubagentBatch(batch);
   const labels = t.subagentBatches.status;
+  const unknownCount = batch.counts.outcome_unknown ?? 0;
 
   return (
     <article
@@ -208,13 +209,18 @@ function BatchCard({
             {batch.counts.failed} {labels.failed.toLowerCase()}
           </span>
         )}
+        {unknownCount > 0 && (
+          <span>{t.subagentBatches.outcomeUnknownCount(unknownCount)}</span>
+        )}
       </div>
       {batch.continuation_status &&
         batch.continuation_status !== "dispatched" && (
           <p className="text-muted-foreground mt-2 text-xs">
             {batch.continuation_status === "pending" ||
             batch.continuation_status === "dispatching"
-              ? t.subagentBatches.followUpPending
+              ? unknownCount > 0
+                ? t.subagentBatches.followUpUnknown
+                : t.subagentBatches.followUpPending
               : t.subagentBatches.followUpStopped}
           </p>
         )}
@@ -367,16 +373,24 @@ function BatchItemRow({
         <span className="min-w-0 truncate font-medium" title={item.item_key}>
           {item.item_key}
         </span>
-        <Badge variant="outline">{item.status}</Badge>
+        <Badge variant="outline">
+          {item.status === "outcome_unknown"
+            ? t.subagentBatches.outcomeUnknown
+            : item.status}
+        </Badge>
       </div>
       {item.result_preview && (
         <p className="mt-1 line-clamp-3 whitespace-pre-wrap">
           {item.result_preview}
         </p>
       )}
-      {item.error && (
+      {item.status === "outcome_unknown" ? (
+        <p className="text-muted-foreground mt-1 break-words">
+          {t.subagentBatches.outcomeUnknownHint}
+        </p>
+      ) : item.error ? (
         <p className="text-destructive mt-1 break-words">{item.error}</p>
-      )}
+      ) : null}
       <div className="mt-1 flex flex-wrap gap-1">
         <Button
           type="button"
@@ -446,6 +460,12 @@ function BatchItemDetail({ detail }: { detail: SubagentBatchItemDetail }) {
   return (
     <KnowledgeSourcesProvider messages={citationMessages}>
       <div className="space-y-4 text-sm">
+        {detail.status === "outcome_unknown" && (
+          <div className="bg-muted/40 rounded-md p-3">
+            <Badge variant="outline">{t.subagentBatches.outcomeUnknown}</Badge>
+            <p className="mt-2">{t.subagentBatches.outcomeUnknownHint}</p>
+          </div>
+        )}
         <section>
           <h3 className="mb-2 font-medium">{t.subagentBatches.report}</h3>
           <div className="bg-muted/40 max-h-72 overflow-y-auto rounded-md p-3">

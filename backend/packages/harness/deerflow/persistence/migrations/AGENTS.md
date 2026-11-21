@@ -55,6 +55,10 @@ Set `TEST_POSTGRES_URI` to run the same cases against PostgreSQL. Test both
   document offline.
 - **Downgrade is refused once the forward policy is active.** Dispose the
   migration engine on refusal as well.
+- **Stop batch workers during the recovery metadata upgrade.** Revision
+  `0053_batch_recovery` leaves legacy policy and attempt fields nullable. A NULL
+  policy retains retries. Downgrade refuses active conservative batches or
+  unknown outcomes.
 - **Concurrent Gateways serialize the upgrade** with a PostgreSQL advisory lock.
 
 ## Tables that Alembic must ignore
