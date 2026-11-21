@@ -1,4 +1,6 @@
 import base64
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,10 +10,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from skill_loader import FakeResp, load  # noqa: E402
 
 img = load("image-generation")
+SCRIPT = Path(img.__file__)
+
+# Child processes execute the real CLI. Only provider responses are substituted.
+_TRANSPORT_RUNNER = """
+import json
+import runpy
+import sys
+from unittest.mock import patch
+
+import requests
+
+payload = json.loads(sys.argv.pop(1))
+sys.argv = sys.argv[1:]
+response = requests.Response()
+response.status_code = 200
+response.encoding = "utf-8"
+response._content = json.dumps(payload).encode("utf-8")
+with patch.object(requests, "post", return_value=response):
+    runpy.run_path(sys.argv[0], run_name="__main__")
+"""
 
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     for k in [
         "GEMINI_API_KEY",
         "MINIMAX_API_KEY",
@@ -24,6 +47,16 @@ def clean_env(monkeypatch):
         "IMAGE_GENERATION_SIZE",
     ]:
         monkeypatch.delenv(k, raising=False)
+
+
+def _run_image_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
 
 
 def test_resolve_prefers_gemini(monkeypatch):
@@ -206,10 +239,10 @@ def test_minimax_rejects_overlong_prompt_without_calling_api(monkeypatch, tmp_pa
     prompt_file = tmp_path / "p.json"
     prompt_file.write_text('{"prompt": "' + "x" * 1600 + '"}', encoding="utf-8")
     out = tmp_path / "o.jpg"
-    msg = img.generate_image(str(prompt_file), [], str(out), "16:9")
+    with pytest.raises(ValueError, match="1500") as exc:
+        img.generate_image(str(prompt_file), [], str(out), "16:9")
 
-    assert "1500" in msg
-    assert "character" in msg.lower()
+    assert "character" in str(exc.value).lower()
     assert not out.exists()
 
 
@@ -424,3 +457,112 @@ def test_guess_mime_by_extension():
     assert img._guess_mime("/a/b.webp") == "image/webp"
     assert img._guess_mime("/a/b.jpg") == "image/jpeg"
     assert img._guess_mime("/a/b.unknown") == "image/jpeg"
+
+
+@pytest.mark.parametrize(
+    ("case", "diagnostic"),
+    [
+        ("no-credentials", "No credentials found"),
+        ("gemini-without-key", "GEMINI_API_KEY is not set"),
+        ("minimax-without-key", "MINIMAX_API_KEY is not set"),
+        ("openai-without-key", "IMAGE_GENERATION_API_KEY is not set"),
+        ("missing-prompt", "prompt.json"),
+        ("overlong-prompt", "1500"),
+        ("dall-e-extension", ".png extension"),
+        ("corrupt-reference", "Skipping invalid reference image"),
+    ],
+)
+def test_cli_failure_exits_nonzero(monkeypatch, tmp_path, case, diagnostic):
+    prompt = tmp_path / "prompt.json"
+    output = tmp_path / "image.jpg"
+    output.write_bytes(b"previous image")
+    reference_args: list[str] = []
+    if case != "missing-prompt":
+        if case == "overlong-prompt":
+            body = json.dumps({"prompt": "x" * 1600})
+        else:
+            body = json.dumps({"prompt": "a red deer"})
+        prompt.write_text(body, encoding="utf-8")
+    if case == "gemini-without-key":
+        monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "gemini")
+    elif case == "minimax-without-key":
+        monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "minimax")
+    elif case == "openai-without-key":
+        monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    elif case == "overlong-prompt":
+        monkeypatch.setenv("MINIMAX_API_KEY", "synthetic-key")
+    elif case == "dall-e-extension":
+        monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+        monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "synthetic-key")
+        monkeypatch.setenv("IMAGE_GENERATION_MODEL", "dall-e-3")
+    elif case == "corrupt-reference":
+        # Gemini validates references before the credential check, so a corrupt
+        # file must not call the API when the key is absent.
+        monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "gemini")
+        reference = tmp_path / "corrupt.jpg"
+        reference.write_bytes(b"not-an-image")
+        reference_args = ["--reference-images", str(reference)]
+
+    result = _run_image_cli(
+        "--prompt-file",
+        str(prompt),
+        "--output-file",
+        str(output),
+        *reference_args,
+    )
+
+    assert result.returncode == 1
+    assert diagnostic in result.stderr
+    assert result.stdout == ""
+    assert output.read_bytes() == b"previous image"
+    if case == "corrupt-reference":
+        assert "invalid or corrupted" in result.stderr
+        assert "validation failure" in result.stderr
+
+
+@pytest.mark.parametrize("succeeds", [False, True], ids=["provider-error", "success"])
+def test_cli_provider_result(monkeypatch, tmp_path, succeeds):
+    monkeypatch.setenv("MINIMAX_API_KEY", "synthetic-key")
+    raw = b"PNGBYTES"
+    payload = (
+        {
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+            "data": {"image_base64": [base64.b64encode(raw).decode()]},
+        }
+        if succeeds
+        else {"base_resp": {"status_code": 1004, "status_msg": "auth failed"}}
+    )
+    prompt = tmp_path / "prompt.json"
+    prompt.write_text(json.dumps({"prompt": "a red deer"}), encoding="utf-8")
+    output = tmp_path / "image.jpg"
+    output.write_bytes(b"previous image")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _TRANSPORT_RUNNER,
+            json.dumps(payload),
+            str(SCRIPT),
+            "--prompt-file",
+            str(prompt),
+            "--output-file",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+
+    if succeeds:
+        assert result.returncode == 0
+        assert f"Successfully generated image to {output}" in result.stdout
+        assert result.stderr == ""
+        assert output.read_bytes() == raw
+    else:
+        assert result.returncode == 1
+        assert "1004" in result.stderr
+        assert "auth failed" in result.stderr
+        assert result.stdout == ""
+        assert output.read_bytes() == b"previous image"
