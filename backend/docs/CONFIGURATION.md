@@ -1430,6 +1430,8 @@ DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
+
+Jina AI, InfoQuest and Browserless run article extraction and Markdown rendering together on a worker thread so processing fetched HTML leaves the agent event loop available.
 - `ls` - List directory contents
 - `read_file` - Read file contents
 - `write_file` - Write file contents

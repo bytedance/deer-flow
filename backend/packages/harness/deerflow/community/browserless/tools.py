@@ -354,13 +354,13 @@ async def web_fetch_tool(url: str) -> tuple[str, dict | None]:
         if isinstance(result, str):
             return result, None
 
-        article = await asyncio.to_thread(_readability_extractor.extract_article, result.html, url=url)
+        markdown = await asyncio.to_thread(_readability_extractor.extract_markdown, result.html, url=url)
         # Preserve target HTTP evidence outside page prose. Direct string callers
         # still receive the same content; LangChain ToolMessages retain the artifact.
         raw_status = result.target_status_code.strip()
         status = int(raw_status) if len(raw_status) == 3 and raw_status.isascii() and raw_status.isdigit() else None
         artifact = {"deerflow_http_response": {"status_code": status}} if status is not None and 100 <= status <= 599 else None
-        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}", artifact
+        return f"{markdown[:4096]}{_target_status_warning(result)}", artifact
 
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")
