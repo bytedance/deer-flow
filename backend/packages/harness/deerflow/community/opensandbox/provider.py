@@ -8,6 +8,7 @@ import ipaddress
 import logging
 import math
 import os
+import posixpath
 import shlex
 import stat
 import tempfile
@@ -53,6 +54,10 @@ _SKILL_CATEGORIES = (SkillCategory.PUBLIC, SkillCategory.CUSTOM, SkillCategory.L
 _PROTECTED_SKILLS_ROOTS = tuple(PurePosixPath(path) for path in ("/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32", "/proc", "/run", "/sbin", "/sys", "/usr", "/var", "/mnt/user-data", "/mnt/acp-workspace"))
 
 
+class _SkillUploadError(RuntimeError):
+    """The upload failed before the published skill view was changed."""
+
+
 def _skills_root(path: str) -> PurePosixPath:
     root = PurePosixPath(path)
     if (
@@ -68,6 +73,27 @@ def _skills_root(path: str) -> PurePosixPath:
     ):
         raise ValueError("skills.container_path must be a dedicated absolute OpenSandbox skills directory")
     return root
+
+
+def _portable_skill_name(name: str) -> bool:
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return not ("\\" in name or ":" in name or name.endswith((" ", ".")) or name.partition(".")[0].rstrip(" ").upper() in _WINDOWS_RESERVED_NAMES)
+
+
+def _skill_link_target(path: Path, package: Path) -> Path | None:
+    raw_target = Path(os.readlink(path))
+    if raw_target.is_absolute() or any(part != ".." and not _portable_skill_name(part) for part in raw_target.parts):
+        return None
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_relative_to(package) or not all(_portable_skill_name(part) for part in resolved.relative_to(package).parts):
+        return None
+    return resolved
 
 
 def _uses_insecure_remote_http(domain: Any, protocol: str) -> bool:
@@ -284,7 +310,11 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         if thread_id is None:
             sandbox_id = str(uuid.uuid4())[:8]
             sandbox = self._create_sandbox(sandbox_id, thread_id=None, user_id=user_id)
-            self._prepare_new_skill_view(sandbox, thread_id=None, user_id=user_id)
+            try:
+                self._prepare_new_skill_view(sandbox, thread_id=None, user_id=user_id)
+            except BaseException:
+                self._destroy_quietly(sandbox, context="skill projection setup failed")
+                raise
             with self._lock:
                 if self._shutdown_called:
                     destroy_after_unlock = True
@@ -333,9 +363,17 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                     raise
                 logger.info("Rebuilding terminal OpenSandbox %s during acquire", existing)
         sandbox = self._reclaim_warm_pool(sandbox_id)
+        reclaimed = sandbox is not None
         if sandbox is None:
             sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
-        self._prepare_new_skill_view(sandbox, thread_id=thread_id, user_id=user_id)
+        try:
+            self._prepare_new_skill_view(sandbox, thread_id=thread_id, user_id=user_id)
+        except BaseException as exc:
+            if reclaimed and isinstance(exc, _SkillUploadError):
+                self._park_failed_skill_upload(sandbox, was_active=False)
+            else:
+                self._destroy_quietly(sandbox, context="skill projection setup failed")
+            raise
         with self._lock:
             if self._shutdown_called:
                 destroy_after_unlock = True
@@ -430,15 +468,25 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         from deerflow.skills.projection import ensure_skill_projections, thread_skill_projection_exists
         from deerflow.skills.storage import get_or_new_user_skill_storage
 
-        try:
-            storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
-            # Eager middleware installs the scoped view. Until then do not expose
-            # either the shared view or the previous agent's files on a warm remote.
-            projection = None if thread_id is not None and thread_skill_projection_exists(storage, thread_id) else ensure_skill_projections(storage)
-            self._replace_skill_projection(sandbox, projection)
-        except BaseException:
-            self._destroy_quietly(sandbox, context="skill projection setup failed")
-            raise
+        storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
+        # Eager middleware installs the scoped view. Until then do not expose
+        # either the shared view or the previous agent's files on a warm remote.
+        projection = None if thread_id is not None and thread_skill_projection_exists(storage, thread_id) else ensure_skill_projections(storage)
+        self._replace_skill_projection(sandbox, projection)
+
+    def _park_failed_skill_upload(self, sandbox: OpenSandboxSandbox, *, was_active: bool) -> None:
+        sandbox_id = sandbox.id
+        with self._lock:
+            if was_active:
+                if self._sandboxes.get(sandbox_id) is not sandbox:
+                    return
+                self._sandboxes.pop(sandbox_id)
+                for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
+                    self._thread_sandboxes.pop(key)
+            if not self._shutdown_called:
+                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
+                return
+        self._destroy_quietly(sandbox, context="skill upload failed during shutdown")
 
     def sync_agent_skills(self, sandbox_id: str, *, thread_id: str, user_id: str, projection: SkillProjectionPaths) -> None:
         from deerflow.skills.projection import get_thread_skill_projection_paths
@@ -455,13 +503,16 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 raise RuntimeError("OpenSandbox skill projection does not belong to this scope")
             try:
                 self._replace_skill_projection(sandbox, projection)
+            except _SkillUploadError:
+                self._park_failed_skill_upload(sandbox, was_active=True)
+                raise
             except BaseException:
                 self._invalidate_sandbox(sandbox_id, "skill projection setup failed")
                 raise
 
     def _replace_skill_projection(self, sandbox: OpenSandboxSandbox, projection: SkillProjectionPaths | None) -> None:
         root = self._config["skills_root"]
-        stage = root / f".deerflow-skills-{uuid.uuid4().hex}"
+        stage = root / ".deerflow-skills-stage"
         deadline = time.monotonic() + self._SYNC_DEADLINE_SECONDS
         ancestors = [*reversed(root.parents[:-1]), root]
         no_links = "; ".join(f"test ! -L {shlex.quote(str(path))}" for path in ancestors)
@@ -479,9 +530,15 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 raise RuntimeError("OpenSandbox skill projection command failed")
 
         try:
-            run(f"{no_links}; mkdir -p -- {qroot}; mkdir -m 700 -- {qstage}; mkdir -- {staged}")
-            if projection is not None:
-                self._upload_skill_projection(sandbox, projection, stage=stage, mkdir=run, deadline=deadline)
+            run(f"{no_links}; mkdir -p -- {qroot}; rm -rf -- {qstage}; mkdir -m 700 -- {qstage}; mkdir -- {staged}")
+        except Exception as exc:
+            raise RuntimeError("Failed to synchronize OpenSandbox skill projection") from exc
+        if projection is not None:
+            try:
+                self._upload_skill_projection(sandbox, projection, stage=stage, run=run, deadline=deadline)
+            except Exception as exc:
+                raise _SkillUploadError("Failed to synchronize OpenSandbox skill projection") from exc
+        try:
             run(f"{no_links}; test ! -L {qstage}; rm -rf -- {destinations}; mv -- {staged} {qroot}; rmdir -- {qstage}")
         except Exception as exc:
             raise RuntimeError("Failed to synchronize OpenSandbox skill projection") from exc
@@ -492,11 +549,12 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         projection: SkillProjectionPaths,
         *,
         stage: PurePosixPath,
-        mkdir: Callable[[str], None],
+        run: Callable[[str], None],
         deadline: float,
     ) -> None:
         sources = (projection.public, projection.custom, projection.legacy, projection.integrations)
         entries: list[tuple[PurePosixPath, int, bool]] = []
+        links: list[tuple[PurePosixPath, PurePosixPath, bool]] = []
         total = 0
 
         def fail_scan(error: OSError) -> None:
@@ -505,6 +563,12 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         def check_deadline() -> None:
             if time.monotonic() >= deadline:
                 raise TimeoutError("OpenSandbox skill projection deadline exceeded")
+
+        def portable(name: str) -> bool:
+            if _portable_skill_name(name):
+                return True
+            logger.warning("Skipping non-portable OpenSandbox skill path component %r", name)
+            return False
 
         # Capture under the publication locks, but do not hold the global
         # public projection lock across SDK calls for one user's sandbox.
@@ -515,18 +579,35 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 for category, source in zip(_SKILL_CATEGORIES, sources, strict=True):
                     if source.is_symlink() or any(parent.is_symlink() for parent in source.parents):
                         raise ValueError("Symlink in OpenSandbox skill projection root")
+                    packages: set[Path] = set()
+                    category_root = stage / category
                     for directory, dirnames, filenames in os.walk(source, followlinks=False, onerror=fail_scan):
                         check_deadline()
                         parent = Path(directory)
-                        dirnames[:] = [name for name in dirnames if not (parent / name).is_symlink()]
-                        target_dir = stage / category / parent.relative_to(source).as_posix()
-                        for name in filenames:
+                        package = next((root for root in (parent, *parent.parents) if root in packages), None)
+                        if package is None and "SKILL.md" in filenames and stat.S_ISREG((parent / "SKILL.md").lstat().st_mode):
+                            packages.add(parent)
+                            package = parent
+                        target_dir = category_root / parent.relative_to(source).as_posix()
+                        dirnames[:] = [name for name in dirnames if portable(name)]
+                        dir_links = {name for name in dirnames if (parent / name).is_symlink()}
+                        dirnames[:] = [name for name in dirnames if name not in dir_links]
+                        for name in (*dir_links, *(name for name in filenames if portable(name))):
                             check_deadline()
                             path = parent / name
                             info = path.lstat()
+                            if stat.S_ISLNK(info.st_mode):
+                                resolved = _skill_link_target(path, package) if package is not None else None
+                                if resolved is None or not (resolved.is_dir() or resolved.is_file()):
+                                    logger.warning("Skipping unsafe OpenSandbox skill link %r", path.relative_to(source).as_posix())
+                                    continue
+                                if len(entries) + len(links) >= self._MAX_SKILL_FILES:
+                                    raise ValueError("OpenSandbox skill projection exceeds upload limits")
+                                links.append((target_dir / name, category_root / resolved.relative_to(source).as_posix(), resolved.is_dir()))
+                                continue
                             if not stat.S_ISREG(info.st_mode):
                                 continue
-                            if len(entries) >= self._MAX_SKILL_FILES or info.st_size > min(self._MAX_SKILL_FILE_BYTES, self._MAX_SKILL_TOTAL_BYTES - total):
+                            if len(entries) + len(links) >= self._MAX_SKILL_FILES or info.st_size > min(self._MAX_SKILL_FILE_BYTES, self._MAX_SKILL_TOTAL_BYTES - total):
                                 raise ValueError("OpenSandbox skill projection exceeds upload limits")
                             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
                             with os.fdopen(os.open(path, flags), "rb") as file:
@@ -541,12 +622,25 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                             total += len(data)
             payload.seek(0)
             created = {stage / category for category in _SKILL_CATEGORIES}
+
+            def ensure_dir(path: PurePosixPath) -> None:
+                if path not in created:
+                    run(f"mkdir -p -- {shlex.quote(str(path))}")
+                    created.add(path)
+
             for target, size, executable in entries:
-                if target.parent not in created:
-                    mkdir(f"mkdir -p -- {shlex.quote(str(target.parent))}")
-                    created.add(target.parent)
+                ensure_dir(target.parent)
                 check_deadline()
                 sandbox._upload_skill_file(str(target), payload.read(size), executable=executable)
+            files = {target for target, _, _ in entries}
+            for link, target, is_dir in links:
+                if is_dir:
+                    ensure_dir(target)
+                elif target not in files:
+                    continue
+                ensure_dir(link.parent)
+                relative = posixpath.relpath(target, start=link.parent)
+                run(f"ln -sT -- {shlex.quote(relative)} {shlex.quote(str(link))}")
 
     def release(self, sandbox_id: str) -> None:
         # Same scope lock as acquire: no next turn may reuse a client while its

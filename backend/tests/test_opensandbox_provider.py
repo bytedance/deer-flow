@@ -654,7 +654,8 @@ def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
     assert _remote_skills(bob) == {"alpha", "beta", "bob-only"}
 
 
-def test_opensandbox_skill_partial_upload_discards_warm_remote(opensandbox_skill_view, monkeypatch):
+@pytest.mark.parametrize("restricted", [False, True])
+def test_opensandbox_skill_partial_upload_preserves_warm_workspace(opensandbox_skill_view, monkeypatch, restricted):
     env = opensandbox_skill_view
     env.skill("alpha")
     env.skill("beta")
@@ -662,6 +663,8 @@ def test_opensandbox_skill_partial_upload_discards_warm_remote(opensandbox_skill
     (allowed / "asset").write_bytes(b"asset")
     sandbox_id = env.provider.acquire("thread", user_id="alice")
     remote = env.sdk.remotes[0]
+    draft = "/mnt/user-data/workspace/draft.txt"
+    remote.file_data[draft] = b"unsaved work"
     env.provider.release(sandbox_id)
     calls = []
     write = remote.files.write_file
@@ -674,18 +677,65 @@ def test_opensandbox_skill_partial_upload_discards_warm_remote(opensandbox_skill
 
     monkeypatch.setattr(remote.files, "write_file", fail_second_write)
     runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-    middleware = SandboxMiddleware(lazy_init=True, available_skills={"allowed"})
+    middleware = SandboxMiddleware(lazy_init=False, available_skills={"allowed"} if restricted else None)
     with pytest.raises(RuntimeError, match="skill projection"):
         middleware.before_agent({}, runtime)
     assert len(calls) == 2
     assert "sandbox_id" not in runtime.context
     assert env.provider.get(sandbox_id) is None
-    assert sandbox_id not in env.provider._warm_pool
-    assert remote.destroy_calls == 1
-    assert not (remote.skill_root / "custom" / "allowed").exists()
+    assert remote.destroy_calls == 0
+    assert (remote.skill_root / "custom" / "allowed").exists() is not restricted
 
     assert middleware.before_agent({}, runtime) == {"sandbox": {"sandbox_id": sandbox_id}}
-    assert _remote_skills(env.sdk.remotes[1]) == {"allowed"}
+    assert len(env.sdk.remotes) == 1
+    assert env.provider.get(sandbox_id).read_file(draft) == "unsaved work"
+    assert _remote_skills(remote) == ({"allowed"} if restricted else {"alpha", "beta", "allowed"})
+    assert {p.name for p in remote.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
+
+
+def test_opensandbox_skill_upload_preserves_package_links(opensandbox_skill_view):
+    env = opensandbox_skill_view
+    package = env.skill("allowed", owner="alice")
+    assets = package / "assets"
+    assets.mkdir()
+    (assets / "data's.txt").write_bytes(b"data")
+    (package / "file link").symlink_to("assets/data's.txt")
+    (package / "dir link").symlink_to("assets", target_is_directory=True)
+    (assets / "nested link").symlink_to("../file link")
+    (assets / "empty").mkdir()
+    (package / "empty link").symlink_to("assets/empty", target_is_directory=True)
+
+    runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
+    SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent({}, runtime)
+    uploaded = env.sdk.remotes[0].skill_root / "custom" / "allowed"
+    assert (uploaded / "file link").is_symlink()
+    assert (uploaded / "file link").read_bytes() == b"data"
+    assert (uploaded / "dir link").is_symlink()
+    assert (uploaded / "dir link" / "data's.txt").read_bytes() == b"data"
+    assert (uploaded / "assets" / "nested link").is_symlink()
+    assert (uploaded / "assets" / "nested link").read_bytes() == b"data"
+    assert (uploaded / "empty link").is_symlink()
+    assert (uploaded / "empty link").is_dir()
+
+
+def test_opensandbox_skill_upload_skips_unsafe_links_and_nonportable_names(opensandbox_skill_view, caplog):
+    env = opensandbox_skill_view
+    package = env.skill("alpha")
+    env.skill("beta")
+    (package / "external").symlink_to("../beta/SKILL.md")
+    (package / "absolute").symlink_to(package / "SKILL.md")
+    (package / "invalid\\name").write_bytes(b"skip")
+    (package / os.fsdecode(b"non-utf8-\xff")).write_bytes(b"skip")
+    (package / "invalid\\directory").mkdir()
+    (package / "invalid\\directory" / "child").write_bytes(b"skip")
+    (package / "portable link").symlink_to("SKILL.md")
+    (package / "broken").symlink_to("missing")
+
+    env.provider.acquire("thread", user_id="alice")
+    remote = env.sdk.remotes[0]
+    assert _remote_skills(remote) == {"alpha", "beta"}
+    assert {p.name for p in (remote.skill_root / "public" / "alpha").iterdir()} == {"SKILL.md", "portable link"}
+    assert "non-portable" in caplog.text
 
 
 def test_opensandbox_skill_sync_refuses_symlinked_remote_root(opensandbox_skill_view, tmp_path):
