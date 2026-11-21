@@ -3256,10 +3256,7 @@ async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
                 None,
             )
             assert cleanup_waiter is not None
-            await asyncio.wait_for(
-                asyncio.gather(cleanup_waiter, return_exceptions=True),
-                timeout=0.5,
-            )
+            await asyncio.wait_for(asyncio.gather(cleanup_waiter, return_exceptions=True), timeout=0.5)
             assert cleanup_waiter.done()
 
             # The pool must have handed off this exact owner, and its reaper must
@@ -3275,9 +3272,6 @@ async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
             if cm.owner is not None:
                 await asyncio.gather(cm.owner, return_exceptions=True)
             while pool._teardown_tasks:
-                await asyncio.gather(
-                    *list(pool._teardown_tasks),
-                    return_exceptions=True,
-                )
+                await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
 
     assert not pool._teardown_tasks
