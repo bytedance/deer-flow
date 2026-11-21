@@ -166,6 +166,7 @@ export const zhCN: Translations = {
       },
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "zh-CN"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "zh-CN"),
+      trajectory: bundledCopy("deerflow-extension-trajectory", "zh-CN"),
       context: bundledCopy("deerflow-extension-jev-context", "zh-CN"),
       classify: bundledCopy("deerflow-extension-jev-classify", "zh-CN"),
       screening: bundledCopy("deerflow-extension-jev-screening", "zh-CN"),

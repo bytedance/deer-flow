@@ -64,6 +64,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "frontend/tests/e2e/AGENTS.md",
     "scripts/AGENTS.md",
     "examples/deerflow-extension-agent-teams/AGENTS.md",
+    "examples/deerflow-extension-trajectory/AGENTS.md",
     "examples/deerflow-extension-workflows/AGENTS.md",
     "examples/deerflow-extension-weknora/AGENTS.md",
     "examples/deerflow-extension-knowledge-management/AGENTS.md",

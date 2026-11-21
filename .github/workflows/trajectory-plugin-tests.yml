@@ -1,0 +1,74 @@
+name: Trajectory Plugin Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, '*-dev']
+    paths:
+      - 'examples/deerflow-extension-trajectory/**'
+      - 'backend/app/gateway/**'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/**'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'scripts/check_extension.py'
+      - '.github/workflows/trajectory-plugin-tests.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'examples/deerflow-extension-trajectory/**'
+      - 'backend/app/gateway/**'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/**'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'scripts/check_extension.py'
+      - '.github/workflows/trajectory-plugin-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trajectory-plugin-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installed-package:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.1'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked host dependencies
+        working-directory: backend
+        run: uv sync --locked --no-group extensions
+      - name: Validate wheel with the official package checker
+        run: backend/.venv/bin/python scripts/check_extension.py examples/deerflow-extension-trajectory
+      - name: Build and install the test wheel in isolation
+        shell: bash
+        run: |
+          uv build examples/deerflow-extension-trajectory --wheel --out-dir "$RUNNER_TEMP/trajectory-wheel"
+          uv pip install --python backend/.venv/bin/python --no-deps --target "$RUNNER_TEMP/trajectory-installed" "$RUNNER_TEMP"/trajectory-wheel/*.whl
+      - name: Test installed entry point, projection, SQLite reopen, authorization and exports
+        shell: bash
+        run: |
+          PYTHONPATH="$RUNNER_TEMP/trajectory-installed:$PWD/backend" TRAJECTORY_REQUIRE_WHEEL=1 \
+            backend/.venv/bin/python -m pytest examples/deerflow-extension-trajectory/tests -q
+      - name: Test browser module turn buffering and lifecycle
+        run: |
+          node --check examples/deerflow-extension-trajectory/deerflow_extension_trajectory/static/dist/index.mjs
+          node --test examples/deerflow-extension-trajectory/tests/test_turns.mjs
+      - name: Lint plugin and tests
+        working-directory: backend
+        run: |
+          .venv/bin/ruff check ../examples/deerflow-extension-trajectory
+          .venv/bin/ruff format --check ../examples/deerflow-extension-trajectory

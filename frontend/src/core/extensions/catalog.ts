@@ -29,6 +29,11 @@ export const extensionCatalog = [
     icon: "bookmark",
   },
   {
+    key: "trajectory",
+    package: "deerflow-extension-trajectory",
+    namespace: "community.trajectory",
+  },
+  {
     key: "context",
     package: "deerflow-extension-jev-context",
     namespace: "community.jev-context",

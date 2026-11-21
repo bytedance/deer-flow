@@ -1,0 +1,46 @@
+[project]
+name = "deerflow-extension-trajectory"
+version = "0.6.2"
+description = "DeerFlow trajectories, deterministic execution evidence and measured durations"
+requires-python = ">=3.12"
+dependencies = [
+  "deerflow-extension-api>=0.2.3,<0.3",
+  "fastapi>=0.115.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.14.11"]
+
+# The package's standalone suite needs only the public extension contract.
+# The dedicated host workflow explicitly passes tests/ to include Gateway,
+# installed-distribution and SQLite integration tests as well.
+[tool.pytest.ini_options]
+testpaths = [
+  "tests/test_analysis.py",
+  "tests/test_checkpoints.py",
+  "tests/test_comparison.py",
+  "tests/test_export.py",
+  "tests/test_paging.py",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[project.entry-points."deerflow.extensions"]
+trajectory = "deerflow_extension_trajectory:install"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deerflow_extension_trajectory"]
+exclude = ["deerflow_extension_trajectory/static/**", "deerflow_extension_trajectory/ui_manifest.json"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"deerflow_extension_trajectory/static" = "deerflow_extension_trajectory/static"
+"deerflow_extension_trajectory/ui_manifest.json" = "deerflow_extension_trajectory/ui_manifest.json"

@@ -145,6 +145,7 @@ export interface Translations {
       | "reportSections"
       | "agentTeams"
       | "bookmarks"
+      | "trajectory"
       | "context"
       | "classify"
       | "screening"
