@@ -3276,7 +3276,9 @@ async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
             assert cm.owner is not None and not cm.owner.done()
             assert cm.owner in tracked_teardown_targets
             owner_reaper = f"mcp-session-owner-reap:{cm.owner.get_name()}"
-            assert any(task.get_name() == owner_reaper for task in pool._teardown_tasks)
+            assert any(
+                task.get_name() == owner_reaper for task in pool._teardown_tasks
+            )
         finally:
             # Always release the owner, including when the deadline assertion fails.
             release_exit.set()
