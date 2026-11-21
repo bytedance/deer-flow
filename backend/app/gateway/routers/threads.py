@@ -2130,8 +2130,9 @@ async def get_thread_history(
 
     Only the latest (first) checkpoint carries the ``messages`` key to
     avoid duplicating the complete conversation across every entry. It also
-    carries an active ``goal`` and an achieved ``goal_outcome``, because
-    ``useStream`` rebuilds thread values from this head after every run.
+    carries the persisted ``todos`` list, an active ``goal`` and an achieved
+    ``goal_outcome``, because ``useStream`` rebuilds thread values from this
+    head after every run.
     """
     checkpointer = get_checkpointer(request)
     try:
@@ -2163,6 +2164,8 @@ async def get_thread_history(
                 values["thread_data"] = thread_data
 
             if is_latest_checkpoint:
+                if isinstance(todos := materialized_values.get("todos"), list):
+                    values["todos"] = [todo for todo in todos if isinstance(todo, dict) and isinstance(todo.get("content"), str)]
                 if is_active_goal(goal := materialized_values.get("goal")):
                     values["goal"] = goal
                 outcome = materialized_values.get(GOAL_OUTCOME_CHANNEL)
