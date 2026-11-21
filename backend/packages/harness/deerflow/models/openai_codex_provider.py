@@ -503,6 +503,7 @@ class CodexChatModel(BaseChatModel):
         tool_calls = []
         invalid_tool_calls = []
         reasoning_content = ""
+        refusal_parts: list[str] = []
 
         for output_item in response.get("output", []):
             if output_item.get("type") == "reasoning":
@@ -516,6 +517,13 @@ class CodexChatModel(BaseChatModel):
                 for part in output_item.get("content", []):
                     if part.get("type") == "output_text":
                         content += part.get("text", "")
+                    elif part.get("type") == "refusal":
+                        refusal = part.get("refusal")
+                        if isinstance(refusal, str):
+                            # A completed refusal is a visible response, not a
+                            # transient empty result for the middleware to retry.
+                            content += refusal
+                            refusal_parts.append(refusal)
             elif output_item.get("type") == "function_call":
                 parsed_arguments, invalid_tool_call = self._parse_tool_call_arguments(output_item)
                 if invalid_tool_call:
@@ -536,6 +544,8 @@ class CodexChatModel(BaseChatModel):
         additional_kwargs = {}
         if reasoning_content:
             additional_kwargs["reasoning_content"] = reasoning_content
+        if refusal_parts:
+            additional_kwargs["refusal"] = "".join(refusal_parts)
 
         message = AIMessage(
             content=content,

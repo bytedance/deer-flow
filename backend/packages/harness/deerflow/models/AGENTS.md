@@ -57,6 +57,10 @@ transport, so they check the payload that DeerFlow sends.
 - **An empty `choices` list becomes `EmptyModelResponseError`** before LangChain
   indexes it. Every OpenAI-compatible adapter keeps `OpenAIEmptyChoicesMixin`.
 - **A completed response with null or empty usage keeps its text.**
+- **A completed Codex refusal is visible response content.** Preserve its exact
+  part order and structured refusal metadata; nonblank refusals must not enter
+  empty-response retry. Parser and sync/async graph controls live in
+  `tests/test_codex_refusal.py`.
 - **A terminal stream error returns no partial output.** The caller must not take
   a truncated answer for a finished one.
 - **Cancelling a Codex async call closes its HTTP stream.** Async generation owns
