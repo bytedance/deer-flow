@@ -1477,6 +1477,31 @@ def test_terminal_renewal_failure_evicts_before_operation() -> None:
     assert remote.commands.calls == []
 
 
+def test_renewal_404_on_read_reports_the_dead_sandbox_not_a_missing_file() -> None:
+    # A renewal 404 means the sandbox expired server-side: evict it and keep its error, so neither read_file's
+    # not_found answer nor the read-before-write gate mistakes a dead sandbox for a file that doesn't exist yet.
+    invalidated: list[tuple[str, str]] = []
+    remote = _FakeRemote("remote")
+    remote.renew_error = _TerminalApiError("sandbox expired")
+    box = _box(
+        remote,
+        sandbox_timeout=timedelta(minutes=5),
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+    assert box.read_file("/mnt/user-data/workspace/notes.md") == "Error: sandbox expired"
+    assert invalidated == [("sandbox-id", "sandbox expired")]
+    assert remote.files.calls == []
+
+
+def test_renewal_404_on_append_raises_instead_of_starting_an_empty_file() -> None:
+    remote = _FakeRemote("remote")
+    remote.renew_error = _TerminalApiError("sandbox expired")
+    box = _box(remote, sandbox_timeout=timedelta(minutes=5))
+    with pytest.raises(_TerminalApiError, match="sandbox expired"):
+        box.write_file("/mnt/user-data/workspace/notes.md", "more", append=True)
+    assert remote.files.calls == []
+
+
 def test_terminal_error_evicts_active_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     provider, sdk = _install(monkeypatch)
     sandbox_id = provider.acquire("thread-1", user_id="user-1")
