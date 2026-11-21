@@ -34,7 +34,7 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
     skill_entries = [path for path in files if PurePosixPath(path).name == "SKILL.md"]
     root_skill = files.get("SKILL.md")
     declared_name = None
-    text_complete = not snapshot.get("truncated")
+    text_complete = not snapshot.get("truncated") and not snapshot.get("reader_errors")
     not_assessed: list[str] = []
 
     if not root_skill:
@@ -115,7 +115,7 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
         analyzer_errors.append({"code": "skillscan_failed", "path": None, "message": type(exc).__name__})
         not_assessed.append("skillscan")
 
-    if snapshot.get("truncated"):
+    if snapshot.get("truncated") or snapshot.get("reader_errors"):
         not_assessed.append("full_package")
 
     findings = sort_findings(findings)

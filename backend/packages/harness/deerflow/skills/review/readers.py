@@ -194,10 +194,15 @@ class LocalDirectoryReader:
                     return self._sort_snapshot(snapshot)
 
                 try:
-                    size = path.stat().st_size
+                    file_stat = path.stat()
                 except OSError as exc:
                     snapshot["reader_errors"].append({"code": "stat_failed", "path": rel_path, "message": str(exc)})
                     continue
+
+                if not stat.S_ISREG(file_stat.st_mode):
+                    snapshot["reader_errors"].append({"code": "unsupported_file_type", "path": rel_path, "message": "Package entry is not a regular file"})
+                    continue
+                size = file_stat.st_size
 
                 total_bytes += max(size, 0)
                 if total_bytes > self.limits.max_total_bytes:
