@@ -16,6 +16,9 @@ async function mockConnections(page: Page) {
       },
     }),
   );
+  await page.route("**/api/mcp/user-oauth", (route) =>
+    route.fulfill({ json: { connections: [] } }),
+  );
   await page.route("**/api/capabilities/installations/mcp?scope=all", (route) =>
     route.fulfill({
       json: {
@@ -132,6 +135,80 @@ test("administrators toggle shared MCP globally without changing a same-named pe
     fullPage: true,
   });
   expect(writes).toHaveLength(3);
+});
+
+test("a member connects and disconnects their own MCP account from Capability Center", async ({
+  page,
+}) => {
+  const { state } = await mockConnections(page);
+  state.role = "user";
+  let status = "reconnect_required";
+  let retired = [
+    { server_key: "retired", display_name: "Retired tools", status: "removed" },
+  ];
+  const calls: string[] = [];
+  await page.route("**/api/mcp/user-oauth", (route) =>
+    route.fulfill({
+      json: {
+        connections: [
+          ...retired,
+          { server_key: "logs", display_name: "Log tools", status },
+          {
+            server_key: "unavailable",
+            display_name: "Unavailable tools",
+            status: "unavailable",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/mcp/user-oauth/logs/connect", (route) => {
+    calls.push(route.request().method());
+    return route.fulfill({
+      json: { authorization_url: "https://provider.example.test/authorize" },
+    });
+  });
+  await page.route("https://provider.example.test/authorize", (route) => {
+    status = "connected";
+    return route.fulfill({
+      status: 303,
+      headers: {
+        location: new URL(
+          "/workspace/capabilities?tab=plugins&mcp_oauth=connected#my-mcp-connections",
+          page.url(),
+        ).href,
+      },
+    });
+  });
+  await page.route("**/api/mcp/user-oauth/retired", (route) => {
+    expect(route.request().method()).toBe("DELETE");
+    retired = [];
+    return route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/mcp/user-oauth/logs", (route) => {
+    calls.push(route.request().method());
+    status = "disconnected";
+    return route.fulfill({ status: 204 });
+  });
+
+  await page.goto("/workspace/capabilities");
+  const mine = page.getByRole("region", { name: "My MCP connections" });
+  await expect(
+    mine.getByText("Connection unavailable. Contact your administrator."),
+  ).toBeVisible();
+  await expect(
+    mine.getByRole("button", { name: /Unavailable tools/ }),
+  ).toHaveCount(0);
+  await mine.getByRole("button", { name: "Reconnect Log tools" }).click();
+  const disconnect = mine.getByRole("button", { name: "Disconnect Log tools" });
+  await expect(disconnect).toBeVisible();
+  await disconnect.click();
+  await expect(
+    mine.getByRole("button", { name: "Connect Log tools" }),
+  ).toBeVisible();
+  expect(calls).toEqual(["POST", "DELETE"]);
+  await mine.getByRole("button", { name: "Disconnect Retired tools" }).click();
+  await expect(mine.getByText("Retired tools")).toHaveCount(0);
 });
 
 test("a rejected platform toggle keeps the stored state and reports the error", async ({

@@ -157,6 +157,61 @@ FEISHU_MAX_CARDS_PER_REPLY = 10
 _CARD_TRUNCATION_MARKER = "\n\n... (truncated)"
 _CARD_CONTINUES_MARKER = "\n\n…"
 _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+# A markdown image marker, rewritten for the card so Feishu never sees one.
+_MARKDOWN_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]*)[^)]*\)")
+_FENCED_CODE = re.compile(r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[ \t]*$")
+_INLINE_CODE_SPAN = re.compile(r"`[^`\n]*`")
+# A fence a streamed snapshot cut open: what follows its opener is still code.
+_UNCLOSED_FENCE = re.compile(r"(?m)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*$")
+
+
+def _rewrite_outside_inline_code(chunk: str, rewrite: Callable[[str], str]) -> str:
+    """Apply *rewrite* to the parts of *chunk* that are not inline code spans."""
+    out: list[str] = []
+    cursor = 0
+    for span in _INLINE_CODE_SPAN.finditer(chunk):
+        out.append(rewrite(chunk[cursor : span.start()]))
+        out.append(span.group(0))
+        cursor = span.end()
+    out.append(rewrite(chunk[cursor:]))
+    return "".join(out)
+
+
+def _card_markdown(text: str) -> str:
+    """Rewrite the markdown a Feishu card cannot render.
+
+    A card markdown element only accepts a markdown image whose target is an
+    uploaded ``image_key``. A URL target makes Feishu reject every update of that
+    card with 230099 / 11310 ("the card contains images but no imagekey is passed
+    in"), which is how a reply carrying ``![alt](url)`` loses the rest of its
+    streamed text. Dropping the marker keeps the reference, and its link, in a
+    form the card renders. Code stays literal: a fenced block renders as code
+    there, and rewriting what it shows would misreport the answer.
+    """
+    if "![" not in text:
+        return text
+
+    def as_link(chunk: str) -> str:
+        return _MARKDOWN_IMAGE.sub(lambda match: f"[{match.group('alt')}]({match.group('target')})", chunk)
+
+    out: list[str] = []
+    cursor = 0
+    for fenced in _FENCED_CODE.finditer(text):
+        out.append(_rewrite_outside_inline_code(text[cursor : fenced.start()], as_link))
+        out.append(fenced.group(0))
+        cursor = fenced.end()
+
+    tail = text[cursor:]
+    # A snapshot streamed before its closing fence arrives has an open block at the
+    # end; that content is code too, so what follows the opener stays literal.
+    open_fence = _UNCLOSED_FENCE.search(tail)
+    literal_from = open_fence.start() if open_fence else len(tail)
+    out.append(_rewrite_outside_inline_code(tail[:literal_from], as_link))
+    out.append(tail[literal_from:])
+    return "".join(out)
+
+
 # Characters JSON escapes, measured after the second escape: ``"`` is ``\\\"``.
 _ESCAPED_CARD_CHAR_BYTES = {'"': 4, "\\": 4, "\b": 3, "\f": 3, "\n": 3, "\r": 3, "\t": 3}
 
@@ -999,7 +1054,7 @@ class FeishuChannel(Channel):
         card = {
             "config": {"wide_screen_mode": True, "update_multi": True},
             # Unpaired surrogates cannot be encoded as UTF-8.
-            "elements": [{"tag": "markdown", "content": _LONE_SURROGATE.sub("\ufffd", text)}],
+            "elements": [{"tag": "markdown", "content": _card_markdown(_LONE_SURROGATE.sub("\ufffd", text))}],
         }
         # ASCII escapes would make each CJK character 6 bytes instead of 3.
         return json.dumps(card, ensure_ascii=False)
