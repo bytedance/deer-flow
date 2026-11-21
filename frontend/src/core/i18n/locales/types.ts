@@ -663,8 +663,18 @@ export interface Translations {
     demoChats: string;
     agents: string;
     scheduledTasks: string;
-    agentsDisabledTooltip: string;
+    featureDisabledTooltip: string;
     channels: string;
+    more: string;
+    customize: string;
+    customizeDescription: string;
+    menuGroup: string;
+    moreGroup: string;
+    dragToReorder: (name: string) => string;
+    moveToMore: (name: string) => string;
+    moveToMenu: (name: string) => string;
+    pinnedHint: string;
+    emptyMoreGroup: string;
   };
   // Sidebar projects section
   projects: {

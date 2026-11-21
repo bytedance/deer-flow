@@ -818,7 +818,19 @@ export const enUS: Translations = {
     demoChats: "Demo chats",
     agents: "Agents",
     scheduledTasks: "Scheduled tasks",
-    agentsDisabledTooltip: "Feature not enabled",
+    featureDisabledTooltip: "Feature not enabled",
+    more: "More",
+    customize: "Customize menu",
+    customizeDescription:
+      "Drag entries to reorder them, or move an entry between the main menu and More.",
+    menuGroup: "Main menu",
+    moreGroup: "More",
+    dragToReorder: (name) => `Reorder ${name}`,
+    moveToMore: (name) => `Move ${name} to More`,
+    moveToMenu: (name) => `Move ${name} to the main menu`,
+    pinnedHint:
+      "New chat is pinned to the top of the main menu and cannot be moved.",
+    emptyMoreGroup: "Drag entries here to hide them under More.",
   },
 
   // Knowledge scope for custom-agent chat

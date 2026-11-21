@@ -769,7 +769,18 @@ export const zhCN: Translations = {
     demoChats: "演示对话",
     agents: "智能体",
     scheduledTasks: "定时任务",
-    agentsDisabledTooltip: "功能未启用",
+    featureDisabledTooltip: "功能未启用",
+    more: "更多",
+    customize: "自定义菜单栏",
+    customizeDescription:
+      "拖动条目调整顺序，或在一级菜单与「更多」之间移动条目。",
+    menuGroup: "一级菜单",
+    moreGroup: "更多",
+    dragToReorder: (name) => `调整 ${name} 的顺序`,
+    moveToMore: (name) => `将 ${name} 移到更多`,
+    moveToMenu: (name) => `将 ${name} 移到一级菜单`,
+    pinnedHint: "新对话固定在一级菜单顶部，无法移动。",
+    emptyMoreGroup: "拖动条目到这里，将其收进「更多」。",
   },
 
   // 自定义智能体聊天中的知识库范围

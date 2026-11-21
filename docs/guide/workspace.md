@@ -30,6 +30,34 @@ Dismissing the drawer returns keyboard focus to the control that opened it.
 The Agents gallery header wraps to the available width so its import and create
 actions remain visible beside the compact sidebar on narrow screens.
 
+## Customize the sidebar menu
+
+Open the **More** entry in the sidebar and choose **Customize menu**. Drag the
+handle beside an entry to reorder it within its group, or drag it between the
+menu and **More**. While a dragged entry is over the other group, a line marks
+where it will land. The arrow button on each row moves an entry between the two
+groups without dragging, and the dialog saves every change immediately.
+
+**New chat** sits above the main menu and cannot be moved; **Chats** is an
+ordinary entry, first by default. Entries the current user cannot see, such as
+**Token usage** without `runs:read`, are not offered in the dialog. An entry
+whose feature is switched off, such as **Agents** when the agents API is
+disabled, stays visible and can be rearranged, but remains inert and is greyed
+out with a "feature not enabled" reason in the menu, in **More**, and in the
+customization dialog. A server state that still leaves the page usable does not
+grey the entry: while the scheduler is paused, **Scheduled tasks** stays a
+normal link and the page explains that automatic runs are off. Moving an entry
+into **More** changes only the sidebar, not the page's route or its permissions.
+**Search** can be collapsed into **More**, and **⌘K / Ctrl+K** continues to
+open search.
+
+The layout is saved in this browser, not on the account: accounts signed in to
+the same browser share it, and another browser or device keeps its own menu.
+Cleared storage or an unreadable layout falls back to the shipped order, and
+entries added in a newer version are inserted at the position their default
+order implies even when an older saved layout does not mention them. A saved
+entry whose visible neighbors are all hidden stays at the end of its group.
+
 ## Search conversations and messages
 
 Use **Search** in the sidebar or **⌘K / Ctrl+K** to find conversation titles and

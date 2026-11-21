@@ -3,11 +3,18 @@ import type { ReasoningEffortValue } from "@/core/models/reasoning";
 import type { TokenUsageInlineMode } from "../messages/usage-model";
 import type { AgentThreadContext } from "../threads";
 
+import {
+  createDefaultNavLayout,
+  parseNavLayout,
+  type NavLayout,
+} from "./nav-layout";
+
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   notification: {
     enabled: true,
   },
   projectsDisplayMode: "flat",
+  navLayout: createDefaultNavLayout(),
   tokenUsage: {
     headerTotal: true,
     inlineMode: "per_turn",
@@ -70,6 +77,7 @@ export interface LocalSettings {
     enabled: boolean;
   };
   projectsDisplayMode: "flat" | "grouped";
+  navLayout: NavLayout;
   tokenUsage: {
     headerTotal: boolean;
     inlineMode: TokenUsageInlineMode;
@@ -108,6 +116,7 @@ function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
     projectsDisplayMode:
       settings?.projectsDisplayMode ??
       DEFAULT_LOCAL_SETTINGS.projectsDisplayMode,
+    navLayout: parseNavLayout(settings?.navLayout),
   };
 }
 

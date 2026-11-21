@@ -58,6 +58,26 @@ pnpm catalog:sync   # after a change to the capability catalog
 - **`pluginPages` lists enabled runtime entries.** A catalog entry does not imply
   activation.
 
+## Sidebar menu
+
+- **`nav-registry.ts` is the one list of core entries.** Add an item with a
+  stable `key`, `order`, label and gate; renaming a shipped key drops its saved
+  position.
+- **Pick the treatment by what the destination can still do.** `isEnabled:
+false` hides an entry users cannot access; `isDisabled: true` greys a page
+  that cannot work and needs a `disabledReason`; a degraded page stays a normal
+  link with an in-page notice.
+- **`NavGateContext` carries one boolean per real switch.** Reuse the feature's
+  own cache hook in `nav-gate.ts`; do not call feature hooks from the sidebar or
+  dialog.
+- **`nav-layout.ts` owns the stored shape.** Pinned entries never enter it;
+  disabled entries stay in it. `mergeNavLayout` reattaches each hidden key to its
+  visible neighbor, so another account keeps that position.
+- **A cross-group drag keeps both `SortableContext` lists fixed.** Moving the
+  active row remounts refs and React loops ("Maximum update depth exceeded").
+  Show a `dropTarget` line and commit on drop.
+- **Plugin pages stay in `PluginNavigation`** and are not customizable yet.
+
 ## Composer references
 
 - **A label grants no read authority.** The backend checks every referenced skill
