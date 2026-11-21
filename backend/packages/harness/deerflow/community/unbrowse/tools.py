@@ -18,6 +18,7 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.community.provider_credentials import resolve_api_key
+from deerflow.community.url_safety import validate_hosted_fetch_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,10 @@ def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    url_error = validate_hosted_fetch_url(url)
+    if url_error:
+        return url_error
+
     api_key = _get_api_key("web_fetch")
     if not api_key:
         return f"Error: {_missing_key_message('web_fetch')}"

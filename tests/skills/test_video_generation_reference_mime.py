@@ -17,6 +17,7 @@ def _mock_provider(monkeypatch, provider):
     monkeypatch.setenv("GEMINI_API_KEY", "offline-test-key")
     monkeypatch.setenv("MINIMAX_API_KEY", "offline-test-key")
     monkeypatch.setenv("MINIMAX_API_HOST", "https://api.example.test")
+    download_url = "https://filecdn.minimax.chat/video.mp4" if provider == "minimax" else "https://generativelanguage.googleapis.com/video.mp4"
     monkeypatch.delenv("MINIMAX_VIDEO_RESOLUTION", raising=False)
     monkeypatch.delenv("MINIMAX_VIDEO_DURATION", raising=False)
     captured = {"posts": [], "gets": []}
@@ -30,12 +31,12 @@ def _mock_provider(monkeypatch, provider):
     def fake_get(url, **kwargs):
         captured["gets"].append(url)
         if url.endswith("/operations/offline-test"):
-            return FakeResp({"done": True, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": "https://example.test/video.mp4"}}]}}})
+            return FakeResp({"done": True, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": download_url}}]}}})
         if url.endswith("/v1/query/video_generation"):
             return FakeResp({"status": "Success", "file_id": "offline-file", "base_resp": {"status_code": 0}})
         if url.endswith("/v1/files/retrieve"):
-            return FakeResp({"file": {"download_url": "https://example.test/video.mp4"}, "base_resp": {"status_code": 0}})
-        assert url == "https://example.test/video.mp4"
+            return FakeResp({"file": {"download_url": download_url}, "base_resp": {"status_code": 0}})
+        assert url == download_url
         return FakeResp(content=b"offline-video-bytes")
 
     monkeypatch.setattr(vid.requests, "post", fake_post)

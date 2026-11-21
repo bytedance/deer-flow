@@ -10,15 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from deerflow.skills.mutations.assets import PackageSnapshot
-from deerflow.skills.mutations.validation import MAX_MAIN_BYTES, PARSER_VERSION
-from deerflow.skills.package_files import is_code_file
+from deerflow.skills.mutations.validation import PARSER_VERSION
+from deerflow.skills.package_files import MAX_MODEL_BYTES, MAX_MODEL_FILE_BYTES, MAX_MODEL_FILES, is_code_file
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.skillscan.orchestrator import scan_skill_dir
 from deerflow.utils.file_io import await_drained
 
-CHECK_POLICY_VERSION = "skill-mutation-check-v1"
-MAX_MODEL_FILES = 32
-MAX_MODEL_BYTES = 1024 * 1024
+CHECK_POLICY_VERSION = "skill-mutation-check-v2"
 CHECK_TIMEOUT_SECONDS = 120
 
 
@@ -65,7 +63,7 @@ class CandidateScanner:
                     return None, None
                 continue
             total += len(item.content)
-            if len(item.content) > MAX_MAIN_BYTES or total > MAX_MODEL_BYTES or len(text_files) >= MAX_MODEL_FILES:
+            if len(item.content) > MAX_MODEL_FILE_BYTES or total > MAX_MODEL_BYTES or len(text_files) >= MAX_MODEL_FILES:
                 return None, None
             text_files.append((item.path, content, executable))
         with tempfile.TemporaryDirectory(prefix="deerflow-host-check-") as temporary:

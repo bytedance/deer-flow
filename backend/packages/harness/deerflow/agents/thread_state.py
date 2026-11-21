@@ -101,13 +101,20 @@ SandboxStateField = Annotated[NotRequired[SandboxState | None], merge_sandbox]
 
 
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
-    """Reducer for artifacts list - merges and deduplicates artifacts."""
-    if existing is None:
-        return new or []
-    if new is None:
-        return existing
+    """Reducer for artifacts list - merges and deduplicates artifacts.
+
+    The thread-state route writes reducer channels with ``Overwrite``, so a
+    caller-supplied non-list value can be persisted without ever reaching this
+    reducer, and a checkpoint written before the boundary validation can carry
+    one. Ignore a non-list side and non-string entries instead of raising on
+    ``existing + new`` or on an unhashable entry: one bad write must not fail
+    every later run that produces an artifact. Entries are display paths, so
+    only strings survive.
+    """
+    existing_items = [item for item in existing if isinstance(item, str)] if isinstance(existing, list) else []
+    new_items = [item for item in new if isinstance(item, str)] if isinstance(new, list) else []
     # Use dict.fromkeys to deduplicate while preserving order
-    return list(dict.fromkeys(existing + new))
+    return list(dict.fromkeys(existing_items + new_items))
 
 
 def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[str, ViewedImageData] | None) -> dict[str, ViewedImageData]:
