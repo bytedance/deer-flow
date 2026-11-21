@@ -111,6 +111,144 @@ def _bash_call(cmd="ls"):
     return {"name": "bash", "id": f"call_{cmd}", "args": {"command": cmd}}
 
 
+def _named_call(name, value):
+    return {"name": name, "id": f"call_{name}_{value}", "args": {"value": value}}
+
+
+class TestCycleDetection:
+    """Layer 3: short repeating tool-name cycles with varying arguments."""
+
+    @staticmethod
+    def _mw(**kwargs):
+        # Small budgets keep the sequences short: warn at 6 calls, stop at 8.
+        return LoopDetectionMiddleware(cycle_warn_calls=6, cycle_hard_calls=8, **kwargs)
+
+    def test_detect_cycle_helper(self):
+        detect = LoopDetectionMiddleware._detect_cycle
+        assert detect([], 2, 4, 6) is None
+        assert detect(["a", "b", "a", "b"], 2, 4, 6) is None
+        assert detect(["a", "b"] * 3, 2, 4, 6) == "a→b"
+        assert detect(["a", "b", "a", "c", "a", "b"], 2, 4, 6) is None
+        # Budgets round up to whole cycles: 7 calls of a 3-cycle needs 9.
+        assert detect(["a", "b", "c"] * 2 + ["a"], 2, 4, 7) is None
+        assert detect(["a", "b", "c"] * 3, 2, 4, 7) == "a→b→c"
+        # A single repeated name is Layer 2's job, not a cycle.
+        assert detect(["a"] * 12, 2, 4, 6) is None
+
+    def test_cycle_key_matches_rotations(self):
+        key = LoopDetectionMiddleware._cycle_key
+        assert key("a→b") == key("b→a")
+        assert key("a→b→c") == key("b→c→a") == key("c→a→b")
+        assert key("a→b→c") != key("a→c→b")
+
+    def test_default_budgets_match_tool_frequency_defaults(self):
+        mw = LoopDetectionMiddleware()
+        assert (mw.cycle_warn_calls, mw.cycle_hard_calls) == (mw.tool_freq_warn, mw.tool_freq_hard_limit)
+
+    def test_default_budget_stops_an_unbounded_two_tool_loop(self):
+        # Alternating two tools keeps each under Layer 2's per-tool count, so
+        # without Layer 3 this loop would never stop.
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        result = None
+        for i, name in enumerate(["web_search", "web_fetch"] * 25):
+            result = mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime)
+            if result is not None:
+                break
+        assert i == 49
+        assert _HARD_STOP_MSG in result["messages"][0].content
+
+    def test_short_edit_test_loop_is_not_stopped_by_default(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        for i in range(8):
+            read = {"name": "read_file", "id": f"call_read_{i}", "args": {"path": f"/tmp/file_{i}.py"}}
+            assert mw._apply(_make_state(tool_calls=[read]), runtime) is None
+            assert mw._apply(_make_state(tool_calls=[_bash_call(f"pytest -k case_{i}")]), runtime) is None
+        assert not mw._pending_warnings.get(_pending_key())
+
+    def test_alternating_tools_queue_warning_at_budget(self):
+        mw = self._mw()
+        runtime = _make_runtime()
+        sequence = ["web_search", "web_fetch"] * 3
+
+        for i, name in enumerate(sequence[:-1]):
+            assert mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime) is None
+        assert not mw._pending_warnings.get(_pending_key())
+
+        result = mw._apply(_make_state(tool_calls=[_named_call(sequence[-1], len(sequence))]), runtime)
+        assert result is None
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "LOOP DETECTED" in warning
+        # The cycle warning names the alternation instead of reusing the
+        # identical-call-set text.
+        assert "web_search→web_fetch" in warning
+        assert "repeating the same tool calls" not in warning
+
+    def test_cycle_warning_queued_once(self):
+        mw = LoopDetectionMiddleware(cycle_warn_calls=6, cycle_hard_calls=20)
+        runtime = _make_runtime()
+        for i, name in enumerate(["web_search", "web_fetch"] * 5):
+            mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime)
+        assert len(mw._pending_warnings[_pending_key()]) == 1
+
+    def test_alternating_tools_hard_stop_at_budget(self):
+        mw = self._mw()
+        runtime = _make_runtime()
+        sequence = ["web_search", "web_fetch"] * 4
+
+        for i, name in enumerate(sequence[:-1]):
+            assert mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime) is None
+
+        result = mw._apply(_make_state(tool_calls=[_named_call(sequence[-1], len(sequence))]), runtime)
+        assert result is not None
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls == []
+        assert _HARD_STOP_MSG in msg.content
+
+    def test_three_tool_cycle_hard_stops(self):
+        mw = self._mw()
+        runtime = _make_runtime()
+        sequence = ["a", "b", "c"] * 3
+
+        for i, name in enumerate(sequence[:-1]):
+            assert mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime) is None
+
+        result = mw._apply(_make_state(tool_calls=[_named_call(sequence[-1], len(sequence))]), runtime)
+        assert result is not None
+        assert _HARD_STOP_MSG in result["messages"][0].content
+
+    def test_mixed_pattern_does_not_trigger(self):
+        mw = self._mw()
+        runtime = _make_runtime()
+        for i, name in enumerate(["a", "b", "a", "c", "a", "b"]):
+            assert mw._apply(_make_state(tool_calls=[_named_call(name, i)]), runtime) is None
+        assert not mw._pending_warnings.get(_pending_key())
+
+    def test_cycle_state_is_scoped_by_run(self):
+        mw = self._mw()
+        run_a = _make_runtime(run_id="run-A")
+        run_b = _make_runtime(run_id="run-B")
+        for i, name in enumerate(["web_search", "web_fetch"] * 2):
+            mw._apply(_make_state(tool_calls=[_named_call(name, i)]), run_a)
+            mw._apply(_make_state(tool_calls=[_named_call(name, i)]), run_b)
+        # Interleaving two runs must not stitch their names into one cycle.
+        assert list(mw._cycle_name_history[_scope_key(run_id="run-A")]) == ["web_search", "web_fetch"] * 2
+        assert not mw._pending_warnings.get(_pending_key(run_id="run-A"))
+
+    def test_cycle_state_cleared_on_eviction_and_reset(self):
+        mw = self._mw(max_tracked_threads=1)
+        mw._apply(_make_state(tool_calls=[_named_call("a", 0)]), _make_runtime("thread-0"))
+        mw._apply(_make_state(tool_calls=[_named_call("a", 1)]), _make_runtime("thread-1"))
+        assert _scope_key("thread-0") not in mw._cycle_name_history
+        assert _scope_key("thread-1") in mw._cycle_name_history
+
+        mw.reset("thread-1")
+        assert _scope_key("thread-1") not in mw._cycle_name_history
+        assert _scope_key("thread-1") not in mw._cycle_warned
+
+
 class TestHashToolCalls:
     def test_same_calls_same_hash(self):
         a = _hash_tool_calls([_bash_call("ls")])
