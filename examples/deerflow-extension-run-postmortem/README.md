@@ -45,9 +45,11 @@ an incident ticket. Query `max_events` (1–2000, default 200) bounds the work.
 ### Workspace page
 
 The same plugin adds a **Run postmortem** page (sidebar entry, localized en/zh)
-with the same data. The page prefills the current thread, can load the latest run
-the caller owns on that thread, renders the verdict, anomalies, activity and a
-scrollable timeline, and downloads the Markdown report. It reaches the host only
+with the same data. When the host supplies the current thread id to the surface,
+the page prefills it; hosts that mount pages without thread context leave the
+field empty, so it stays editable. The page can load the latest run the caller
+owns on that thread, renders the verdict, anomalies, activity and a scrollable
+timeline, and downloads the Markdown report. It reaches the host only
 through three declared actions — `latest`, `report`, `markdown` — so the page
 holds no credentials and no network code of its own. A run the caller does not
 own answers `{"not_found": true}` rather than an error, and the action route's

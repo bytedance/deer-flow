@@ -165,6 +165,8 @@ export function mount(root, context) {
     value: "200",
     "aria-label": t.maxEvents,
   });
+  // Hosts that mount a page without thread context omit threadId; the field
+  // stays empty and editable so the operator can type it.
   if (context.threadId) threadInput.value = context.threadId;
 
   const latestButton = el("button", {

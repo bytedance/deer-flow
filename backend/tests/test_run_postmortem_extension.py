@@ -81,6 +81,7 @@ def test_disabled_configuration_registers_nothing(monkeypatch):
     assert not diagnostics
     assert loaded.services == ()
     assert loaded.routers == ()
+    assert loaded.plugins == ()
 
 
 def test_a_mistyped_off_switch_fails_the_load(monkeypatch):
@@ -89,3 +90,4 @@ def test_a_mistyped_off_switch_fails_the_load(monkeypatch):
     assert diagnostics
     assert loaded.services == ()
     assert loaded.routers == ()
+    assert loaded.plugins == ()
