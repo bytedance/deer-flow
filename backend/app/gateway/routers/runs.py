@@ -31,10 +31,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 
+def _request_thread_id(body: RunCreateRequest) -> str | None:
+    """The caller-supplied thread_id, or None when the server must generate one."""
+    return ((body.config or {}).get("configurable") or {}).get("thread_id")
+
+
+def _thread_id_is_new(body: RunCreateRequest) -> bool:
+    """True when the request carried no thread_id, so one is generated server-side."""
+    return _request_thread_id(body) is None
+
+
 def _resolve_thread_id(body: RunCreateRequest) -> str:
     """Return the thread_id from the request body, or generate a new one."""
-    thread_id = ((body.config or {}).get("configurable") or {}).get("thread_id")
-    return resolve_thread_id(thread_id)
+    return resolve_thread_id(_request_thread_id(body))
 
 
 @router.post("/stream")
@@ -49,7 +58,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
     thread_id = _resolve_thread_id(body)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(body, thread_id, request, thread_is_new=_thread_id_is_new(body))
 
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
@@ -70,7 +79,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     thread_id = _resolve_thread_id(body)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(body, thread_id, request, thread_is_new=_thread_id_is_new(body))
 
     completed = True
     if record.task is not None:
