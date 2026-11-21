@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from deerflow.skills.package_paths import is_eval_fixture_path
 from deerflow.skills.review.models import make_finding
 
 
 def analyze_eval_manifests(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     files = {str(entry["path"]): entry for entry in snapshot.get("files", [])}
-    eval_files = [path for path in sorted(files) if path.startswith("evals/") and path.endswith(".json")]
+    # Fixture payloads (evals/fixtures/**) are eval *data*, not manifests:
+    # the rest of the review core already treats them as fixture paths
+    # (resource_graph, analyzer, package_paths.is_eval_fixture_path).
+    eval_files = [path for path in sorted(files) if path.startswith("evals/") and path.endswith(".json") and not is_eval_fixture_path(path)]
     findings: list[dict[str, Any]] = []
     aggregate = {
         "schema": None,
