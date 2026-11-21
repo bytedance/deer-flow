@@ -467,6 +467,27 @@ class TestSearxngTools:
         assert "error" not in data
         assert mock_client.search.call_args.kwargs["max_results"] == 5
 
+    @patch("deerflow.community.searxng.tools._get_searxng_client")
+    async def test_web_search_tool_rejects_bool_and_fractional_max_results(self, mock_get_client):
+        """A boolean or fractional max_results falls back to the default.
+
+        ``bool`` is an ``int`` subclass, so the inline coercion this tool used to
+        run turned ``max_results: true`` into a one-result search, and a YAML
+        ``3.5`` was silently truncated to 3. Both are operator mistakes the
+        shared owner rejects rather than honours.
+        """
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=[])
+        mock_get_client.return_value = mock_client
+
+        for raw in (True, 3.5):
+            with patch("deerflow.community.searxng.tools._get_tool_config", return_value={"max_results": raw}):
+                result = await tools.web_search_tool.ainvoke("test query")
+
+            assert "error" not in json.loads(result), f"max_results={raw!r} failed the whole call"
+            assert mock_client.search.call_args.kwargs["max_results"] == 5, f"max_results={raw!r} was coerced instead of rejected"
+            mock_client.search.reset_mock()
+
     async def test_web_search_tool_reports_a_format_error_for_a_malformed_page(self):
         """The agent sees the provider's format error, not a raw Python error.
 
