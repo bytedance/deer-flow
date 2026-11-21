@@ -37,26 +37,61 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
-{{/* Fully-qualified image refs for the three DeerFlow images.
+{{/* Fully-qualified image refs for the three DeerFlow images. Each takes its
+     own tag (`image.<name>Tag`) when set, otherwise `image.tag`.
      When `image.registry` is empty, omit the prefix so the ref is
      `deer-flow-gateway:latest` (local-image mode, imagePullPolicy: Never). */}}
 {{- define "deer-flow.gatewayImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.gatewayImage .Values.image.tag -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.gatewayImage .Values.image.tag -}}{{- end -}}
+{{- $tag := include "deer-flow.imageTag" (dict "Values" .Values "key" "gatewayTag") -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.gatewayImage $tag -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.gatewayImage $tag -}}{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.frontendImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendImage .Values.image.tag -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.frontendImage .Values.image.tag -}}{{- end -}}
+{{- $tag := include "deer-flow.imageTag" (dict "Values" .Values "key" "frontendTag") -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendImage $tag -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.frontendImage $tag -}}{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.provisionerImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.provisionerImage .Values.image.tag -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.provisionerImage .Values.image.tag -}}{{- end -}}
+{{- $tag := include "deer-flow.imageTag" (dict "Values" .Values "key" "provisionerTag") -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.provisionerImage $tag -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.provisionerImage $tag -}}{{- end -}}
+{{- end -}}
+
+{{/* Tag of one DeerFlow image: `image.<key>` when it is a non-empty string,
+     otherwise `image.tag`. Takes a dict with `Values` and `key` (gatewayTag,
+     frontendTag or provisionerTag). A tag that is not a string fails the
+     render: `--set image.gatewayTag=20261118` arrives as an integer, which
+     printf renders as `%!s(int64=20261118)`, and `default` would silently
+     replace an integer 0 with `image.tag`. The check is on the type, not the
+     kind: Helm 3.18.0 hands an unquoted number from a parent chart's values
+     to the subchart as a json.Number, whose kind is "string", so `7.0` and
+     `0123` would render as 7 and 83. */}}
+{{- define "deer-flow.imageTag" -}}
+{{- $value := get .Values.image .key -}}
+{{- if kindIs "invalid" $value -}}{{- .Values.image.tag -}}
+{{- else if not (typeIs "string" $value) -}}
+{{- fail (printf "image.%s must be a string (got %s %v); quote it in YAML or set it with --set-string image.%s=..." .key (typeOf $value) $value .key) -}}
+{{- else if eq (toString $value) "" -}}{{- .Values.image.tag -}}
+{{- else -}}{{- toString $value -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.nginxImage" -}}
 {{- printf "%s:%s" .Values.nginx.image.repository .Values.nginx.image.tag -}}
+{{- end -}}
+
+{{/* Image of the gateway's init containers (init-home, init-extensions). */}}
+{{- define "deer-flow.initImage" -}}
+{{- printf "%s:%s" .Values.gateway.initContainers.image.repository .Values.gateway.initContainers.image.tag -}}
+{{- end -}}
+
+{{/* A Deployment strategy. With `type: Recreate`, `rollingUpdate` is dropped:
+     Kubernetes rejects the pair, and a parent chart cannot null the default
+     `rollingUpdate` of this chart's values (Helm keeps subchart defaults). */}}
+{{- define "deer-flow.strategy" -}}
+{{- if eq (.type | default "") "Recreate" -}}{{- toYaml (omit . "rollingUpdate") -}}{{- else -}}{{- toYaml . -}}{{- end -}}
 {{- end -}}
 
 {{/* PVC name for the .deer-flow home directory. */}}

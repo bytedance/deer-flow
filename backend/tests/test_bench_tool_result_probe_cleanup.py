@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.benchmark
+
 
 def _load_probe_module() -> object:
     path = Path(__file__).resolve().parents[1] / "scripts" / "benchmark" / "checkpoint" / "bench_tool_result_probe.py"

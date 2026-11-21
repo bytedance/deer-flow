@@ -50,6 +50,22 @@ changing its configuration. Other memory backends do not consume these
 DeerMem-specific fields. Existing external memory templates remain the mechanism
 for complete template replacement; this feature adds no editing endpoint or UI.
 
+## DeepSeek cache accounting
+
+Models configured with `langchain_deepseek:ChatDeepSeek` or
+`deerflow.models.patched_deepseek:PatchedChatDeepSeek` retain DeepSeek's native
+`usage.prompt_cache_hit_tokens` as `input_token_details.cache_read` when the
+standard `prompt_tokens_details.cached_tokens` field is absent or null. An
+explicit standard count, including zero, takes precedence. Invalid native
+counts are ignored; they do not fail an otherwise successful response.
+
+This applies to synchronous, asynchronous and streaming calls. The existing
+lead-agent journal and subagent usage handoff retain that count for per-model
+cache-aware cost estimates. Cached tokens are a subset of input tokens, so
+normalization never adds them or `prompt_cache_miss_tokens` to the input total.
+Responses that already supply the standard field are unchanged. These are
+provider-reported usage estimates, not a measurement of money saved by DeerFlow.
+
 ## Model request admission
 
 For request-per-minute limits, opt into pacing on each relevant `models[]`
@@ -933,6 +949,16 @@ agent_storage:
 - `agent_storage` is restart-required (the backend is captured at Gateway lifespan startup).
 - In a multi-worker Postgres deployment (`GATEWAY_WORKERS > 1`), leaving `agent_storage.backend: file` logs a startup warning — agents written to one node's local disk are invisible to the others, which is exactly the divergence the `db` backend fixes.
 
+Managed subagents also follow this backend selection. With `file`, their directory
+must support hard links: creation atomically publishes a fully written temporary
+file without replacing an existing name. Workers sharing that directory therefore
+return one HTTP 201 and one HTTP 409 for concurrent same-name creates. Other
+filesystem errors propagate rather than falling back to an overwrite.
+Gateway startup probes hard-link creation once per worker in that directory,
+off the event loop, and logs a warning if the probe fails. Startup continues;
+use a volume with working hard links or migrate to `backend: db` before creating
+managed subagents on an incompatible volume. Probe files are removed afterward.
+
 Migrating an existing install from `file` to `db`:
 
 Run from the repository root using the backend's `uv` environment. The importer
@@ -972,6 +998,8 @@ tools:
     exclude_domains: []         # Optional: domains to exclude from search results
     # api_key: $TAVILY_API_KEY  # Optional
 ```
+
+Tavily search and fetch initialize their HTTPS clients on a worker thread so TLS trust loading does not block other agent runs. A tool cancelled during initialization closes its client before returning without sending a request.
 
 For Tavily, `include_domains` and `exclude_domains` are deployment-only options
 read from the `web_search` tool entry and passed directly to `TavilyClient.search`.
@@ -1303,8 +1331,82 @@ operator handling has not been verified here. Upstream operators are best-effort
 offline mocked tests verify request composition and local filtering, not provider
 retrieval behavior. No paid API calls are needed for the regression suite.
 
+#### DeepSeek Web Search
+
+DeepSeek's `web_search` provider calls the official Chat Completions endpoint
+with the server-side `deepseek_web_search` tool. Set `DEEPSEEK_API_KEY` in the
+Gateway environment and replace the active search provider in `config.yaml`:
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.deepseek.tools:web_search_tool
+    api_key: $DEEPSEEK_API_KEY
+    model: deepseek-flash
+    thinking: false
+    max_results: 5
+    timeout_seconds: 180
+    max_tokens: 8192
+```
+
+Set `thinking: true` to enable DeepSeek's multi-step thinking search. This
+controls the model inside the search tool independently of the main DeerFlow
+model. Boolean strings such as `"false"` are accepted for environment-variable
+configuration. The default model is `deepseek-flash`; use a model that supports
+DeepSeek's server-side web tools. See the official
+[web tools documentation](https://api-docs.deepseek.com/zh-cn/guides/web_tools/).
+
+The tool accepts `query` and `max_results` and returns JSON with `query`,
+`total_results`, `results` (`title`, `url`, `snippet`), `answer`, and `truncated`.
+Source URLs use the shared public-URL policy and are deduplicated. Sources cited
+by the generated answer take priority, with search snippets preserved when
+available. When retained sources have valid citation ranges, each result also
+has a response-local `source_id`, and a top-level `citations` list pairs each
+`excerpt` with its supporting `source_ids`. Resolve those IDs to the returned
+source titles and URLs when citing a claim. For example:
+
+```json
+{"excerpt": "A claim supported by two pages.", "source_ids": [1, 2]}
+```
+
+Each distinct original range is represented once, in answer order, even when
+several sources cite it. Identical text at different ranges remains separate.
+Excerpts stay paired with their sources through tool-result sanitization and
+optional PII redaction. If either boundary falls inside a redacted value, the
+excerpt includes the whole placeholder. Responses without valid retained ranges
+omit `citations` and `source_id`, keeping their usual fields. Long answers or
+distinct long overlapping excerpts still use the normal tool-output budget and
+externalization policy. `max_results` defaults to 5 and is capped at 50.
+A configured value takes precedence over the tool argument. It limits returned
+source links, while DeepSeek controls how many searches it executes and what
+answer it generates.
+
+`timeout_seconds` bounds the request, including server-side search and reasoning.
+`max_tokens` bounds generated output, including thinking. Both accept positive
+numeric values or environment-variable strings. Boolean limits are rejected.
+The API key can also be set directly through the tool's `api_key` field.
+Configured keys take precedence over `DEEPSEEK_API_KEY`.
+
+DeepSeek decides whether to search. A completed response with no usable public
+sources returns `No results found`. Provider failures, malformed payloads,
+timeouts and output-budget exhaustion return structured errors. A partial
+response with usable sources sets `truncated: true` when it reaches its output
+limit. Cancellation waits for HTTP transport cleanup to complete, including when
+the caller is cancelled repeatedly during client teardown. Requests have no
+automatic retries. DeepSeek bills model inference and server-side search/fetch
+calls.
+
+Offline regression tests use HTTPX mock transports. To explicitly run the paid
+API checks for both thinking modes, export `DEEPSEEK_API_KEY` and run from
+`backend/`:
+
+```bash
+DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
+```
+
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
@@ -1371,6 +1473,14 @@ default it refuses URLs that resolve to private, loopback, link-local,
 shared (`100.64.0.0/10`, used by CGNAT and Tailscale), other non-global, or
 cloud-metadata addresses; set `allow_private_addresses: true` only when you
 intentionally point the tool at an internal target.
+
+Each Browserless tool entry reads its request timeout from `timeout_s`, with
+`timeout` as an alias when `timeout_s` is absent. The default is 30 seconds.
+Zero, negative, and non-finite values fall back to the default with a warning.
+Strings that cannot be parsed as numbers also trigger this fallback. HTTPX can
+time out immediately for non-positive values. It raises an error for NaN and
+applies no deadline for positive infinity. Browserless preserves positive finite
+values in seconds, including very large values.
 
 Both `web_fetch` (Browserless provider) and `web_capture` need a running
 Browserless instance. You can point `base_url` at [Browserless Cloud](https://www.browserless.io/)
@@ -1638,6 +1748,9 @@ sandbox:
    request_timeout: 30                # management request timeout seconds
    ready_timeout: 30                  # create/readiness timeout seconds
    use_server_proxy: false            # proxy execd/file traffic through server
+   secure_access: false               # per-sandbox endpoint token; Kubernetes + gateway mode only
+   resource: {cpu: "2", memory: 4Gi}  # sandbox limits; omitted = SDK default 1 CPU / 2Gi
+   resource_requests: {cpu: "1", memory: 2Gi}  # sandbox requests; omitted = server default
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
@@ -1645,6 +1758,23 @@ sandbox:
    environment:
       PYTHONUNBUFFERED: "1"
 ```
+
+`use_server_proxy` and `secure_access` accept YAML booleans. Omitted or `null`
+values default to `false`. Quoted values such as `"false"` cause a provider
+startup error.
+
+`resource` and `resource_requests` map resource names to Kubernetes quantities
+(`cpu`, `memory`, or any name the OpenSandbox runtime accepts). They become the
+sandbox's limits and requests. Without `resource`, the SDK asks for 1 CPU and
+2Gi; without `resource_requests`, the server decides the requests.
+
+Only Kubernetes runtimes apply `resource_requests`; the Docker runtime ignores
+them. On Kubernetes, a request you omit defaults to its limit, and every request
+must fit within its limit. That includes the SDK default limits: setting only
+`resource_requests: {cpu: "2", memory: 4Gi}` sends limits of 1 CPU and 2Gi, and
+the sandbox creation fails. Set `resource` whenever requests exceed those
+defaults. Blank names or quantities and zero, negative or non-finite numbers
+cause a provider startup error.
 
 Install the optional SDK before selecting this provider:
 
@@ -1666,6 +1796,67 @@ horizon. File transfer uses OpenSandbox's native filesystem API; bounded
 Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
 implemented, so `replicas` is a per-Gateway-process soft cap.
+
+**boxd Machine Sandbox** (runs each sandbox as an isolated [boxd](https://boxd.sh?ref=deer-flow) machine):
+
+```yaml
+sandbox:
+   use: deerflow.community.boxd_sandbox:BoxdSandboxProvider
+   boxd_api_key: $BOXD_API_KEY        # falls back to the BOXD_API_KEY env var
+   # org: my-org                      # optional; the key's own org when omitted
+   # region: fra                      # optional; fra or nyc
+   # vcpu: 2                          # optional; 1, 2, 4 or 8 (memory 4G, 8G, 16G or 32G follows)
+   # from_snapshot: my-snapshot       # optional; start machines from a prepared snapshot
+   # auto_suspend_timeout: 300        # optional; idle seconds before a machine goes to standby
+   # ready_timeout: 120               # seconds to wait for a new machine to boot
+   # name_prefix: deer-flow-          # machine names are <prefix><scope>-<random suffix>
+   # labels:                          # extra labels on every machine
+   #    team: research
+   replicas: 3                        # active + warm cap per gateway process
+   idle_timeout: 600                  # warm seconds before the machine is deleted; 0 disables
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional SDK before selecting this provider:
+
+```bash
+pip install "deerflow-harness[boxd]"
+```
+
+Each `(user_id, thread_id)` scope gets its own Ubuntu machine, created with
+`isolated: true`, so it joins no private network and holds no boxd
+credentials. The API key stays in the Gateway. Machines carry the labels
+`deer-flow: sandbox` and `deer-flow-scope: <scope id>`, so you can find them in
+the boxd console or with the CLI. The provider creates `/mnt/user-data` and the
+skills root (`skills.container_path`) as real directories on the machine, so
+shell commands and file tools use the same paths.
+
+A new machine for a thread receives the thread's uploads, workspace and outputs
+files and the skills projection before `acquire()` returns, each as one archive
+of at most 5,000 files and 128 MiB; files past that limit are skipped with a
+warning, and a failed transfer deletes the machine and raises. An Agent with a
+skill policy gets its own skills projection, and the machine sees only what was
+uploaded. Work outside `/mnt/user-data` is lost when the idle reaper deletes a
+machine. At the end of a turn, release copies
+`/mnt/user-data/outputs` back to the thread's output directory (bounded by file
+count, bytes and one shared 120-second deadline), then parks the machine in an
+in-process warm pool. A stopped machine's output copy is skipped until a normal
+sandbox call restarts it. The same scope reclaims it after a health check;
+the idle reaper deletes it after
+`idle_timeout`. Shutdown deletes every machine the provider tracks and can be
+retried when a delete fails.
+Machines discovered after a failed create use the same tracked deletion retries.
+
+Commands run through `bash -lc`. Per-call environment variables travel as exec
+options, never inside the command string. The command deadline (the caller's
+timeout, else `bash_command_timeout`) is enforced in the machine, so a command
+that runs over it ends with `Exit Code: 124` and keeps its partial output. A
+stopped machine is started on the next call; a command that hit the stopped
+machine is not repeated and returns an error. Machines in standby or
+hibernation wake on the call. Downloads are restricted to `/mnt/user-data` and
+capped while streaming. Like the other remote providers, `replicas` is a
+per-Gateway-process soft cap.
 
 Choose between local execution or Docker-based isolation:
 
@@ -2089,6 +2280,8 @@ models:
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
+Search, fetch and capture providers treat an example value that `.env.example` ships (such as `your-jina-api-key`, matched exactly) as unset, in `config.yaml` and in the environment alike: a keyless provider such as the Jina Reader uses its free tier, and a provider that needs a key reports it missing. Any other value is sent as written, so a self-hosted token you chose keeps working. Browserless reads `BROWSERLESS_TOKEN` only when its `token` field is omitted, so a blank or placeholder `token` is not replaced by the variable. `make doctor` applies the same rules and names the variable or field that still holds a placeholder, including `JINA_API_KEY` and `YDC_API_KEY` for the keyless providers.
+
 ## Backend dotenv selection
 
 Set `DEER_FLOW_ENV_FILE` in the backend process environment **before startup**
@@ -2254,51 +2447,130 @@ Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
 only when the agent is expected to edit files or run commands for a trusted
 task.
 
+Pi can run as an external coding agent through the community `pi-acp` adapter.
+The adapter launches the separate `pi` executable, so install both packages in
+the Gateway environment before starting DeerFlow. `pi-acp` currently requires
+Node.js 22+ and pi 0.81.0+:
+
+```bash
+npm install --global @earendil-works/pi-coding-agent
+npm install --global pi-acp
+```
+
+Configure pi's model provider and API key separately for the user that runs the
+Gateway. For interactive providers, start `pi` in that same environment, then run
+`/login` in Pi's terminal UI and select your provider. Alternatively, provide the
+provider's documented environment variables. The `pi` executable and its credentials must
+be available inside the Gateway container; installing or authenticating them
+only on the Docker host is not sufficient.
+
+```yaml
+acp_agents:
+  pi:
+    command: pi-acp
+    args: []
+    description: Pi coding agent for repository tasks and code generation
+    auto_approve_permissions: false
+```
+
+Node.js, `pi-acp`, and `pi` must be available on the Gateway process's `PATH`. When
+the Gateway runs in Docker, install them inside the Gateway image or container.
+Pi executes its filesystem and shell tools directly in its working environment.
+`auto_approve_permissions` only controls permission requests sent through ACP;
+leaving it disabled does not sandbox these direct operations. Run untrusted Pi
+tasks in an independently isolated process, container, or VM with only the
+required files, credentials, and network access. Keep
+`auto_approve_permissions` disabled for untrusted tasks. Alternatively,
+set `command: npx` and `args: ["-y", "pi-acp"]` to fetch the adapter on demand;
+this requires `npx` on the Gateway's `PATH` and may require network access at
+startup. Preinstalling the adapter lets deployment tooling control its version
+without fetching it during an invocation.
+
 
 ## HITL Tool Approval
 
-`hitl_approval` pauses high-risk tool calls for human approval before execution.
-It is disabled by default; enabling it without a tool list changes nothing.
+Set `hitl_approval.enabled: true` to gate bound tools immediately before execution.
+The default is disabled for existing installations. When enabled, unknown tools,
+file writes, shell commands, and both personal and deployment MCP tools are
+reviewed. Concrete host read/navigation tools can run directly; an MCP server's
+read-only annotation never grants permission.
 
 ```yaml
 hitl_approval:
   enabled: true
-  tools: [write_file, str_replace, bash]
-  non_interactive: deny  # deny | allow
-  max_actions: 32  # 0 disables the approval-batch count limit
+  default_mode: ask
+  allowed_modes: [ask, auto]
+  review_unknown_tools: true
+  tools: []
+  allow_tools: []
+  deny_tools: []
+  always_ask_tools: []
+  reviewer_model: null
+  reviewer_timeout_seconds: 30
+  reviewer_max_input_bytes: 65536
+  max_payload_bytes: 524288
+  child_approval_timeout_seconds: 300
+  non_interactive: deny
+  max_actions: 32
 ```
 
-- `enabled`: master switch. `false` leaves all behavior unchanged.
-- `tools`: host-owned high-risk list edited by the operator. Unknown names log
-  a warning at assembly (a typo would otherwise silently disable approval).
-- `non_interactive`: behavior for IM channels, GitHub runs, scheduled tasks,
-  and other non-interactive entry points. `deny` rejects the call with an
-  error ToolMessage; `allow` executes it directly. Subagents and runtimes
-  assembled without resume support always reject matching calls regardless of
-  this setting.
-- `max_actions`: maximum matching tool calls in one approval batch. Batches
-  above the limit are rejected without executing any call; `0` disables this
-  count limit. The approval payload size limit still applies.
+| Mode | Behavior |
+| --- | --- |
+| `ask` | Present an approval card for operations requiring review. |
+| `auto` | Independently assess the concrete operation against user intent. Allow low/medium-risk authorized operations; ask for uncertainty or high risk; deny critical violations. |
+| `full` | Skip individual approvals within mandatory deployment and account restrictions. |
 
-Approval is **not** authorization. `read_before_write`, guardrails, and sandbox
-authorization still apply after approval — "approve to try executing", not
-"approve to guarantee execution". Approval requires a resume-capable entry:
-the Web UI and SDK support it. IM channels, GitHub runs, and scheduled tasks
-follow `non_interactive`; subagents and runtimes without resume support always
-fail closed.
+Clients select `context.tool_approval_mode` per run from the operator's `allowed_modes`.
+The default ceiling permits Ask and Auto. Full requires explicitly adding `full`
+to that operator-owned list; the client selection is not persisted server-side
+and cannot extend the ceiling.
+This setting is separate from Flash/Thinking/Pro/Ultra. `deny_tools` blocks in
+every mode. `always_ask_tools` requires a human in every mode and cannot receive
+a chat grant. Uninspectable tool implementations cannot receive chat grants.
+Implementation fingerprints include both execution callables and their callable
+adapters, so changing an asynchronous implementation requires fresh approval. `allow_tools` is an explicit operator exception. `tools` adds
+otherwise routine tools to review; disabling `review_unknown_tools` restores a
+selected-tool policy. These are trusted deployment settings, never model output.
 
-Argument summaries are display-only. Fields other than `path`, `command`, `url`,
-`old_str`, and `new_str` are truncated when they exceed the display budget; the
-summary includes a `chars omitted` marker. Approving executes the original,
-complete arguments, including content hidden by that marker. The payload-size
-limit bounds the approval summary, not the tool arguments.
+Auto uses a separate, tool-free model invocation. `reviewer_model` names an
+existing configured profile; null reuses the effective execution profile. No new
+provider or credentials are required. Review input contains original user intent,
+tool identity/schema, and complete arguments, treating tool material as untrusted
+data. Reviewer callbacks cannot enter the Agent message stream; the host records
+its token usage. Each review adds model latency and usage. Invalid output,
+timeout, provider failure, or oversized input requests human approval. In an
+unattended run these outcomes deny execution. Model review supplements the host's
+rules and sandbox; it is not a security isolation boundary.
 
-Pending approvals do not expire. While the thread remains paused at the current
-checkpoint, its approval stays resumable and blocks new runs on that thread,
-including scheduled runs, until every action is approved or rejected. Operators
-must resolve stale approvals explicitly. Disabling HITL while paused still
-allows the all-reject response as a safe escape hatch; other configuration
-changes fail closed.
+Cards show complete arguments and support approve, reject with a reason, edit
+and approve, or allow the exact operation for this chat. Edits are validated
+against the public tool schema and rerun through mandatory authorization. Injected
+runtime fields cannot be edited. Grants bind owner, thread incarnation, tool
+implementation/schema/connection, arguments, and policy. A changed MCP connection
+requires fresh approval. Revoke grants from the Tool permissions menu. SQL-backed
+deployments persist grants; memory-only deployments keep them for the process.
+
+Root pauses use native checkpoints and block fresh runs until resolved. Native
+parallel interrupts resume by their individual IDs; decisions cannot approve a
+stale proposal. Root pauses have no time expiry; policy/tool changes fail closed,
+and disabling the feature still permits the existing all-reject escape hatch.
+The full card must fit `max_payload_bytes`; oversized cards deny execution rather
+than hiding part of the operation. `max_actions` bounds calls in a model turn;
+zero removes that count limit.
+
+Delegated calls use an owner-scoped live approval endpoint and suspend the original
+child invocation. The wait expires after `child_approval_timeout_seconds`, or the
+child's execution deadline if earlier. Cancellation, lost run ownership and worker
+restart invalidate pending child approvals; they do not replay the delegated task.
+The UI polls pending child cards while the parent is active. Authenticated session
+ownership is required to answer these cards. Requests and audit records are deleted
+with their thread. Scheduled, webhook and other unattended origins cannot open a
+human wait. The legacy `non_interactive: allow` explicitly bypasses Ask for those
+root runs; it never overrides mandatory deny/ask rules, Auto uncertainty, or an
+unresumable child.
+
+Approval permits an execution attempt. Guardrails, read-before-write rules,
+sandbox restrictions and tool-account authorization still run afterward.
 
 
 ## Best Practices

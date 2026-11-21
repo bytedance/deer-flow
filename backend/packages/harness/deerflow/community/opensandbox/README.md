@@ -22,6 +22,9 @@ sandbox:
   # request_timeout: 30
   # ready_timeout: 30
   # use_server_proxy: false
+  # secure_access: false
+  # resource: {cpu: "2", memory: 4Gi}          # limits; default 1 CPU / 2Gi
+  # resource_requests: {cpu: "1", memory: 2Gi} # requests; default from the server
   # sandbox_timeout: 14400  # remote lifetime; 0 means explicit cleanup only
   # bash_command_timeout: 600  # default command timeout
   # replicas: 3             # active + warm sandboxes per gateway process
@@ -34,6 +37,30 @@ sandbox:
 `OPEN_SANDBOX_DOMAIN` are set. `use_server_proxy` is useful when DeerFlow can
 reach the OpenSandbox management service but cannot directly reach sandbox
 `execd` endpoints.
+
+Use unquoted `true` or `false` for `use_server_proxy` and `secure_access`.
+Omitted and `null` values default to `false`. Quoted booleans and other
+non-boolean values cause a provider startup error.
+
+`secure_access: true` creates each sandbox with OpenSandbox
+[Secure Access](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/secure-access.md):
+the ingress gateway, and the server proxy, then reject endpoint requests that
+lack the sandbox's access token. The server issues the token with the endpoint
+and the SDK attaches it to every execd and file request, so no token setting is
+needed in DeerFlow. The server must run the Kubernetes runtime with
+`[ingress] mode = "gateway"`; the Docker runtime and other ingress modes reject
+the create with HTTP 400.
+
+`resource` sets each sandbox's limits and `resource_requests` its requests,
+as maps of resource names to Kubernetes quantities. Without `resource`, the
+SDK default of 1 CPU and 2Gi applies to every sandbox. Without
+`resource_requests`, the server decides the requests. Only Kubernetes runtimes
+apply `resource_requests`; Docker ignores them. Kubernetes uses the limit for
+any request you omit, and a request must not exceed its limit, including the
+SDK default limits when `resource` is unset (a request of 2 CPU without
+`resource` fails at sandbox creation). Positive numbers are passed as strings;
+blank names or quantities, zero, negative or non-finite numbers, and other
+value types cause a provider startup error.
 
 Values in `sandbox.environment` that start with `$` are resolved from the
 Gateway process environment once, when `config.yaml` loads; a missing variable
@@ -104,7 +131,7 @@ The full DeerFlow surface is implemented:
   signal status need additional deadline information before it can safely be
   normalized to 124.
 - Text and binary file operations use OpenSandbox's native filesystem API.
-  Append is serialized as a read-modify-write because SDK 0.1.x has no append
+  Append is serialized as a read-modify-write because the SDK has no append
   primitive.
 - `list_dir`, `glob`, and `grep` use portable `find`/`grep` commands and the
   shared DeerFlow result parsers.

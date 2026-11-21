@@ -128,8 +128,9 @@ def test_provisioner_detection_local_fallback(script_name, config, tmp_path):
         _sandbox_config(None) + "other:\n  provisioner_url: http://ignored:8002\n",
         "other:\n  provisioner_url: http://ignored:8002\n" + _sandbox_config("null"),
         _sandbox_config("'' # empty\t").replace("\n", "\r\n"),
+        "--- # document start\n  sandbox: # sandbox config\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
     ],
-    ids=["commented-key", "following-section", "preceding-section", "crlf"],
+    ids=["commented-key", "following-section", "preceding-section", "crlf", "indented-commented-heading"],
 )
 def test_provisioner_detection_preserves_section_boundaries(script_name, config, tmp_path):
     assert _run_detector(script_name, tmp_path, config) == "aio"
@@ -138,7 +139,74 @@ def test_provisioner_detection_preserves_section_boundaries(script_name, config,
 @pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
 @pytest.mark.parametrize(("value", "expected"), [*PROVISIONER_VALUES, pytest.param(None, "local", id="local-provider")])
 def test_provisioner_start_selects_services_and_overlay(script_name, value, expected, tmp_path):
-    """Run both launchers in a synthetic checkout; all external commands are doubles."""
+    config = _sandbox_config(value, "deerflow.sandbox.local:LocalSandboxProvider") if expected == "local" else _sandbox_config(value)
+    _assert_launcher_selects_sandbox_services(script_name, config, expected, tmp_path)
+
+
+@pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
+@pytest.mark.parametrize(("value", "expected"), [(None, "aio"), ("http://provisioner:8002", "provisioner")])
+def test_start_accepts_comment_on_sandbox_heading(script_name, value, expected, tmp_path):
+    config = _sandbox_config(value).replace("sandbox:\n", "sandbox: # sandbox config\n", 1)
+    _assert_launcher_selects_sandbox_services(script_name, config, expected, tmp_path)
+
+
+@pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        pytest.param(
+            "custom:\n  sandbox:\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\nsandbox: # actual sandbox\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
+            "local",
+            id="nested-sandbox",
+        ),
+        pytest.param(
+            "sandbox: # sandbox config\n  custom:\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
+            "local",
+            id="nested-use",
+        ),
+        pytest.param(
+            _sandbox_config(None) + "  options:\n    provisioner_url: http://decoy:8002\n",
+            "aio",
+            id="nested-provisioner-url",
+        ),
+    ],
+)
+def test_start_ignores_nested_sandbox_keys(script_name, config, expected, tmp_path):
+    _assert_launcher_selects_sandbox_services(script_name, config, expected, tmp_path)
+
+
+@pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        pytest.param(
+            "sandbox: # settings\n  use: custom:OtherProvider # deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            "local",
+            id="provider-in-comment",
+        ),
+        pytest.param(
+            "sandbox: # settings\n  use: 'custom:OtherProvider # deerflow.community.aio_sandbox:AioSandboxProvider'\n",
+            "local",
+            id="provider-in-quoted-text",
+        ),
+        pytest.param(
+            'sandbox: # settings\n    use: "deerflow.community.aio_sandbox:AioSandboxProvider" # deerflow.sandbox.local:LocalSandboxProvider\n    provisioner_url: http://provisioner:8002\n',
+            "provisioner",
+            id="four-space-quoted-provider-with-comment",
+        ),
+        pytest.param(
+            "sandbox: # settings\n  use: 'deerflow.community.aio_sandbox:AioSandboxProvider' # local AIO\n",
+            "aio",
+            id="single-quoted-provider",
+        ),
+    ],
+)
+def test_start_uses_the_provider_scalar(script_name, config, expected, tmp_path):
+    _assert_launcher_selects_sandbox_services(script_name, config, expected, tmp_path)
+
+
+def _assert_launcher_selects_sandbox_services(script_name, config, expected, tmp_path):
+    """Run the launcher in a synthetic checkout with Docker stubbed."""
     checkout = tmp_path / "synthetic checkout"
     shutil.copytree(REPO_ROOT / "scripts", checkout / "scripts")
     docker_dir = checkout / "docker"
@@ -150,7 +218,6 @@ def test_provisioner_start_selects_services_and_overlay(script_name, value, expe
         (checkout / filename).write_text("# synthetic, no credentials\n", encoding="utf-8")
     extensions = checkout / "extensions_config.json"
     extensions.write_text("{}\n", encoding="utf-8")
-    config = _sandbox_config(value, "deerflow.sandbox.local:LocalSandboxProvider") if expected == "local" else _sandbox_config(value)
     root_config = checkout / "config.yaml"
     selected_config = checkout / "selected config.yaml"
     # Dev must keep using PROJECT_ROOT/config.yaml; prod must honor its selector.
@@ -196,7 +263,8 @@ openssl() { return 97; }
     assert result.returncode == 0, result.stdout + result.stderr
     args = capture.read_text(encoding="utf-8").splitlines()
     assert args.count("up") == 1, args
-    assert ("provisioner" in args) == (expected == "provisioner"), args
+    services_and_options = args[args.index("up") + 1 :]
+    assert ("provisioner" in services_and_options) == (expected == "provisioner"), args
     files = [Path(args[index + 1]).name for index, arg in enumerate(args) if arg == "-f"]
     base = "docker-compose-dev.yaml" if script_name == "docker.sh" else "docker-compose.yaml"
     assert files == [base] + (["docker-compose.dood.yaml"] if expected == "aio" else [])

@@ -18,6 +18,7 @@ from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, 
 from lark_oapi.core.json import JSON
 
 from app.channels.feishu import FEISHU_CARD_MAX_BYTES, FEISHU_MAX_CARDS_PER_REPLY, FeishuChannel, _card_text_bytes, _split_card_text
+from app.channels.feishu_card_interaction import ClarificationCardRequest, build_button_card
 from app.channels.message_bus import MessageBus, OutboundMessage
 from app.channels.store import JsonChannelStore
 
@@ -223,3 +224,68 @@ async def test_reply_without_running_card_and_push_without_source_split_too(feis
     assert api.rejected == []
     assert "".join(api.cards[card_id] for _, card_id in api.replies) == answer
     assert "".join(text for _, text in api.created) == answer
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "keeps_its_marker"),
+    [
+        # Feishu only accepts a markdown image whose target is an uploaded image_key;
+        # a URL target fails the whole card with 230099 / 11310 (#8407).
+        ("see ![chart](https://x.io/a.png) here", "see [chart](https://x.io/a.png) here", False),
+        ("![only](https://x.io/a.png)", "[only](https://x.io/a.png)", False),
+        ("![a](k) and ![b](k2)", "[a](k) and [b](k2)", False),
+        # A title inside the marker is not part of the link target Feishu gets.
+        ('![a](https://x.io/a.png "title") tail', "[a](https://x.io/a.png) tail", False),
+        # Text without an image marker is untouched.
+        ("plain answer", "plain answer", False),
+        # Code renders literally in a card, so the shown source must not change.
+        ("inline `![a](b)` keeps its marker", "inline `![a](b)` keeps its marker", True),
+        ("```\n![a](b)\n```", "```\n![a](b)\n```", True),
+        # A snapshot streamed before the closing fence arrives keeps its open block literal.
+        ("```\n![a](b)", "```\n![a](b)", True),
+        ("```\n![a](b)\n```\ntail ![c](d)", "```\n![a](b)\n```\ntail [c](d)", True),
+    ],
+)
+async def test_card_content_never_sends_a_markdown_image_feishu_cannot_resolve(text: str, expected: str, keeps_its_marker: bool):
+    rendered = json.loads(FeishuChannel._build_card_content(text))["elements"][0]["content"]
+
+    assert rendered == expected
+    # An unrendered marker inside code is literal text, not an image element.
+    assert ("![" in rendered) is keeps_its_marker
+
+
+async def test_clarification_button_card_rewrites_an_image_in_the_question():
+    """The button card is delivered as raw card JSON, so it needs the rewrite too."""
+    request = ClarificationCardRequest(
+        request_id="r1",
+        source="s",
+        question="Pick ![chart](https://example.invalid/chart.png)",
+        options=("Alpha", "Beta"),
+        option_ids=("o1", "o2"),
+        callback_token="token",
+        context="context ![x](https://example.invalid/x.png)",
+    )
+
+    card = json.loads(build_button_card(request))
+
+    markdown = next(element for element in card["elements"] if element["tag"] == "markdown")
+    assert markdown["content"] == ("context [x](https://example.invalid/x.png)\n\nPick [chart](https://example.invalid/chart.png)")
+    assert "![" not in markdown["content"]
+
+
+async def test_card_answer_with_an_image_url_still_fits_the_body_limit():
+    """An answer carrying an image URL keeps its link and stays within the card body limit."""
+    answer = (
+        """Look at this:
+![chart](https://example.invalid/chart.png)
+"""
+        + "中文" * 200
+    )
+
+    card = FeishuChannel._build_card_content(answer)
+
+    rendered = json.loads(card)["elements"][0]["content"]
+    assert "![chart]" not in rendered
+    assert "[chart](https://example.invalid/chart.png)" in rendered
+    request = PatchMessageRequest.builder().message_id("card").request_body(PatchMessageRequestBody.builder().content(card).build()).build()
+    assert _body_bytes(request) <= FEISHU_CARD_MAX_BYTES

@@ -15,6 +15,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from datetime import timedelta
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -72,7 +73,7 @@ def _import_sdk() -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[R
         from opensandbox.models.execd import RunCommandOpts
         from opensandbox.sync import SandboxSync
     except ImportError as exc:  # pragma: no cover - depends on optional install state
-        raise ImportError("OpenSandboxProvider requires the optional 'opensandbox' dependency. Install it with: pip install 'deerflow-harness[opensandbox]' or pip install 'opensandbox>=0.1.15,<0.2.0'.") from exc
+        raise ImportError("OpenSandboxProvider requires the optional 'opensandbox' dependency. Install it with: pip install 'deerflow-harness[opensandbox]' or pip install 'opensandbox>=1.1.0,<2.0.0'.") from exc
     return SandboxSync, ConnectionConfigSync, RunCommandOpts
 
 
@@ -114,8 +115,38 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     def _load_config(self) -> dict[str, Any]:
         sandbox_config = get_app_config().sandbox
 
-        def option(name: str, default: Any = None) -> Any:
-            return getattr(sandbox_config, name, default)
+        def option(name: str) -> Any:
+            return getattr(sandbox_config, name, None)
+
+        def bool_option(name: str) -> bool:
+            value = option(name)
+            if value is None:
+                return False
+            if not isinstance(value, bool):
+                raise ValueError(f"sandbox.{name} must be true or false")
+            return value
+
+        def resource_quantity(value: Any) -> str | None:
+            if isinstance(value, str):
+                return value.strip() or None
+            if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+                return str(value)
+            return None
+
+        def resource_option(name: str) -> dict[str, str] | None:
+            value = option(name)
+            if value is None:
+                return None
+            invalid = ValueError(f"sandbox.{name} must map resource names to positive quantities, e.g. {{cpu: '2', memory: 4Gi}}")
+            if not isinstance(value, Mapping):
+                raise invalid
+            resources: dict[str, str] = {}
+            for key, raw in value.items():
+                quantity = resource_quantity(raw)
+                if not isinstance(key, str) or not key.strip() or quantity is None:
+                    raise invalid
+                resources[key.strip()] = quantity
+            return resources or None
 
         api_key = option("api_key")
         domain = option("domain")
@@ -143,7 +174,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "domain": domain,
             "protocol": protocol,
             "request_timeout": self._positive_float("request_timeout", option("request_timeout"), DEFAULT_REQUEST_TIMEOUT),
-            "use_server_proxy": bool(option("use_server_proxy", False)),
+            "use_server_proxy": bool_option("use_server_proxy"),
+            "secure_access": bool_option("secure_access"),
             "image": option("image") or DEFAULT_IMAGE,
             "ready_timeout": self._positive_float("ready_timeout", option("ready_timeout"), DEFAULT_READY_TIMEOUT),
             "sandbox_timeout": None if sandbox_timeout == 0 else sandbox_timeout,
@@ -151,6 +183,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
+            "resource": resource_option("resource"),
+            "resource_requests": resource_option("resource_requests"),
         }
 
     def _get_sdk(self) -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[RunCommandOpts]]:
@@ -309,7 +343,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             ready_timeout=timedelta(seconds=self._config["ready_timeout"]),
             env=self._config["environment"] or None,
             metadata=metadata,
+            resource=self._config["resource"],
+            resource_requests=self._config["resource_requests"],
             connection_config=connection_config,
+            secure_access=self._config["secure_access"],
         )
         try:
             bootstrap = remote.commands.run(

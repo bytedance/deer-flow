@@ -1,16 +1,24 @@
-"""Versioned bridge journal replay; authority is reacquired from a live session.
+"""Versioned bridge journal replay; authority is reacquired from a live session
+or, when the owner minted one at launch, from the persisted recovery grant.
 
 SQLite retains its exclusive store owner. PostgreSQL uses a shared execution
 lease and fenced admission; both replay the same committed bridge journal.
+Unattended grant recovery runs on the single-Gateway SQLite store only.
 """
 
 import asyncio
 import copy
 import json
+import logging
+import time
 
+from deerflow_extension_api import AgentRunError
 from deerflow_extension_api.plugins import ToolContext
 
+from .constants import NAMESPACE
+
 RECOVERY_VERSION = 1
+logger = logging.getLogger(__name__)
 
 
 class Recovery:
@@ -25,11 +33,15 @@ class Recovery:
         return await asyncio.shield(task)
 
     async def restore(self, payload, context):
-        from .service import identity, text
+        from .service import text
+
+        run_id = text(payload["run_id"], 64)
+        return await self.restore_body(self.owner(context), run_id, context.agent_runs)
+
+    async def restore_body(self, owner, run_id, runs):
+        from .service import identity
 
         async with self.launch_lock:
-            owner = self.owner(context)
-            run_id = text(payload["run_id"], 64)
             record = await asyncio.to_thread(self.store.get, owner, run_id)
             if run_id in self.entries:
                 return {"run_id": run_id, "status": record["status"]}
@@ -41,11 +53,11 @@ class Recovery:
                 raise ValueError("Recovery script or arguments changed")
             if len(self.entries) >= self.config["max_workflows"] or sum(e["owner"] == owner for e in self.entries.values()) >= self.config["max_workflows_per_owner"]:
                 raise ValueError("Active workflow limit")
-            entry = self.new_entry(owner, record, context.agent_runs)
+            entry = self.new_entry(owner, record, runs)
             await self.check_configuration(entry)
             if self.clustered:
                 record = await asyncio.to_thread(self.store.claim, owner, run_id)
-                entry = self.new_entry(owner, record, context.agent_runs)
+                entry = self.new_entry(owner, record, runs)
             # A committed admission intent with no receipt is never dispatched
             # again. An operator must reconcile its external effects first.
             uncertain = [s for s in record["steps"] if s["status"] not in ("queued", "completed", "running") or (s["status"] == "running" and not s.get("run_id"))]
@@ -63,6 +75,52 @@ class Recovery:
             await self.save(owner, record)
             self.publish(entry)
             return {"run_id": run_id, "status": "queued"}
+
+    def grant_usable(self, record):
+        grant = record.get("grant")
+        return (
+            isinstance(grant, dict) and grant.get("version") == 1 and grant.get("revoked") is not True and isinstance(grant.get("expires_at"), (int, float)) and grant["expires_at"] > time.time() and isinstance(grant.get("authority"), dict)
+        )
+
+    def grant_validator(self, owner, run_id):
+        async def validate():
+            entry = self.entries.get(run_id)
+            if entry is not None:
+                grant = entry["record"].get("grant")
+            else:
+                # Locked admission publishes the entry only after restore, while
+                # the delegated handle already operates; validate the current
+                # persisted grant until publication switches to the live entry.
+                record = await asyncio.to_thread(self.store.get, owner, run_id)
+                grant = record.get("grant") if isinstance(record, dict) else None
+            if not isinstance(grant, dict) or grant.get("revoked") is True or grant.get("expires_at", 0) <= time.time():
+                raise AgentRunError(403, "Workflow recovery grant expired or revoked")
+
+        return validate
+
+    async def recover_granted_workflows(self):
+        """Resume opt-in recoverable workflows after a restart, without a session.
+
+        Records without a usable grant stay on the manual sign-in path; per-record
+        failures never block the others or Gateway startup.
+        """
+        if self.agent_runs_restore is None:
+            return
+        try:
+            records = await asyncio.to_thread(self.store.recoverable)
+        except Exception:
+            logger.exception("Workflow grant scan failed; unattended recovery unavailable")
+            return
+        for owner, run_id, record in records:
+            if not self.available:
+                return
+            if run_id in self.entries or not self.grant_usable(record):
+                continue
+            try:
+                runs = await self.agent_runs_restore(user_id=owner, grant=record["grant"]["authority"], validator=self.grant_validator(owner, run_id), plugin_namespace=NAMESPACE)
+                await self.restore_body(owner, run_id, runs)
+            except Exception:
+                logger.exception("Workflow %s unattended recovery failed; manual recovery remains available", run_id)
 
     async def begin_frame(self, entry, frame):
         """Persist intent before effects; replay verifies every emitted request."""

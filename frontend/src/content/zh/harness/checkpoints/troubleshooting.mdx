@@ -147,29 +147,17 @@ Run {run_id} could not materialize resume checkpoint {checkpoint_id}
 
 **症状**：在并行扇出向同一 delta 通道写入的同一个 super-step 中，实时 run 按路径顺序返回写入，但 `get_state` / 恢复以不同顺序回放。
 
-**原因**：已固定的上游缺陷（[langgraph #8382](https://github.com/langchain-ai/langgraph/issues/8382)），open，修复 PR [#8544](https://github.com/langchain-ai/langgraph/pull/8544) 未合并，无已发布版本。delta 回放按哈希后的 `(task_id, idx)` 排序写入，而不是实时 `apply_writes` 使用的路径顺序，于是同一 super-step 的写入被重排。存在于 `langgraph-checkpoint 4.2.0`；已在 memory、SQLite 与 Postgres 上复现。
+**原因**：上游缺陷 [langgraph #8382](https://github.com/langchain-ai/langgraph/issues/8382)，已由 PR [#8544](https://github.com/langchain-ai/langgraph/pull/8544) 在 `langgraph-checkpoint` 4.3.0 中修复。受影响的版本按哈希后的 `(task_id, idx)` 排序 delta 回放写入，而不是实时 `apply_writes` 使用的路径顺序，导致 memory、SQLite 与 Postgres 上同一 super-step 的写入被重排。
 
-**处理**：本地无解。DeerFlow 的测试断言正确契约，并在缺陷存在时触发 skip，同时点名该 issue：
-
-```
-upstream langgraph#8382 unfixed in langgraph-checkpoint 4.2.0: delta replay orders writes by hashed (task_id, idx) instead of the path order apply_writes used live, so get_state/resume reorders same-superstep writes
-```
-
-如果你的消费方在意同一 super-step 内的顺序，请避免把并行写入扇出到同一个 delta 通道。
+**处理**：使用 `langgraph-checkpoint>=4.3.0,<5.0`。DeerFlow 的依赖下限会排除受影响版本，`test_parallel_superstep_replay_matches_live_write_order` 无条件断言回放顺序与实时写入顺序一致。
 
 ### Postgres 物化旧检查点为空
 
 **症状**：在 Postgres 上，较旧的 delta 检查点物化为空，较新的却正常。
 
-**原因**：已固定的上游缺陷（[langgraph #8448](https://github.com/langchain-ai/langgraph/issues/8448)），open，修复 PR #8556 未合并。当目标检查点不在第一页分页结果里时，`PostgresSaver.get_delta_channel_history` 会永久污染其回走游标：未修补的游标取自一个尚未加载的父级，永久停在 `None`，于是旧检查点物化为空。只有 Postgres 对其 stage-1 扫描分页。存在于 `langgraph-checkpoint-postgres 3.1.2`。
+**原因**：上游缺陷 [langgraph #8448](https://github.com/langchain-ai/langgraph/issues/8448)，已由 PR #8556 在 `langgraph-checkpoint-postgres` 3.1.3 中修复。受影响的版本在目标检查点超出第一页分页结果时，从尚未加载的父级推导回走游标；游标随后一直停在 `None`，导致旧检查点物化为空。
 
-**处理**：本地无解；Postgres 用例触发 skip，并点名该 issue：
-
-```
-upstream langgraph#8448 unfixed in langgraph-checkpoint-postgres 3.1.2: the paged delta walk poisons the channel cursor for a target past the first stage-1 page, hydrating old checkpoints empty
-```
-
-节奏约束回放深度，因此更小的 `snapshot_frequency` 能让回走更短；这是本仓库暴露的唯一杠杆，而不是对该游标缺陷的修复。
+**处理**：使用 `langgraph-checkpoint-postgres>=3.1.3,<3.2`。DeerFlow 的依赖下限会排除受影响版本，`test_long_chain_history_survives_pagination` 无条件将每个物化检查点与 `InMemorySaver` 预言机对照。
 
 ## 缓存
 

@@ -1,6 +1,47 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
+  sharing: {
+    title: string;
+    description: string;
+    scope: string;
+    expiry: string;
+    hour: string;
+    day: string;
+    week: string;
+    month: string;
+    create: string;
+    working: string;
+    link: string;
+    copy: string;
+    copied: string;
+    links: string;
+    noLinks: string;
+    revoke: string;
+    revoked: string;
+    expired: string;
+    expires: string;
+    loading: string;
+    failed: string;
+    unavailable: string;
+    conflict: string;
+    tooLarge: string;
+    readOnly: string;
+    fork: string;
+    forking: string;
+    missing: string;
+    retry: string;
+    artifacts: string;
+    download: string;
+    preview: string;
+    close: string;
+    you: string;
+    assistant: string;
+    tool: string;
+    noPreview: string;
+    previewNote: string;
+    previewLimited: string;
+  };
   usage: {
     title: string;
     description: string;
@@ -98,6 +139,8 @@ export interface Translations {
       refreshHint: string;
     };
     catalog: Record<
+      | "officePreview"
+      | "workspaceSearch"
       | "workflows"
       | "reportSections"
       | "agentTeams"
@@ -110,6 +153,7 @@ export interface Translations {
       | "knowledgeManagement"
       | "knowledgePlatform"
       | "knowledgeCenter"
+      | "skillEvolution"
       | "weknora"
       | "lightrag"
       | "example",
@@ -131,6 +175,21 @@ export interface Translations {
 
   capabilities: {
     toolsAndIntegrations: string;
+    mcpConnections: {
+      title: string;
+      action: (action: string, name: string) => string;
+      disconnect: string;
+      reconnect: string;
+      actionFailed: string;
+      loadFailed: string;
+      status: {
+        disconnected: string;
+        connected: string;
+        reconnect_required: string;
+        removed: string;
+        unavailable: string;
+      };
+    };
     icon: {
       title: string;
       upload: string;
@@ -224,6 +283,7 @@ export interface Translations {
     more: string;
     search: string;
     loadMore: string;
+    scrollToBottom: string;
     showingOf: (loaded: number, total: number) => string;
     download: string;
     thinking: string;
@@ -315,6 +375,19 @@ export interface Translations {
     linkCopied: string;
   };
 
+  artifactSelection: {
+    rewrite: string;
+    instructions: string;
+    exactRequired: string;
+    review: string;
+    original: string;
+    replacement: string;
+    apply: string;
+    applied: string;
+    changed: string;
+    limit: string;
+  };
+
   artifactEditing: {
     unsaved: string;
     saving: string;
@@ -329,6 +402,12 @@ export interface Translations {
   };
 
   artifactPreview: {
+    preparingDownload: string;
+    retryDownload: string;
+    downloadFailed: string;
+    downloadRequested: string;
+    retry: string;
+    unavailable: string;
     loadingPreview: string;
     resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
@@ -676,7 +755,15 @@ export interface Translations {
     viewTrash: string;
     documentsLoadFailed: string;
     threadFilesLoadFailed: string;
-    interimMemoryNotice: string;
+    memoryTitle: string;
+    memoryAutoExtract: string;
+    memoryDescription: string;
+    memoryEmpty: string;
+    memoryPromote: string;
+    memoryPromoted: string;
+    memorySaveFirst: string;
+    memoryLoadFailed: string;
+    memoryActionFailed: string;
   };
 
   // Trash view (Projects Phase 2)
@@ -1621,6 +1708,21 @@ export interface Translations {
     selectPlaceholder: string;
     answeredValue: (value: string) => string;
     approval: {
+      modeLabel: string;
+      modeAsk: string;
+      modeAuto: string;
+      modeFull: string;
+      askDescription: string;
+      autoDescription: string;
+      fullDescription: string;
+      approveThread: string;
+      grantScope: string;
+      editArguments: string;
+      fullArguments: string;
+      invalidArguments: string;
+      revokeGrants: string;
+      grantsRevoked: string;
+      childApproval: string;
       title: string;
       description: string;
       waiting: string;
@@ -1643,6 +1745,19 @@ export interface Translations {
 
   // Uploads
   uploads: {
+    status: {
+      pending: string;
+      uploading: string;
+      uploaded: string;
+      failed: string;
+      cancelled: string;
+    };
+    cancelUpload: string;
+    retryUpload: string;
+    notReady: string;
+    attachment: string;
+    image: string;
+    removeAttachment: (filename: string) => string;
     uploading: string;
     uploadingFiles: string;
     limitsHint: (
@@ -1705,6 +1820,37 @@ export interface Translations {
   };
 
   // Shortcuts
+  workspaceSearch: {
+    title: string;
+    description: string;
+    placeholder: string;
+    open: string;
+    all: string;
+    threads: string;
+    messages: string;
+    includeArchived: string;
+    archived: string;
+    recent: string;
+    searching: string;
+    indexing: string;
+    unavailable: string;
+    unsupported: string;
+    error: string;
+    empty: string;
+    more: string;
+    retry: string;
+    hint: string;
+    user: string;
+    assistant: string;
+    context: string;
+    returnToLatest: string;
+    loadingContext: string;
+    messageUnavailable: string;
+    matchedMessage: string;
+    earlier: string;
+    later: string;
+    untitled: string;
+  };
   shortcuts: {
     searchActions: string;
     noResults: string;

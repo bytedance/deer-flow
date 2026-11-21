@@ -1,16 +1,20 @@
 # Skills & Tools
 
-**Human approval for high-risk tools**: Set `hitl_approval.enabled: true` and
-list tools such as `write_file`, `str_replace`, or `bash` in `config.yaml` to
-pause matching calls before execution. The Web UI shows an approval card for
-each action; approval attempts execution under the existing guardrails and
-sandbox authorization, while rejection returns the reason to the agent without
-running the tool. Non-interactive runs follow `hitl_approval.non_interactive`;
-subagents and runtimes without resume support always fail closed.
+**Runtime tool approvals**: Enable `hitl_approval.enabled` to offer Ask and Auto
+independently of reasoning mode. Operators can also enable Full access in
+`hitl_approval.allowed_modes`. Ask presents the complete operation before
+execution. Auto makes a separate, tool-free review call using
+an existing model profile and requests human approval when risk or authorization
+is uncertain. Full skips individual reviews within the operator's policy.
+Mandatory guardrails and account permissions apply in every mode.
 
-Pending approvals do not expire and block new runs on the same thread until
-resolved. Long argument values may be truncated in the display, but approval
-executes the original complete arguments. The feature is disabled by default.
+Approval cards support allow, reject, edited arguments, and exact-operation chat
+grants that can be revoked from Tool permissions. Root approvals survive restart
+through checkpoints. A delegated call waits in its original execution; stopping
+its run, timing out, or restarting the worker invalidates that child approval.
+Unattended runs cannot wait for a human. The feature is disabled by default.
+Missing, empty or duplicate tool-call IDs are rejected before execution so an
+unanswerable approval cannot block the chat.
 See [HITL Tool Approval](../../backend/docs/CONFIGURATION.md#hitl-tool-approval) for
 configuration and safety semantics.
 
@@ -39,6 +43,16 @@ embedding slide images, so rotated or mirrored photos retain their displayed
 orientation.
 
 The **ppt-generation** skill preserves transparent slide images when composing a presentation, including grayscale and palette PNG transparency.
+
+The **data-analysis** skill reads legacy Excel 97–2003 (`.xls`) workbooks with
+optional `pandas` and `xlrd` packages. It preserves literal text such as `NA`
+and leading-zero identifiers while importing cell values into DuckDB. See the
+[data-analysis setup instructions](../../skills/public/data-analysis/SKILL.md)
+for the additional dependencies. Legacy `.xls` and CSV input do not require
+DuckDB extensions and can be analyzed offline with an empty extension cache.
+The `.xlsx` reader continues to use the spatial extension. Legacy workbooks that
+cannot be opened are reported and skipped while other input files continue;
+analysis fails if no tables can be loaded.
 
 Administrators can see **Could not load** warnings in Capability Center > Skills
 when their own custom skill's `SKILL.md` contains invalid YAML. Warnings show the
@@ -146,11 +160,27 @@ accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds
 Unset overrides use the provider defaults. Invalid duration strings fail before
 the script submits a request.
 
+Generated videos download over HTTPS on port 443. The skill checks the
+provider's download-host allowlist before the first request and after each
+redirect, up to five redirects. Gemini sends its API key only to its API host
+and drops it when a download moves to storage. For a MiniMax deployment using
+another CDN, set `MINIMAX_VIDEO_DOWNLOAD_HOSTS` in the runtime environment to
+the comma-separated, exact DNS names of trusted file hosts. Each entry grants
+download access to that entire host. If the custom API endpoint set in
+`MINIMAX_API_HOST` also serves video files, include its hostname in
+`MINIMAX_VIDEO_DOWNLOAD_HOSTS` as well.
+
 The video-generation skill derives reference-image MIME metadata from `.png`,
 `.jpg`, `.jpeg`, `.webp`, and `.gif` filename extensions (case-insensitive). A
 submitted reference with a missing or unrecognized extension raises a clear error
 before API submission. Filenames must match their contents; image bytes are not
 validated or converted, and provider-specific format restrictions still apply.
+
+The [image-generation skill](../../skills/public/image-generation/SKILL.md#output-handling)
+decodes Gemini base64 image data before opening the output file,
+preserving an existing image when decoding fails. With the legacy MiniMax
+`/v1/image_generation` endpoint, a decode failure can still erase an existing
+output image. Use a fresh `--output-file` path to keep the previous image.
 
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
