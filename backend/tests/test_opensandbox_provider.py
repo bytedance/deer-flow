@@ -693,7 +693,12 @@ def test_opensandbox_skill_partial_upload_preserves_warm_workspace(opensandbox_s
     assert {p.name for p in remote.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
 
 
-def test_opensandbox_skill_upload_preserves_package_links(opensandbox_skill_view):
+def test_opensandbox_skill_upload_preserves_package_links(opensandbox_skill_view, tmp_path):
+    # The fake remote runs the production commands with the host's utilities.
+    probe = subprocess.run(["ln", "-sT", "--", "target", tmp_path / "ln-probe"], capture_output=True, check=False, timeout=5)
+    if probe.returncode != 0:
+        pytest.skip("host ln does not support -sT for the fake OpenSandbox remote")
+
     env = opensandbox_skill_view
     package = env.skill("allowed", owner="alice")
     assets = package / "assets"
@@ -725,16 +730,33 @@ def test_opensandbox_skill_upload_skips_unsafe_links_and_nonportable_names(opens
     (package / "external").symlink_to("../beta/SKILL.md")
     (package / "absolute").symlink_to(package / "SKILL.md")
     (package / "invalid\\name").write_bytes(b"skip")
-    (package / os.fsdecode(b"non-utf8-\xff")).write_bytes(b"skip")
     (package / "invalid\\directory").mkdir()
     (package / "invalid\\directory" / "child").write_bytes(b"skip")
-    (package / "portable link").symlink_to("SKILL.md")
+    (package / "portable.txt").write_bytes(b"keep")
     (package / "broken").symlink_to("missing")
 
     env.provider.acquire("thread", user_id="alice")
     remote = env.sdk.remotes[0]
     assert _remote_skills(remote) == {"alpha", "beta"}
-    assert {p.name for p in (remote.skill_root / "public" / "alpha").iterdir()} == {"SKILL.md", "portable link"}
+    uploaded = remote.skill_root / "public" / "alpha"
+    assert {p.name for p in uploaded.iterdir()} == {"SKILL.md", "portable.txt"}
+    assert (uploaded / "portable.txt").read_bytes() == b"keep"
+    assert "non-portable" in caplog.text
+
+
+def test_opensandbox_skill_upload_skips_non_utf8_filename(opensandbox_skill_view, caplog):
+    env = opensandbox_skill_view
+    package = env.skill("alpha")
+    try:
+        (package / os.fsdecode(b"non-utf8-\xff")).write_bytes(b"skip")
+    except OSError as exc:
+        if exc.errno in {errno.EILSEQ, errno.EINVAL, errno.EPERM}:
+            pytest.skip("host filesystem cannot create a non-UTF-8 filename")
+        raise
+
+    env.provider.acquire("thread", user_id="alice")
+    uploaded = env.sdk.remotes[0].skill_root / "public" / "alpha"
+    assert {p.name for p in uploaded.iterdir()} == {"SKILL.md"}
     assert "non-portable" in caplog.text
 
 
