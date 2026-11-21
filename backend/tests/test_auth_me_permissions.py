@@ -25,6 +25,27 @@ _TEST_SECRET = "test-secret-key-auth-me-permissions-min-32"
 _DISABLED_NON_ADMIN_PERMISSIONS = [permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY]
 
 
+def test_permission_registry_membership_is_exact():
+    expected = {
+        "threads:read",
+        "threads:write",
+        "threads:delete",
+        "runs:create",
+        "runs:read",
+        "runs:cancel",
+        "memory:read",
+        "memory:write",
+        "agents:read",
+        "agents:write",
+        "projects:read",
+        "projects:write",
+        "projects:delete",
+        "skills:manage",
+    }
+    assert len(_ALL_PERMISSIONS) == len(expected)
+    assert set(_ALL_PERMISSIONS) == expected
+
+
 class _RecordingProvider:
     """Async-only provider recording every decision request it serves."""
 

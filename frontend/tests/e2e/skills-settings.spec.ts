@@ -203,7 +203,10 @@ test.describe("Skill gallery", () => {
       0,
     );
     await expect(
-      page.getByRole("button", { name: "Details", exact: true }),
+      page.getByRole("button", {
+        name: "View details custom-demo",
+        exact: true,
+      }),
     ).toHaveCount(0);
     await page.getByRole("tab", { name: "Community", exact: true }).click();
     await expect(

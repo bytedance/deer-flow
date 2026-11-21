@@ -236,6 +236,8 @@ def test_official_contents_field_is_required():
 @pytest.mark.parametrize(
     ("files", "message"),
     [
+        ([{"path": "SKILL.md", "contents": _SKILL_MD}, {"path": "", "contents": "x"}], "must name a file"),
+        ([{"path": "SKILL.md", "contents": _SKILL_MD}, {"path": "dir/", "contents": "x"}], "must name a file"),
         ([{"path": "SKILL.md", "contents": _SKILL_MD}, {"path": "nested/SKILL.md", "contents": _SKILL_MD}], "nested SKILL.md"),
         ([{"path": "SKILL.md", "contents": _SKILL_MD}, {"path": "scripts/run.sh:ads", "contents": "echo ok"}], "unsafe member path"),
         ([{"path": "SKILL.md", "contents": _SKILL_MD}, {"path": "scripts/CON.txt", "contents": "x"}], "portable to Windows"),
@@ -289,13 +291,16 @@ async def test_local_user_and_concurrency_limits_reject_without_queuing():
     limiter = _SourceRateLimiter()
     for _ in range(20):
         await limiter.acquire("user-1")
-        await limiter.release()
+        limiter.release()
     with pytest.raises(SkillSourceError) as caught:
         await limiter.acquire("user-1")
     assert caught.value.code == "skill_source_rate_limited"
     assert caught.value.retry_after is not None
     local_http = skills_router._source_http_exception(caught.value)
     assert local_http.headers["Retry-After"] == caught.value.retry_after
+    from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS
+
+    assert "Retry-After" in CORS_EXPOSED_HEADERS
 
     other = _SourceRateLimiter()
     for _ in range(4):
@@ -304,7 +309,35 @@ async def test_local_user_and_concurrency_limits_reject_without_queuing():
         await other.acquire("user-3")
     assert caught.value.retry_after == "1"
     for _ in range(4):
-        await other.release()
+        other.release()
+
+
+@pytest.mark.asyncio
+async def test_source_limiter_prunes_stale_users_and_releases_on_cancellation(monkeypatch):
+    limiter = _SourceRateLimiter()
+    now = 0.0
+    monkeypatch.setattr(skill_source.time, "monotonic", lambda: now)
+    await limiter.acquire("stale-user")
+    limiter.release()
+    now = 61.0
+    await limiter.acquire("new-user")
+    limiter.release()
+    assert "stale-user" not in limiter._requests
+
+    monkeypatch.setattr(skill_source, "_source_rate_limiter", limiter)
+    started = asyncio.Event()
+
+    async def hold():
+        async with skill_source._upstream_request_slot("cancel-user"):
+            started.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(hold())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert limiter._active == 0
 
 
 def test_source_routes_envelope_missing_credentials_and_denied_permission(monkeypatch):
@@ -313,7 +346,7 @@ def test_source_routes_envelope_missing_credentials_and_denied_permission(monkey
         response = client.post("/api/skills/install/source/inspect", json={"source": _SOURCE})
         invalid = client.post("/api/skills/install/source/inspect", json={"source": "https://github.com/owner/repo@skill"})
     assert response.status_code == 503
-    assert response.json()["detail"] == {"code": "skill_source_not_configured", "message": "当前部署没有 skills.sh 凭据"}
+    assert response.json()["detail"] == {"code": "skill_source_not_configured", "message": "This deployment does not have skills.sh credentials."}
     assert invalid.status_code == 400
     assert invalid.json()["detail"]["code"] == "skill_source_invalid"
 
@@ -328,7 +361,12 @@ def test_source_routes_envelope_missing_credentials_and_denied_permission(monkey
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
     with TestClient(_make_app(_config(), permissions=[])) as client:
         denied = client.post("/api/skills/install/source/inspect", json={"source": _SOURCE})
+        denied_install = client.post(
+            "/api/skills/install/source",
+            json={"source": _SOURCE, "expected_snapshot_digest": "0" * 64},
+        )
     assert denied.status_code == 403
+    assert denied_install.status_code == 403
     assert called is False
 
 
@@ -485,11 +523,15 @@ async def test_cancellation_after_drained_install_finishes_and_cleans_archive(mo
 
 
 def test_source_limits_stay_stricter_than_archive_installer_limits():
+    import inspect
+
     from deerflow.skills.installer import safe_extract_skill_archive
 
+    parameters = inspect.signature(safe_extract_skill_archive).parameters
     assert skill_source.SOURCE_FILE_COUNT_LIMIT == 256
     assert skill_source.SOURCE_TOTAL_BYTES_LIMIT == 8 * 1024 * 1024
-    assert safe_extract_skill_archive.__defaults__ == (512 * 1024 * 1024, 4096)
+    assert parameters["max_total_size"].default == 512 * 1024 * 1024
+    assert parameters["max_entries"].default == 4096
 
 
 def test_real_source_install_scans_and_supports_complete_owned_lifecycle(monkeypatch, tmp_path):

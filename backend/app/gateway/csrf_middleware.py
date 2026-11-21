@@ -135,8 +135,9 @@ def get_configured_cors_origins() -> set[str]:
 # `X-Trace-Id` is listed for the same reason: TraceMiddleware puts it on every
 # response as the correlation id to quote in a bug report, and unexposed it is
 # readable on same-origin nginx deployments but invisible to exactly the
-# split-origin clients that cannot see the Gateway's logs either.
-CORS_EXPOSED_HEADERS: tuple[str, ...] = ("Content-Location", TRACE_ID_HEADER)
+# split-origin clients that cannot see the Gateway's logs either. `Retry-After`
+# lets source-install clients present the server-provided retry delay.
+CORS_EXPOSED_HEADERS: tuple[str, ...] = ("Content-Location", TRACE_ID_HEADER, "Retry-After")
 
 
 def _first_header_value(value: str | None) -> str | None:

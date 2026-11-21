@@ -2,7 +2,7 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { DownloadIcon, LoaderIcon, PencilIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -53,6 +53,8 @@ export function CustomSkillDetails({
   const [error, setError] = useState<unknown>(null);
   const [errorFallback, setErrorFallback] = useState(text.skillLoadFailed);
   const [reloadToken, setReloadToken] = useState(0);
+  const loadFailedRef = useRef(text.skillLoadFailed);
+  loadFailedRef.current = text.skillLoadFailed;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -61,7 +63,7 @@ export function CustomSkillDetails({
     setEditing(false);
     setConfirmingDelete(false);
     setError(null);
-    setErrorFallback(text.skillLoadFailed);
+    setErrorFallback(loadFailedRef.current);
     setLoading(true);
     loadCustomSkill(skill.name, controller.signal)
       .then((result) => {
@@ -76,7 +78,7 @@ export function CustomSkillDetails({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [skill.name, reloadToken, text.skillLoadFailed]);
+  }, [skill.name, reloadToken]);
 
   const save = async () => {
     if (saving || !loaded) return;

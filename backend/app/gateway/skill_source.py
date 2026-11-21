@@ -114,10 +114,18 @@ class _SourceRateLimiter:
         self._lock = asyncio.Lock()
         self._active = 0
         self._requests: dict[str, deque[float]] = defaultdict(deque)
+        self._last_prune = 0.0
 
     async def acquire(self, user_id: str) -> None:
         async with self._lock:
             now = time.monotonic()
+            if now - self._last_prune >= _SOURCE_WINDOW_SECONDS:
+                for existing_user, entries in list(self._requests.items()):
+                    while entries and entries[0] <= now - _SOURCE_WINDOW_SECONDS:
+                        entries.popleft()
+                    if not entries:
+                        del self._requests[existing_user]
+                self._last_prune = now
             requests = self._requests[user_id]
             while requests and requests[0] <= now - _SOURCE_WINDOW_SECONDS:
                 requests.popleft()
@@ -129,9 +137,9 @@ class _SourceRateLimiter:
             self._active += 1
             requests.append(now)
 
-    async def release(self) -> None:
-        async with self._lock:
-            self._active -= 1
+    def release(self) -> None:
+        # Synchronous event-loop bookkeeping cannot be interrupted in a finally.
+        self._active -= 1
 
 
 _source_rate_limiter = _SourceRateLimiter()
@@ -143,7 +151,7 @@ async def _upstream_request_slot(user_id: str) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await _source_rate_limiter.release()
+        _source_rate_limiter.release()
 
 
 def source_install_available() -> bool:
@@ -219,6 +227,8 @@ def _parse_snapshot(reference: SkillSourceRef, payload: Any) -> tuple[list[Snaps
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not isinstance(entry.get("contents"), str):
             raise _snapshot_unusable("Every skills.sh file must contain string path and contents fields.")
         raw_path = entry["path"]
+        if not raw_path or raw_path.endswith(("/", "\\")):
+            raise _snapshot_unusable("Every skills.sh file path must name a file, not a directory.")
         if "\x00" in raw_path:
             raise _snapshot_unusable("A source file path contains a NUL character.")
         path = raw_path.replace("\\", "/")
@@ -307,7 +317,7 @@ def _valid_retry_after(value: str | None) -> str | None:
 async def _fetch_snapshot_payload(reference: SkillSourceRef, user_id: str) -> Any:
     token = (os.environ.get("VERCEL_OIDC_TOKEN") or "").strip()
     if not token:
-        raise SkillSourceError(503, "skill_source_not_configured", "当前部署没有 skills.sh 凭据")
+        raise SkillSourceError(503, "skill_source_not_configured", "This deployment does not have skills.sh credentials.")
     timeout = httpx.Timeout(_SOURCE_TOTAL_TIMEOUT_SECONDS, connect=_SOURCE_CONNECT_TIMEOUT_SECONDS)
     try:
         async with asyncio.timeout(_SOURCE_TOTAL_TIMEOUT_SECONDS), _upstream_request_slot(user_id):

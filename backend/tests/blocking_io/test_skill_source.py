@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -30,7 +31,7 @@ def _request() -> Request:
     return request
 
 
-async def test_source_inspect_archive_work_does_not_block_event_loop(monkeypatch, tmp_path):
+async def test_source_inspect_archive_work_does_not_block_event_loop(monkeypatch):
     """Drive the real route through a real local temporary .skill archive."""
     payload = {
         "id": "vercel-labs/skills/find-skills",
@@ -49,7 +50,15 @@ async def test_source_inspect_archive_work_does_not_block_event_loop(monkeypatch
         return _REAL_ASYNC_CLIENT(transport=transport, **kwargs)
 
     monkeypatch.setattr(skill_source.httpx, "AsyncClient", _client)
-    monkeypatch.setattr(skill_source.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+    created: list[str] = []
+    real_mkdtemp = skill_source.tempfile.mkdtemp
+
+    def _mkdtemp(prefix):
+        path = real_mkdtemp(prefix)
+        created.append(path)
+        return path
+
+    monkeypatch.setattr(skill_source.tempfile, "mkdtemp", _mkdtemp)
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
     config = SimpleNamespace(skill_scan=SimpleNamespace(enabled=False), authorization=AuthorizationConfig(enabled=False))
 
@@ -57,4 +66,5 @@ async def test_source_inspect_archive_work_does_not_block_event_loop(monkeypatch
 
     assert response.file_count == 2
     assert len(response.snapshot_digest) == 64
-    assert not await asyncio.to_thread(tmp_path.exists)
+    assert len(created) == 1
+    assert not await asyncio.to_thread(Path(created[0]).exists)

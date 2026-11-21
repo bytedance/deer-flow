@@ -778,6 +778,8 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
 
 
 @router.get("/skills/diagnostics/custom", response_model=SkillDiagnosticsResponse, summary="List Owned Custom Skill YAML Errors")
+# Diagnostics are an operational troubleshooting surface, not a lifecycle
+# prerequisite. They intentionally remain admin-only alongside global diagnostics.
 async def list_custom_skill_diagnostics(request: Request, response: Response, config: AppConfig = Depends(get_config)) -> SkillDiagnosticsResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     response.headers["Cache-Control"] = "no-store"

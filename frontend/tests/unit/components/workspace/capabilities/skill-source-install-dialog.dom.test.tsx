@@ -68,6 +68,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("source skill installation", () => {
+  it("trims surrounding whitespace before inspecting a source", async () => {
+    mocks.inspect.mockResolvedValue(preview);
+    renderDialog();
+    fireEvent.change(screen.getByLabelText(text.sourceLabel), {
+      target: { value: `  ${preview.source}  ` },
+    });
+    fireEvent.click(screen.getByRole("button", { name: text.sourceInspect }));
+
+    await screen.findByText(preview.skill_name);
+    expect(mocks.inspect).toHaveBeenCalledWith(
+      preview.source,
+      expect.any(AbortSignal),
+    );
+  });
+
   it("walks input, preview, install, and immediate lifecycle actions", async () => {
     mocks.install.mockResolvedValue({
       success: true,

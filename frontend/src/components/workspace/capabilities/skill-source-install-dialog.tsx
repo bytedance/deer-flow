@@ -125,7 +125,12 @@ export function SkillSourceInstallDialog({
     setPreview(null);
     setPhase("inspecting");
     try {
-      const result = await inspectSkillSource(source, controller.signal);
+      const normalizedSource = source.trim();
+      setSource(normalizedSource);
+      const result = await inspectSkillSource(
+        normalizedSource,
+        controller.signal,
+      );
       if (active.current !== controller || controller.signal.aborted) return;
       setPreview(result);
       setPhase("preview");
@@ -146,7 +151,7 @@ export function SkillSourceInstallDialog({
     try {
       const result = await installSkillSource(
         {
-          source,
+          source: preview.source,
           expected_snapshot_digest: preview.snapshot_digest,
         },
         controller.signal,
