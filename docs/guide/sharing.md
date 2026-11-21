@@ -35,9 +35,13 @@ usable after the source link is revoked.
 
 The copied messages are context for the model, not something the visitor said,
 so memory extraction skips them, also when compaction removes them. New turns in
-the copy are remembered as in any other conversation, including assistant replies
-that repeat copied content. A copy made before this behavior existed has its
-copied messages marked before its next run.
+the copy are remembered as in any other conversation. With the default DeerMem
+backend, extraction is also told that the conversation continues someone else's,
+so details an assistant reply repeats from the copy, such as the sharer's name or
+preferences, are not recorded as the visitor's. This holds after compaction too,
+because the Gateway flags the copy on every run. Other memory backends receive
+the visitor's turns without that note. A copy made before this behavior existed
+has its copied messages marked before its next run.
 
 ## Deployment and limits
 

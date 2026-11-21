@@ -37,6 +37,29 @@ def without_imported_history(messages: list[Any]) -> list[Any]:
     return kept
 
 
+#: Mark on queued memory copies, never on graph state: the conversation they
+#: come from continues history copied from someone else. An assistant reply can
+#: restate that person's details, so extraction must not read them as the user's.
+FOLLOWS_IMPORTED_HISTORY_KEY = "deerflow_follows_imported_history"
+
+
+def own_messages_for_memory(messages: list[Any], context: object = None) -> list[Any]:
+    """Drop imported history and mark the remaining copies when the thread has any.
+
+    The thread counts as a copy when a message carries the import mark, or when
+    the Gateway flagged it in the run context: compaction removes the copied
+    messages, and their marks with them.
+    """
+    # Imported here: ``deerflow.runtime`` imports this module.
+    from deerflow.runtime.context_keys import SHARE_COPY_CONTEXT_KEY
+
+    own = without_imported_history(messages)
+    is_copy = len(own) != len(messages) or (isinstance(context, Mapping) and context.get(SHARE_COPY_CONTEXT_KEY) is True)
+    if not is_copy:
+        return own
+    return [message.model_copy(update={"additional_kwargs": {**message.additional_kwargs, FOLLOWS_IMPORTED_HISTORY_KEY: True}}) for message in own]
+
+
 #: Suffix ``DynamicContextMiddleware``'s ID-swap gives the real user message; the
 #: reminder SystemMessage takes the original id so ``add_messages`` can replace it
 #: in place.  It lives here rather than beside the middleware because the message

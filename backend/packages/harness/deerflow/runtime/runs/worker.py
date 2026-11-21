@@ -68,6 +68,7 @@ from deerflow.runtime.context_keys import (
     DEFAULT_AGENT_NAME_METADATA_VALUE,
     MCP_BROWSER_USER_CONTEXT_KEY,
     PROJECT_CONTEXT_KEY,
+    SHARE_COPY_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
@@ -668,6 +669,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             # admission (spec §7.1); a caller-supplied value in
             # ``config['context']`` must never be merged (§12).
             PROJECT_CONTEXT_KEY,
+            # Set by the Gateway at admission from thread metadata.
+            SHARE_COPY_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
     )
@@ -741,7 +744,7 @@ def _build_runtime_context(
 
 
 def _pin_admission_project_context(config: dict, runtime_context: dict[str, Any]) -> None:
-    """Re-inject the admission-pinned project snapshot into the runtime context.
+    """Re-inject the admission-pinned project snapshot and share-copy flag into the runtime context.
 
     The Gateway resolves and stamps ``config['context'][PROJECT_CONTEXT_KEY]``
     after stripping client-supplied values at admission (``build_run_config``
@@ -755,6 +758,8 @@ def _pin_admission_project_context(config: dict, runtime_context: dict[str, Any]
     caller_context = config.get("context")
     if isinstance(caller_context, dict) and PROJECT_CONTEXT_KEY in caller_context:
         runtime_context[PROJECT_CONTEXT_KEY] = caller_context[PROJECT_CONTEXT_KEY]
+    if isinstance(caller_context, dict) and caller_context.get(SHARE_COPY_CONTEXT_KEY) is True:
+        runtime_context[SHARE_COPY_CONTEXT_KEY] = True
 
 
 @dataclass(frozen=True)

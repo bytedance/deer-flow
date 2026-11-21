@@ -166,28 +166,39 @@ async def _imported_message_ids(request: Request, accessor, config: dict) -> set
     return ids or None
 
 
-async def ensure_share_import_history_marked(request: Request, thread_id: str, *, threads: ThreadMetaStore | None, metadata_timeout: float) -> None:
-    """Mark the copied history of a share copy imported before marks existed.
+async def prepare_share_copy_run(request: Request, thread_id: str, *, threads: ThreadMetaStore | None, metadata_timeout: float) -> bool:
+    """Return whether *thread_id* is a share copy, marking legacy copies first.
 
-    Migration shim, run before admission like ``ensure_checkpoint_history_seeded``:
+    Runs before admission like ``ensure_checkpoint_history_seeded``. The
+    result lets memory capture treat the thread as a copy even after
+    compaction has removed the copied messages and their marks. A metadata
+    read failure returns ``False`` and never blocks the run.
+
+    Marking is a migration shim for copies imported before marks existed:
     without it, such a copy's history reaches memory extraction on the owner's
     next run, also through the pre-compaction flush, which ignores extraction
-    watermarks. Remove it once those copies are no longer an upgrade source.
-    A busy or paused thread is left for a later run, because a checkpoint
-    write would race the active run or replace the pending interrupt. The
-    shim is best effort: a failure is logged and never blocks the run.
+    watermarks. Remove that part once those copies are no longer an upgrade
+    source. A busy or paused thread is left for a later run, because a
+    checkpoint write would race the active run or replace the pending
+    interrupt. The shim is best effort: a failure is logged.
     """
     if threads is None:
-        return
+        return False
     try:
         async with asyncio.timeout(metadata_timeout):
             record = await threads.get(thread_id, user_id=None)
     except Exception:
         logger.warning("Could not read metadata of thread %s; its copied share history is checked on a later run", sanitize_log_param(thread_id), exc_info=True)
-        return
+        return False
     metadata = record.get("metadata") if isinstance(record, dict) else None
-    if not isinstance(metadata, dict) or metadata.get(SHARE_IMPORT_COMPLETE_KEY) is not True or metadata.get(SHARE_IMPORT_HISTORY_MARKED_KEY) is True:
-        return
+    if not isinstance(metadata, dict) or metadata.get(SHARE_IMPORT_COMPLETE_KEY) is not True:
+        return False
+    if metadata.get(SHARE_IMPORT_HISTORY_MARKED_KEY) is not True:
+        await _mark_legacy_share_copy(request, thread_id, threads)
+    return True
+
+
+async def _mark_legacy_share_copy(request: Request, thread_id: str, threads: ThreadMetaStore) -> None:
     try:
         async with get_run_manager(request).reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=get_trusted_internal_owner_user_id(request)):
             accessor, config = build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node="branch")
