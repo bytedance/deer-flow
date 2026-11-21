@@ -6,6 +6,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 
+from deerflow_extension_api import AgentRunError
 from fastapi import HTTPException, Request
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Overwrite
@@ -37,6 +38,11 @@ logger = logging.getLogger(__name__)
 #: messages carry :data:`IMPORTED_HISTORY_KEY`.
 SHARE_IMPORT_COMPLETE_KEY = "share_import_complete"
 SHARE_IMPORT_HISTORY_MARKED_KEY = "share_import_history_marked"
+
+# The descriptor-confined writer below is POSIX-only. Capture already refuses
+# the same artifacts off POSIX, so import answers with that contract instead of
+# surfacing a 500 from a partial write.
+_ARTIFACT_IMPORT_SUPPORTED = os.name == "posix"
 
 
 def _write_fork_files(owner: str, thread_id: str, artifacts: list[dict]) -> None:
@@ -88,6 +94,8 @@ async def fork_share(request: Request, repo: ThreadShareRepository, token: str, 
     share = await repo.get_public(token)
     if share is None:
         raise HTTPException(404, "Share unavailable")
+    if share["artifacts"] and not _ARTIFACT_IMPORT_SUPPORTED:
+        raise AgentRunError(422, "Importing a share with artifacts requires POSIX")
     owner = get_effective_user_id()
     thread_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"deerflow-share:{owner}:{share['share_id']}:{request_id}"))
     threads = get_thread_store(request)
