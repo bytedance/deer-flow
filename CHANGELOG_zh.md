@@ -33,6 +33,18 @@
 
 ### 修复
 
+- **调度器：** 定时任务发往 IM 的通知不再把不带密钥词形态的凭证原样发出。URL 中的账号信息
+  （`postgres://admin:hunter2@host`）以及 `Authorization`、`Cookie` 请求头的值
+  （`Authorization: Bearer ...`）此前会完整进入消息；现在替换为 `[redacted]`，协议名和句子
+  其余部分保持可读，不含凭证的 URL 不受影响。`Cookie` 请求头和 `Digest` 凭据会替换到行尾，
+  同一行后面紧跟的文字也会一并去掉。([#8250])
+
+- **前端：** 任务表单的 Cron 预设现在要求分钟 0-59、小时 0-23、日期 1-31，
+  超出范围的表达式（例如 `0 24 * * *`）会保持为自定义并保留原始文本。此前它会被识别为预设，
+  在序列化以供提交时可能被限制到合法范围内的另一个时间。使用非法表达式创建或复制任务，
+  或在表达式仍非法时更新调度配置，会由 Gateway 返回 `422`；仅修改其他字段不会重新校验
+  未变化的调度配置。([#8020])
+
 - **网关：** 创建对话时在元数据中带上 `step`、`parents`、`counters_since_delta_snapshot`
   等由检查点自身维护的键，不再让该对话损坏。此前这些键会写入对话的首个检查点，错误的 `parents`
   会让该对话的历史记录永久返回 500，错误的 `step` 或增量计数器会让之后每一轮对话都失败；
@@ -77,6 +89,7 @@
   用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
   且脱敏的地址与此前完全相同。([#8006])
 
+- **调度器：** 队列超时扫描或队列排空中的单条记录出现异常时，调度器会记录该失败并继续处理剩余队列，以及同一轮启动的到期任务。过期记录会在所有者排名和批次限额之前被排除，启动领取还会再次检查同一截止时间，因此超时清理失败时遗留的排队记录既不会启动，也不会挤占正常排队工作的候选位置，只会继续等待超时恢复流程处理。([#7998])
 - **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
   已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
   不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
@@ -12899,8 +12912,10 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8019]: https://github.com/bytedance/deer-flow/pull/8019
+[#8020]: https://github.com/bytedance/deer-flow/pull/8020
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
@@ -12909,3 +12924,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
+[#8250]: https://github.com/bytedance/deer-flow/pull/8250

@@ -2,6 +2,8 @@
 
 import json
 import logging
+from functools import partial
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -500,6 +502,31 @@ class TestWebSearchTool:
 
 
 class TestWebFetchTool:
+    def test_screens_url_before_provider_call(self, mock_config_with_key, monkeypatch, caplog):
+        from deerflow.community.sofya import tools
+
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(200, json={"results": [{"content": "Article."}]})
+
+        client = partial(httpx.Client, transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(tools, "httpx", SimpleNamespace(Client=client, HTTPStatusError=httpx.HTTPStatusError))
+        monkeypatch.setattr("socket.getaddrinfo", lambda *args, **kwargs: pytest.fail("Hosted fetch must leave DNS to the provider"))
+        caplog.set_level(logging.DEBUG, logger=tools.__name__)
+
+        result = tools.web_fetch_tool.invoke({"url": "https://sofya-test-marker.localhost/article"})
+        assert requests == []
+        assert result.startswith("Error:")
+        assert "sofya-test-marker" not in result
+        assert "sofya-test-marker" not in caplog.text
+
+        public_url = "https://reader.example.com:443/articles/a%2Fb?tag=a%20b"
+        assert "Article." in tools.web_fetch_tool.invoke({"url": public_url})
+        [payload] = requests
+        assert payload["urls"] == [public_url]
+
     def test_returns_title_and_content(self, mock_config_with_key):
         results = [{"title": "Example Page", "url": "https://example.com", "content": "# Markdown body", "success": True}]
 

@@ -183,6 +183,17 @@ def test_provider_projection_is_metadata_not_an_sdk_argument():
     assert "_managed_provider" not in client.model_kwargs
 
 
+def test_model_response_projects_configured_context_window():
+    from app.gateway.routers.models import _model_response
+    from deerflow.config.model_config import ModelConfig
+
+    unknown = ModelConfig(name="unknown", model="unknown", use="langchain_openai:ChatOpenAI")
+    configured = ModelConfig(name="configured", model="configured", use="langchain_openai:ChatOpenAI", context_window=200_000)
+
+    assert _model_response(unknown).context_window is None
+    assert _model_response(configured).context_window == 200_000
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rotate", [False, True])
 @pytest.mark.parametrize("concurrent_import", [False, True])

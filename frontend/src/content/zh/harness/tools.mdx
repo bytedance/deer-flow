@@ -268,9 +268,8 @@ tools:
   - name: web_fetch
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
-    api_key: $JINA_API_KEY # 可选；匿名使用有速率限制
 ```
-将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制。
+将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制；在 `.env` 中设置 `JINA_API_KEY` 可提高限额。该工具只读取这个环境变量，不读取 `api_key` 字段。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

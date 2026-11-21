@@ -23,9 +23,9 @@ from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
 
 ## Terminal state
 
-- **The first terminal write wins.** Cancellation, timeout and completion race.
-  A late cancellation must not replace a recorded timeout, and a cancelled or
-  stale attempt must not publish a result or evidence.
+- **The first terminal write wins.** Check the deadline under the result lock
+  before publishing success. Cancelled or stale attempts cannot publish
+  results or evidence.
 - **Clean up before you notify.** Stream cleanup and the final usage snapshot come
   before the terminal notification, because callbacks can arrive before the last
   values chunk.
@@ -78,9 +78,8 @@ from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
 - **Sandbox use is leased.** An admitted subagent carries a stable lease owner ID
   and command scope ID derived from its task, so the shared sandbox can stop only
   that subagent's processes.
-- **All native subagents share one persistent event loop.** Keep loop and thread
-  ownership until the worker has stopped. A bounded join does not prove that it
-  stopped.
+- **Retain loop/thread ownership until subagents stop; a bounded join is insufficient.**
+  See [checkpoint lifetimes](../../../../../docs/guide/subagents.md#checkpoint-resource-ownership).
 - **Delegation is not the default.** The routing policy permits `task` only when
   parallel latency, a specialist skill or context isolation clearly outweighs the
   startup cost and the duplicated discovery.

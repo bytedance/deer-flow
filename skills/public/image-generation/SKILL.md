@@ -155,6 +155,14 @@ Read the following template file only when matching the user request.
 
 ## Output Handling
 
+Gemini image data is base64-decoded before the output directory or
+file is created. If decoding fails, an existing output image is preserved and no
+empty output file is left behind.
+
+The legacy MiniMax `/v1/image_generation` writer opens the destination before
+decoding. If decoding fails, it can leave an empty file or erase an existing
+image. Use a fresh `--output-file` path when you need to keep the previous image.
+
 After generation:
 
 - Images are typically saved in `/mnt/user-data/outputs/`

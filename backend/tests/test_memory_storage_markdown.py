@@ -1129,6 +1129,54 @@ def test_full_rebuild_index_accepts_original_email_user_scope(tmp_path: Path) ->
     assert retrieval.fact_ids == ["fact_01HZZZZZZZZZZZZZZZZZZZZZZZ"]
 
 
+def test_full_rebuild_index_reads_only_the_memory_buckets(tmp_path: Path) -> None:
+    """The host's storage root is the runtime home, which also holds every thread's workspace.
+
+    A sandbox can write a valid fact file into its workspace; the full rebuild
+    must not index it as the user's memory, and a stray ``facts/`` file there
+    is not a failed fact.
+    """
+
+    class RecordingRetrieval:
+        def __init__(self) -> None:
+            self.indexed: list[tuple[str, dict]] = []
+
+        def upsert(self, fact, *, scope, path):
+            self.indexed.append((fact["id"], scope))
+
+        def remove(self, fact_id, *, scope):
+            pass
+
+        def search(self, query, *, scopes, top_k, mode, filters):
+            return []
+
+    retrieval = RecordingRetrieval()
+    scoped = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)), retrieval=retrieval)
+    scoped.upsert_fact({"id": "fact_user", "content": "user fact", "category": "context", "confidence": 0.9}, user_id="alice", agent_name="agent-a")
+    scoped.upsert_fact({"id": "fact_legacy", "content": "legacy fact", "category": "context", "confidence": 0.9}, user_id=None, agent_name="agent-a")
+    user_fact = next(tmp_path.glob("users/alice/agents/agent-a/facts/*/fact_user.md"))
+    legacy_fact = next(tmp_path.glob("agents/agent-a/facts/*/fact_legacy.md"))
+    for workspace, source, planted_id in [
+        (tmp_path / "users" / "alice" / "threads" / "t1" / "user-data" / "workspace", user_fact, "fact_planted_user"),
+        (tmp_path / "threads" / "t1" / "user-data" / "workspace", legacy_fact, "fact_planted_legacy"),
+    ]:
+        planted = workspace / "agents" / "agent-a" / "facts" / "00" / f"{planted_id}.md"
+        planted.parent.mkdir(parents=True)
+        planted.write_text(source.read_text(encoding="utf-8").replace(source.stem, planted_id), encoding="utf-8")
+        stray = workspace / "docs" / "facts" / "notes.md"
+        stray.parent.mkdir(parents=True)
+        stray.write_text("# Project facts\n", encoding="utf-8")
+    retrieval.indexed.clear()
+
+    result = scoped.rebuild_index()
+
+    assert result == {"supported": True, "indexed": 2, "failed": 0}
+    assert sorted(retrieval.indexed, key=lambda item: item[0]) == [
+        ("fact_legacy", {"userId": None, "agentName": "agent-a"}),
+        ("fact_user", {"userId": "alice", "agentName": "agent-a"}),
+    ]
+
+
 def test_full_rebuild_index_skips_fact_deleted_after_directory_listing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class RecordingRetrieval:
         def __init__(self) -> None:

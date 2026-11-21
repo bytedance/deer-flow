@@ -350,7 +350,7 @@ before review.
 python -m pip install -r tests/skills/requirements.txt
 python -m pytest tests/skills -q
 
-# Default backend tests (four parallel shards; excludes live and blocking-I/O tests)
+# Default backend tests (six parallel shards matching CI; excludes live, blocking-I/O and bundled-extension tests)
 cd backend
 make test
 
@@ -359,6 +359,9 @@ make test TEST_JOBS=1
 
 # Strict blocking-I/O tests
 make test-blocking-io
+
+# Behavior suites of the bundled extension examples
+make test-bundled-extensions
 
 # Live DeerFlowClient integration tests (explicit opt-in)
 # Requires a valid root config.yaml and API credentials.
@@ -385,11 +388,21 @@ must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks
 
-Every pull request triggers the following CI workflows:
+Pull requests trigger the following CI workflows:
 
-- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
-- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
+- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml) (skipped only when every changed file is one the backend suite never reads)
+- **Bundled extension tests** — [.github/workflows/bundled-extension-tests.yml](.github/workflows/bundled-extension-tests.yml) (triggered by example packages, `backend/packages/**`, `backend/app/gateway/**` and the marked test modules)
+- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml) (run when `frontend/` or a file it reads changes)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+
+[scripts/ci_changed_scopes.py](scripts/ci_changed_scopes.py) holds the path rules
+for the unit test and lint workflows. Pushes to `main` and changes under
+`.github/` run every scope. When a test starts reading a file outside its own
+tree, add that path to the script. On every pull request, the
+`frontend-scope-reads` lint job flags literal references outside the frontend
+scope, including paths based on `import.meta.url`. The backend guard in
+`backend/tests/test_ci_changed_scopes.py` flags frontend paths that would skip
+the backend suite, including paths built from module-level Python constants.
 
 The browser E2E and full-stack replay jobs use the official Playwright image,
 which includes Chromium and its system libraries. When upgrading the locked
@@ -402,14 +415,26 @@ setup also verifies SSL and SQLite imports before launching fixture gateways.
 
 ### Test and diagnostics notes
 
-Backend `make test` runs four duration-balanced shards concurrently and reports
+Backend `make test` runs six duration-balanced shards concurrently (matching CI) and reports
 failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
-It excludes live external-API and blocking-I/O coverage.
+It excludes live external-API, blocking-I/O and bundled-extension coverage.
 Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.
 Maintainers can run the real `DeerFlowClient` suite with `cd backend && make test-live`.
 This command requires a valid root `config.yaml` and API credentials.
 It can incur API costs and create local sandboxes, artifacts, or files.
 Direct pytest runs additionally require `DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+Bundled extension examples keep their behavior suites in `backend/tests/` under
+the `bundled_extension` pytest marker. The core shards exclude them so an
+optional example cannot fail an unrelated core PR, and a separate CI workflow
+runs them when an example, the public extension contract or the bundled tests
+change. Run `cd backend && make test-bundled-extensions` to exercise them
+locally. Tests that validate a host mechanism — loading, registration, the
+public extension API and authorization — stay in the core shards even when an
+example package is the payload. The host/extension compatibility checks (an
+extension requiring a newer API than the host provides, authorization of
+contributed routes) live in `backend/tests/test_extension_host_contracts.py` so
+a broken compatibility guarantee fails core CI.
 
 Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
 Backend blocking-IO diagnostics are available from the repository root with

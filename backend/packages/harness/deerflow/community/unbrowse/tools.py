@@ -17,6 +17,8 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
+from deerflow.community.url_safety import validate_hosted_fetch_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -33,14 +35,8 @@ _api_key_warned: set[str] = set()
 
 def _get_api_key(tool_name: str) -> str | None:
     config = get_app_config().get_tool_config(tool_name)
-    if config is not None:
-        api_key = config.model_extra.get("api_key")
-        if isinstance(api_key, str) and api_key.strip():
-            return api_key.strip()
-    env_key = os.getenv("UNBROWSE_API_KEY")
-    if isinstance(env_key, str) and env_key.strip():
-        return env_key.strip()
-    return None
+    configured = resolve_api_key(config.model_extra.get("api_key")) if config is not None else None
+    return configured or resolve_api_key(os.getenv("UNBROWSE_API_KEY"))
 
 
 def _resolve_render(value: object) -> str:
@@ -168,6 +164,10 @@ def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    url_error = validate_hosted_fetch_url(url)
+    if url_error:
+        return url_error
+
     api_key = _get_api_key("web_fetch")
     if not api_key:
         return f"Error: {_missing_key_message('web_fetch')}"
