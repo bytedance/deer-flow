@@ -52,6 +52,10 @@ make test-blocking-io
 - **Persisted metadata is untrusted.** Checkpoints written by older versions and
   by direct integrations contain malformed values. Every history reader validates
   what it reads, and a bad value must not abort compaction or a model call.
+- **File-URL compatibility follows the request serializer.** For OpenAI, include
+  model defaults, request settings and converted tools when resolving routing;
+  checking only `use_responses_api` misses inferred Responses routing and drops
+  supported file inputs. Compatibility rewrites stay inside the model request.
 - **Declare release policy.** A configurable middleware returns JSON-safe
   `release_policy_parameters()`, and `collect_release_policies()` changes with its
   behaviour.
