@@ -1134,6 +1134,8 @@ def _merge_preserving_secrets(
     # it and silently detach an Agent's capability selection.
     if isinstance(existing_extra.get("capability"), dict):
         update["capability"] = existing_extra["capability"]
+    if "user_oauth" not in incoming_extra and "user_oauth" in existing_extra:
+        update["user_oauth"] = existing_extra["user_oauth"]
     merged = incoming.model_copy(update=update)
     _ensure_no_masked_secrets(merged)
     return merged
