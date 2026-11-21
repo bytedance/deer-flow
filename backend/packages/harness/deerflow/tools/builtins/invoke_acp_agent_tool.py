@@ -75,7 +75,7 @@ def _build_acp_mcp_servers() -> list[dict[str, Any]]:
     from deerflow.config.extensions_config import ExtensionsConfig
 
     extensions_config = ExtensionsConfig.from_file()
-    enabled_servers = extensions_config.get_enabled_mcp_servers()
+    enabled_servers = extensions_config.get_discoverable_mcp_servers()
 
     mcp_servers: list[dict[str, Any]] = []
     for name, server_config in enabled_servers.items():

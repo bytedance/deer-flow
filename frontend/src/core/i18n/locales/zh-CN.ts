@@ -207,6 +207,21 @@ export const zhCN: Translations = {
 
   capabilities: {
     toolsAndIntegrations: "工具与集成",
+    mcpConnections: {
+      title: "我的 MCP 连接",
+      action: (action, name) => `${action} ${name}`,
+      disconnect: "断开",
+      reconnect: "重新连接",
+      actionFailed: "无法更改连接，请重试。",
+      loadFailed: "无法加载你的 MCP 连接。",
+      status: {
+        disconnected: "未连接",
+        connected: "已连接",
+        reconnect_required: "重新连接后即可使用此服务器。",
+        removed: "此服务器已停用用户授权。",
+        unavailable: "连接不可用，请联系管理员。",
+      },
+    },
     icon: {
       title: "插件图标",
       upload: "上传插件图标",
