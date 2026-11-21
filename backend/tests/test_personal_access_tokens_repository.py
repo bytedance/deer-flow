@@ -89,16 +89,18 @@ def test_validate_scopes_deduplicates_and_rejects_unknown():
 
 
 def test_pat_scopes_stay_aligned_with_route_permissions():
-    """Every PAT scope must be a real route permission, and the memory/agent
-    permissions are deliberately excluded: PATs govern the thread/run
-    lifecycle only (_PAT_ROUTE_RULES default-denies those routers for PAT
-    callers regardless of scopes). Fail on drift in either direction."""
+    """Every PAT scope must be a real route permission.
+
+    Memory remains session-only even though agent and scheduled-task scopes are
+    now admitted through their explicit route policies. Fail on drift in either
+    direction.
+    """
     from app.gateway.authz import _ALL_PERMISSIONS
 
     route_permissions = frozenset(_ALL_PERMISSIONS)
     assert PAT_ALLOWED_SCOPES <= route_permissions
-    # The deliberate exclusions, pinned so they cannot drift silently.
-    assert not (PAT_ALLOWED_SCOPES & {"memory:read", "memory:write", "agents:read", "agents:write"})
+    # Memory stays session-only and cannot drift into PAT scope admission.
+    assert not (PAT_ALLOWED_SCOPES & {"memory:read", "memory:write"})
 
 
 # ── Repository ────────────────────────────────────────────────────────────

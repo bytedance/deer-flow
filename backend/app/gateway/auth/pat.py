@@ -36,27 +36,25 @@ PAT_ALLOWED_SCOPES: frozenset[str] = frozenset(
         "projects:read",
         "projects:write",
         "projects:delete",
+        "agents:read",
+        "agents:write",
+        "schedules:read",
+        "schedules:write",
     }
 )
 
-# Deliberately NOT in PAT_ALLOWED_SCOPES: the route permissions "memory:read",
-# "memory:write", "agents:read", and "agents:write" exist in authz
-# (they guard the memory/agent routers), but PATs stay on the thread/run
-# lifecycle only — _PAT_ROUTE_RULES default-denies the memory/agent routes
-# for PAT callers regardless of scopes, so admitting these scopes would not
-# even reach those routes. Opening them to PATs is a product decision that
-# must change all three of: this set, _PAT_ROUTE_RULES, and the API docs.
+# Memory remains session-only. Agent and scheduled-task scopes are admitted
+# below with their own explicit route rules so CI can manage the resources it
+# owns without gaining access to unrelated authenticated APIs.
 
 PAT_MAX_NAME_LENGTH = 128
 
 # Default-deny route boundary for PAT callers (#5041 review P1-1): scope
 # intersection in AuthMiddleware only constrains routes that consult
 # ``request.state.auth.permissions`` (``@require_permission``). Authenticated
-# mutation routes without that decorator — memory deletion, agent creation,
-# credential switching, channel configuration — would otherwise accept a
-# PAT holding a single read scope. A route is reachable by PAT only when it
-# is explicitly listed here, and only together with the thread/run lifecycle
-# the v1 scopes govern; everything else answers 403 regardless of scopes.
+# routes without that decorator could otherwise accept a PAT holding a
+# single read scope. Only the methods and paths listed here can be used
+# with a PAT. All other routes return 403 regardless of the token's scopes.
 _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"POST"}), re.compile(r"^/api/threads$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/search$")),
@@ -65,6 +63,13 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/state$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/(compact|history|branches)$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/move$")),
+    # Personal agent and scheduled-task deployment. Preserve the session
+    # boundary for package management, manual triggers and history.
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/agents$")),
+    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/agents/[^/]+$")),
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/scheduled-tasks$")),
+    (frozenset({"PATCH", "DELETE"}), re.compile(r"^/api/scheduled-tasks/(?!preview-cron$)[^/]+$")),
+    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks/[^/]+/(pause|resume)$")),
     # Projects subtree: same enumerated-no-dead-methods precision as the
     # threads/runs rules — only the methods the projects router implements
     # are admitted, so a future projects route is default-denied until

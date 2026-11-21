@@ -244,6 +244,7 @@ async def preview_cron_schedule(request: Request, body: CronPreviewRequest):
 
 @router.get("/scheduled-tasks")
 @require_permission("threads", "read")
+@require_permission("schedules", "read", pat_only=True)
 async def list_scheduled_tasks(request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
@@ -255,6 +256,7 @@ async def list_scheduled_tasks(request: Request):
 @router.post("/scheduled-tasks")
 @require_permission("threads", "write")
 @require_permission("runs", "create")
+@require_permission("schedules", "write", pat_only=True)
 async def create_scheduled_task(request: Request, body: ScheduledTaskCreateRequest):
     """Create a task (also used by the page's Duplicate)."""
     config = await asyncio.to_thread(get_config)
@@ -307,6 +309,7 @@ async def get_scheduled_task(task_id: str, request: Request):
 @router.patch("/scheduled-tasks/{task_id}")
 @require_permission("threads", "write")
 @require_permission("runs", "create")
+@require_permission("schedules", "write", pat_only=True)
 async def update_scheduled_task(task_id: str, request: Request, body: ScheduledTaskUpdateRequest):
     """Edit a task; null clears goal_objective, max_runs, end_at and stop_condition.
 
@@ -357,6 +360,7 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
 
 @router.post("/scheduled-tasks/{task_id}/pause")
 @require_permission("threads", "write")
+@require_permission("schedules", "write", pat_only=True)
 async def pause_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
@@ -391,6 +395,7 @@ async def pause_scheduled_task(task_id: str, request: Request):
 @router.post("/scheduled-tasks/{task_id}/resume")
 @require_permission("threads", "write")
 @require_permission("runs", "create")
+@require_permission("schedules", "write", pat_only=True)
 async def resume_scheduled_task(task_id: str, request: Request, body: ScheduledTaskResumeRequest | None = None):
     """Resume a paused or finished task, optionally renewing its safety cap.
 
@@ -452,6 +457,7 @@ async def trigger_scheduled_task(task_id: str, request: Request):
 
 @router.delete("/scheduled-tasks/{task_id}")
 @require_permission("threads", "write")
+@require_permission("schedules", "write", pat_only=True)
 async def delete_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
