@@ -53,9 +53,15 @@ class RunRepository(RunStore):
         from deerflow.runtime.runs.inputs import InputConflict, empty_input_state
 
         async with self._sf() as session:
-            # Preserve the existing global-clock -> row lock order (SQLite's
-            # first write serializes peer connections as well).
-            await self._next_change_seq(session)
+            # An input append rewrites ``run_inputs_json`` only, so it publishes
+            # no change position and no changed-run cursor observes it -- like a
+            # progress snapshot, it is not a lifecycle-discovery signal, and
+            # ``delete``/``delete_by_thread`` likewise stay off the clock
+            # (#5516). It does read before it writes, though, so SQLite still
+            # needs its write lock up front; ``BEGIN IMMEDIATE`` takes it
+            # directly instead of borrowing it from a discarded clock bump.
+            if session.bind.dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
             row = (await session.execute(select(RunRow).where(RunRow.run_id == run_id).with_for_update())).scalar_one_or_none()
             if row is None or (user_id is not None and row.user_id != user_id):
                 raise InputConflict("Run not found")
