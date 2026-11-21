@@ -94,7 +94,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY, SHARE_COPY_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -1246,6 +1246,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # at admission from threads_meta; a client-supplied value must
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
+            SHARE_COPY_CONTEXT_KEY,
             AGENT_AUTH_CONTEXT_KEY,
             MCP_BROWSER_USER_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
@@ -3076,9 +3077,10 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
-                from app.gateway.share_fork import ensure_share_import_history_marked
+                from app.gateway.share_fork import prepare_share_copy_run
 
-                await ensure_share_import_history_marked(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
+                if await prepare_share_copy_run(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS):
+                    config["context"][SHARE_COPY_CONTEXT_KEY] = True
                 # A strict caller may have observed the thread before a
                 # concurrent delete removed it while checkpoint preparation
                 # yielded. Recheck immediately before durable admission. The
