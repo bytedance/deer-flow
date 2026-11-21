@@ -9,6 +9,7 @@ import pytest
 from deerflow_extension_api import CompletedRunEvent, CompletedRunEventPage, CompletedRunSnapshot, EvidenceLimits, ExtensionRuntimeDeps
 from deerflow_extension_api.run_evidence import RunPage
 
+from deerflow.extensions.browser_assets import load_browser_assets
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
 pytestmark = pytest.mark.bundled_extension
@@ -50,6 +51,13 @@ def test_install_registers_one_service_and_its_router(monkeypatch):
     ((_, service),) = loaded.services
     assert service.ready is False  # the host starts services; install only registers
     assert [getattr(router, "prefix", "") for _, router in loaded.routers] == [PREFIX]
+    ((_, plugin),) = loaded.plugins
+    assert plugin.namespace == "community.run-postmortem"
+    assert [action.name for action in plugin.backend] == ["latest", "report", "markdown"]
+    assets = load_browser_assets(plugin.frontend)
+    assert assets.entry == "static/postmortem.mjs"
+    assert assets.module == "run-postmortem.v1"
+    assert "static/postmortem.mjs" in assets.files
 
 
 @pytest.mark.asyncio
