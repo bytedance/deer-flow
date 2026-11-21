@@ -55,6 +55,10 @@ client or the real storage, because the payload shape is the contract.
 
 ## DeerMem storage
 
+FTS5 filters fact metadata before selecting composite `top_k`.
+Do not pre-limit by BM25 alone. A streaming heap bounds retained Python
+rows, not SQLite ranking work.
+
 - **Facts are one Markdown file each.** `memory.json` holds shared summaries and
   revision data only. It never holds facts or a fact index.
 - **Writes take the user lock and check revisions.** A snapshot operation reloads
