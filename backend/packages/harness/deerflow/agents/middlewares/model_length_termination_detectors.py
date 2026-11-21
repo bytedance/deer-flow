@@ -87,6 +87,18 @@ class OpenAIResponsesLengthDetector:
         return None
 
 
+class OllamaLengthDetector:
+    """Native Ollama ``done_reason == "length"`` signal."""
+
+    name = "ollama_length"
+
+    def detect(self, message: AIMessage) -> ModelLengthTermination | None:
+        value = _get_metadata_value(message, "done_reason")
+        if value != "length":
+            return None
+        return ModelLengthTermination(detector=self.name, reason_field="done_reason", reason_value=value)
+
+
 class AnthropicMaxTokensDetector:
     """Anthropic ``stop_reason == "max_tokens"`` signal."""
 
@@ -142,6 +154,7 @@ __all__ = [
     "GeminiMaxTokensDetector",
     "ModelLengthTermination",
     "ModelLengthTerminationDetector",
+    "OllamaLengthDetector",
     "OpenAICompatibleLengthDetector",
     "OpenAIResponsesLengthDetector",
     "default_detectors",
