@@ -102,7 +102,7 @@ async def test_steer_pauses_a_child_even_before_its_handler_starts():
     try:
         reply = await control.wait_tool(SimpleNamespace(tool_call={"id": "child", "name": "task", "args": {}}), handler)
         assert reply.additional_kwargs["subagent_pending"]
-        assert not control.child("child").resume.is_set()
+        assert not next(iter(control.children.values())).gate.resume.is_set()
         release.set()
         await asyncio.gather(*control.tasks)
         from deerflow.agents.middlewares.message_utils import requires_input_sanitization
@@ -180,7 +180,7 @@ async def test_parallel_pending_results_keep_their_own_ids():
     try:
         replies = await _start_parallel_tasks(inputs, control, {"first": handler, "second": handler})
         assert [reply.tool_call_id for reply in replies] == ["first", "second"]
-        assert [reply.id for reply in replies] == [control.children[reply.tool_call_id][0].result_id for reply in replies]
+        assert [reply.id for reply in replies] == [child.gate.result_id for child in control.children.values()]
         assert replies[0].id != replies[1].id
     finally:
         release.set()
@@ -206,12 +206,13 @@ async def test_finished_task_closes_only_its_own_gate():
     try:
         await _start_parallel_tasks(inputs, control, {"short": short_task, "long": long_task})
         finished.set()
-        short_gate, long_gate = control.children["short"][0], control.children["long"][0]
+        short_child, long_child = control.children.values()
+        short_gate, long_gate = short_child.gate, long_child.gate
         async with asyncio.timeout(2):
             while not short_gate.closed:
                 await asyncio.sleep(0)
         assert not long_gate.closed and not long_gate.resume.is_set()
-        control.interrupted_children = {"long"}
+        control.interrupted_children = {long_child.invocation_id}
         assert control.resume_children("Include 2025") == ["long"]
     finally:
         finished.set()
@@ -380,7 +381,8 @@ async def test_deferred_usage_survives_a_compacted_dispatch(usage, charged):
     async def finished():
         return ToolMessage(content="Child finished", tool_call_id="compacted", name="task", additional_kwargs={SUBAGENT_TOKEN_USAGE_KEY: usage})
 
-    await control._observe(asyncio.create_task(finished()), "compacted", dispatch)
+    child = control.create_invocation("compacted", dispatch)
+    await control._observe(asyncio.create_task(finished()), child)
     latest = AIMessage(id="latest", content="Summarized history", usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
     update = await control.deliver({"messages": [AIMessage(id="older", content="Before"), HumanMessage(content="Next"), latest]})
 
@@ -393,11 +395,11 @@ async def test_deferred_usage_survives_a_compacted_dispatch(usage, charged):
 
 
 def test_deferred_usage_with_no_ai_message_to_charge_is_reported(caplog):
-    from deerflow.agents.middlewares.token_usage_middleware import attribute_deferred_subagent_usage
+    from deerflow.agents.middlewares.token_usage_middleware import DeferredSubagentUsage, attribute_deferred_subagent_usage
 
     usage = {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
     with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.token_usage_middleware"):
-        assert attribute_deferred_subagent_usage([HumanMessage(content="Only input")], [("lost", usage)]) == []
+        assert attribute_deferred_subagent_usage([HumanMessage(content="Only input")], [DeferredSubagentUsage("lost", None, usage)]) == []
     assert "lost" in caplog.text
 
 
@@ -529,7 +531,7 @@ async def test_control_tool_cannot_cancel_without_an_authorized_direct_input(ste
     capability = SimpleNamespace(authorize_control=AsyncMock(side_effect=AgentRunError(403, "Cancellation denied")))
     control = RunInputControl(RunInputs(MemoryRunStore(), "run", "owner", "worker"), agent_runs=capability, thread_id="thread", checkpointer=None)
     control.current_input = "direct" if steered else None
-    gate = control.child("old-task")
+    gate = control.create_invocation("old-task").gate
     gate.resume.clear()
     runtime = SimpleNamespace(context={INPUT_CONTEXT_KEY: control}, state={"goal": {"objective": "Keep working", "status": "active"}}, tool_call_id="control")
     with pytest.raises(AgentRunError if steered else ValueError):
@@ -564,9 +566,9 @@ async def test_paused_children_do_not_require_expanding_the_execution_pool():
     from deerflow.subagents.capacity import SubagentCapacityRejected, SubagentExecutionCapacity
 
     control = RunInputControl(RunInputs(MemoryRunStore(), "run", "owner", "worker"), agent_runs=None, thread_id="thread", checkpointer=None)
-    gate = control.child("old")
+    gate = control.create_invocation("old").gate
     gate.resume.clear()
-    assert not control.child("priority").can_queue
+    assert not control.create_invocation("priority").gate.can_queue
     capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
     async with capacity.slot():
         async with asyncio.timeout(2):
@@ -686,7 +688,7 @@ async def test_steer_withdrawn_before_delivery_releases_the_children_it_paused()
     try:
         await asyncio.wait_for(entered.wait(), 5)
         await inputs.submit("update", "Handle this first", "steer")
-        gate = control.child("child")
+        gate = next(iter(control.children.values())).gate
         async with asyncio.timeout(5):
             while gate.resume.is_set():
                 await asyncio.sleep(0.01)
@@ -713,7 +715,7 @@ async def test_children_stay_paused_while_a_delivered_steer_is_being_handled():
     inputs = RunInputs(store, "run", "owner", "worker")
     await inputs.submit("update", "Handle this first", "steer")
     control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
-    gate = control.child("child")
+    gate = control.create_invocation("child").gate
     gate.resume.clear()
     assert (await control.deliver({}))["applied_run_inputs"]["ids"] == ["update"]
     # Later model turns of the same steer have nothing to deliver, yet the
@@ -756,7 +758,7 @@ async def test_steer_withdrawn_during_a_steering_turn_releases_the_child_it_paus
         await asyncio.wait_for(entered.wait(), 5)
         assert control.steering_active and control.interrupted_children == set()
         await inputs.submit("second", "Handle this first", "steer")
-        gate = control.child("child")
+        gate = next(iter(control.children.values())).gate
         async with asyncio.timeout(5):
             while gate.resume.is_set():
                 await asyncio.sleep(0.01)
@@ -830,10 +832,10 @@ async def test_steer_withdrawn_from_a_replacement_reusing_a_call_id_releases_it(
     run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context={INPUT_CONTEXT_KEY: control}))
     try:
         await asyncio.wait_for(entered.wait(), 5)
-        old_gate = control.child("call_0")
+        old_gate = next(iter(control.children.values())).gate
         await inputs.submit("first", "Do this instead", "steer")
         await asyncio.wait_for(replacement_entered.wait(), 5)
-        gate = control.child("call_0")
+        gate = next(child.gate for child in control.children.values() if child.gate is not old_gate)
         assert gate is not old_gate and control.abandoned
         await inputs.submit("second", "Handle this first", "steer")
         async with asyncio.timeout(5):
@@ -862,10 +864,10 @@ async def test_withdrawn_steer_keeps_children_held_by_the_delivered_steer_paused
     inputs = RunInputs(store, "run", "owner", "worker")
     await inputs.submit("first", "Handle this first", "steer")
     control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
-    held = control.child("held")
+    held = control.create_invocation("held").gate
     held.resume.clear()
     await control.deliver({})
-    released = control.child("released")
+    released = control.create_invocation("released").gate
     released.resume.clear()
     assert await control.deliver({}) is None
     assert released.resume.is_set()
