@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@rstest/core";
 
-import { truncateToCodePoints } from "@/core/utils/text";
+import { sliceToCodePoints, truncateToCodePoints } from "@/core/utils/text";
 
 const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
 
@@ -30,5 +30,48 @@ describe("truncateToCodePoints", () => {
   it("falls back to a plain cut when the budget cannot hold the ellipsis", () => {
     expect(truncateToCodePoints("abcd", 2, "...")).toBe("ab");
     expect(truncateToCodePoints("abcd", 3, "...")).toBe("abc");
+  });
+});
+describe("sliceToCodePoints", () => {
+  it("returns a fitting value with its code-point count", () => {
+    const value = "a😀b";
+    expect(sliceToCodePoints(value, 3)).toEqual({
+      text: value,
+      codePointCount: 3,
+      truncated: false,
+    });
+  });
+
+  it("cuts only at a code-point boundary", () => {
+    const result = sliceToCodePoints("a😀bc", 2);
+    expect(result).toEqual({
+      text: "a😀",
+      codePointCount: 2,
+      truncated: true,
+    });
+    expect(result.text).not.toMatch(loneSurrogate);
+  });
+
+  it("normalizes zero, NaN, negative and fractional budgets", () => {
+    expect(sliceToCodePoints("😀abc", 0)).toEqual({
+      text: "",
+      codePointCount: 0,
+      truncated: true,
+    });
+    expect(sliceToCodePoints("😀abc", Number.NaN)).toEqual({
+      text: "",
+      codePointCount: 0,
+      truncated: true,
+    });
+    expect(sliceToCodePoints("😀abc", -3)).toEqual({
+      text: "",
+      codePointCount: 0,
+      truncated: true,
+    });
+    expect(sliceToCodePoints("😀abc", 1.9)).toEqual({
+      text: "😀",
+      codePointCount: 1,
+      truncated: true,
+    });
   });
 });

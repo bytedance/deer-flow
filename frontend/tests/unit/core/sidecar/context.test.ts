@@ -1,4 +1,4 @@
-import { expect, test } from "@rstest/core";
+import { expect, rs, test } from "@rstest/core";
 
 import {
   buildMessageSidecarContext,
@@ -173,3 +173,187 @@ test("renders parent conversation for sidecar follow-ups without new references"
   expect(prompt).toContain("Use a side conversation.");
   expect(prompt).not.toContain("<referenced_message");
 });
+
+test("truncates parent conversation by code points without splitting an emoji", () => {
+  const parentContext = buildParentConversationContext(
+    [
+      {
+        type: "ai",
+        id: "parent-ai-emoji",
+        content: "a😀bc",
+      },
+    ] as never,
+    { maxCharsPerMessage: 2 },
+  );
+
+  expect(parentContext).toEqual([
+    {
+      role: "assistant",
+      messageId: "parent-ai-emoji",
+      content: "a😀\n[truncated]",
+    },
+  ]);
+});
+
+test("does not truncate when emoji count fits the code-point budget", () => {
+  const content = "😀".repeat(1200);
+  const parentContext = buildParentConversationContext(
+    [{ type: "ai", id: "parent-ai-many-emoji", content }] as never,
+    { maxCharsPerMessage: 1200, maxTotalChars: 1200 },
+  );
+
+  expect(parentContext).toEqual([
+    {
+      role: "assistant",
+      messageId: "parent-ai-many-emoji",
+      content,
+    },
+  ]);
+});
+
+test("does not truncate when the total code-point budget includes complete emoji", () => {
+  const content = "😀".repeat(1200);
+  const parentContext = buildParentConversationContext(
+    [{ type: "ai", id: "parent-ai-total-emoji", content }] as never,
+    { maxCharsPerMessage: 5000, maxTotalChars: 1200 },
+  );
+
+  expect(parentContext).toEqual([
+    {
+      role: "assistant",
+      messageId: "parent-ai-total-emoji",
+      content,
+    },
+  ]);
+});
+
+test("truncates an emoji-only message to the marker at a zero budget", () => {
+  const parentContext = buildParentConversationContext(
+    [{ type: "ai", id: "parent-ai-zero-budget", content: "😀" }] as never,
+    { maxCharsPerMessage: 0, maxTotalChars: 10 },
+  );
+
+  expect(parentContext).toEqual([
+    {
+      role: "assistant",
+      messageId: "parent-ai-zero-budget",
+      content: "\n[truncated]",
+    },
+  ]);
+});
+
+test("shares the total budget across messages by code point", () => {
+  const parentContext = buildParentConversationContext(
+    [
+      { type: "human", id: "parent-human-budget", content: "😀" },
+      { type: "ai", id: "parent-ai-budget", content: "😀😀" },
+    ] as never,
+    { maxCharsPerMessage: 100, maxTotalChars: 3 },
+  );
+
+  expect(parentContext).toEqual([
+    {
+      role: "user",
+      messageId: "parent-human-budget",
+      content: "😀",
+    },
+    {
+      role: "assistant",
+      messageId: "parent-ai-budget",
+      content: "😀😀",
+    },
+  ]);
+});
+test("does not materialize an unbounded parent message", () => {
+  const content = `😀${"a".repeat(1_000_000)}`;
+  const from = rs.spyOn(Array, "from");
+  let rawContentReads = 0;
+  let result: ReturnType<typeof buildParentConversationContext>;
+  try {
+    result = buildParentConversationContext(
+      [{ type: "ai", id: "parent-ai-large", content }] as never,
+      { maxCharsPerMessage: 2, maxTotalChars: 2 },
+    );
+    rawContentReads = from.mock.calls.filter(
+      ([value]) => value === content,
+    ).length;
+  } finally {
+    from.mockRestore();
+  }
+
+  expect(rawContentReads).toBe(0);
+  expect(result![0]?.content).toBe("😀a\n[truncated]");
+});
+test("does not materialize a large message that fits its budget", () => {
+  const content = "a".repeat(1_000_000);
+  const from = rs.spyOn(Array, "from");
+  let rawContentReads = 0;
+  let result: ReturnType<typeof buildParentConversationContext>;
+  try {
+    result = buildParentConversationContext(
+      [{ type: "ai", id: "parent-ai-fit", content }] as never,
+      { maxCharsPerMessage: 2_000_000, maxTotalChars: 2_000_000 },
+    );
+    rawContentReads = from.mock.calls.filter(
+      ([value]) => value === content,
+    ).length;
+  } finally {
+    from.mockRestore();
+  }
+
+  expect(rawContentReads).toBe(0);
+  expect(result![0]?.content).toBe(content);
+});
+test("counts the truncation marker by code point after a truncated message", () => {
+  const parentContext = buildParentConversationContext(
+    [
+      { type: "human", id: "parent-human-marker", content: "x" },
+      { type: "ai", id: "parent-ai-marker", content: "😀😀😀" },
+    ] as never,
+    { maxCharsPerMessage: 1, maxTotalChars: 14 },
+  );
+
+  expect(parentContext).toEqual([
+    {
+      role: "user",
+      messageId: "parent-human-marker",
+      content: "x",
+    },
+    {
+      role: "assistant",
+      messageId: "parent-ai-marker",
+      content: "😀\n[truncated]",
+    },
+  ]);
+});
+test.each([
+  { content: "😀😀😀", budget: 1 },
+  { content: "a😀b😀c", budget: 3 },
+  { content: "😀   trailing", budget: 1 },
+])(
+  "accumulates the actual truncated output for $content at budget $budget",
+  ({ content, budget }) => {
+    const [truncatedMessage] = buildParentConversationContext(
+      [{ type: "ai", id: "ai", content }] as never,
+      { maxCharsPerMessage: budget, maxTotalChars: 10_000 },
+    );
+    expect(truncatedMessage).toBeDefined();
+    const truncated = truncatedMessage!.content;
+
+    const parentContext = buildParentConversationContext(
+      [
+        { type: "human", id: "human", content: "x" },
+        { type: "ai", id: "ai", content },
+      ] as never,
+      {
+        maxCharsPerMessage: budget,
+        maxTotalChars: Array.from(truncated).length + 1,
+      },
+    );
+
+    expect(parentContext.map((message) => message.messageId)).toEqual([
+      "human",
+      "ai",
+    ]);
+  },
+);
