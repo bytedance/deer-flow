@@ -59,6 +59,21 @@ async def test_snapshot_reports_running_and_queued_waiters():
         await asyncio.gather(queued, holder, return_exceptions=True)
 
 
+def test_capacity_exposes_the_queue_bound_it_applies():
+    """An injected controller reports its own bound, not the startup snapshot."""
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(queue_timeout_seconds=42))
+
+    assert capacity.queue_timeout_seconds == 42
+
+
+def test_configured_queue_timeout_reads_startup_snapshot(monkeypatch):
+    """The poller derives its budget without binding the controller to a loop."""
+    from deerflow.subagents import capacity as capacity_module
+
+    monkeypatch.setattr(capacity_module, "_config", SubagentRuntimeConfig(queue_timeout_seconds=42))
+    assert capacity_module.configured_subagent_queue_timeout_seconds() == 42
+
+
 @pytest.mark.asyncio
 async def test_repeated_cancellation_cannot_leak_running_slot(monkeypatch):
     """A second cancellation during cleanup must not strand process capacity."""
