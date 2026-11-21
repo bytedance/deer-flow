@@ -1147,6 +1147,31 @@ class _PreparedServerDiscovery:
     personal_user_id: str | None = None
 
 
+async def _handle_network_tool_error(request: Any, handler: Any) -> Any:
+    """Summarize HTTP/SSE errors before the adapter can stringify binary blocks."""
+    from langchain_core.tools import ToolException
+    from mcp.types import CallToolResult, EmbeddedResource, TextContent, TextResourceContents
+
+    result = await handler(request)
+    if not isinstance(result, CallToolResult) or not result.isError:
+        return result
+
+    text_parts = []
+    for item in result.content:
+        if isinstance(item, TextContent):
+            text_parts.append(item.text)
+        elif isinstance(item, EmbeddedResource) and isinstance(item.resource, TextResourceContents):
+            text_parts.append(item.resource.text)
+    if text_parts:
+        error = "\n".join(text_parts)
+    else:
+        # Error results can contain images, audio, blobs or data-URI links.
+        # Neither their payloads nor structuredContent belong in error text.
+        count = len(result.content)
+        error = f"MCP tool returned an error with {count} non-text content block{'s' if count != 1 else ''}."
+    raise ToolException(error)
+
+
 def _prepare_server_client(
     extensions_config: ExtensionsConfig,
     server_name: str,
@@ -1172,6 +1197,11 @@ def _prepare_server_client(
         resolver=resolve_variable,
         target_logger=logger,
     )
+    if transport != "stdio":
+        # Outermost so custom interceptors can retry/recover raw MCP errors,
+        # and their final result is checked before adapter conversion.
+        tool_interceptors.insert(0, _handle_network_tool_error)
+
     if initial_oauth_header and transport in ("sse", "http"):
         # Case-insensitive write: a static header spelled 'authorization'
         # must be replaced, not joined on the wire by a second field.
