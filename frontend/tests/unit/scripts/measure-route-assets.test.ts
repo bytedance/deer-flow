@@ -5,6 +5,7 @@ import {
   evaluateBudgets,
   extractAssetPaths,
   formatMeasurementSummary,
+  nextCliArgs,
   ROUTES,
 } from "../../../scripts/measure-route-assets.mjs";
 
@@ -64,6 +65,15 @@ describe("route asset measurement", () => {
       }),
     ).toBe(
       "Route asset summary\n/ [static-demo] JS 345 B | CSS 12 B | HTML 67 B",
+    );
+  });
+
+  it("runs the bundled Next.js CLI instead of a PATH pnpm lookup", () => {
+    const args = nextCliArgs(["build"]);
+
+    expect(args.slice(1)).toEqual(["build"]);
+    expect((args[0] ?? "").replace(/\\/g, "/")).toMatch(
+      /\/node_modules\/next\/dist\/bin\/next$/,
     );
   });
 });
