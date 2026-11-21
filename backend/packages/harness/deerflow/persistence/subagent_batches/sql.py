@@ -748,11 +748,18 @@ class SubagentBatchRepository:
         return await self._set_control(batch_id, user_id=user_id, action="cancel")
 
     async def _set_control(self, batch_id: str, *, user_id: str, action: str) -> dict[str, Any] | None:
-        now = datetime.now(UTC)
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
             if batch is None or batch.user_id != user_id:
                 return None
+            # SQLite ignores FOR UPDATE. Reserve its writer before deciding
+            # the transition, then reload any completion or cancellation that
+            # committed after our first read.
+            locked = await session.execute(update(SubagentBatchRow).where(SubagentBatchRow.id == batch_id, SubagentBatchRow.user_id == user_id).values(updated_at=SubagentBatchRow.updated_at).execution_options(synchronize_session=False))
+            if locked.rowcount != 1:
+                return None
+            await session.refresh(batch)
+            now = datetime.now(UTC)
             if action == "cancel" and batch.continuation_status is not None:
                 await session.execute(update(SubagentBatchRow).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.user_id == user_id).values(continuation_status="cancelled").execution_options(synchronize_session=False))
                 await session.refresh(batch)
