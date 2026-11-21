@@ -298,6 +298,12 @@ class OpenSandboxSandbox(Sandbox):
         try:
             content = self._file_op(lambda files: files.read_file(resolved))
         except Exception as exc:
+            if _is_not_found(exc):
+                # Same contract as LocalSandbox: callers tell "missing" from "unreadable" by the exception type
+                # (read_file reports not_found, the read-before-write gate lets write_file create the file).
+                # A missing file is an expected answer, not an error to log.
+                logger.debug("OpenSandbox file %s not found: %s", resolved, exc)
+                raise FileNotFoundError(f"File not found: {path}") from exc
             logger.error("Failed to read OpenSandbox file %s: %s", resolved, exc)
             return f"Error: {exc}"
         if start_line is None and end_line is None:

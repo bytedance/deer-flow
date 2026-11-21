@@ -1439,13 +1439,28 @@ def test_download_rejects_outside_virtual_prefix_before_sdk_call() -> None:
     assert remote.files.calls == []
 
 
-def test_missing_file_api_404_does_not_evict_sandbox() -> None:
+@pytest.mark.parametrize("line_range", [{}, {"start_line": 2, "end_line": 3}])
+def test_missing_file_api_404_raises_file_not_found_without_evicting(caplog: pytest.LogCaptureFixture, line_range: dict) -> None:
+    # Same contract as LocalSandbox: the read-before-write gate and read_file tell "missing" from "unreadable" by the
+    # exception type, and a file an agent is about to create is not an error worth an ERROR log line.
     invalidated: list[tuple[str, str]] = []
     remote = _FakeRemote("remote")
     remote.file_error = _TerminalApiError("file not found", status_code=404)
     box = _box(remote, on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)))
-    assert box.read_file("/mnt/user-data/workspace/missing.txt").startswith("Error:")
+    with caplog.at_level(logging.DEBUG), pytest.raises(FileNotFoundError, match="/mnt/user-data/workspace/missing.txt") as raised:
+        box.read_file("/mnt/user-data/workspace/missing.txt", **line_range)
+    assert raised.value.__cause__ is remote.file_error
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
     assert invalidated == []
+
+
+def test_unreadable_file_still_returns_the_error_string(caplog: pytest.LogCaptureFixture) -> None:
+    remote = _FakeRemote("remote")
+    remote.file_error = _TerminalApiError("internal error", status_code=500)
+    box = _box(remote)
+    with caplog.at_level(logging.ERROR):
+        assert box.read_file("/mnt/user-data/workspace/x.txt").startswith("Error:")
+    assert any("Failed to read OpenSandbox file" in record.getMessage() for record in caplog.records)
 
 
 def test_terminal_renewal_failure_evicts_before_operation() -> None:
