@@ -1,6 +1,7 @@
 import { describe, expect, test } from "@rstest/core";
 
 import {
+  classifyWorkspaceDiffLines,
   getChangedFileCount,
   getWorkspaceChangeBadgeLabel,
   getWorkspaceChangeLineClass,
@@ -82,17 +83,51 @@ describe("workspace change summary helpers", () => {
   });
 
   test("classifies unified diff lines", () => {
-    expect(getWorkspaceChangeLineClass("+new line")).toBe("addition");
-    expect(getWorkspaceChangeLineClass("-old line")).toBe("deletion");
-    expect(getWorkspaceChangeLineClass("@@ -1 +1 @@")).toBe("hunk");
-    expect(getWorkspaceChangeLineClass(" unchanged")).toBe("context");
-    expect(getWorkspaceChangeLineClass("+++ b/file.md")).toBe("meta");
-    expect(getWorkspaceChangeLineClass("--- a/file.md")).toBe("meta");
+    expect(getWorkspaceChangeLineClass("+new line", true)).toBe("addition");
+    expect(getWorkspaceChangeLineClass("-old line", true)).toBe("deletion");
+    expect(getWorkspaceChangeLineClass("@@ -1 +1 @@", false)).toBe("hunk");
+    expect(getWorkspaceChangeLineClass(" unchanged", true)).toBe("context");
+    expect(getWorkspaceChangeLineClass("+++ b/file.md", false)).toBe("meta");
+    expect(getWorkspaceChangeLineClass("--- a/file.md", false)).toBe("meta");
   });
 
   test("treats content lines beginning with +++/--- as add/remove, not meta", () => {
-    expect(getWorkspaceChangeLineClass("+++foo")).toBe("addition");
-    expect(getWorkspaceChangeLineClass("---bar")).toBe("deletion");
+    expect(getWorkspaceChangeLineClass("+++foo", true)).toBe("addition");
+    expect(getWorkspaceChangeLineClass("---bar", true)).toBe("deletion");
+    expect(getWorkspaceChangeLineClass("+++ counter", true)).toBe("addition");
+    expect(getWorkspaceChangeLineClass("--- get users", true)).toBe("deletion");
+  });
+
+  test("treats hunk lines that look like file headers as add/remove", () => {
+    // Deleting the SQL comment "-- get users" and adding "++ counter" give the
+    // hunk lines "--- get users" and "+++ counter". Only the two lines before
+    // the first "@@" are file headers (the backend counts lines the same way).
+    const diff = [
+      "--- a/q.sql",
+      "+++ b/q.sql",
+      "@@ -1,2 +1,2 @@",
+      "--- get users",
+      " SELECT 1",
+      "+++ counter",
+      // A later hunk must keep treating these prefixes as content.
+      "@@ -10,2 +10,2 @@",
+      "--- old note",
+      "+++ new note",
+    ];
+
+    expect(
+      classifyWorkspaceDiffLines(diff).map(({ lineClass }) => lineClass),
+    ).toEqual([
+      "meta",
+      "meta",
+      "hunk",
+      "deletion",
+      "context",
+      "addition",
+      "hunk",
+      "deletion",
+      "addition",
+    ]);
   });
 
   test("ranks a symlink-created entry with modified files, not before created or after deleted", () => {
