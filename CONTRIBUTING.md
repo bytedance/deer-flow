@@ -399,9 +399,10 @@ Pull requests trigger the following CI workflows:
 for the unit test and lint workflows. Pushes to `main` and changes under
 `.github/` run every scope. When a test starts reading a file outside its own
 tree, add that path to the script. On every pull request, the
-`frontend-scope-reads` lint job fails when a frontend file reads a path outside
-the frontend scope, and `backend/tests/test_ci_changed_scopes.py` fails when
-backend code names a frontend path that would skip the backend scope.
+`frontend-scope-reads` lint job flags literal references outside the frontend
+scope, including paths based on `import.meta.url`. The backend guard in
+`backend/tests/test_ci_changed_scopes.py` flags frontend paths that would skip
+the backend suite, including paths built from module-level Python constants.
 
 The browser E2E and full-stack replay jobs use the official Playwright image,
 which includes Chromium and its system libraries. When upgrading the locked

@@ -110,32 +110,64 @@ def test_frontend_files_the_backend_suite_reads_keep_the_backend_scope(path: str
     assert scopes_module.scopes_for([path])["backend"] is True
 
 
+def _frontend_path_chain(value: ast.expr, constants: dict[str, tuple[str, ...]]) -> tuple[str, ...]:
+    suffix: list[ast.expr] = []
+    while isinstance(value, ast.BinOp) and isinstance(value.op, ast.Div):
+        suffix.append(value.right)
+        value = value.left
+    segments = list(constants.get(value.id, ())) if isinstance(value, ast.Name) else []
+    if not segments:
+        suffix.append(value)
+    for part in reversed(suffix):
+        if isinstance(part, ast.Constant) and isinstance(part.value, str):
+            segments.append(part.value)
+        elif segments:
+            segments.append("<any>")
+            break
+    return tuple(segments) if segments and segments[0] == "frontend" else ()
+
+
 def _frontend_paths_named_in_python(source: Path) -> set[str]:
-    """Frontend paths a Python file names, as a literal or a `ROOT / "frontend" / ...` chain."""
+    """Find frontend path literals and pathlib chains, including module-level aliases."""
     named: set[str] = set()
     tree = ast.parse(source.read_text(encoding="utf-8"))
+    constants: dict[str, tuple[str, ...]] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            targets, value = statement.targets, statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets, value = [statement.target], statement.value
+        else:
+            continue
+        path = _frontend_path_chain(value, constants)
+        if path and path[-1] != "<any>":
+            constants.update((target.id, path) for target in targets if isinstance(target, ast.Name))
+
     # Only the outermost `/` chain names the full path; its left operands are partial chains.
     inner = {id(node.left) for node in ast.walk(tree) if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)}
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("frontend/"):
             named.add(node.value)
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and id(node) not in inner:
-            parts: list[ast.expr] = []
-            chain: ast.expr = node
-            while isinstance(chain, ast.BinOp) and isinstance(chain.op, ast.Div):
-                parts.insert(0, chain.right)
-                chain = chain.left
-            parts.insert(0, chain)
-            segments: list[str] = []
-            for part in parts:
-                if isinstance(part, ast.Constant) and isinstance(part.value, str):
-                    segments.append(part.value)
-                elif segments:
-                    segments.append("<any>")
-                    break
-            if segments and segments[0] == "frontend":
-                named.add("/".join(segments))
+            path = _frontend_path_chain(node, constants)
+            if path:
+                named.add("/".join(path))
     return named
+
+
+def test_backend_scope_scan_follows_frontend_path_constants(tmp_path: Path) -> None:
+    source = tmp_path / "test_frontend_reads.py"
+    source.write_text(
+        """\
+FRONTEND = ROOT / "frontend"
+SOURCE_DIR: Path = FRONTEND / "src"
+SOURCE_ALIAS = SOURCE_DIR
+(FRONTEND / "src" / "env.js").read_text()
+(SOURCE_ALIAS / filename).read_text()
+""",
+        encoding="utf-8",
+    )
+    assert {"frontend/src/env.js", "frontend/src/<any>"} <= _frontend_paths_named_in_python(source)
 
 
 # Existing frontend paths backend code names as data, without opening them.
@@ -296,7 +328,14 @@ def test_frontend_only_reads_paths_inside_its_scope() -> None:
     assert outside == {}, "add these paths to FRONTEND_PREFIXES in scripts/ci_changed_scopes.py"
 
 
-def test_frontend_read_check_fails_on_a_new_read_outside_the_scope(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param('readFileSync(path.resolve(__dirname, "../../../backend/pyproject.toml"));\n', id="dirname"),
+        pytest.param('readFileSync(new URL(\n  "../../../backend/pyproject.toml",\n  import.meta.url,\n));\n', id="import-meta-url"),
+    ],
+)
+def test_frontend_read_check_fails_on_a_new_read_outside_the_scope(tmp_path: Path, capsys: pytest.CaptureFixture[str], read: str) -> None:
     unit = tmp_path / "frontend" / "tests" / "unit"
     unit.mkdir(parents=True)
     (tmp_path / "backend").mkdir()
@@ -305,6 +344,6 @@ def test_frontend_read_check_fails_on_a_new_read_outside_the_scope(tmp_path: Pat
     (unit / "contract.test.ts").write_text('readFileSync(path.join(process.cwd(), "../contracts"));\n', encoding="utf-8")
     assert scopes_module.check_frontend_reads(tmp_path) == 0
 
-    (unit / "version.test.ts").write_text('readFileSync(path.resolve(__dirname, "../../../backend/pyproject.toml"));\n', encoding="utf-8")
+    (unit / "version.test.ts").write_text(read, encoding="utf-8")
     assert scopes_module.check_frontend_reads(tmp_path) == 1
     assert "tests/unit/version.test.ts reads backend/pyproject.toml" in capsys.readouterr().err

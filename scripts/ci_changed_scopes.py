@@ -103,6 +103,9 @@ _RELATIVE_IMPORT = re.compile(
     r"""(?:from\s+|import\(\s*|require\(\s*)["']((?:\.\./)+[^"']+)["']"""
 )
 _DIRNAME_PATH = re.compile(r"""__dirname\s*,\s*["']((?:\.\./)+[^"']*)["']""")
+_IMPORT_META_URL_PATH = re.compile(
+    r"""\bnew\s+URL\s*\(\s*["']((?:\.\.?/)+[^"']*)["']\s*,\s*import\.meta\.url\s*,?\s*\)"""
+)
 _CWD_PATH = re.compile(r"""process\.cwd\(\)\s*,\s*["']((?:\.\./)+[^"']*)["']""")
 _COMMAND_PATH = re.compile(r"""(?<![\w./])((?:\.\./)+[\w./-]+)""")
 
@@ -129,7 +132,7 @@ def frontend_reads_outside_frontend(repo_root: Path) -> dict[str, set[str]]:
         else:
             targets = [
                 source.parent / match
-                for pattern in (_RELATIVE_IMPORT, _DIRNAME_PATH)
+                for pattern in (_RELATIVE_IMPORT, _DIRNAME_PATH, _IMPORT_META_URL_PATH)
                 for match in pattern.findall(text)
             ]
             targets += [frontend / match for match in _CWD_PATH.findall(text)]
