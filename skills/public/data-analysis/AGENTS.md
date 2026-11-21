@@ -48,5 +48,7 @@ preserving nulls. Change the XLS cache key when this materialization changes.
 - **JSON export rejects duplicate column names** before it opens the output
   file, and tells the caller to add SQL aliases. CSV and Markdown keep
   duplicates.
-- **At the CLI boundary a `ValueError` becomes a short stderr message and a
-  non-zero exit.** The connection closes in `finally`.
+- **Route SQL errors, missing summary tables, and unsupported exports through
+  the CLI's `ValueError` handler** so callers get stderr and a non-zero exit.
+  Keep available-table diagnostics and validate extensions before creating
+  directories. The cache context closes the read-only connection on failure.
