@@ -62,7 +62,7 @@ async def test_fetch_tool_screens_target_before_post(responses, monkeypatch, cap
     assert "infoquest-test-marker" not in result
     assert "infoquest-test-marker" not in caplog.text
 
-    url = "https://reader.example.com/articles/a%2Fb?view=full&tag=a%20b"
+    url = "https://reader.example.com/articles/a%2Fb?tag[]=a%20b&view=full&tag[]=c%26d"
     assert "Example article content." in await tools.web_fetch_tool.ainvoke({"url": url})
     assert [json.loads(request.content)["url"] for request in requests] == [url]
 

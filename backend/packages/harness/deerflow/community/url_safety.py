@@ -35,6 +35,13 @@ def safe_public_result_url(value: object) -> str:
 
 def validate_hosted_fetch_url(url: str) -> str | None:
     """Check a hosted reader's input locally. The provider resolves the host."""
+    if isinstance(url, str) and ("[" in url or "]" in url):
+        # Strict parsing needs brackets in query parameters like tag[] escaped.
+        # Only this check uses the escaped form. Readers receive the original URL.
+        before_fragment, hash_mark, fragment = url.partition("#")
+        base, question_mark, query = before_fragment.partition("?")
+        escaped_query = query.replace("[", "%5B").replace("]", "%5D")
+        url = f"{base}{question_mark}{escaped_query}{hash_mark}{fragment}"
     try:
         parsed = _HTTP_URL.validate_python(url, strict=True)
     except ValidationError:

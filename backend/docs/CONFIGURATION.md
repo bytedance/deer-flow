@@ -1003,8 +1003,9 @@ official Exa API accept absolute HTTP(S) URLs for `web_fetch`. The tool checks
 the URL locally before contacting the reader.
 Malformed URLs, embedded user credentials, local hostnames such as `localhost`,
 known metadata hosts and non-public IP literals return a tool error.
-The reader receives an accepted URL exactly as supplied, including its encoded
-path and query string, and resolves the hostname in its own network.
+The reader receives an accepted URL exactly as supplied, including encoded paths
+and repeated query parameters such as `tag[]=api&tag[]=guides`. The reader
+resolves the hostname in its own network.
 
 #### Jina fetch retries
 
