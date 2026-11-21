@@ -1041,7 +1041,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 # a claim can observe an interceptor edit after reconciliation,
                 # and a failed claim already advanced that baseline on retry.
                 if loaded_revision is not None:
-                    for name in loaded_config.get_enabled_mcp_servers():
+                    for name in loaded_config.get_discoverable_mcp_servers():
                         entry = _server_tool_cache.get(name)
                         if (
                             entry is not None
@@ -1054,7 +1054,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             if retired_before_claim is not None:
                 retired_before_claim.close_all_sync()
 
-        enabled_names = list(loaded_config.get_enabled_mcp_servers())
+        enabled_names = list(loaded_config.get_discoverable_mcp_servers())
         missing_names = [name for name in enabled_names if name not in reusable_entries]
         discovered_groups: dict[str, ServerDiscoveryResult] = {}
         try:

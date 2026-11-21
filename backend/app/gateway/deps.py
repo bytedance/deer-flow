@@ -337,6 +337,8 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     if extensions is not None:
         # deerflow.mcp.oauth_store keeps rotating refresh tokens in the database.
         for name, server in extensions.get_enabled_mcp_servers().items():
+            if server.uses_browser_oauth:
+                consumers.append(f"mcpServers.{name}.user_oauth.enabled=true")
             oauth = server.oauth
             if oauth is not None and oauth.enabled and oauth.grant_type == "refresh_token":
                 consumers.append(f"mcpServers.{name}.oauth.enabled=true")

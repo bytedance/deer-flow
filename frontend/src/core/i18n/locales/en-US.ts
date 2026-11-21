@@ -220,6 +220,21 @@ export const enUS: Translations = {
 
   capabilities: {
     toolsAndIntegrations: "Tools & integrations",
+    mcpConnections: {
+      title: "My MCP connections",
+      action: (action, name) => `${action} ${name}`,
+      disconnect: "Disconnect",
+      reconnect: "Reconnect",
+      actionFailed: "Could not change the connection. Try again.",
+      loadFailed: "Could not load your MCP connections.",
+      status: {
+        disconnected: "Not connected",
+        connected: "Connected",
+        reconnect_required: "Reconnect to use this server.",
+        removed: "User authorization is no longer enabled for this server.",
+        unavailable: "Connection unavailable. Contact your administrator.",
+      },
+    },
     icon: {
       title: "Plugin icon",
       upload: "Upload plugin icon",
