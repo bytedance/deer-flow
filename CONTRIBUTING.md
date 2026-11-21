@@ -80,7 +80,7 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    - Gateway-hosted LangGraph-compatible runtime supports hot-reload
 
 4. **Access the application**:
-   - Web Interface: http://localhost:2026
+   - Open the [workspace](http://localhost:2026/workspace). Complete setup or sign in if prompted.
    - API Gateway: http://localhost:2026/api/*
    - LangGraph-compatible API: http://localhost:2026/api/langgraph/*
 
@@ -209,7 +209,7 @@ Required tools:
    ```
 
 4. **Access the application**:
-   - Web Interface: http://localhost:2026
+   - Open the [workspace](http://localhost:2026/workspace). Complete setup or sign in if prompted.
    - All API requests are automatically proxied through nginx
 
 #### Manual Service Control
@@ -235,7 +235,7 @@ If you need to start services individually:
    This runs `scripts/nginx.sh`, which launches nginx in the foreground the same way `scripts/serve.sh` (used by `make dev` / `make start`) does: it pre-creates the `logs/` and `temp/` directories and uses the local dev config at `docker/nginx/nginx.local.conf`.
 
 3. **Access the application**:
-   - Web Interface: http://localhost:2026
+   - Open the [workspace](http://localhost:2026/workspace). Complete setup or sign in if prompted.
 
 #### Nginx Configuration
 
