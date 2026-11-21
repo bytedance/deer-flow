@@ -78,6 +78,15 @@ guarantee still fails core CI, and `test_bundled_extension_ci.py` keeps the
 workflow's test-file list in step with the marker. Run the bundled suites with
 `make test-bundled-extensions`.
 
+## Benchmark script tests
+
+Tests for offline benchmark harnesses under `backend/scripts/benchmark/` live in
+`test_bench_*.py` and carry `pytest.mark.benchmark` at module level. Core shards
+exclude them so offline benchmark scripts do not inflate unrelated PRs;
+`.github/workflows/backend-benchmark-tests.yml` runs them when benchmark scripts
+or tests change, and `test_benchmark_ci.py` keeps the workflow and marker in
+sync. Run them locally with `make test-benchmark`.
+
 ## Blocking-I/O tests
 
 Every test under `blocking_io/` runs with a detector that fails on a blocking

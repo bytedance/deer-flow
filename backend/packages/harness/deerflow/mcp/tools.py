@@ -1387,7 +1387,7 @@ def _prepare_server_discovery(
     session_pool: MCPSessionPool | None,
 ) -> _PreparedServerDiscovery | None:
     """Build selected connections and capture bindings before discovery."""
-    all_enabled = extensions_config.get_enabled_mcp_servers()
+    all_enabled = extensions_config.get_discoverable_mcp_servers()
     requested = set(all_enabled) if server_names is None else set(server_names) & set(all_enabled)
     selected_names = [name for name in all_enabled if name in requested]
     if not selected_names:
@@ -1505,6 +1505,100 @@ async def _discover_and_wrap_prepared(
         len(groups),
     )
     return groups
+
+
+async def get_browser_mcp_tools(config: ExtensionsConfig, owner: str, selected: set[str] | None = None) -> list[BaseTool]:
+    """Discover as the signed-in lead agent, without publishing to the shared cache."""
+    import httpx
+    from langchain_core.tools import ToolException
+
+    from deerflow.approvals.policy import digest
+    from deerflow.mcp.browser_oauth import browser_grant_fingerprint, get_browser_oauth_server, get_call_token, mcp_client_factory
+    from deerflow.mcp.client import build_server_params
+    from deerflow.runtime.context_keys import MCP_BROWSER_USER_CONTEXT_KEY
+
+    adapter = _load_mcp_adapter_symbols()
+    if adapter is None:
+        return []
+    client_cls, load_tools = adapter
+    redirect_hint = "Connect or reconnect this MCP server in Capability Center."
+
+    async def discover(name: str, server: McpServerConfig) -> tuple[BaseTool, ...]:
+        fingerprint = browser_grant_fingerprint(server)
+
+        async def check_current():
+            try:
+                current = await asyncio.to_thread(get_browser_oauth_server, name)
+            except Exception:
+                raise ToolException("MCP credential policy is unavailable") from None
+            if current is None or browser_grant_fingerprint(current) != fingerprint:
+                raise ToolException(redirect_hint)
+            return current
+
+        try:
+            await check_current()
+            _, epoch = await get_call_token(name, server, owner)
+        except ToolException:
+            return ()
+
+        class CurrentGrant(httpx.Auth):
+            async def async_auth_flow(self, request):
+                current = await check_current()
+                token, _ = await get_call_token(name, current, owner, expected_epoch=epoch)
+                await check_current()
+                request.headers["Authorization"] = f"Bearer {token}"
+                response = yield request
+                if response.status_code == 401:
+                    # Do not replay remote calls. A later request can use the rotated token.
+                    await get_call_token(name, current, owner, expected_epoch=epoch, rejected_token=token)
+
+        async def require_current_grant(request, handler):
+            runtime = getattr(request, "runtime", None)
+            context = getattr(runtime, "context", None)
+            if not isinstance(context, Mapping) or context.get(MCP_BROWSER_USER_CONTEXT_KEY) != owner:
+                raise ToolException(redirect_hint)
+            current = await check_current()
+            await get_call_token(name, current, owner, expected_epoch=epoch)
+            return await handler(request)
+
+        connection = build_server_params(name, server)
+        connection.update(auth=CurrentGrant(), httpx_client_factory=mcp_client_factory(server))
+        view = config.model_copy(update={"mcp_servers": {name: server}})
+        interceptors = [
+            require_current_grant,
+            *build_mcp_tool_interceptors(view, connection_scope="personal"),
+        ]
+        client = client_cls({name: connection}, tool_interceptors=interceptors, tool_name_prefix=True)
+        prepared = _PreparedServerClient(name, connection, client, interceptors, server.tool_name_prefix, _resolve_session_init_timeout(server))
+        _, raw = await _discover_server_tools(prepared, load_mcp_tools_fn=load_tools)
+        if raw is None:
+            return ()
+        tools = _wrap_discovered_server_tools(
+            config,
+            name,
+            connection,
+            raw,
+            tool_name_prefix=server.tool_name_prefix,
+            session_init_timeout=prepared.session_init_timeout,
+            pool=None,
+            binding=None,
+            ownership_domain="deployment",
+            connection_scope="deployment",
+        ).tools
+        for tool in tools:
+            metadata = tool.metadata or {}
+            tool.metadata = {**metadata, "deerflow_approval_binding": digest([metadata.get("deerflow_approval_binding"), owner, epoch])}
+        return tools
+
+    async def discover_safely(name, server):
+        try:
+            return await discover(name, server)
+        except Exception as exc:
+            logger.warning("Skipping browser MCP discovery for '%s' (%s)", name, type(exc).__name__)
+            return ()
+
+    groups = await asyncio.gather(*(discover_safely(name, server) for name, server in config.get_enabled_mcp_servers().items() if server.uses_browser_oauth and (selected is None or name in selected)))
+    return [tool for group in groups for tool in group]
 
 
 async def get_mcp_tools_by_server(

@@ -1782,6 +1782,7 @@ async def test_http_transport_tools_not_pooled():
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
+    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     class Args(BaseModel):
@@ -1808,21 +1809,17 @@ async def test_http_transport_tools_not_pooled():
     mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
     mock_cm.__aexit__ = AsyncMock(return_value=False)
 
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {
-        "myserver": MagicMock(type="http", url="http://localhost:8000/mcp", headers=None, command=None, args=[], env=None),
-        "playwright": MagicMock(type="stdio", command="npx", args=["-y", "@anthropic/mcp-server-playwright"], env=None, url=None, headers=None),
-    }
-    extensions_config.model_extra = {}
+    extensions_config = ExtensionsConfig(
+        mcpServers={
+            "myserver": McpServerConfig(type="http", url="http://localhost:8000/mcp"),
+            "playwright": McpServerConfig(type="stdio", command="npx", args=["-y", "@anthropic/mcp-server-playwright"]),
+        }
+    )
 
     servers_config = {
         "myserver": {"transport": "http", "url": "http://localhost:8000/mcp"},
         "playwright": {"transport": "stdio", "command": "npx", "args": ["-y", "@anthropic/mcp-server-playwright"]},
     }
-    for name, server in extensions_config.get_enabled_mcp_servers.return_value.items():
-        server.model_dump.return_value = servers_config[name]
-    extensions_config.mcp_servers = extensions_config.get_enabled_mcp_servers.return_value
-
     with (
         patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
         patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
@@ -1865,7 +1862,7 @@ async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
-    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     class Args(BaseModel):
@@ -1884,10 +1881,7 @@ async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
         url="https://example.com/mcp",
         tool_call_timeout=30.0,
     )
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {"remote": server_cfg}
-    extensions_config.mcp_servers = {"remote": server_cfg}
-    extensions_config.model_extra = {}
+    extensions_config = ExtensionsConfig(mcpServers={"remote": server_cfg})
 
     servers_config = {
         "remote": {"transport": "http", "url": "https://example.com/mcp"},
@@ -1927,7 +1921,7 @@ async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
-    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     class Args(BaseModel):
@@ -1955,10 +1949,7 @@ async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
         tool_call_timeout=60.0,
     )
 
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {"biomcp": server_cfg}
-    extensions_config.mcp_servers = {"biomcp": server_cfg}
-    extensions_config.model_extra = {}
+    extensions_config = ExtensionsConfig(mcpServers={"biomcp": server_cfg})
 
     # Connection dict must NOT contain tool_call_timeout — this is the key assertion.
     servers_config = {

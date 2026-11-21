@@ -39,6 +39,9 @@ a bare flag (`deerflow summarize this repo --print`) are the message, as with
 both sides of the flag are rejected with exit 2, since their order cannot be
 recovered. `--print` and `--json` cannot be combined; pick one output mode.
 
+If the program reading a `--print` pipe closes it before the answer is written,
+DeerFlow exits quietly with status `1`.
+
 If no TTY is available and no headless flag is given, `deerflow` prints guidance
 instead of hanging.
 

@@ -7,6 +7,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+Local bash tool status follows the process exit code, including timeout failures.
+Successful commands may print `Error:` or JSON containing an `error` field without
+being marked as failed. Output is still subject to the configured redaction and
+size limits; those transformations do not change the execution status.
+
 The optional [Tenki provider](../../backend/packages/harness/deerflow/community/tenki/README.md)
 retains failed termination handles for retry and rejects late acquisitions after
 reset or shutdown. If shutdown reports outstanding work, retry after its SDK
@@ -20,6 +25,12 @@ filtering and read-only mounts still apply. Configured category mounts such as
 `build` or `logs` remain searchable; ignore rules apply inside each mount. A broken
 category mount stops the root search, and the Gateway warning log identifies its
 virtual path.
+
+Explicit `glob` patterns and `grep` file filters can name data directories such
+as `logs/*.txt`, `**/logs/*.txt` or `.cache/*.txt`, even outside the user-data
+mounts. Generic searches keep ignoring those directories outside user data.
+Repository metadata, dependency directories and in-flight `.upload-*.part`
+files remain filtered.
 
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a

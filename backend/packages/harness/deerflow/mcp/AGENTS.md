@@ -35,6 +35,8 @@ make test-blocking-io
 - **`mcp_tasks` is read at startup.** The installed submitter decides whether task
   tools are exposed. Editing the config on disk does not change a running process.
 
+- **Disconnect cleanup is bounded.** A transport failure waits at most `SESSION_CLOSE_TIMEOUT` for session cleanup; if the owner is still unwinding, its teardown remains strongly tracked in `_teardown_tasks` while the caller receives the original transport error.
+
 ## Credentials
 
 - **Header names are case-insensitive.** Every credential interceptor writes
@@ -97,5 +99,3 @@ make test-blocking-io
   discovery and on every call. Look the role up each time; do not capture it.
 - **Public-network personal clients** keep `trust_env=False`, DNS screening and
   per-origin connection pools. TLS trust loads in a worker thread.
-
-- **Disconnect cleanup is bounded.** A transport failure waits at most `SESSION_CLOSE_TIMEOUT` for session cleanup; if the owner is still unwinding, its teardown remains strongly tracked in `_teardown_tasks` while the caller receives the original transport error.

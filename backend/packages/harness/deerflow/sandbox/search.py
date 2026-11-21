@@ -118,8 +118,7 @@ def should_ignore_name(name: str) -> bool:
 
 
 def _names_user_data(pattern: str) -> bool:
-    name = pattern.rsplit("/", 1)[-1]
-    return any(fnmatch.fnmatchcase(name, candidate) for candidate in USER_DATA_PATTERNS)
+    return any(fnmatch.fnmatchcase(part, candidate) for part in pattern.split("/") for candidate in USER_DATA_PATTERNS)
 
 
 def ignore_rules_for(search_root: Path, *, glob: str | None = None, user_data: bool = False) -> IgnoreRules:

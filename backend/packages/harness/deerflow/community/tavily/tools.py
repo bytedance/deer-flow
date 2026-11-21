@@ -8,7 +8,7 @@ from tavily import AsyncTavilyClient
 
 from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_time_range import SearchTimeRange
-from deerflow.community.url_safety import safe_public_result_url
+from deerflow.community.url_safety import safe_public_result_url, validate_hosted_fetch_url
 from deerflow.config import get_app_config
 from deerflow.config.tool_config import ToolConfig
 from deerflow.utils.file_io import await_drained
@@ -129,6 +129,9 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    target_error = validate_hosted_fetch_url(url)
+    if target_error:
+        return target_error
     # Config resolution stats and hashes the config files; keep it off the event loop.
     client = await _open_tavily_client("web_fetch")
     try:

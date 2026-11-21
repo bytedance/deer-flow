@@ -2,6 +2,8 @@
 
 import json
 import logging
+from functools import partial
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -140,6 +142,31 @@ class TestMissingKeyMessage:
 
 
 class TestWebFetchTool:
+    def test_screens_url_before_provider_call(self, mock_config_with_key, monkeypatch, caplog):
+        from deerflow.community.unbrowse import tools
+
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": {"markdown": "Article."}}})
+
+        client = partial(httpx.Client, transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(tools, "httpx", SimpleNamespace(Client=client, HTTPStatusError=httpx.HTTPStatusError))
+        monkeypatch.setattr("socket.getaddrinfo", lambda *args, **kwargs: pytest.fail("Hosted fetch must leave DNS to the provider"))
+        caplog.set_level(logging.DEBUG, logger=tools.__name__)
+
+        result = tools.web_fetch_tool.invoke({"url": "https://unbrowse-test-marker.localhost/article"})
+        assert requests == []
+        assert result.startswith("Error:")
+        assert "unbrowse-test-marker" not in result
+        assert "unbrowse-test-marker" not in caplog.text
+
+        public_url = "https://reader.example.com:443/articles/a%2Fb?tag=a%20b"
+        assert "Article." in tools.web_fetch_tool.invoke({"url": public_url})
+        [payload] = requests
+        assert payload["params"]["arguments"]["url"] == public_url
+
     def test_returns_title_and_markdown(self, mock_config_with_key):
         with patch("deerflow.community.unbrowse.tools.httpx.Client") as mock_client_cls:
             mock_post = mock_client_cls.return_value.__enter__.return_value.post

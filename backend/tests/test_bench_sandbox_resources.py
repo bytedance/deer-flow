@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.benchmark
+
 
 def _load_module():
     path = Path(__file__).resolve().parents[1] / "scripts/benchmark/sandbox/resources.py"
