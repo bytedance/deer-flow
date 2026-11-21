@@ -801,20 +801,36 @@ class SubagentBatchRepository:
             item = await session.get(SubagentBatchItemRow, item_id, with_for_update=True)
             if item is None or item.batch_id != batch_id or item.status != "failed":
                 return None
-            item.status = "pending"
-            item.attempt = 0
-            item.error = None
-            item.result = None
-            item.result_artifact = None
-            item.result_preview = None
-            item.result_truncated = False
-            item.acceptance_verdict = None
-            item.completed_at = None
-            item.cancel_requested_at = None
-            item.updated_at = now
-            # SQLite ignores FOR UPDATE: flush first so this transaction holds the
-            # write lock, then re-read the batch a cancel may have committed since.
-            await session.flush()
+            # SQLite ignores FOR UPDATE. Recheck eligibility at the write so a
+            # stale retry cannot reset a newer attempt, even if it failed again.
+            changed = await session.execute(
+                update(SubagentBatchItemRow)
+                .where(
+                    SubagentBatchItemRow.id == item_id,
+                    SubagentBatchItemRow.batch_id == batch_id,
+                    SubagentBatchItemRow.status == "failed",
+                    SubagentBatchItemRow.completed_at == item.completed_at,
+                    SubagentBatchItemRow.updated_at == item.updated_at,
+                )
+                .values(
+                    status="pending",
+                    attempt=0,
+                    error=None,
+                    result=None,
+                    result_artifact=None,
+                    result_preview=None,
+                    result_truncated=False,
+                    acceptance_verdict=None,
+                    completed_at=None,
+                    cancel_requested_at=None,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if changed.rowcount != 1:
+                return None
+            await session.refresh(item)
+            # The write lock now protects the parent cancellation recheck.
             await session.refresh(batch)
             # Cancellation is final; reopening the batch would run work the user
             # stopped. Returning without commit discards the item reset.
