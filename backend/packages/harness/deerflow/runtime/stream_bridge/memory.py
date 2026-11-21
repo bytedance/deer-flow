@@ -161,13 +161,13 @@ class MemoryStreamBridge(StreamBridge):
         heartbeat_interval = self._resolve_heartbeat_interval(heartbeat_interval)
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
-            if self._closing:
-                raise RuntimeError("Stream bridge is closing")
             start = self._resolve_start_offset(stream, last_event_id)
             if isinstance(start, StreamGap):
                 gap = start
                 next_offset = stream.start_offset
             else:
+                if self._closing:
+                    raise RuntimeError("Stream bridge is closing")
                 gap = None
                 next_offset = start
 

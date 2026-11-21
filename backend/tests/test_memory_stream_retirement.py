@@ -490,3 +490,66 @@ async def test_overlapping_close_keeps_admission_fenced_until_every_drain_exits(
                 task.cancel()
         await asyncio.gather(*close_tasks, return_exceptions=True)
         await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_close_preserves_retirement_gap_while_later_run_is_still_draining(monkeypatch):
+    bridge = MemoryStreamBridge()
+    first_run = "close-gap-first"
+    second_run = "close-gap-second"
+    await bridge.publish(first_run, "before", {})
+    await bridge.publish(second_run, "before", {})
+    first_stream = bridge.subscribe(first_run)
+    first_condition = bridge._streams[first_run].condition
+    second_condition = bridge._streams[second_run].condition
+
+    close_queued_on_first = asyncio.Event()
+    subscriber_queued_on_first = asyncio.Event()
+    close_queued_on_second = asyncio.Event()
+    close_task = None
+    subscriber_task = None
+    real_first_acquire = first_condition.acquire
+    real_second_acquire = second_condition.acquire
+
+    async def observe_first_acquire():
+        current = asyncio.current_task()
+        if current is close_task:
+            close_queued_on_first.set()
+        elif current is subscriber_task:
+            subscriber_queued_on_first.set()
+        return await real_first_acquire()
+
+    async def observe_second_acquire():
+        if asyncio.current_task() is close_task:
+            close_queued_on_second.set()
+        return await real_second_acquire()
+
+    try:
+        # Hold the later run so close() retires the first generation but remains
+        # inside its drain, with the admission fence still raised.
+        async with second_condition:
+            async with first_condition:
+                monkeypatch.setattr(first_condition, "acquire", observe_first_acquire)
+                monkeypatch.setattr(second_condition, "acquire", observe_second_acquire)
+                close_task = asyncio.create_task(bridge.close())
+                await asyncio.wait_for(close_queued_on_first.wait(), 1)
+                subscriber_task = asyncio.create_task(anext(first_stream))
+                await asyncio.wait_for(subscriber_queued_on_first.wait(), 1)
+
+            await asyncio.wait_for(close_queued_on_second.wait(), 1)
+            assert bridge._closing
+            assert await asyncio.wait_for(asyncio.shield(subscriber_task), 1) == StreamGap(None, None, None)
+            with pytest.raises(StopAsyncIteration):
+                await anext(first_stream)
+
+        await asyncio.wait_for(close_task, 1)
+        assert not bridge._closing
+    finally:
+        for task in (subscriber_task, close_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (subscriber_task, close_task) if task is not None),
+            return_exceptions=True,
+        )
+        await bridge.close()
