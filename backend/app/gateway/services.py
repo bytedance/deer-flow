@@ -2403,6 +2403,7 @@ async def _legacy_turn_mode_options(request: Request, thread_id: str, message_id
     owner = get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
     manager = get_run_manager(request)
     run_id = source.get("run_id")
+    record = None
     if not run_id or (target_run_id and target_run_id != run_id):
         # A regenerated answer can belong to a different run from its copied prompt.
         # The prepare response is a hint; verify a different ID against the journal.
@@ -2412,17 +2413,18 @@ async def _legacy_turn_mode_options(request: Request, thread_id: str, message_id
             # The source stamp or the same answer match used by prepare can
             # still identify the run when a legacy journal cannot page back.
             origins = {}
-        run_id = origins.get(message_id, run_id)
-    if isinstance(run_id, str) and run_id:
+        journal_id = origins.get(message_id)
+        if journal_id and journal_id != run_id:
+            record = await manager.get(journal_id, user_id=owner, raise_on_store_error=True)
+    if record is None and isinstance(run_id, str) and run_id:
         record = await manager.get(run_id, user_id=owner, raise_on_store_error=True)
-    elif answer is not None and target_run_id:
+    if record is None and answer is not None and target_run_id:
+        # Backfilled events group history under synthetic IDs with no run row.
+        # Bind to the unique stored answer independently of the client's hint.
         records = await manager.list_by_thread(thread_id, user_id=owner, limit=10)
         matches = replay_runs_matching_answer([row for row in records if row.user_id == owner], answer)
-        if len(matches) != 1 or matches[0].run_id != target_run_id:
-            return None
-        record = matches[0]
-    else:
-        return None
+        if len(matches) == 1:
+            record = matches[0]
     # get() can return a cached run without applying the store's owner filter.
     if record is None or record.thread_id != thread_id or record.user_id != owner:
         return None

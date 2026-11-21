@@ -520,6 +520,18 @@ async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, mon
         retry = await client.post(path, json=body, headers={"Idempotency-Key": "replay"})
         assert retry.status_code == 200 and retry.json()["run_id"] == record.run_id
         assert worker.await_count == 2
+        if legacy_summary:
+            await manager.set_status(record.run_id, services.RunStatus.success)
+            # Admission backfills a legacy thread's event feed. Its synthetic
+            # turn ID still identifies the superseded messages, not a RunRecord.
+            origins = await app.state.run_event_store.find_latest_ai_message_run_ids(tid, {"answer"}, user_id=owner)
+            assert origins["answer"] != source.run_id
+            body["metadata"]["regenerate_from_run_id"] = origins["answer"]
+            repeated = await client.post(path, json=body)
+            assert repeated.status_code == 200, repeated.text
+            admitted = await manager.get(repeated.json()["run_id"], user_id=owner)
+            await admitted.task
+            assert {key: val for key, val in worker.await_args.kwargs["config"]["context"].items() if key in keys} == original
 
 
 @pytest.mark.asyncio
