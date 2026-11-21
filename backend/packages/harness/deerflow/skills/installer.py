@@ -402,10 +402,9 @@ def _collect_scannable_files(skill_dir: Path) -> list[Path]:
     return [skill_md, *others]
 
 
-async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
-    """Run the skill security scanner against all installable text and script files."""
-    static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
-
+async def _prepare_model_review(skill_dir: Path, skill_name: str) -> list[tuple[str, bool, str | None]]:
+    """Check the package budget before moderation. Cache only budgeted text."""
+    review_files = []
     skill_md = skill_dir / "SKILL.md"
     additional_files = additional_bytes = 0
     for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
@@ -413,23 +412,33 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
         if path != skill_md and path.name == "SKILL.md":
             raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
         rel_path_posix = rel_path.as_posix()
-        location = f"{skill_name}/{rel_path_posix}"
         executable = await _is_code_file(path, rel_path)
         if path == skill_md or executable or _is_prompt_input(rel_path):
-            content = await asyncio.to_thread(_read_required_text, path, location)
-        else:
-            # An interpreter can consume text under any name. Require explicit
-            # approval for these files even when optional SkillScan is disabled.
-            additional = await asyncio.to_thread(_read_additional_text, path, rel_path_posix, location)
-            if additional is None:
-                continue
-            content, size = additional
-            additional_files += 1
-            additional_bytes += size
-            if additional_files > MAX_MODEL_FILES or additional_bytes > MAX_MODEL_BYTES:
-                raise SkillSecurityScanError(f"Security scan failed for {location}: additional text exceeds the package review budget")
-            executable = True
-        await _scan_skill_file_or_raise(content, rel_path_posix, skill_name, executable=executable, static_findings=_findings_for_file(static_findings, rel_path_posix), app_config=app_config)
+            review_files.append((rel_path_posix, executable, None))
+            continue
+
+        # An interpreter can consume text under any name. Require explicit
+        # approval for these files even when optional SkillScan is disabled.
+        location = f"{skill_name}/{rel_path_posix}"
+        additional = await asyncio.to_thread(_read_additional_text, path, rel_path_posix, location)
+        if additional is None:
+            continue
+        content, size = additional
+        additional_files += 1
+        additional_bytes += size
+        if additional_files > MAX_MODEL_FILES or additional_bytes > MAX_MODEL_BYTES:
+            raise SkillSecurityScanError(f"Security scan failed for {location}: additional text exceeds the package review budget")
+        review_files.append((rel_path_posix, True, content))
+    return review_files
+
+
+async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
+    """Run the skill security scanner against all installable text and script files."""
+    static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
+    for rel_path, executable, content in await _prepare_model_review(skill_dir, skill_name):
+        if content is None:
+            content = await asyncio.to_thread(_read_required_text, skill_dir / rel_path, f"{skill_name}/{rel_path}")
+        await _scan_skill_file_or_raise(content, rel_path, skill_name, executable=executable, static_findings=_findings_for_file(static_findings, rel_path), app_config=app_config)
     return static_findings
 
 

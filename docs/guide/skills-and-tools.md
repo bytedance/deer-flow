@@ -410,10 +410,12 @@ Skill installs and agent-managed skill edits run through **SkillScan**, a native
 Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`), HTML applications (`.hta`), and scriptlets (`.sct`) count as code even outside `scripts/`, regardless of filename case. They receive both SkillScan analysis and the installer's executable-code policy.
 
 SkillScan also inspects text for Python and shell code when the file has an unfamiliar name or no shebang.
+Shell terminology in a reference document can go to the model for contextual review. A critical shell finding in inferred code needs command evidence.
+For inferred Python, the sensitive-read and network rule requires evidence of a file read and an outbound network operation. Configuration values can contain a path and a help URL without triggering this rule.
 For text over 131,072 characters without a Python filename or shebang, it reports a Python analysis limit and continues the other checks.
 During archive installation, NUL-free UTF-8 files outside the usual script and prompt paths go to the configured review model and require an explicit `allow`.
 The installer rejects additional files containing recognized credentials or sensitive configuration before sending their contents to the model.
-It also rejects the package if any additional text file exceeds 128 KiB, or if those files exceed 32 files or 1 MiB in total.
+Before the first model call, the installer checks that each additional text file is at most 128 KiB and that the package contains at most 32 of these files totaling at most 1 MiB. Exceeding any limit stops installation.
 These model-review safeguards also apply when `skill_scan.enabled` is false.
 
 SkillScan warns about remote downloads piped into common shells, including `env` launchers, sudo, interpreter paths, and shell line continuations. It distinguishes environment dumps from `env` commands, including assignments and GNU split-string escapes. Shell parsing and split expansion are bounded; reaching a limit preserves critical findings already detected. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.

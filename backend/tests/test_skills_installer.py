@@ -693,18 +693,27 @@ class TestInstallSkillFromArchive:
         ("limit", "cap", "contents"),
         [("MAX_MODEL_FILE_BYTES", 3, ["abcd"]), ("MAX_MODEL_BYTES", 3, ["ab", "cd"]), ("MAX_MODEL_FILES", 1, ["a", "b"])],
     )
-    def test_additional_text_over_review_limits_prevents_install(self, tmp_path, monkeypatch, limit, cap, contents):
+    def test_additional_text_over_review_limits_prevents_model_calls_and_install(self, tmp_path, monkeypatch, limit, cap, contents):
         import deerflow.skills.installer as installer
 
         monkeypatch.setattr(installer, limit, cap)
+        reviewed = []
+
+        async def _scan(content, *, location, **kwargs):
+            reviewed.append(location)
+            return ScanResult(decision="allow", reason="fixture decision")
+
+        monkeypatch.setattr(installer, "scan_skill_content", _scan)
         zip_path = self._make_skill_zip(tmp_path)
         with zipfile.ZipFile(zip_path, "a") as zf:
+            zf.writestr("test-skill/a.py", "print('ready')\n")
             for index, content in enumerate(contents):
                 zf.writestr(f"test-skill/data/{index}.dat", content)
         skills_root = tmp_path / "skills"
         with pytest.raises(SkillSecurityScanError, match="additional text"):
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
+        assert reviewed == []
         assert not (skills_root / "custom" / "test-skill").exists()
 
     @pytest.mark.parametrize("ending", [b"\x00", b"\xff", b"\xc3"], ids=["nul", "invalid-utf8", "truncated-utf8"])
@@ -712,6 +721,8 @@ class TestInstallSkillFromArchive:
         import deerflow.skills.installer as installer
 
         monkeypatch.setattr(installer, "MAX_MODEL_FILE_BYTES", 2)
+        monkeypatch.setattr(installer, "MAX_MODEL_BYTES", 2)
+        monkeypatch.setattr(installer, "MAX_MODEL_FILES", 1)
         zip_path = self._make_skill_zip(tmp_path)
         with zipfile.ZipFile(zip_path, "a") as zf:
             zf.writestr("test-skill/data/asset", b"asset" + b" " * 65536 + ending)

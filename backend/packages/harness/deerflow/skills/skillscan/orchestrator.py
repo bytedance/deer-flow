@@ -386,7 +386,7 @@ def _scan_text_file(rel_path: str, text: str) -> list[SecurityFinding]:
     # A JSON array/object is valid Python syntax too. A literal-only document
     # with path or URL labels does not perform a sensitive read or network call.
     if tree is not None and (named_python or _has_python_operations(tree)):
-        findings.extend(_scan_python(rel_path, tree))
+        findings.extend(_scan_python(rel_path, tree, named_python=named_python))
     if over_python_limit:
         findings.append(_finding("package-python-analysis-limit", file=rel_path, evidence=f"{len(text)} characters"))
     shell_findings = _scan_shell(rel_path, text)
@@ -759,7 +759,26 @@ def _has_python_operations(tree: ast.Module) -> bool:
     return any(not isinstance(statement, ast.Expr) for statement in tree.body) or any(isinstance(node, (ast.Call, ast.Attribute)) for node in ast.walk(tree))
 
 
-def _scan_python(rel_path: str, tree: ast.Module) -> list[SecurityFinding]:
+def _inferred_sensitive_file_read(node: ast.Call, call_name: str, aliases: dict[str, str]) -> bool:
+    """Recognize literal operands of file reads in text that only resembles Python."""
+    mode: ast.expr | None = None
+    if call_name in {"open", "builtins.open", "io.open"}:
+        path = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "file"), None)
+        mode = node.args[1] if len(node.args) > 1 else next((kw.value for kw in node.keywords if kw.arg == "mode"), None)
+    elif isinstance(node.func, ast.Attribute) and node.func.attr in {"read_text", "read_bytes", "open"}:
+        path = node.func.value
+        if node.func.attr == "open":
+            mode = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "mode"), None)
+    else:
+        return False
+    if mode is not None and not (isinstance(mode, ast.Constant) and isinstance(mode.value, str) and ("r" in mode.value or "+" in mode.value)):
+        return False
+    if isinstance(path, ast.Call) and _python_call_name(path, aliases) == "pathlib.Path":
+        return any(isinstance(arg, ast.Constant) and isinstance(arg.value, str) and _SENSITIVE_PATH_RE.search(arg.value) for arg in path.args)
+    return isinstance(path, ast.Constant) and isinstance(path.value, str) and bool(_SENSITIVE_PATH_RE.search(path.value))
+
+
+def _scan_python(rel_path: str, tree: ast.Module, *, named_python: bool) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
 
     aliases = _collect_python_aliases(tree)
@@ -769,17 +788,21 @@ def _scan_python(rel_path: str, tree: ast.Module) -> list[SecurityFinding]:
     sensitive_node: ast.AST | None = None
     env_node: ast.AST | None = None
     network_node: ast.AST | None = None
+    # The environment-dump rule retains its established URL/constructor signals.
+    env_network_hint: ast.AST | None = None
     reverse_shell_parts: set[str] = set()
     reverse_shell_node: ast.AST | None = None
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if _SENSITIVE_PATH_RE.search(node.value):
+            if named_python and _SENSITIVE_PATH_RE.search(node.value):
                 has_sensitive_read = True
                 sensitive_node = sensitive_node or node
             if _is_outbound_url(node.value):
-                has_network_sink = True
-                network_node = network_node or node
+                env_network_hint = env_network_hint or node
+                if named_python:
+                    has_network_sink = True
+                    network_node = network_node or node
 
         if isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
             has_env_dump = True
@@ -801,9 +824,15 @@ def _scan_python(rel_path: str, tree: ast.Module) -> list[SecurityFinding]:
         elif call_name in {"pickle.load", "pickle.loads"} or (call_name == "yaml.load" and not _yaml_load_uses_safe_loader(node)):
             findings.append(_finding_for_node("python-unsafe-deserialization", rel_path, node, call_name))
 
-        if _call_is_network_sink(call_name):
+        if not named_python and _inferred_sensitive_file_read(node, call_name, aliases):
+            has_sensitive_read = True
+            sensitive_node = sensitive_node or node
+
+        if _call_is_network_sink(call_name) and (named_python or call_name != "socket.socket"):
             has_network_sink = True
             network_node = network_node or node
+        elif call_name == "socket.socket":
+            env_network_hint = env_network_hint or node
 
         if call_name == "os.dup2":
             reverse_shell_parts.add("dup2")
@@ -830,8 +859,8 @@ def _scan_python(rel_path: str, tree: ast.Module) -> list[SecurityFinding]:
         findings.append(_finding_for_node("python-sensitive-exfil", rel_path, sensitive_node or network_node, "sensitive read + network sink"))
     elif has_sensitive_read:
         findings.append(_finding_for_node("python-sensitive-path-read", rel_path, sensitive_node, "sensitive path read"))
-    if has_env_dump and has_network_sink:
-        findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node, "environment dump + network sink"))
+    if has_env_dump and (has_network_sink or env_network_hint):
+        findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node or env_network_hint, "environment dump + network sink"))
     return findings
 
 
@@ -1268,7 +1297,62 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
                 continue
         findings.append(_finding("shell-env-dump", file=rel_path, line=_line_number(code, match.start("cmd")), evidence=command))
         break
+    # The original shell rules also flag prose mentions. Preserve those signals
+    # for contextual review; reserve blocking inferred files for command use.
+    criticals = [finding for finding in findings if finding["severity"] == "CRITICAL"]
+    if criticals and not _is_shell_path(rel_path, text):
+        confirmed = _inferred_shell_critical_evidence(code)
+        for finding in criticals:
+            if command := confirmed.get(finding["rule_id"]):
+                finding["line"], finding["evidence"] = command
+            else:
+                finding["severity"] = "HIGH"
     return findings
+
+
+def _inferred_shell_critical_evidence(code: str) -> dict[str, tuple[int, str]]:
+    """Corroborate raw path/tool matches with shell operators or command arguments."""
+    evidence: dict[str, tuple[int, str]] = {}
+    sensitive_path: tuple[int, str] | None = None
+    transfer_command = False
+    transfers = {"curl", "wget", "nc", "scp"}
+    path_commands = transfers | {"test", "[", "[[", "cat", "head", "tail", "grep", "awk", "sed", "cut", "read", "tee"}
+    markers = ("/dev/tcp/", "/etc/passwd", "/etc/shadow", *transfers)
+    for number, line in enumerate(code.split("\n"), 1):
+        if not any(marker in line for marker in markers):
+            continue
+        for tokens in _inferred_shell_commands(line):
+            words = [token for token in tokens if isinstance(token, _ShellWord)]
+            head = next((i for i, word in enumerate(words) if word not in {"!", "if", "then", "elif", "else", "while", "until", "do", "command", "exec", "env", "sudo"} and not re.match(r"[A-Za-z_]\w*=", word)), None)
+            name = PurePosixPath(words[head]).name if head is not None else ""
+            if name == "nc" and "-e" in words[head + 1 :]:
+                evidence.setdefault("shell-reverse-shell", (number, "nc -e"))
+            transfer_command |= name in transfers
+            for index, token in enumerate(tokens):
+                redirected = index > 0 and not isinstance(tokens[index - 1], _ShellWord) and _ENV_REDIRECTION_RE.fullmatch(tokens[index - 1]) is not None
+                if not redirected and name not in path_commands:
+                    continue
+                if token.startswith("/dev/tcp/"):
+                    evidence.setdefault("shell-reverse-shell", (number, "/dev/tcp/"))
+                if token.removeprefix("@") in {"/etc/passwd", "/etc/shadow"}:
+                    sensitive_path = sensitive_path or (number, "/etc")
+    if transfer_command and sensitive_path:
+        evidence["shell-sensitive-exfil"] = sensitive_path
+    return evidence
+
+
+def _inferred_shell_commands(line: str) -> Iterable[list[str]]:
+    # A backtick-delimited mention in ordinary Markdown is not a command
+    # boundary. The original raw finding remains available for model review.
+    line = line.replace("`", '"')
+    start = 0
+    while start < len(line):
+        budget = _ShellTokenBudget(len(line) - start)
+        tokens = _tokenize_shell(line, start, budget=budget)
+        if tokens:
+            yield tokens
+        # The tokenizer stops at the next unquoted command separator.
+        start = len(line) - budget.remaining + 1
 
 
 def _moderate_quoted_shell_findings(findings: list[SecurityFinding], tree: ast.Module) -> None:
@@ -1637,6 +1721,7 @@ class _ClientSpec:
 
 # Keep response-only operations such as `getresponse()` out: this signal needs outbound I/O.
 _PYTHON_CLIENT_SPECS = {
+    "socket.socket": _ClientSpec(frozenset({"connect", "connect_ex", "send", "sendall", "sendto", "sendmsg", "sendfile"}), sync_context=True),
     "http.client.HTTPConnection": _ClientSpec(frozenset({"request", "connect", "send"})),
     "http.client.HTTPSConnection": _ClientSpec(frozenset({"request", "connect", "send"})),
     "requests.Session": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options", "send"}), sync_context=True),
