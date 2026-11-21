@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -99,6 +100,129 @@ def test_minimax_full_flow(monkeypatch, tmp_path, video_settings):
     if "duration" in video_settings:
         assert type(posts["json"]["duration"]) is int
     assert "successfully" in msg.lower()
+
+
+def mock_http_transport(monkeypatch, responses):
+    """Record the prepared requests and return the scripted responses in order."""
+    sent = []
+
+    def send(adapter, request, **kwargs):
+        assert len(sent) < len(responses), f"Unexpected {request.method} {request.url}"
+        status, payload = responses[len(sent)]
+        sent.append(request)
+        response = requests.Response()
+        response.request = request
+        response.url = request.url
+        response.status_code = status
+        if isinstance(payload, str):
+            response.headers["Location"] = payload
+            payload = b""
+        elif isinstance(payload, dict):
+            payload = json.dumps(payload).encode()
+        response._content = payload
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
+    return sent
+
+
+def test_minimax_api_follows_same_origin_redirects_through_generation(monkeypatch, tmp_path):
+    host = "https://minimax.example:8443"
+    monkeypatch.setenv("MINIMAX_API_HOST", host)
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+    sent = mock_http_transport(monkeypatch, [
+        (307, "submit/next"),
+        (308, f"{host}/submit/final"),
+        (200, {"task_id": "T1"}),
+        (307, "?task_id=T1&step=2"),
+        (308, f"{host}/poll/final?cursor=next"),
+        (200, {"status": "Success", "file_id": "F1"}),
+        (308, "/retrieve?file_id=F1"),
+        (307, f"{host}/retrieve/final"),
+        (200, {"file": {"download_url": MINIMAX_VIDEO}}),
+        (200, b"video"),
+    ])
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a cat runs", encoding="utf-8")
+    output = tmp_path / "video.mp4"
+
+    vid.generate_video(str(prompt), [], str(output))
+
+    assert [(request.method, request.url) for request in sent] == [
+        ("POST", f"{host}/v1/video_generation"),
+        ("POST", f"{host}/v1/submit/next"),
+        ("POST", f"{host}/submit/final"),
+        ("GET", f"{host}/v1/query/video_generation?task_id=T1"),
+        ("GET", f"{host}/v1/query/video_generation?task_id=T1&step=2"),
+        ("GET", f"{host}/poll/final?cursor=next"),
+        ("GET", f"{host}/v1/files/retrieve?file_id=F1"),
+        ("GET", f"{host}/retrieve?file_id=F1"),
+        ("GET", f"{host}/retrieve/final"),
+        ("GET", MINIMAX_VIDEO),
+    ]
+    assert json.loads(sent[0].body) == {"model": "MiniMax-Hailuo-2.3", "prompt": "a cat runs"}
+    for request in sent[:3]:
+        assert request.body == sent[0].body
+        assert request.headers["Content-Type"] == "application/json"
+    assert all(request.body is None for request in sent[3:])
+    assert all(request.headers["Authorization"] == "Bearer test-key" for request in sent[:-1])
+    assert "Authorization" not in sent[-1].headers
+    assert output.read_bytes() == b"video"
+
+
+@pytest.mark.parametrize("destination", [
+    "http://minimax.example/submit",
+    "https://minimax.example:8443/submit",
+    "https://filecdn.minimax.chat/submit",
+    "https://user@minimax.example/submit",
+    "https://minimax.example:/submit",
+])
+def test_minimax_api_rejects_untrusted_redirect_before_sending(monkeypatch, tmp_path, destination):
+    host = "https://minimax.example"
+    monkeypatch.setenv("MINIMAX_API_HOST", host)
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+    sent = mock_http_transport(monkeypatch, [(307, "/submit/next"), (308, destination)])
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"existing video")
+
+    with pytest.raises(ValueError):
+        vid._generate_video_minimax("a cat runs", [], str(output))
+
+    assert [request.url for request in sent] == [f"{host}/v1/video_generation", f"{host}/submit/next"]
+    assert output.read_bytes() == b"existing video"
+
+
+@pytest.mark.parametrize("count", [5, 6])
+def test_minimax_api_limits_same_origin_redirects(monkeypatch, count):
+    host = "https://minimax.example:443"
+    responses = [(307, f"https://minimax.example/step/{i + 1}") for i in range(count)]
+    responses.append((200, {"file": {"download_url": MINIMAX_VIDEO}}))
+    sent = mock_http_transport(monkeypatch, responses)
+
+    if count == 5:
+        assert vid._retrieve_file_url(host, "Bearer test-key", "F1") == MINIMAX_VIDEO
+    else:
+        with pytest.raises(ValueError):
+            vid._retrieve_file_url(host, "Bearer test-key", "F1")
+    assert len(sent) == 6
+
+
+@pytest.mark.parametrize("status", [300, 301, 302, 303, 304, 305, 306])
+def test_minimax_api_rejects_other_3xx(monkeypatch, status):
+    host = "https://minimax.example"
+    sent = mock_http_transport(monkeypatch, [(status, "/next")])
+    with pytest.raises(ValueError, match=str(status)):
+        vid._poll_video_task(host, "Bearer test-key", "T1", max_attempts=1)
+    assert [request.url for request in sent] == [f"{host}/v1/query/video_generation?task_id=T1"]
+
+
+@pytest.mark.parametrize("status", [307, 308])
+def test_minimax_api_rejects_redirect_without_location(monkeypatch, status):
+    host = "https://minimax.example"
+    sent = mock_http_transport(monkeypatch, [(status, b"")])
+    with pytest.raises(ValueError, match="no destination"):
+        vid._retrieve_file_url(host, "Bearer test-key", "F1")
+    assert [request.url for request in sent] == [f"{host}/v1/files/retrieve?file_id=F1"]
 
 
 @pytest.mark.parametrize("duration", ["abc", "2.5", "²"])
