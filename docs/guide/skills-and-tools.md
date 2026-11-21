@@ -160,6 +160,16 @@ accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds
 Unset overrides use the provider defaults. Invalid duration strings fail before
 the script submits a request.
 
+Generated videos download over HTTPS on port 443. The skill checks the
+provider's download-host allowlist before the first request and after each
+redirect, up to five redirects. Gemini sends its API key only to its API host
+and drops it when a download moves to storage. For a MiniMax deployment using
+another CDN, set `MINIMAX_VIDEO_DOWNLOAD_HOSTS` in the runtime environment to
+the comma-separated, exact DNS names of trusted file hosts. Each entry grants
+download access to that entire host. If the custom API endpoint set in
+`MINIMAX_API_HOST` also serves video files, include its hostname in
+`MINIMAX_VIDEO_DOWNLOAD_HOSTS` as well.
+
 The video-generation skill derives reference-image MIME metadata from `.png`,
 `.jpg`, `.jpeg`, `.webp`, and `.gif` filename extensions (case-insensitive). A
 submitted reference with a missing or unrecognized extension raises a clear error

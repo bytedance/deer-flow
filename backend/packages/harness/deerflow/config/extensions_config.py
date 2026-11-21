@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
@@ -215,6 +216,41 @@ class McpOAuthConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+MCP_USER_OAUTH_CALLBACK_PATH = "/api/mcp/user-oauth/callback"
+
+
+def _browser_oauth_url(value: str, *, callback: bool = False, issuer: bool = False) -> str:
+    """Validate configuration shape here; IP/egress policy is checked again at dispatch."""
+    parts = urlsplit(value)
+    _ = parts.port  # Reject malformed ports before publishing config.
+    loopback_callback = callback and parts.hostname in {"localhost", "127.0.0.1", "::1"} and parts.scheme == "http"
+    if not parts.hostname or (parts.scheme != "https" and not loopback_callback) or parts.username is not None or parts.password is not None or "#" in value or any(c.isspace() for c in value) or "\\" in value:
+        raise ValueError("Invalid MCP browser OAuth URL; HTTPS is required except for a loopback callback")
+    if (issuer or callback) and "?" in value or callback and parts.path != MCP_USER_OAUTH_CALLBACK_PATH:
+        raise ValueError("Invalid MCP OAuth issuer or registered callback URI")
+    return value
+
+
+class McpUserOAuthConfig(BaseModel):
+    """Pre-registered OAuth client for delegated browser connections."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    client_id: str = Field(min_length=1)
+    client_secret: str | None = Field(default=None, repr=False)
+    issuer: str
+    redirect_uri: str
+    scope: str | None = None
+    allow_private_addresses: bool = False
+    grant_revision: str = Field(default="1", min_length=1)
+
+    @field_validator("issuer", "redirect_uri")
+    @classmethod
+    def _validate_oauth_urls(cls, value: str, info: ValidationInfo) -> str:
+        return _browser_oauth_url(value, issuer=info.field_name == "issuer", callback=info.field_name == "redirect_uri")
+
+
 class McpServerConfig(BaseModel):
     """Configuration for a single MCP server."""
 
@@ -228,6 +264,7 @@ class McpServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
     agent_auth: bool = Field(default=False, description="Require an administrator-granted agent identity for calls to this deployment HTTP server")
+    user_oauth: McpUserOAuthConfig | None = Field(default=None, description="Browser-based OAuth for the caller of a deployment HTTP server")
     user_auth: McpUserScopedAuthConfig | None = Field(
         default=None,
         description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
@@ -274,6 +311,16 @@ class McpServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_agent_credentials(self) -> "McpServerConfig":
+        if self.uses_browser_oauth:
+            if self.type != "http" or not self.url or self.task_toolsets:
+                raise ValueError("user_oauth requires Streamable HTTP without durable task toolsets")
+            _browser_oauth_url(self.url)
+            if self.agent_auth or (self.user_auth and self.user_auth.enabled) or (self.oauth and self.oauth.enabled):
+                raise ValueError("user_oauth is mutually exclusive with other MCP credential modes")
+            if any(name.lower() == "authorization" for name in self.headers):
+                raise ValueError("user_oauth conflicts with a static Authorization header")
+            if self.headers_from_context and self.headers_from_context.enabled and any(name.lower() == "authorization" for name in self.headers_from_context.headers):
+                raise ValueError("user_oauth conflicts with headers_from_context for Authorization")
         if self.agent_auth:
             if self.type != "http":
                 raise ValueError("agent_auth requires an HTTP MCP server")
@@ -283,6 +330,10 @@ class McpServerConfig(BaseModel):
             if context_headers is not None and context_headers.enabled and any(name.lower() == "authorization" for name in context_headers.headers):
                 raise ValueError("agent_auth conflicts with headers_from_context for Authorization")
         return self
+
+    @property
+    def uses_browser_oauth(self) -> bool:
+        return self.user_oauth is not None and self.user_oauth.enabled
 
     @field_validator("headers")
     @classmethod
@@ -620,6 +671,10 @@ class ExtensionsConfig(BaseModel):
             Dictionary of enabled MCP servers.
         """
         return {name: config for name, config in self.mcp_servers.items() if config.enabled}
+
+    def get_discoverable_mcp_servers(self) -> dict[str, McpServerConfig]:
+        """Return servers that can be discovered without a user's browser grant."""
+        return {name: server for name, server in self.get_enabled_mcp_servers().items() if not server.uses_browser_oauth}
 
     def is_skill_enabled(self, skill_name: str, skill_category: str) -> bool:
         """Check if a skill is enabled.

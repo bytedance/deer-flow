@@ -75,6 +75,7 @@ from deerflow.runtime.checkpoint_mode import (
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
+from deerflow.runtime.context_keys import MCP_BROWSER_USER_CONTEXT_KEY
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
@@ -1378,6 +1379,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         subagent_enabled=subagent_enabled,
         **({"chat_mode": True} if chat_mode else {}),
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
+        **({"mcp_browser_user": runtime_context[MCP_BROWSER_USER_CONTEXT_KEY]} if isinstance(runtime_context, Mapping) and runtime_context.get(MCP_BROWSER_USER_CONTEXT_KEY) and not cfg.get("is_subagent") else {}),
         **({"scheduler_capability": scheduler_capability} if scheduler_capability is not None else {}),
         app_config=resolved_app_config,
         chat_model=chat_model,

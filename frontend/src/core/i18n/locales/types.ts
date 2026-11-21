@@ -175,6 +175,21 @@ export interface Translations {
 
   capabilities: {
     toolsAndIntegrations: string;
+    mcpConnections: {
+      title: string;
+      action: (action: string, name: string) => string;
+      disconnect: string;
+      reconnect: string;
+      actionFailed: string;
+      loadFailed: string;
+      status: {
+        disconnected: string;
+        connected: string;
+        reconnect_required: string;
+        removed: string;
+        unavailable: string;
+      };
+    };
     icon: {
       title: string;
       upload: string;
