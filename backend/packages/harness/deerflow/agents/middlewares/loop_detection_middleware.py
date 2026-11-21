@@ -90,6 +90,7 @@ from deerflow.agents.middlewares.audit_context import (
     LOOP_DETECTION_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.model_response import is_empty_stop_response
 from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
@@ -984,11 +985,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         return warnings
 
     def _restore_pending_warnings(self, runtime: Runtime, warnings: list[str]) -> None:
-        """Requeue warnings taken for a model call that raised.
+        """Requeue warnings taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the warning. It would not be queued again: it is already marked warned.
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the warning. It would not be queued again: it
+        is already marked warned.
         """
         if not warnings:
             return
@@ -1027,10 +1029,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return handler(self._inject_warnings(request, warnings))
+            response = handler(self._inject_warnings(request, warnings))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     @override
     async def awrap_model_call(
@@ -1040,10 +1045,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return await handler(self._inject_warnings(request, warnings))
+            response = await handler(self._inject_warnings(request, warnings))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""
