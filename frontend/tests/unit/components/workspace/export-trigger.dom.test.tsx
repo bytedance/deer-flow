@@ -50,8 +50,11 @@ function page(messages: (typeof latest)[], start: number, next: number | null) {
     next_before_seq: next,
   });
 }
-async function selectExport(format = enUS.common.exportAsJSON) {
-  render(<ExportTrigger threadId="chat" />);
+async function selectExport(
+  format = enUS.common.exportAsJSON,
+  createdAt?: string,
+) {
+  render(<ExportTrigger threadId="chat" createdAt={createdAt} />);
   fireEvent.keyDown(screen.getByRole("button", { name: enUS.common.export }), {
     key: "Enter",
   });
@@ -93,6 +96,19 @@ test.each([enUS.common.exportAsJSON, enUS.common.exportAsMarkdown])(
         "200",
       );
     }
+  },
+);
+
+test.each([enUS.common.exportAsJSON, enUS.common.exportAsMarkdown])(
+  "passes the thread creation time to the %s export",
+  async (format) => {
+    mocks.fetch.mockResolvedValueOnce(page([latest], 1, null));
+    await selectExport(format, "2026-01-02T03:04:05Z");
+    await waitFor(() => expect(mocks.exportThread).toHaveBeenCalledTimes(1));
+    expect(mocks.exportThread.mock.calls[0]?.[0]).toMatchObject({
+      thread_id: "chat",
+      created_at: "2026-01-02T03:04:05Z",
+    });
   },
 );
 
@@ -144,4 +160,23 @@ test("disables export until history loading finishes", async () => {
   finish(page([latest], 100, null));
   await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
   expect(mocks.exportThread).toHaveBeenCalledTimes(1);
+});
+
+test("disables export until the thread creation time loads", async () => {
+  mocks.fetch.mockResolvedValueOnce(page([latest], 1, null));
+  const { rerender } = render(
+    <ExportTrigger threadId="chat" createdAtLoading />,
+  );
+  const button = screen.getByRole("button", { name: enUS.common.export });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  rerender(<ExportTrigger threadId="chat" createdAt="2026-01-02T03:04:05Z" />);
+  expect(button.hasAttribute("disabled")).toBe(false);
+  fireEvent.keyDown(button, { key: "Enter" });
+  fireEvent.click(
+    await screen.findByRole("menuitem", { name: enUS.common.exportAsJSON }),
+  );
+  await waitFor(() => expect(mocks.exportThread).toHaveBeenCalledTimes(1));
+  expect(mocks.exportThread.mock.calls[0]?.[0]).toMatchObject({
+    created_at: "2026-01-02T03:04:05Z",
+  });
 });
