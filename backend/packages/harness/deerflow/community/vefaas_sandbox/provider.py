@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from deerflow.community.provider_credentials import redact_secret, resolve_api_key
 from deerflow.config import get_app_config
@@ -100,6 +100,7 @@ _PROTECTED_ROOTS = (
 )
 _WINDOWS_RESERVED_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "123456789¹²³"})
 _BOOTSTRAP_COMMAND = "mkdir -p /mnt/user-data/workspace /mnt/user-data/uploads /mnt/user-data/outputs"
+_INIT_MARKER_PATH = "/tmp/.deerflow-vefaas-initialized"
 _MAX_UPLOAD_FILES = 5000
 _MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 _MAX_SYNC_FILES = 2000
@@ -735,6 +736,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     tracked = self._create_new_sandbox(sandbox_id, thread_id=None, user_id=user_id)
                     with self._lock:
                         if not self._accepting or self._shutdown_called or sandbox_id in self._local_teardown:
+                            self._pending_destroys[tracked.remote_sandbox_id] = tracked
                             rollback = True
                         else:
                             self._sandboxes[sandbox_id] = tracked
@@ -807,6 +809,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             tracked = self._create_new_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
             with self._lock:
                 if not self._accepting or self._shutdown_called or sandbox_id in self._local_teardown:
+                    self._pending_destroys[tracked.remote_sandbox_id] = tracked
                     rollback = True
                 else:
                     self._sandboxes[sandbox_id] = tracked
@@ -838,6 +841,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         if not healthy:
             with self._lock:
                 removed = self._warm_pool.pop(sandbox_id, None)
+                if removed is not None:
+                    self._pending_destroys[removed[0].remote_sandbox_id] = removed[0]
             if removed is not None:
                 self._destroy_tracked(removed[0], reason="warm_health_check_failed")
             return None
@@ -864,6 +869,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             if removed is None:
                 return None
             if not self._accepting or self._shutdown_called or sandbox_id in self._local_teardown:
+                self._pending_destroys[removed[0].remote_sandbox_id] = removed[0]
                 rollback = True
             else:
                 self._sandboxes[sandbox_id] = removed[0]
@@ -875,6 +881,42 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             raise RuntimeError("VeFaaSSandboxProvider shut down during acquire")
         logger.info("Reclaimed warm veFaaS sandbox %s (remote=%s)", sandbox_id, tracked.remote_sandbox_id)
         return sandbox_id
+
+    @staticmethod
+    def _write_init_marker(sandbox: AioSandbox, sandbox_id: str) -> None:
+        """Persist an ephemeral marker proving DeerFlow finished sandbox initialization."""
+        sandbox.update_file(_INIT_MARKER_PATH, f"{sandbox_id}\n".encode())
+
+    @staticmethod
+    def _probe_init_marker(sandbox: AioSandbox, sandbox_id: str) -> Literal["initialized", "missing", "invalid"]:
+        """Check whether an existing remote instance completed DeerFlow initialization."""
+        quoted_marker = shlex.quote(_INIT_MARKER_PATH)
+        output = sandbox.execute_command(f"set +e; ( if [ -f {quoted_marker} ] && [ ! -L {quoted_marker} ]; then printf 'INIT_MARKER:%s\\n' \"$(cat {quoted_marker})\"; else echo 'INIT_MARKER:MISSING'; fi )")
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped == f"INIT_MARKER:{sandbox_id}":
+                return "initialized"
+            if stripped == "INIT_MARKER:MISSING":
+                return "missing"
+        return "invalid"
+
+    def _initialize_remote_sandbox(
+        self,
+        sandbox: AioSandbox,
+        *,
+        sandbox_id: str,
+        thread_id: str | None,
+        user_id: str | None,
+    ) -> None:
+        """Create workspace directories, restore host thread files/skills, and write init marker."""
+        sandbox.execute_command(_BOOTSTRAP_COMMAND)
+
+        if thread_id is not None and user_id:
+            if not self._uses_tos_for_user_data():
+                self._restore_thread_files(sandbox, thread_id=thread_id, user_id=user_id)
+            self._upload_shared_skills(sandbox, thread_id=thread_id, user_id=user_id)
+
+        self._write_init_marker(sandbox, sandbox_id)
 
     def _discover_existing_sandbox(
         self,
@@ -901,8 +943,33 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             url, headers = self._resolve_data_plane(record.id)
             if not wait_for_sandbox_ready(url, timeout=5, headers=headers):
                 continue
+            sandbox = self._build_aio_sandbox(sandbox_id, record.id)
+            try:
+                init_state = self._probe_init_marker(sandbox, sandbox_id)
+            except Exception as exc:
+                logger.warning("Failed to verify initialization state for veFaaS sandbox %s (remote=%s): %s", sandbox_id, record.id, self._redact(exc))
+                sandbox.close()
+                continue
+            if init_state == "invalid":
+                logger.warning("Refusing to adopt veFaaS sandbox %s (remote=%s): invalid or mismatched initialization marker", sandbox_id, record.id)
+                sandbox.close()
+                continue
             if not self._ownership.take(sandbox_id):
+                sandbox.close()
                 raise RuntimeError(f"veFaaS sandbox {sandbox_id} is being destroyed by a peer")
+            if init_state == "missing":
+                logger.info("Completing DeerFlow initialization before adopting veFaaS sandbox %s (remote=%s)", sandbox_id, record.id)
+                try:
+                    self._initialize_remote_sandbox(
+                        sandbox,
+                        sandbox_id=sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
+                except Exception:
+                    sandbox.close()
+                    self._rollback_remote_sandbox(sandbox_id, record.id, release_ownership=True)
+                    raise
             try:
                 client.set_sandbox_timeout(
                     function_id,
@@ -911,7 +978,6 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 )
             except Exception as exc:
                 logger.warning("Failed to refresh timeout on discovered veFaaS sandbox %s: %s", record.id, exc)
-            sandbox = self._build_aio_sandbox(sandbox_id, record.id)
             logger.info("Adopted existing veFaaS sandbox %s (remote=%s)", sandbox_id, record.id)
             return _TrackedVeFaaSSandbox(
                 sandbox_id=sandbox_id,
@@ -996,12 +1062,12 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             ownership_taken = True
 
             sandbox = self._build_aio_sandbox(sandbox_id, remote_sandbox_id)
-            sandbox.execute_command(_BOOTSTRAP_COMMAND)
-
-            if thread_id is not None and user_id:
-                if not self._uses_tos_for_user_data():
-                    self._restore_thread_files(sandbox, thread_id=thread_id, user_id=user_id)
-                self._upload_shared_skills(sandbox, thread_id=thread_id, user_id=user_id)
+            self._initialize_remote_sandbox(
+                sandbox,
+                sandbox_id=sandbox_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
 
             return _TrackedVeFaaSSandbox(
                 sandbox_id=sandbox_id,
@@ -1401,7 +1467,11 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             for key in [k for k, v in self._thread_sandboxes.items() if v == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
             destroy_now = needs_recycle or self._shutdown_called or not self._accepting
-            if not destroy_now:
+            if destroy_now:
+                # Register pending teardown in the same critical section as removing the active
+                # entry so a concurrent shutdown() cannot miss this sandbox or close the client early.
+                self._pending_destroys[tracked.remote_sandbox_id] = tracked
+            else:
                 self._warm_pool[sandbox_id] = (tracked, time.monotonic())
         if destroy_now:
             reason = "recycle_corrupted" if needs_recycle else "released_during_shutdown"

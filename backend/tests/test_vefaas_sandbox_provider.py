@@ -60,9 +60,17 @@ class _FakeAioSandbox:
         self.remote_outputs: dict[str, bytes] = {}
         self.closed = False
         self.fail_upload_script = False
+        self.init_marker_override: str | None = None
 
     def execute_command(self, command: str) -> str:
         self.commands.append(command)
+        if "INIT_MARKER:" in command:
+            if self.init_marker_override is not None:
+                return self.init_marker_override
+            marker = self.uploaded_files.get(provider_mod._INIT_MARKER_PATH)
+            if marker is not None:
+                return f"INIT_MARKER:{marker.decode('utf-8').strip()}\n"
+            return "INIT_MARKER:MISSING\n"
         if "UPLOAD_OK" in command:
             return "" if self.fail_upload_script else "UPLOAD_OK\n"
         if "find /mnt/user-data/outputs" in command:
@@ -630,8 +638,10 @@ class TestVeFaaSSandboxProviderLifecycle:
         try:
             sandbox_id = provider.acquire("t-skills", user_id="u-skills")
             aio = aio_instances[0]
-            # Initial acquire uploads the shared skills projection once.
-            assert len(aio.uploaded_files) == 1
+            # Initial acquire uploads the shared skills projection and writes the init marker.
+            tar_uploads = [k for k in aio.uploaded_files if k.endswith(".tar.gz")]
+            assert len(tar_uploads) == 1
+            assert provider_mod._INIT_MARKER_PATH in aio.uploaded_files
             aio.uploaded_files.clear()
             aio.commands.clear()
 
@@ -956,7 +966,7 @@ class TestVeFaaSSandboxProviderLifecycle:
     def test_shutdown_waits_for_inflight_acquire_without_closing_client(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         entered_ready = threading.Event()
         release_ready = threading.Event()
-        acquire_errors: list[BaseException] = []
+        acquire_errors: list[Exception] = []
 
         provider, server, _ = _install_provider(monkeypatch, tmp_path)
         # Allow shutdown() to manage client lifecycle so we verify client stays open while acquire is in-flight.
@@ -973,7 +983,7 @@ class TestVeFaaSSandboxProviderLifecycle:
         def run_acquire() -> None:
             try:
                 provider.acquire("t-inflight", user_id="u1")
-            except BaseException as exc:
+            except Exception as exc:
                 acquire_errors.append(exc)
 
         worker = threading.Thread(target=run_acquire)
@@ -1120,3 +1130,138 @@ class TestVeFaaSSandboxProviderLifecycle:
             assert "vefaas-sb-2" not in server.sandboxes
         finally:
             provider.shutdown()
+
+    def test_recycling_release_remains_visible_to_concurrent_shutdown(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        provider._client_override = None
+        sandbox_id = provider.acquire("t-recycle-race", user_id="u1")
+        aio_instances[0].requires_container_recycle = True
+
+        # Pause release right after _release_scope_locked unlocks and before _destroy_tracked runs.
+        destroy_called = threading.Event()
+        release_destroy = threading.Event()
+        orig_destroy = provider._destroy_tracked
+
+        def paused_destroy(tracked: Any, *, reason: str, **kwargs: Any) -> bool:
+            if reason == "recycle_corrupted":
+                destroy_called.set()
+                release_destroy.wait(timeout=5)
+            return orig_destroy(tracked, reason=reason, **kwargs)
+
+        monkeypatch.setattr(provider, "_destroy_tracked", paused_destroy)
+        releaser = threading.Thread(target=provider.release, args=(sandbox_id,))
+        releaser.start()
+        assert destroy_called.wait(timeout=5)
+
+        # Pending destroy is already registered atomically under _lock, so shutdown() sees and kills it.
+        assert "vefaas-sb-1" in provider._pending_destroys
+        provider.shutdown()
+        assert provider._shutdown_complete is True
+        assert any(a == "KillSandbox" and p["SandboxId"] == "vefaas-sb-1" for a, p, _ in server.requests)
+        assert server.sandboxes == {}
+
+        release_destroy.set()
+        releaser.join(timeout=5)
+        assert not releaser.is_alive()
+
+    def test_adoption_verifies_initialization_and_restores_uploads_when_uninitialized(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from deerflow.config.paths import get_paths
+
+        # Case A: uninitialized Running sandbox (worker crashed after CreateSandbox) restores host uploads & writes init marker.
+        server_a = _FakeVeFaaSServer()
+        sid_a = derive_sandbox_scope_token(user_id="u1", thread_id="t-uninit")
+        server_a.sandboxes["vefaas-uninit-1"] = {
+            "Id": "vefaas-uninit-1",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_a,
+            },
+        }
+        provider_a, _, aio_a = _install_provider(monkeypatch, tmp_path / "case-a", server=server_a)
+        try:
+            uploads_dir = get_paths().sandbox_uploads_dir("t-uninit", user_id="u1")
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            (uploads_dir / "report.txt").write_text("from-host", encoding="utf-8")
+
+            acquired = provider_a.acquire("t-uninit", user_id="u1")
+            assert acquired == sid_a
+            assert not any(a == "CreateSandbox" for a, _, _ in server_a.requests)
+            aio = aio_a[0]
+            assert provider_mod._BOOTSTRAP_COMMAND in aio.commands
+            assert provider_mod._INIT_MARKER_PATH in aio.uploaded_files
+            assert aio.uploaded_files[provider_mod._INIT_MARKER_PATH].decode("utf-8").strip() == sid_a
+            # Verify the existing host upload was packaged and uploaded into /mnt/user-data.
+            restored_names: set[str] = set()
+            for path, raw in aio.uploaded_files.items():
+                if path.endswith(".tar.gz"):
+                    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
+                        restored_names.update(tf.getnames())
+            assert "uploads/report.txt" in restored_names
+        finally:
+            provider_a.shutdown()
+
+        # Case B: already-initialized Running sandbox is adopted without re-running bootstrap or clobbering files.
+        server_b = _FakeVeFaaSServer()
+        sid_b = derive_sandbox_scope_token(user_id="u1", thread_id="t-inited")
+        server_b.sandboxes["vefaas-inited-2"] = {
+            "Id": "vefaas-inited-2",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_b,
+            },
+        }
+        provider_b, _, aio_b = _install_provider(monkeypatch, tmp_path / "case-b", server=server_b)
+        orig_ctor = provider_mod.AioSandbox
+
+        def initialized_aio_ctor(**kwargs: Any) -> Any:
+            inst = orig_ctor(**kwargs)
+            inst.init_marker_override = f"INIT_MARKER:{sid_b}\n"
+            return inst
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", initialized_aio_ctor)
+        try:
+            acquired_b = provider_b.acquire("t-inited", user_id="u1")
+            assert acquired_b == sid_b
+            assert not any(a == "CreateSandbox" for a, _, _ in server_b.requests)
+            assert provider_mod._BOOTSTRAP_COMMAND not in aio_b[0].commands
+            assert aio_b[0].uploaded_files == {}
+        finally:
+            provider_b.shutdown()
+
+        # Case C: running sandbox with mismatched/invalid init marker is refused; fresh sandbox is provisioned.
+        server_c = _FakeVeFaaSServer()
+        sid_c = derive_sandbox_scope_token(user_id="u1", thread_id="t-mismatch")
+        server_c.sandboxes["vefaas-bad-marker"] = {
+            "Id": "vefaas-bad-marker",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_c,
+            },
+        }
+        provider_c, _, aio_c = _install_provider(monkeypatch, tmp_path / "case-c", server=server_c)
+        orig_ctor_c = provider_mod.AioSandbox
+
+        def mismatch_first_ctor(**kwargs: Any) -> Any:
+            inst = orig_ctor_c(**kwargs)
+            if kwargs.get("request_headers", {}).get(provider_mod.INSTANCE_ROUTING_HEADER) == "vefaas-bad-marker":
+                inst.init_marker_override = "INIT_MARKER:wrong-sandbox-id\n"
+            return inst
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", mismatch_first_ctor)
+        try:
+            acquired_c = provider_c.acquire("t-mismatch", user_id="u1")
+            assert acquired_c == sid_c
+            assert any(a == "CreateSandbox" for a, _, _ in server_c.requests)
+            assert aio_c[0].closed is True
+            assert aio_c[1].request_headers[provider_mod.INSTANCE_ROUTING_HEADER] == "vefaas-sb-1"
+        finally:
+            provider_c.shutdown()
