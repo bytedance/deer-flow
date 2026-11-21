@@ -902,6 +902,8 @@ def test_aio_deploy_socket_preflight_allows_windows_when_docker_reachable(tmp_pa
         cwd=worktree,
         env=env,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -928,6 +930,8 @@ def test_aio_deploy_socket_preflight_rejects_missing_socket_on_posix(tmp_path):
         cwd=worktree,
         env=env,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -964,6 +968,8 @@ def test_aio_deploy_socket_preflight_rejects_missing_custom_socket_on_windows(tm
         cwd=worktree,
         env=env,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -1001,6 +1007,8 @@ def test_aio_deploy_socket_preflight_rejects_windows_when_docker_unreachable(tmp
         cwd=worktree,
         env=env,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -1038,6 +1046,8 @@ def test_aio_deploy_socket_unsets_default_on_windows(tmp_path):
         cwd=worktree,
         env=env,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -1075,6 +1085,8 @@ def test_aio_deploy_socket_preserves_unset_default_on_windows(tmp_path):
         cwd=worktree,
         env=env,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -1115,6 +1127,8 @@ def test_aio_deploy_socket_preserves_custom_socket_on_windows(tmp_path):
         cwd=worktree,
         env=env,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -1153,6 +1167,8 @@ def test_aio_deploy_socket_reads_from_dotenv(tmp_path):
         cwd=worktree,
         env=env,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
