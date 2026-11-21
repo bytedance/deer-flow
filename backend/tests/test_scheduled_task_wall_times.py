@@ -112,6 +112,36 @@ def test_end_at_preserves_an_aware_second_fold():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update", "resume"])
+@pytest.mark.parametrize(
+    "end_at",
+    ["9999-12-31T23:59:00", "9999-12-31T23:59:00-05:00", "0001-01-01T00:00:00+05:00"],
+)
+async def test_end_at_outside_utc_datetime_range_returns_validation_error(operation, end_at):
+    timezone = "America/New_York"
+    with pytest.raises(HTTPException) as caught:
+        if operation == "create":
+            body = ScheduledTaskCreateRequest(
+                title="Report",
+                prompt="Write the report",
+                schedule_type="once",
+                schedule_spec={"run_at": "2027-01-01T09:00:00"},
+                timezone=timezone,
+                end_at=end_at,
+            )
+            await validate_scheduled_task_create(body, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(return_value="lead_agent"), now=NOW)
+        elif operation == "update":
+            body = ScheduledTaskUpdateRequest(end_at=end_at)
+            await validate_scheduled_task_update(_existing(timezone), body.model_dump(exclude_unset=True), user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), used=0, now=NOW)
+        else:
+            prepare_resume_updates(_existing(timezone, status="paused"), {"end_at": end_at}, used=0, now=NOW)
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "invalid_request"
+    assert f"end_at: {end_at} cannot be represented in UTC" in caught.value.detail["message"]
+    assert timezone in caught.value.detail["message"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["enabled", "paused"])
 async def test_unchanged_legacy_gap_schedule_keeps_its_already_accepted_instant(status):
     timezone, wall_time = GAPS[0]
