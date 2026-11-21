@@ -9,9 +9,10 @@ normalized ``deerflow_tool_meta`` status when stamped (ToolErrorHandling runs
 on the inner return path); short-circuit messages either self-stamp the meta
 or fall back to ``message.status`` in ``make_tool_receipt``.
 
-The ledger injection mirrors DurableContextMiddleware: derived from the
-in-flight messages on every model call, appended as a hidden HumanMessage,
-never written back to state.
+Receipts are rendered on every model call from the in-flight messages and
+never written back to state: each receipt line is appended to its own tool
+result in the request, so the rendered history stays append-only and the
+provider prefix cache survives across calls.
 """
 
 from __future__ import annotations
@@ -23,23 +24,36 @@ from typing import override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages, is_genuine_user_message
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.tool_receipt import (
     TOOL_RECEIPT_KEY,
     TOOL_RECEIPT_LEDGER_KEY,
     ToolReceipt,
     extract_tool_receipts,
+    is_valid_receipt,
+    ledger_header_lines,
     make_tool_receipt,
-    render_tool_receipts_with_snapshot,
+    render_receipt_line,
 )
 
 logger = logging.getLogger(__name__)
 
-_RECEIPT_CONTEXT_KEY = "deerflow_tool_receipt_context"
+#: Receipts citable at once. The snapshot stamped on each model response holds
+#: at most this many entries; crossing a multiple drops the older inline lines.
+_RECEIPT_EPOCH = 50
+
+
+def _with_suffix(message: ToolMessage, suffix: str) -> ToolMessage:
+    content = message.content
+    if isinstance(content, list):
+        content = [*content, {"type": "text", "text": "\n\n" + suffix}]
+    else:
+        content = f"{content}\n\n{suffix}"
+    return message.model_copy(update={"content": content})
 
 
 class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
@@ -110,44 +124,42 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         return self._stamp(await handler(request), request)
 
-    def _should_render(self, request: ModelRequest) -> bool:
-        if self._render_mode == "always":
-            return True
-        # delegation_only: render only while a subagent result is being
-        # processed (a task ToolMessage carries subagent_status in its
-        # additional_kwargs — see subagents/status_contract.py). Scoped to the
-        # current turn: only messages after the latest genuine user message
-        # count, otherwise one completed delegation would keep the ledger
-        # rendering on every later ordinary turn and defeat the token saving.
-        # Without any genuine user message there is no turn boundary (e.g.
-        # scheduled/internal invocations), so the whole stream is in scope.
-        messages = list(request.messages)
-        latest_user_index = -1
-        for index, message in enumerate(messages):
-            if is_genuine_user_message(message):
-                latest_user_index = index
-        turn_messages = messages[latest_user_index + 1 :] if latest_user_index >= 0 else messages
-        for message in turn_messages:
-            if isinstance(message, ToolMessage) and (message.additional_kwargs or {}).get("subagent_status"):
-                return True
-        return False
+    def _eligible(self, messages: list) -> list[tuple[int, ToolReceipt]]:
+        """Receipts to render, paired with the index of their tool result.
 
-    def _inject(self, request: ModelRequest, ledger: str) -> ModelRequest:
-        if not ledger:
-            return request
-        ledger_message = HumanMessage(
-            content=ledger,
-            additional_kwargs={"hide_from_ui": True, _RECEIPT_CONTEXT_KEY: True},
-        )
-        messages = insert_after_leading_system_messages(list(request.messages), [ledger_message])
-        return request.override(messages=messages)
+        delegation_only renders only while a subagent result is being processed
+        (a task ToolMessage carries subagent_status in its additional_kwargs —
+        see subagents/status_contract.py), and only the current turn's receipts:
+        a completed delegation must not keep receipts rendering on later
+        ordinary turns. A turn starts after the latest genuine user message;
+        without one (scheduled/internal invocations) the whole stream is in scope.
+        """
+        receipts = iter(extract_tool_receipts(messages))
+        indexed: list[tuple[int, ToolReceipt]] = []
+        for index, message in enumerate(messages):
+            if isinstance(message, ToolMessage) and is_valid_receipt((message.additional_kwargs or {}).get(TOOL_RECEIPT_KEY)):
+                indexed.append((index, next(receipts)))
+        if self._render_mode == "always":
+            return indexed
+        turn_start = max((index for index, message in enumerate(messages) if is_genuine_user_message(message)), default=-1) + 1
+        if not any(isinstance(message, ToolMessage) and (message.additional_kwargs or {}).get("subagent_status") for message in messages[turn_start:]):
+            return []
+        return [(index, receipt) for index, receipt in indexed if index >= turn_start]
 
     def _prepare_model_call(self, request: ModelRequest) -> tuple[ModelRequest, list[ToolReceipt] | None]:
-        if not self._should_render(request):
+        messages = list(request.messages)
+        eligible = self._eligible(messages)
+        if not eligible:
             return request, None
-        receipts = extract_tool_receipts(list(request.messages))
-        ledger, rendered_receipts = render_tool_receipts_with_snapshot(receipts)
-        return self._inject(request, ledger), rendered_receipts
+        # Each receipt line is a pure function of its own tool result, so earlier
+        # messages render identically on every call and the provider prefix cache
+        # keeps hitting. Epochs bound the citable snapshot; crossing one re-renders
+        # once.
+        current = eligible[((len(eligible) - 1) // _RECEIPT_EPOCH) * _RECEIPT_EPOCH :]
+        for position, (index, receipt) in enumerate(current):
+            lines = [*ledger_header_lines(), render_receipt_line(receipt)] if position == 0 else [render_receipt_line(receipt)]
+            messages[index] = _with_suffix(messages[index], "\n".join(lines))
+        return request.override(messages=messages), [receipt for _, receipt in current]
 
     @staticmethod
     def _stamp_citing_ledger(result: ModelCallResult, receipts: list[ToolReceipt] | None) -> ModelCallResult:
