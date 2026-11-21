@@ -427,7 +427,11 @@ export function InputBox({
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
-  onBusySubmit?: (text: string, mode: RunInputMode) => Promise<unknown>;
+  onBusySubmit?: (
+    text: string,
+    mode: RunInputMode,
+    files: File[],
+  ) => Promise<unknown>;
   /**
    * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
    * Defaults to true so callers that don't resolve permissions (pre-Phase-4
@@ -1678,22 +1682,42 @@ export function InputBox({
           if (runInputInFlight.current)
             return Promise.reject(new Error("input-in-flight"));
           if (
-            !message.text.trim() ||
-            message.files.length ||
             projectAttachments.length ||
             conversationReferences.length ||
             inlineRefs.length ||
             (sidecar?.conversationQuotes.length ?? 0) ||
             message.text.trimStart().startsWith("/")
           ) {
+            toast.info(t.inputBox.runInputUnsupported);
+            return Promise.reject(new Error("busy-input-unsupported"));
+          }
+          if (
+            runInputMode === "steer" &&
+            (!message.text.trim() || message.files.length)
+          ) {
             toast.info(t.inputBox.runInputTextOnly);
             return Promise.reject(new Error("text-input-required"));
+          }
+          const files = message.files.flatMap(({ file }) =>
+            file instanceof File ? [file] : [],
+          );
+          if (files.length !== message.files.length) {
+            toast.error(t.uploads.notReady);
+            return Promise.reject(new Error("Attachments not ready."));
+          }
+          if (!files.length && !message.text.trim()) {
+            return Promise.reject(new Error("empty-input"));
+          }
+          const { violations } = validateUploadLimits([], files, uploadLimits);
+          if (violations.length) {
+            reportUploadLimitViolations(violations);
+            return Promise.reject(new Error("Attachment limits exceeded."));
           }
           abortVoiceInput();
           runInputInFlight.current = true;
           setRunInputSending(true);
           try {
-            await onBusySubmit(message.text, runInputMode);
+            await onBusySubmit(message.text, runInputMode, files);
             return;
           } finally {
             runInputInFlight.current = false;
@@ -1815,13 +1839,17 @@ export function InputBox({
       projectAttachments.length,
       conversationReferences.length,
       inlineRefs.length,
+      reportUploadLimitViolations,
       sidecar?.conversationQuotes.length,
       status,
       submitThreadMessage,
       t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
       t.inputBox.runInputTextOnly,
+      t.inputBox.runInputUnsupported,
       t.inputBox.startTurnUnavailable,
+      t.uploads.notReady,
+      uploadLimits,
     ],
   );
 
@@ -3683,7 +3711,11 @@ export function InputBox({
                   className="rounded-full"
                   variant="outline"
                   status={runInputSending ? "submitted" : "ready"}
-                  disabled={composerLocked || !textInput.value.trim()}
+                  disabled={
+                    composerLocked ||
+                    (!textInput.value.trim() &&
+                      (runInputMode !== "queue" || !attachmentParts.length))
+                  }
                 />
               </>
             )}

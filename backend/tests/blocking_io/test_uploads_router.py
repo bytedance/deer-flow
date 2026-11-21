@@ -92,6 +92,28 @@ async def test_upload_endpoint_mounted_provider_does_not_block_event_loop(tmp_pa
     assert await asyncio.to_thread(target.read_bytes) == b"hello uploads"
 
 
+async def test_queued_upload_storage_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.gateway.run_input_files import discard_input_files, publish_input_files, stage_input_files
+    from deerflow.config.paths import get_paths
+
+    _reset_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: _MountedProvider())
+    file = UploadFile(filename="notes.txt", file=BytesIO(b"queued notes"))
+    config = SimpleNamespace()
+    stage_id, staged = await stage_input_files("queued-thread", "owner", [file], config)
+    stage_root, uploads_dir = await asyncio.to_thread(
+        lambda: (
+            get_paths().thread_dir("queued-thread", user_id="owner") / ".queued-uploads",
+            get_uploads_dir("queued-thread", user_id="owner"),
+        )
+    )
+    assert not await asyncio.to_thread(uploads_dir.exists)
+    files = await publish_input_files("queued-thread", "owner", stage_id, staged, request=None, config=config)
+    assert await asyncio.to_thread((uploads_dir / files[0]["filename"]).read_bytes) == b"queued notes"
+    await discard_input_files("queued-thread", "owner", stage_id)
+    assert not await asyncio.to_thread(lambda: any(stage_root.iterdir()))
+
+
 async def test_unsafe_filename_is_reported_as_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A rejected filename must reach the caller in ``skipped_files`` (#7160)."""
     _reset_paths(tmp_path, monkeypatch)

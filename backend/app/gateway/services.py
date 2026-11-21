@@ -3009,6 +3009,7 @@ async def start_run(
                     logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
             execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
             artifact_imports = getattr(request.state, "extension_artifact_imports", None)
+            queued_attachments = getattr(request.state, "queued_input_attachments", None)
             artifact_lifetime = None
             if artifact_imports:
                 from contextlib import AsyncExitStack
@@ -3029,6 +3030,14 @@ async def start_run(
                         raise
 
                 execution_context = replace(execution_context, verify_artifacts=verify_artifacts)
+            if queued_attachments is not None:
+                from app.gateway.run_input_files import publish_input_files
+
+                async def publish_queued_attachments():
+                    # Only the admitted worker may expose this input's files to the thread.
+                    await publish_input_files(thread_id, record.user_id, queued_attachments["id"], queued_attachments["files"], request=request, config=app_config)
+
+                execution_context = replace(execution_context, verify_artifacts=publish_queued_attachments)
             try:
                 await run_agent(
                     bridge,

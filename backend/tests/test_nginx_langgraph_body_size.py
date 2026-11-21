@@ -30,6 +30,8 @@ used by ``make dev``, and the Kubernetes/Helm ConfigMap template.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from support.nginx_conf import NGINX_CONFIGS
 from support.nginx_conf import extract_location_block as _extract_location_block
@@ -85,10 +87,14 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
     fixing the langgraph route does not accidentally touch the upload route's
     existing configuration."""
     content = _read(path)
-    block = _extract_location_block(content, r"~ ^/api/threads/[^/]+/uploads")
+    selector = r"^/api/threads/[^/]+/(uploads|runs/[^/]+/inputs$)"
+    block = _extract_location_block(content, f"~ {selector}")
 
     assert "client_max_body_size 100M;" in block
     assert "proxy_request_buffering off;" in block
+    assert re.match(selector, "/api/threads/t/uploads")
+    assert re.match(selector, "/api/threads/t/runs/r/inputs")
+    assert not re.match(selector, "/api/threads/t/runs/r/inputs/i/retry")
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)

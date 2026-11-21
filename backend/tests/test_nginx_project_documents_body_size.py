@@ -23,7 +23,7 @@ from app.gateway.routers.project_documents import router as project_documents_ro
 from app.gateway.routers.uploads import DEFAULT_MAX_FILE_SIZE
 
 PROJECT_DOCUMENTS_LOCATION = r"~ ^/api/projects/[^/]+/documents"
-UPLOADS_LOCATION = r"~ ^/api/threads/[^/]+/uploads"
+UPLOADS_LOCATION = r"~ ^/api/threads/[^/]+/(uploads|runs/[^/]+/inputs$)"
 
 # The /api/ catch-all these routes used to land on grants blocking Gateway calls
 # this much; moving them to their own location must not take it away.

@@ -15,10 +15,11 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
-from app.gateway import upload_ingestion
+from app.gateway import run_input_files, upload_ingestion
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
+from deerflow.config.paths import Paths
 from deerflow.sandbox.lease import get_sandbox_lease_manager
 from deerflow.uploads.companions import resolve_companion
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
@@ -80,6 +81,33 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
 
     sandbox.update_file.assert_not_called()
     provider.release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_queued_upload_companion_stays_valid_after_staging_removal(tmp_path, monkeypatch):
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.config.paths._paths", paths)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", _mounted_provider)
+    config = SimpleNamespace(uploads={"auto_convert_documents": True})
+    thread_id, user_id = "thread-queue", "user-queue"
+    destination = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
+    file = UploadFile(filename="report.pdf", file=BytesIO(b"%PDF queued upload"))
+    stage_id, files = await run_input_files.stage_input_files(thread_id, user_id, [file], config)
+
+    async def convert(source, output_path):
+        assert source.suffix == ".pdf"
+        assert source.read_bytes() == b"%PDF queued upload"
+        assert not destination.exists()
+        output_path.write_text("# Converted\n", encoding="utf-8")
+        return output_path
+
+    monkeypatch.setattr(uploads, "convert_file_to_markdown", convert)
+    metadata = await run_input_files.publish_input_files(thread_id, user_id, stage_id, files, request=MagicMock(), config=config)
+    original = destination / metadata[0]["filename"]
+    companion = resolve_companion(original)
+    assert companion is not None
+    assert companion.read_text(encoding="utf-8") == "# Converted\n"
+    assert list((paths.thread_dir(thread_id, user_id=user_id) / ".queued-uploads").iterdir()) == []
 
 
 def test_upload_and_list_response_models_expose_size_as_int(tmp_path):

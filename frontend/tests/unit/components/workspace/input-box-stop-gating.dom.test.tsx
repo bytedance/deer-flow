@@ -51,7 +51,11 @@ function renderComposer({
 }: {
   canStopStreaming?: boolean;
   onStop: () => void;
-  onBusySubmit?: (text: string, mode: "queue" | "steer") => Promise<unknown>;
+  onBusySubmit?: (
+    text: string,
+    mode: "queue" | "steer",
+    files: File[],
+  ) => Promise<unknown>;
   canCreateRuns?: boolean;
 }) {
   const queryClient = new QueryClient({
@@ -97,6 +101,43 @@ afterEach(() => {
 });
 
 describe("InputBox stop gating (runs:cancel)", () => {
+  it("queues a file-only draft and keeps the file if the send fails", async () => {
+    rs.spyOn(URL, "createObjectURL").mockReturnValue("blob:attachment");
+    rs.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const onBusySubmit = rs
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({});
+    const { container } = renderComposer({ onStop: rs.fn(), onBusySubmit });
+    const file = new File(["test"], "screenshot.png", { type: "image/png" });
+    fireEvent.change(container.querySelector('input[type="file"]')!, {
+      target: { files: [file] },
+    });
+
+    const send = screen.getByRole("button", { name: "Send update" });
+    expect(send).toHaveProperty("disabled", false);
+    fireEvent.click(send);
+    await waitFor(() =>
+      expect(onBusySubmit).toHaveBeenNthCalledWith(1, "", "queue", [file]),
+    );
+    await waitFor(() => expect(send).toHaveProperty("disabled", false));
+    expect(
+      screen.getByRole("button", { name: "Remove attachment: screenshot.png" }),
+    ).toBeTruthy();
+
+    fireEvent.click(send);
+    await waitFor(() =>
+      expect(onBusySubmit).toHaveBeenNthCalledWith(2, "", "queue", [file]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: "Remove attachment: screenshot.png",
+        }),
+      ).toBeNull(),
+    );
+  });
+
   it("keeps update sending separate from Stop and preserves a rejected draft", async () => {
     const onStop = rs.fn();
     const onBusySubmit = rs
@@ -108,7 +149,7 @@ describe("InputBox stop gating (runs:cancel)", () => {
     fireEvent.change(input, { target: { value: "Include 2025" } });
     fireEvent.click(screen.getByRole("button", { name: "Send update" }));
     await waitFor(() =>
-      expect(onBusySubmit).toHaveBeenCalledWith("Include 2025", "queue"),
+      expect(onBusySubmit).toHaveBeenCalledWith("Include 2025", "queue", []),
     );
     await waitFor(() =>
       expect(

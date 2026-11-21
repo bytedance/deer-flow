@@ -306,6 +306,12 @@ rolling upgrade, route keyed runs with ID-less input and their retries to
 upgraded workers until all Gateway workers are upgraded; older workers may
 reject those retries with 409. See the [run API contract](../../backend/docs/API.md#create-run).
 
+During a rolling upgrade, route multipart Queue submissions and their retry
+and remove requests to upgraded Gateways. Only a run owned by a worker that
+supports queued attachments can accept them. Older Gateways handle queue items
+as plain text, so finish or remove items with attachments before rolling back.
+See [queued input](../../backend/docs/API.md#submit-an-input-while-a-web-run-is-active).
+
 ## Option 2: Local Development
 
 If you prefer running services locally:

@@ -836,6 +836,177 @@ async def _wait_for_worker(client, task_id, section, field, value):
             await asyncio.sleep(0.05)
 
 
+async def _submit_screenshot(client, url, request_id, text, screenshot, *, mode="queue"):
+    import json
+
+    return await client.post(
+        url,
+        data={"input": json.dumps({"request_id": request_id, "text": text, "mode": mode})},
+        files=[("files", ("screenshot.png", screenshot, "image/png"))],
+    )
+
+
+def _png(color):
+    from io import BytesIO
+
+    from PIL import Image
+
+    output = BytesIO()
+    Image.new("RGB", (1, 1), color).save(output, format="PNG")
+    return output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_queued_attachments_are_delivered_in_order_and_cancelled_bytes_are_discarded(worker_gateway, monkeypatch):
+    import asyncio
+
+    from sqlalchemy.exc import OperationalError
+
+    from deerflow.config.paths import get_paths
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="queue-with-attachments")
+    uploads = get_paths().sandbox_uploads_dir(thread, user_id=owner)
+    staging = get_paths().thread_dir(thread, user_id=owner) / ".queued-uploads"
+    first_png, second_png, cancelled_png = (_png(color) for color in ("red", "blue", "green"))
+    observed = asyncio.Queue()
+    finish_first_followup = asyncio.Event()
+
+    def contents(directory):
+        return {path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+
+    async def observe_uploads(prompt, runtime):
+        observed.put_nowait((prompt, runtime.context["run_id"], await asyncio.to_thread(contents, uploads)))
+        if prompt == "first follow-up":
+            await finish_first_followup.wait()
+
+    state.present_worker_report = observe_uploads
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    thread_inputs = f"/api/threads/{thread}/inputs"
+
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert (await _submit_screenshot(client, inputs_url, "steer", "update now", first_png, mode="steer")).status_code == 422
+        assert await asyncio.to_thread(contents, staging) == set()
+
+        # An older worker has no capability marker in its persisted state.
+        def remove_queue_attachment_capability(inputs, _row):
+            assert inputs.pop("queue_attachments") is True
+
+        def restore_queue_attachment_capability(inputs, _row):
+            inputs["queue_attachments"] = True
+
+        await state.run_store.mutate_run_inputs(initial.run_id, remove_queue_attachment_capability, user_id=owner)
+        assert (await _submit_screenshot(client, inputs_url, "old-worker", "old worker", first_png)).status_code == 409
+        assert not await asyncio.to_thread(staging.exists)
+        await state.run_store.mutate_run_inputs(initial.run_id, restore_queue_attachment_capability, user_id=owner)
+
+        async def fail_before_input_write(*args, **kwargs):
+            assert await asyncio.to_thread(contents, staging) == {first_png}
+            raise OperationalError("UPDATE runs", {}, OSError("RunStore write unavailable"))
+
+        with monkeypatch.context() as patch:
+            patch.setattr(state.run_store, "mutate_run_inputs", fail_before_input_write)
+            with pytest.raises(OperationalError, match="RunStore write unavailable"):
+                await _submit_screenshot(client, inputs_url, "failed-write", "failed write", first_png)
+        assert await asyncio.to_thread(contents, staging) == set()
+
+        first = (await _submit_screenshot(client, inputs_url, "first", "first follow-up", first_png)).raise_for_status().json()
+        repeated = (await _submit_screenshot(client, inputs_url, "first", "first follow-up", first_png)).raise_for_status().json()
+        assert first == repeated
+        assert first["files"] == [{"filename": "screenshot.png", "size": len(first_png)}]
+        assert (await _submit_screenshot(client, inputs_url, "first", "first follow-up", second_png)).status_code == 409
+        (await _submit_screenshot(client, inputs_url, "second", "second follow-up", second_png)).raise_for_status()
+        (await _submit_screenshot(client, inputs_url, "cancelled", "cancel this", cancelled_png)).raise_for_status()
+        entries = (await client.get(thread_inputs)).raise_for_status().json()["items"]
+        assert [(entry["id"], entry["status"], entry["files"][0]["filename"]) for entry in entries] == [
+            ("first", "pending", "screenshot.png"),
+            ("second", "pending", "screenshot.png"),
+            ("cancelled", "pending", "screenshot.png"),
+        ]
+        assert await asyncio.to_thread(contents, uploads) == set()
+        assert cancelled_png in await asyncio.to_thread(contents, staging)
+        (await client.delete(f"{inputs_url}/cancelled")).raise_for_status()
+        assert cancelled_png not in await asyncio.to_thread(contents, staging)
+
+        state.release_worker.set()
+        assert await asyncio.wait_for(observed.get(), 5) == ("wait", initial.run_id, set())
+        prompt, first_run, visible = await asyncio.wait_for(observed.get(), 5)
+        assert prompt == "first follow-up" and visible == {first_png}
+        finish_first_followup.set()
+        prompt, second_run, visible = await asyncio.wait_for(observed.get(), 5)
+        assert prompt == "second follow-up" and visible == {first_png, second_png}
+        assert (await runs.wait(thread_id=thread, run_id=second_run, timeout=5)).status == "success"
+
+        retried = (await client.post(f"{inputs_url}/first/retry")).raise_for_status().json()
+        assert retried["run_id"] == first_run
+        assert (await client.post(f"{inputs_url}/cancelled/retry")).status_code == 409
+        records = await state.run_manager.list_by_thread(thread, user_id=owner)
+        assert {record.run_id for record in records} == {initial.run_id, first_run, second_run}
+        assert len([path for path in uploads.rglob("*") if path.is_file()]) == 2
+        assert await asyncio.to_thread(contents, staging) == set()
+    finally:
+        state.release_worker.set()
+        finish_first_followup.set()
+
+    messages = (await runs.get_state(thread_id=thread))["values"]["messages"]
+    by_prompt = {message["content"]: message.get("additional_kwargs", {}) for message in messages}
+    assert "files" not in by_prompt["wait"]
+    (first_file,) = by_prompt["first follow-up"]["files"]
+    (second_file,) = by_prompt["second follow-up"]["files"]
+    root = "/mnt/user-data/uploads/"
+    assert (uploads / first_file["path"].removeprefix(root)).read_bytes() == first_png
+    assert (uploads / second_file["path"].removeprefix(root)).read_bytes() == second_png
+
+
+@pytest.mark.asyncio
+async def test_attachment_only_queue_retry_reconciles_a_lost_dispatch_receipt(worker_gateway, monkeypatch):
+    import asyncio
+
+    from deerflow.config.paths import get_paths
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="queue-attachment-retry")
+    screenshot = _png("purple")
+    admitted = asyncio.Event()
+    lost_receipt = None
+    dispatched = RunInputs.dispatched
+
+    async def fail_first_receipt(self, input_id, run_id):
+        nonlocal lost_receipt
+        if input_id == "attachment" and lost_receipt is None:
+            # Fail the receipt write after ordinary admission already succeeded.
+            lost_receipt = run_id
+            admitted.set()
+            raise OSError("receipt write failed after admission")
+        await dispatched(self, input_id, run_id)
+
+    monkeypatch.setattr(RunInputs, "dispatched", fail_first_receipt)
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        receipt = (await _submit_screenshot(client, inputs_url, "attachment", "", screenshot)).raise_for_status().json()
+        assert receipt["status"] == "pending"
+    finally:
+        state.release_worker.set()
+
+    await asyncio.wait_for(admitted.wait(), 5)
+    assert (await runs.wait(thread_id=thread, run_id=lost_receipt, timeout=5)).status == "success"
+    before_retry = (await client.get(f"/api/threads/{thread}/inputs")).raise_for_status().json()["items"]
+    assert before_retry[0]["status"] == "dispatching"
+    reply = (await client.post(f"{inputs_url}/attachment/retry")).raise_for_status().json()
+    assert reply == {"run_id": lost_receipt}
+    after_retry = (await client.get(f"/api/threads/{thread}/inputs")).raise_for_status().json()["items"]
+    assert after_retry[0]["status"] == "applied"
+    records = await state.run_manager.list_by_thread(thread, user_id=owner)
+    assert {record.run_id for record in records} == {initial.run_id, lost_receipt}
+    uploads = get_paths().sandbox_uploads_dir(thread, user_id=owner)
+    assert [path.read_bytes() for path in uploads.rglob("*") if path.is_file()] == [screenshot]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("followup_report", [None, b"revised report"], ids=["text-followup", "same-name-file"])
 async def test_managed_worker_routes_followups_and_retains_the_producing_runs_file(worker_gateway, followup_report):

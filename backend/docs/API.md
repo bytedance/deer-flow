@@ -261,6 +261,20 @@ the previous answer's verdict does not certify the replacement answer.
 
 ### Runs
 
+#### Submit an input while a Web run is active
+
+`POST /api/threads/{thread_id}/runs/{run_id}/inputs` accepts JSON with
+`request_id`, `text`, `mode` (`queue` or `steer`), and optional `context`.
+To queue attachments, send multipart form data with the JSON in `input`
+and one `files` part per file. Set `mode` to `queue`. The text may be empty
+when the message includes files. Upload limits and thread write permission
+apply.
+
+The input receipt and `GET /api/threads/{thread_id}/inputs` show attachment
+names and sizes. Files become readable by the Agent when the queued message's
+run starts. The existing remove and retry endpoints operate on the same input
+ID. Retry uses the staged files without another upload.
+
 #### Create Run
 
 Execute the agent with input.
