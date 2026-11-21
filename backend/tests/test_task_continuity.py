@@ -154,6 +154,55 @@ def test_retention_is_explicit_and_duplicate_capture_is_idempotent(scoped):
     assert archive.lookup(old, scoped, query="Citrine") == {"results": [], "status": "partially_expired"}
 
 
+def test_recaptured_batch_remains_readable_after_the_next_capture(scoped):
+    config = TaskContinuityConfig(enabled=True, max_batches=2)
+    state = {}
+    for word in ("alpha", "beta", "alpha", "gamma"):
+        message = HumanMessage(content=word, id=word)
+        state["task_history"] = archive.capture(state, scoped, [message], config)
+
+    for word in ("alpha", "gamma"):
+        result = archive.lookup(state, scoped, query=word)
+        assert result["status"] == "available"
+        assert [row["message_id"] for row in result["results"]] == [word]
+    assert not archive.lookup(state, scoped, query="beta")["results"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_recapture_preserves_checkpoint_retention(scoped, monkeypatch):
+    import asyncio
+
+    config = TaskContinuityConfig(enabled=True, max_batches=2)
+    alpha, beta, gamma = (HumanMessage(content=word, id=word) for word in ("alpha", "beta", "gamma"))
+    state = {"task_history": archive.capture({}, scoped, [alpha], config)}
+    state["task_history"] = archive.capture(state, scoped, [beta], config)
+
+    started, release = asyncio.Event(), asyncio.Event()
+    run_file_io = archive.run_file_io
+
+    async def gated_write(*args):
+        started.set()
+        await release.wait()
+        return await run_file_io(*args)
+
+    monkeypatch.setattr(archive, "run_file_io", gated_write)
+    task = asyncio.create_task(archive.acapture(state, scoped, [alpha], config))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+    finally:
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    state["task_history"] = archive.capture(state, scoped, [gamma], config)
+    for word in ("beta", "gamma"):
+        result = archive.lookup(state, scoped, query=word)
+        assert result["status"] == "available"
+        assert [row["message_id"] for row in result["results"]] == [word]
+    assert not archive.lookup(state, scoped, query="alpha")["results"]
+
+
 def test_serialization_allowlist_omits_reasoning_and_binary():
     source = AIMessage(
         content=[
