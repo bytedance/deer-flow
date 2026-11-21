@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -17,7 +18,9 @@ from deerflow.agents.memory.backends.deermem.deermem.core.paths import (
     agent_eviction_audit_path,
     agent_usage_path,
 )
+from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_memory_for_injection
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
+from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater, _select_stale_candidates
 
 NOW = datetime(2026, 8, 13, tzinfo=UTC)
 
@@ -273,6 +276,276 @@ def test_hybrid_reserve_honors_explicit_correction_exclusion(reserved_categories
     assert "correction" not in kept_ids
     assert ("preference" in kept_ids) == bool(reserved_categories)
     assert decision.reserved_correction_slots == 0
+
+
+def test_hybrid_reserve_rescues_at_risk_fact_when_top_winners_exceed_slots() -> None:
+    # Mirrors #8194 review example: 3 preferences in top 10, intervening contexts
+    # at ranks #4..#14, and 1 vital preference at rank #15 (plus a lower junk one).
+    facts = [
+        *[_fact(f"top_pref_{i}", confidence=0.98 - i * 0.01, category="preference") for i in range(3)],
+        *[_fact(f"context_{i}", confidence=0.90 - i * 0.01, category="context") for i in range(11)],
+        _fact("endangered_vital_pref", confidence=0.70, category="preference"),
+        _fact("junk_low_pref", confidence=0.10, category="preference"),
+    ]
+
+    decision = select_facts_for_capacity(
+        facts,
+        max_facts=10,
+        policy=EVICTION_POLICY_HYBRID_V1,
+        reserved_categories=["preference"],
+        now=NOW,
+    )
+
+    kept_ids = {fact["id"] for fact in decision.kept}
+    evicted_ids = {item.fact_id for item in decision.evicted}
+    assert kept_ids == {"top_pref_0", "top_pref_1", "top_pref_2", *(f"context_{i}" for i in range(6)), "endangered_vital_pref"}
+    assert evicted_ids == {"context_6", "context_7", "context_8", "context_9", "context_10", "junk_low_pref"}
+    assert decision.reserved_correction_slots == 0
+
+
+@pytest.mark.parametrize(
+    ("align_all_knobs", "expected_stale", "expected_injected"),
+    [
+        (False, True, False),
+        (True, False, True),
+    ],
+)
+def test_end_to_end_protection_requires_eviction_staleness_and_injection_knobs(
+    align_all_knobs: bool,
+    expected_stale: bool,
+    expected_injected: bool,
+) -> None:
+    now = datetime.now(UTC)
+    aged_ts = (now - timedelta(days=120)).isoformat()
+    recent_ts = now.isoformat()
+    cfg = DeerMemConfig(
+        max_facts=10,
+        fact_eviction_policy=EVICTION_POLICY_HYBRID_V1,
+        eviction_reserved_categories=["correction", "preference"],
+        staleness_protected_categories=["correction", "preference"] if align_all_knobs else ["correction"],
+        guaranteed_categories=["correction", "preference"] if align_all_knobs else ["correction"],
+    )
+    vital = _fact(
+        "vital_pref",
+        confidence=0.70,
+        category="preference",
+        created_at=aged_ts,
+    )
+    vital["content"] = "User has a severe peanut allergy and must avoid all peanut ingredients"
+    clutter = []
+    for i in range(10):
+        item = _fact(
+            f"context_{i}",
+            confidence=0.90,
+            category="context",
+            created_at=recent_ts,
+        )
+        item["content"] = f"Routine recent project note #{i} covering sprint tasks and build status"
+        clutter.append(item)
+
+    eviction = select_facts_for_capacity(
+        [vital, *clutter],
+        max_facts=cfg.max_facts,
+        policy=cfg.fact_eviction_policy,
+        reserved_categories=cfg.eviction_reserved_categories,
+        now=now,
+    )
+    assert any(fact["id"] == "vital_pref" for fact in eviction.kept)
+
+    stale_ids = {fact["id"] for fact in _select_stale_candidates({"facts": eviction.kept}, cfg)}
+    assert ("vital_pref" in stale_ids) is expected_stale
+
+    injected = format_memory_for_injection(
+        {"facts": eviction.kept},
+        max_tokens=60,
+        use_tiktoken=False,
+        guaranteed_categories=cfg.guaranteed_categories,
+        guaranteed_token_budget=cfg.guaranteed_token_budget,
+    )
+    assert ("severe peanut allergy" in injected) is expected_injected
+
+
+def test_hybrid_reserve_stays_bounded_across_repeated_writes(tmp_path) -> None:
+    # Regression for #8331 review: writing 10 lower-scoring corrections one by
+    # one into a full 10-context store must keep the 1-slot reserve bounded at
+    # 9 contexts + 1 correction so a subsequent high-scoring context still lands.
+    config = DeerMemConfig(
+        storage_path=str(tmp_path),
+        retrieval_adapter="",
+        max_facts=10,
+        fact_eviction_policy=EVICTION_POLICY_HYBRID_V1,
+    )
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage=storage)
+
+    for i in range(10):
+        _, fact_id = updater.create_memory_fact(
+            f"High-scoring context fact {i}",
+            category="context",
+            confidence=0.95,
+            agent_name="default",
+            user_id="u",
+        )
+        assert fact_id is not None
+
+    for i in range(10):
+        updater.create_memory_fact(
+            f"Lower-scoring correction fact {i}",
+            category="correction",
+            confidence=0.20,
+            agent_name="default",
+            user_id="u",
+        )
+
+    mid_facts = storage.load("default", user_id="u")["facts"]
+    assert len(mid_facts) == 10
+    assert sum(fact["category"] == "context" for fact in mid_facts) == 9
+    assert sum(fact["category"] == "correction" for fact in mid_facts) == 1
+
+    _, new_ctx_id = updater.create_memory_fact(
+        "Subsequent higher-scoring context fact",
+        category="context",
+        confidence=0.98,
+        agent_name="default",
+        user_id="u",
+    )
+    assert new_ctx_id is not None
+    final_facts = storage.load("default", user_id="u")["facts"]
+    assert any(fact["id"] == new_ctx_id for fact in final_facts)
+    assert sum(fact["category"] == "context" for fact in final_facts) == 9
+    assert sum(fact["category"] == "correction" for fact in final_facts) == 1
+
+
+def test_hybrid_tail_reserve_stays_bounded_with_high_scoring_winners_across_writes(tmp_path) -> None:
+    # Even when 3 high-scoring preferences already win top-10 slots, repeated
+    # low-scoring preference writes can only occupy the 1 tail-reserve slot.
+    config = DeerMemConfig(
+        storage_path=str(tmp_path),
+        retrieval_adapter="",
+        max_facts=10,
+        fact_eviction_policy=EVICTION_POLICY_HYBRID_V1,
+        eviction_reserved_categories=["preference"],
+    )
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage=storage)
+
+    for i in range(3):
+        updater.create_memory_fact(f"Top preference {i}", category="preference", confidence=0.98 - i * 0.01, agent_name="default", user_id="u")
+    for i in range(7):
+        updater.create_memory_fact(f"High context {i}", category="context", confidence=0.90, agent_name="default", user_id="u")
+    for i in range(5):
+        updater.create_memory_fact(f"Low preference {i}", category="preference", confidence=0.50 - i * 0.05, agent_name="default", user_id="u")
+
+    facts = storage.load("default", user_id="u")["facts"]
+    assert len(facts) == 10
+    assert sum(fact["category"] == "context" for fact in facts) == 6
+    assert sum(fact["category"] == "preference" for fact in facts) == 4
+    assert any(fact["content"] == "Low preference 0" for fact in facts)
+
+
+@pytest.mark.parametrize(
+    ("facts", "max_facts", "reserved_categories", "fraction", "reserved_max", "expected_kept", "expected_correction_slots"),
+    [
+        # Same-tier protected pool: never evict a higher-scored preference to rescue a lower-scored preference.
+        (
+            [*[_fact(f"pref_{i}", confidence=0.9 - i * 0.05, category="preference") for i in range(4)]],
+            3,
+            ["preference"],
+            0.5,
+            5,
+            {"pref_0", "pref_1", "pref_2"},
+            0,
+        ),
+        # Correction outranks other reserved categories when no unprotected victim exists.
+        (
+            [*[_fact(f"pref_{i}", confidence=0.9 - i * 0.05, category="preference") for i in range(3)], _fact("corr_low", confidence=0.1, category="correction")],
+            3,
+            ["correction", "preference"],
+            0.5,
+            5,
+            {"pref_0", "pref_1", "corr_low"},
+            1,
+        ),
+        # Within a 1-slot tail reserve, correction priority takes the single slot while top context stays.
+        (
+            [_fact("ctx_high", confidence=0.95, category="context"), _fact("pref_low", confidence=0.80, category="preference"), _fact("corr_below", confidence=0.10, category="correction")],
+            2,
+            ["correction", "preference"],
+            0.5,
+            5,
+            {"ctx_high", "corr_below"},
+            1,
+        ),
+        # With 2 tail-reserve slots, both correction and preference outlast an unprotected higher-scored context in the tail.
+        (
+            [_fact("ctx_0", confidence=0.98, category="context"), _fact("ctx_1", confidence=0.95, category="context"), _fact("pref_low", confidence=0.80, category="preference"), _fact("corr_below", confidence=0.10, category="correction")],
+            3,
+            ["correction", "preference"],
+            0.5,
+            5,
+            {"ctx_0", "pref_low", "corr_below"},
+            1,
+        ),
+        # Natural winner correction does not consume reserve budget or inflate reserved_correction_slots.
+        (
+            [_fact("corr_top", confidence=0.99, category="correction"), _fact("ctx_1", confidence=0.90, category="context"), _fact("pref_below", confidence=0.50, category="preference")],
+            2,
+            ["correction", "preference"],
+            0.5,
+            5,
+            {"corr_top", "pref_below"},
+            0,
+        ),
+        # Zero reserve budget (fraction=0 or max=0 or empty list) rescues nothing.
+        (
+            [_fact("ctx_0", confidence=0.95, category="context"), _fact("ctx_1", confidence=0.90, category="context"), _fact("corr_below", confidence=0.10, category="correction")],
+            2,
+            ["correction"],
+            0.0,
+            5,
+            {"ctx_0", "ctx_1"},
+            0,
+        ),
+        (
+            [_fact("ctx_0", confidence=0.95, category="context"), _fact("ctx_1", confidence=0.90, category="context"), _fact("corr_below", confidence=0.10, category="correction")],
+            2,
+            ["correction"],
+            0.5,
+            0,
+            {"ctx_0", "ctx_1"},
+            0,
+        ),
+        (
+            [_fact("ctx_0", confidence=0.95, category="context"), _fact("ctx_1", confidence=0.90, category="context"), _fact("corr_below", confidence=0.10, category="correction")],
+            2,
+            ["  "],
+            0.5,
+            5,
+            {"ctx_0", "ctx_1"},
+            0,
+        ),
+    ],
+)
+def test_hybrid_reserve_priority_and_budget_matrix(
+    facts: list[dict[str, Any]],
+    max_facts: int,
+    reserved_categories: list[str],
+    fraction: float,
+    reserved_max: int,
+    expected_kept: set[str],
+    expected_correction_slots: int,
+) -> None:
+    decision = select_facts_for_capacity(
+        facts,
+        max_facts=max_facts,
+        policy=EVICTION_POLICY_HYBRID_V1,
+        correction_reserved_fraction=fraction,
+        correction_reserved_max=reserved_max,
+        reserved_categories=reserved_categories,
+        now=NOW,
+    )
+    assert {fact["id"] for fact in decision.kept} == expected_kept
+    assert decision.reserved_correction_slots == expected_correction_slots
 
 
 @pytest.mark.parametrize("argument", ["reserved_categories", "decay_exempt_categories"])
