@@ -103,7 +103,7 @@ def test_core_and_bundled_selections_stay_complementary() -> None:
 
     # Core shards and their duration baseline exclude the marker; the bundled
     # target selects exactly it. Renaming either side must fail here.
-    assert makefile.count('-m "not live and not bundled_extension"') == 2
+    assert makefile.count('-m "not live and not bundled_extension and not benchmark"') == 2
     assert makefile.count('-m "bundled_extension and not live"') == 1
 
 

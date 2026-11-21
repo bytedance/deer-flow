@@ -3011,6 +3011,9 @@ scheduler:
   recursion_limit: 1000
 
 # ============================================================================
+# Per-user browser OAuth for a deployment MCP service is configured in the
+# matching extensions_config.json server via user_oauth. See backend/docs/MCP_SERVER.md.
+
 # Per-agent MCP credentials (opt-in, deployment-managed HTTP servers only).
 # Bindings stay operator-owned here; set agent_auth: true on the matching
 # extensions_config.json server. See backend/docs/MCP_SERVER.md for the digest

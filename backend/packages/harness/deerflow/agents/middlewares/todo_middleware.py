@@ -393,15 +393,18 @@ def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
     user-input boundary markers, so they read as user data under the lead
     prompt's trust rule instead of borrowing framework authority.
     `_format_todos` already neutralizes forged markers inside item text.
-    Blocked and waiting items are terminal for this run, so they are not
-    chased here.
+
+    The wording must match ``_TODO_TERMINAL_STATUSES``: the guard also accepts
+    ``blocked`` and ``waiting``, so the reminder offers them instead of asking
+    the model to finish everything or mark it completed.
     """
     incomplete_text = _format_todos(todo for todo in todos if _stored_todo_status(todo) not in _TODO_TERMINAL_STATUSES)
     return (
         "<system_reminder>\n"
-        "You have incomplete todo items that must be finished before giving your final response:\n\n"
+        "You have todo items that are not completed, blocked, or waiting:\n\n"
         "Please continue working on these tasks. Call `write_todos` to mark items as completed "
-        "as you finish them, and only respond when all items are done.\n"
+        "as you finish them. Mark an item `blocked` or `waiting` only when it cannot continue in this run, "
+        "and only respond when every item is completed, blocked, or waiting.\n"
         "</system_reminder>\n\n"
         f"{_USER_INPUT_BEGIN}\n{incomplete_text}\n{_USER_INPUT_END}"
     )
@@ -473,6 +476,9 @@ class TodoMiddleware(TodoListMiddleware):
         return {
             "system_prompt_hash": canonical_hash(self.system_prompt),
             "tool_description_hash": canonical_hash(self.tool_description),
+            # The fixed reminder template is model-visible instruction text too;
+            # hash it with an empty item list so per-run todo content stays out.
+            "completion_reminder_template_hash": canonical_hash(_format_completion_reminder([])),
             "state_channel": "todos",
             "skip_completion_reminder_on_length_cap": True,
             "skip_completion_reminder_on_safety_cap": True,

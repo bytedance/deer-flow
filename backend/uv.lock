@@ -1130,7 +1130,7 @@ requires-dist = [
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
     { name = "monocle-apptrace", marker = "extra == 'monocle'", specifier = ">=0.8.8" },
-    { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=0.1.15,<0.2.0" },
+    { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=1.1.0,<2.0.0" },
     { name = "packaging", specifier = ">=24.2" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.3.3" },
@@ -3132,17 +3132,20 @@ wheels = [
 
 [[package]]
 name = "opensandbox"
-version = "0.1.15"
+version = "1.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
+    { name = "httpcore" },
     { name = "httpx" },
+    { name = "httpx-sse" },
+    { name = "opentelemetry-api" },
     { name = "pydantic" },
     { name = "python-dateutil" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/43/21/654a3d69815b09690e926d553f3f4a178640d1206000a1b49f5e22c8eb68/opensandbox-0.1.15.tar.gz", hash = "sha256:017abc9b399b88da51bf077d6fb94ee89b1783e601495e85ba85fed478fed1b0", size = 228729, upload-time = "2026-07-24T09:36:29.988Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/44/55e37c760f28b008051dcc0afcdb09a0d526929f54ce952c5e4a1dbe7967/opensandbox-1.2.1.tar.gz", hash = "sha256:079bdde72fb7cd047de09c04928820cbed7394ab5c537ddda9e5ac108b1855df", size = 339085, upload-time = "2026-11-13T00:34:19.168Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d5/5c/ab87ea696531210790feb8f575471036fccba29dedaff201736f15bbb3a7/opensandbox-0.1.15-py3-none-any.whl", hash = "sha256:992b01490551f4d8e3f99caa25e34cb9d1690f0c5027eeebab912738291957d1", size = 538522, upload-time = "2026-07-24T09:36:28.277Z" },
+    { url = "https://files.pythonhosted.org/packages/85/a8/f72a8549ff5d076841c9180bfcea251cc8c64adb9ceb3b6d4b919f84f989/opensandbox-1.2.1-py3-none-any.whl", hash = "sha256:67c9210a06cc2c18e621b34b6b21ce143e04226b6773ea17924783b379a75585", size = 742873, upload-time = "2026-11-13T00:34:17.886Z" },
 ]
 
 [[package]]

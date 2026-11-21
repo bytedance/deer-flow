@@ -25,7 +25,7 @@ def test_opensandbox_is_optional_harness_dependency() -> None:
     optional_dependencies = pyproject["project"]["optional-dependencies"]
 
     assert not any(dep.startswith("opensandbox") for dep in core_dependencies)
-    assert optional_dependencies["opensandbox"] == ["opensandbox>=0.1.15,<0.2.0"]
+    assert optional_dependencies["opensandbox"] == ["opensandbox>=1.1.0,<2.0.0"]
 
 
 def test_boxd_is_optional_harness_dependency() -> None:

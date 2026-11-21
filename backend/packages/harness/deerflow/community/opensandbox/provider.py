@@ -73,7 +73,7 @@ def _import_sdk() -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[R
         from opensandbox.models.execd import RunCommandOpts
         from opensandbox.sync import SandboxSync
     except ImportError as exc:  # pragma: no cover - depends on optional install state
-        raise ImportError("OpenSandboxProvider requires the optional 'opensandbox' dependency. Install it with: pip install 'deerflow-harness[opensandbox]' or pip install 'opensandbox>=0.1.15,<0.2.0'.") from exc
+        raise ImportError("OpenSandboxProvider requires the optional 'opensandbox' dependency. Install it with: pip install 'deerflow-harness[opensandbox]' or pip install 'opensandbox>=1.1.0,<2.0.0'.") from exc
     return SandboxSync, ConnectionConfigSync, RunCommandOpts
 
 

@@ -66,6 +66,7 @@ from deerflow.runtime.context_keys import (
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
+    MCP_BROWSER_USER_CONTEXT_KEY,
     PROJECT_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
@@ -630,6 +631,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
             AGENT_AUTH_CONTEXT_KEY,
+            MCP_BROWSER_USER_CONTEXT_KEY,
             "__run_input_control",
             "__tool_approval_runtime",
             "_hitl_disabled_resume_escape",
@@ -664,6 +666,7 @@ def _build_runtime_context(
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     scheduler_capability: SchedulerRunCapability | None = None,
     agent_mcp_authority: Any | None = None,
+    mcp_browser_user: str | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -695,6 +698,8 @@ def _build_runtime_context(
         runtime_ctx[SCHEDULER_CAPABILITY_CONTEXT_KEY] = scheduler_capability
     if agent_mcp_authority is not None:
         runtime_ctx[AGENT_AUTH_CONTEXT_KEY] = agent_mcp_authority
+    if mcp_browser_user is not None:
+        runtime_ctx[MCP_BROWSER_USER_CONTEXT_KEY] = mcp_browser_user
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -761,6 +766,7 @@ class RunContext:
     agent_runs: Any | None = field(default=None)
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     agent_mcp_authority: Any | None = field(default=None)
+    mcp_browser_user: str | None = None
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
     # Host-only preflight under durable run ownership; failures reject execution.
@@ -776,6 +782,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
         configurable.pop(AGENT_AUTH_CONTEXT_KEY, None)
+        configurable.pop(MCP_BROWSER_USER_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1391,6 +1398,7 @@ async def run_agent(
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
             agent_mcp_authority=ctx.agent_mcp_authority,
+            mcp_browser_user=ctx.mcp_browser_user,
         )
         # A disabled all-reject escape still needs the HITL hook to consume the
         # pending interrupt. The assembly marker makes that hook deny rather
@@ -1481,6 +1489,10 @@ async def run_agent(
             configurable["checkpoint_ns"] = ""
             configurable.pop("checkpoint_id", None)
             configurable.pop("checkpoint_map", None)
+            if runtime_ctx.pop(MCP_BROWSER_USER_CONTEXT_KEY, None) is not None:
+                # The worker can continue a Goal after the interactive turn.
+                # Keep the same runtime state but retire browser-only authority.
+                continuation_config["context"].pop(MCP_BROWSER_USER_CONTEXT_KEY, None)
             continuation_config["configurable"] = configurable
             continuation = RunnableConfig(**continuation_config)
             runnable_configs.append(continuation)
@@ -2076,7 +2088,9 @@ async def run_agent(
 
                 # A rejected resume has not written state; compensating it through
                 # the state-only graph would itself discard the pending Sends.
-                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_resume_rejected:
+                # A native pause has not failed: restoring the pre-run checkpoint
+                # would drop the edit and strand the interrupt behind the new head.
+                if not record.ownership_lost and _is_edit_replay_run(record) and record.status not in (RunStatus.success, RunStatus.waiting_for_input) and not checkpoint_resume_rejected:
                     if not record.finalizing:
                         await run_manager.set_finalizing(run_id, True)
                     try:
@@ -2257,11 +2271,12 @@ async def run_agent(
                     except Exception:
                         logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
 
-                if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+                needs_local_title = record.status == RunStatus.interrupted or (record.status == RunStatus.error and getattr(record, "stop_reason", None) == _RECURSION_CAPPED_STOP_REASON)
+                if started and not record.ownership_lost and checkpointer is not None and needs_local_title and not _is_edit_replay_run(record):
                     try:
                         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                         if not await run_manager.has_later_started_run(thread_id, run_id):
-                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input, accessor=accessor)
                     except Exception:
                         logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
@@ -3777,8 +3792,8 @@ async def _persist_run_duration(
     )
 
 
-async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:
-    """Persist a local fallback title for interrupted first-turn runs.
+async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None, accessor: CheckpointStateAccessor | None = None) -> str | None:
+    """Persist a local fallback title for interrupted or recursion-capped first turns.
 
     Returns the title that is now persisted (existing or newly written), or
     ``None`` when no checkpoint is available or no title text can be derived.
@@ -3798,6 +3813,10 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
         if existing_title:
             return existing_title
 
+        if ckpt_tuple is not None and accessor is not None and accessor.mode == "delta":
+            # Reconstruct messages at this exact checkpoint before checking which turn stopped.
+            snapshot = await accessor.aget(ckpt_tuple.config)
+            channel_values = snapshot.values
         result = middleware._generate_title_result(_title_generation_state(channel_values, graph_input), allow_partial_exchange=True)
         title = result.get("title") if isinstance(result, dict) else None
         if not title:
