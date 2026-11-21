@@ -540,11 +540,14 @@ export interface Translations {
     voiceInputStart: string;
     voiceInputStop: string;
     voiceInputListening: string;
+    voiceInputStarting: string;
+    voiceInputFinishing: string;
+    voiceInputCancel: string;
     voiceInputUnsupported: string;
     voiceInputPermissionDenied: string;
     voiceInputMicrophoneUnavailable: string;
-    voiceInputUnsupportedLanguage: string;
-    voiceInputNetworkError: string;
+    voiceInputTooLarge: string;
+    voiceInputUnavailable: string;
     voiceInputNoSpeech: string;
     voiceInputFailed: string;
     mode: string;
