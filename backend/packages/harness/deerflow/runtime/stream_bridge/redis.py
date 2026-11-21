@@ -338,6 +338,8 @@ class RedisStreamBridge(StreamBridge):
             )
 
     def _ensure_producer_can_publish(self, run_id: str) -> None:
+        if self._closing:
+            raise RuntimeError("Stream bridge is closing")
         lease = self._producer_leases.get(run_id)
         if lease is None:
             return
@@ -839,8 +841,13 @@ class RedisStreamBridge(StreamBridge):
         heartbeat_interval: float | None = None,
     ) -> AsyncIterator[StreamItem]:
         heartbeat_interval = self._resolve_heartbeat_interval(heartbeat_interval)
+        if self._closing:
+            raise RuntimeError("Stream bridge is closing")
         key = self._stream_key(run_id)
         stream_id = await self._resolve_start_stream_id(key, last_event_id)
+        # Closing may begin while the initial cursor lookup is waiting on Redis.
+        if self._closing:
+            raise RuntimeError("Stream bridge is closing")
         gap_detection_enabled = last_event_id is not None and self._parse_stream_id(last_event_id) is not None
         pending_initial_response: list[Any] | None = None
         block_ms = max(1, int(heartbeat_interval * 1000)) if heartbeat_interval > 0 else 1

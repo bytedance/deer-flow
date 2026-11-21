@@ -36,6 +36,9 @@ make test-blocking-io
 
 - **Memory writers fence the captured generation.** After waiting for the stream Condition, check `retired` and `ended` before allocating an event ID or appending; rejected writes consume no sequence number, and END is idempotent for that generation.
 
+
+- **Bridge close is a retirement barrier, not a permanent terminal state.** Memory fences `publish`, `publish_end` and new stream creation while close drains. Overlapping closes keep admission fenced until every active drain exits, including when one caller is cancelled. A caller that captured an existing generation may observe its retirement gap; later calls can create a fresh generation after close returns. Keep close idempotent and retryable after cancellation.
+
 ## Checkpoints
 
 - **The channel mode is fixed for the life of the process.** A reader in `full`

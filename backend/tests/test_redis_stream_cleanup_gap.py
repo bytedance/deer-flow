@@ -648,3 +648,53 @@ async def test_empty_gap_does_not_complete_running_or_retained_run(terminal_with
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_redis_bridge_rejects_new_work_after_close_with_borrowed_client():
+    class BorrowedRedis:
+        def __init__(self):
+            self.calls = []
+
+        async def xadd(self, *args, **kwargs):
+            self.calls.append(("xadd", args, kwargs))
+            return "1-0"
+
+    client = BorrowedRedis()
+    bridge = RedisStreamBridge(redis_url="redis://unused", client=client)
+    await bridge.close()
+    await bridge.close()
+
+    with pytest.raises(RuntimeError, match="closing"):
+        await bridge.publish("closed-redis-bridge", "late-event", {})
+    with pytest.raises(RuntimeError, match="closing"):
+        await bridge.publish_end("closed-redis-bridge")
+    with pytest.raises(RuntimeError, match="closing"):
+        await anext(bridge.subscribe("new-redis-run"))
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_redis_bridge_rechecks_close_after_initial_cursor_lookup():
+    class BorrowedRedis:
+        def __init__(self):
+            self.lookup_started = asyncio.Event()
+            self.release_lookup = asyncio.Event()
+
+        async def xrevrange(self, *args, **kwargs):
+            self.lookup_started.set()
+            await self.release_lookup.wait()
+            return []
+
+    client = BorrowedRedis()
+    bridge = RedisStreamBridge(redis_url="redis://unused", client=client)
+    subscription = bridge.subscribe("closing-redis-run", last_event_id="not-a-stream-id")
+    pending = asyncio.create_task(anext(subscription))
+    try:
+        await asyncio.wait_for(client.lookup_started.wait(), timeout=1)
+        await bridge.close()
+    finally:
+        client.release_lookup.set()
+
+    with pytest.raises(RuntimeError, match="closing"):
+        await asyncio.wait_for(pending, timeout=1)
