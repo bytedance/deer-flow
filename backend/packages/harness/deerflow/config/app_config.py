@@ -19,6 +19,7 @@ from deerflow.config.authorization_config import AuthorizationConfig, load_autho
 from deerflow.config.blob_storage_config import BlobStorageConfig, load_blob_storage_config_from_dict
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
+from deerflow.config.custom_events_config import CustomEventsConfig
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dedupe_storage_config import DedupeStorageConfig
 from deerflow.config.deployment_config import DeploymentConfig
@@ -65,6 +66,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.tool_streaming_config import ToolStreamingConfig
 from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
 from deerflow.config.verification_config import VerificationConfig
 from deerflow.env import load_selected_env_file
@@ -339,6 +341,8 @@ class AppConfig(BaseModel):
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     verification: VerificationConfig = Field(default_factory=VerificationConfig, description="Subagent result verification (receipts, checklist, judge)")
     hitl_approval: HitlApprovalConfig = Field(default_factory=HitlApprovalConfig, description="Human-in-the-loop approval for high-risk tool calls")
+    tool_streaming: ToolStreamingConfig = Field(default_factory=ToolStreamingConfig, description="Real-time tool output streaming middleware configuration")
+    custom_events: CustomEventsConfig = Field(default_factory=CustomEventsConfig, description="Internal `custom` stream channel subscription (task and middleware progress events)")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
     harness_guard: HarnessGuardConfig = Field(default_factory=HarnessGuardConfig, description="HarnessGuard tool-loop interceptor middleware configuration")
     projects: ProjectsConfig = Field(default_factory=ProjectsConfig, description="User projects configuration (instructions injection, shelf index, trash retention)")
@@ -685,6 +689,21 @@ class AppConfig(BaseModel):
         elif isinstance(config, list):
             return [cls.resolve_env_variables(item) for item in config]
         return config
+
+    @model_validator(mode="after")
+    def _validate_tool_streaming_requires_custom_events(self) -> "AppConfig":
+        """Tool streaming delivers its events on the ``custom`` channel.
+
+        Turning the channel off while the middleware is on would enable a
+        producer with no subscriber, so reject the combination instead of
+        silently degrading it.
+        """
+        if self.tool_streaming.enabled and not self.custom_events.enabled:
+            raise ValueError(
+                "tool_streaming.enabled requires custom_events.enabled: "
+                "tool lifecycle events are delivered on the `custom` stream channel."
+            )
+        return self
 
     @model_validator(mode="after")
     def _build_name_indexes(self) -> "AppConfig":

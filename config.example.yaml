@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 67
+config_version: 68
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1605,6 +1605,39 @@ pii_redaction:
 #     - write_todos
 #     - present_files
 #     - task
+
+# ============================================================================
+# Custom Stream Channel
+# ============================================================================
+# Every run subscribes LangGraph's `custom` stream channel so middlewares and
+# tools can report progress through `get_stream_writer()`. DeerFlow's own
+# progress events ride on it: the `task_*` lifecycle updates for subagent and
+# background tasks, LLM retry hints, and the provider safety finish-reason
+# notice. Turning it off therefore drops those events too.
+#
+# Leave it on unless the deployment has no progress consumer and wants a
+# strictly caller-defined stream. A caller that requests `custom` explicitly
+# keeps it either way.
+
+# custom_events:
+#   enabled: true
+
+# ============================================================================
+# Tool Output Streaming (issue #4150)
+# ============================================================================
+# When enabled, ToolStreamingMiddleware emits `tool_output_chunk` lifecycle
+# events during tool execution (start / error / final). Built-in tools do not
+# currently emit intermediate output chunks. These events propagate to the
+# frontend SSE stream and through subagents via SubagentExecutor.
+#
+# Defaults to disabled (opt-in). Tool execution results still arrive through
+# the canonical ToolMessage regardless of this setting. Enabling this requires
+# `custom_events.enabled` above: the lifecycle events are delivered on the
+# `custom` stream channel, so the pair is rejected at config load rather than
+# silently degrading.
+
+# tool_streaming:
+#   enabled: false
 
 # ============================================================================
 # Read-Before-Write File Gate (issue #3857)

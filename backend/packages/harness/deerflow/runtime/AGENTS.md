@@ -33,6 +33,12 @@ make test-blocking-io
 - **Subgraph frames keep their namespace.** A bare `values` frame from a subgraph
   would overwrite the thread view of an SDK client. Consumers that only handle the
   root run ignore namespaced frames.
+- **`custom` is subscribed unless the deployment turns it off, so it is not a
+  caller mode.** The raw-chunk fast path and the batcher are chosen from the
+  caller's own mode list (`caller_langgraph_stream_modes`), never from the
+  graph's `astream` mode list, which also carries the internal `custom` channel
+  that middlewares and tools use to report progress. `custom_events.enabled:
+  false` drops that channel; a caller that names `custom` itself still gets it.
 
 - **Memory writers fence the captured generation.** After waiting for the stream Condition, check `retired` and `ended` before allocating an event ID or appending; rejected writes consume no sequence number, and END is idempotent for that generation.
 
