@@ -73,7 +73,7 @@ class RequestAdmission(BaseRateLimiter):
             raise AdmissionError("LLM admission timed out before dispatch; increase max_wait_seconds or reduce workload.")
         with self._lock:
             until_next = self._next - now
-        # Track short admission intervals rather than imposing a 20/s ceiling.
+        # Cap each sleep at 50 ms and shorten it for an approaching dispatch or deadline.
         # Non-head waiters still yield when the schedule is already due.
         return min(0.05, until_next if until_next > 0 else self._interval, remaining)
 
