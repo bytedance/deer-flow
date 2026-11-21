@@ -110,6 +110,28 @@ def test_dotenv_still_overrides_inherited_variables(tmp_path: Path) -> None:
     assert exported["EMPTIED"] == ""
 
 
+def test_tilde_uses_home_declared_earlier_in_dotenv(tmp_path: Path) -> None:
+    home = tmp_path / "dotenv-home"
+    exported = _exported(tmp_path, f"HOME={home}\nDEER_FLOW_HOME=~/runtime\n".encode())
+
+    assert exported["HOME"] == str(home)
+    assert exported["DEER_FLOW_HOME"] == str(home / "runtime")
+
+
+def test_tilde_without_dotenv_home_uses_platform_default(tmp_path: Path) -> None:
+    inherited_home = tmp_path / "inherited-home"
+    platform_home = tmp_path / "platform-home"
+    exported = _exported(
+        tmp_path,
+        b"DEER_FLOW_HOME=~/runtime\n",
+        HOME=str(inherited_home),
+        USERPROFILE=str(platform_home),
+    )
+    expected_home = platform_home if os.name == "nt" else inherited_home
+
+    assert exported["DEER_FLOW_HOME"] == str(expected_home / "runtime")
+
+
 def test_unparseable_statements_and_names_are_skipped_without_echoing_values(tmp_path: Path) -> None:
     dotenv = b'BEFORE=kept\nNOT-A-NAME=secret-one\nBROKEN="unterminated secret-two\nAFTER=kept\n'
 
