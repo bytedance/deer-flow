@@ -10,7 +10,7 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 
 1. Monitors message token counts in real-time
 2. Triggers summarization when thresholds are met
-3. Keeps recent messages intact while summarizing older exchanges
+3. Keeps recent message content while summarizing older exchanges
 4. Maintains AI/Tool message pairs together for context continuity
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
@@ -63,6 +63,21 @@ already-compressed carry can omit earlier summarized facts.
 Prefix selection expands a local window and then searches within it using the
 actual token counter, avoiding repeated processing of the entire remaining source.
 Warning diagnostics include numeric budget, carry and progress values, never text.
+
+## Responses API continuation
+
+When an OpenAI model enables both `use_responses_api` and
+`use_previous_response_id`, successful compaction starts a fresh response chain.
+The next request replays the compacted history, including the summary projected
+by durable context. Reusing a response ID from before compaction would instead
+resume the server's old history and omit that summary.
+
+Automatic compaction and manual `/compact` remove `resp_` response IDs from
+copies of every retained assistant message. Message IDs, content, tool-call IDs
+and other response metadata stay unchanged, as do the original message objects.
+Skipped or failed compaction leaves continuation metadata untouched. Once the
+model returns a new response, subsequent requests can chain from it normally.
+This does not change compaction thresholds, summary generation or retention.
 
 ## Reuse and telemetry
 
