@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from app.mcp_tasks.errors import PermanentNotificationError
+from app.mcp_tasks.submission import SubmissionOwner
 from deerflow.constants import (
     MCP_TASK_POLL_AFTER_MAX_SECONDS,
     MCP_TASK_REMOTE_ID_MAX_LENGTH,
@@ -37,6 +38,15 @@ _MAX_PERSISTED_ERROR_CHARS = 4_000
 _MAX_INPUT_REQUIRED_BYTES = 65_536
 _MAX_NOTIFICATION_ATTEMPTS = 5
 _CANCELLATION_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedSubmission:
+    # The public row omits incarnation. Retain the exact request receipt for
+    # internal cancellation without adding internal fields to tool/API output.
+    record: dict[str, Any]
+    reference: TaskReference
+    driver_name: str
 
 
 @dataclass(slots=True)
@@ -140,6 +150,7 @@ class McpTaskService:
         # Includes children still draining after a bounded cancellation handoff.
         self._active_control_calls: set[str] = set()
         self._stop = asyncio.Event()
+        self._submissions = SubmissionOwner(self._cancel_owned_submission)
 
     @property
     def drivers(self) -> McpTaskDriverRegistry:
@@ -311,6 +322,13 @@ class McpTaskService:
         now: datetime | None = None,
     ) -> dict:
         """Submit through one driver and persist the remote handle before returning."""
+        submission = await self._submissions.submit(
+            lambda: self._submit_owned(driver_name=driver_name, request=request, now=now),
+            timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+        )
+        return submission.record
+
+    async def _submit_owned(self, *, driver_name: str, request: TaskSubmitRequest, now: datetime | None) -> _PersistedSubmission:
         driver = self._drivers.get(driver_name)
         if driver is None:
             raise LookupError(f"No MCP task driver registered as {driver_name!r}")
@@ -334,7 +352,7 @@ class McpTaskService:
                 raise McpTaskProtocolError(f"MCP task remote_task_id must not exceed {MCP_TASK_REMOTE_ID_MAX_LENGTH} characters")
             snapshot = self._normalize_snapshot(submission.snapshot)
             next_poll_at = self._next_poll_at(snapshot, now=submitted_at)
-            return await self._repository.create(
+            record = await self._repository.create(
                 task_id=local_task_id,
                 user_id=request.user_id,
                 thread_id=request.thread_id,
@@ -355,20 +373,10 @@ class McpTaskService:
                 next_poll_at=next_poll_at,
                 driver_data=driver_data,
             )
+            return _PersistedSubmission(record, task_reference, driver_name)
         except DuplicateMcpRemoteTaskError:
             # This handle already has a durable owner. Cancelling it as
             # compensation would terminate the pre-existing tracked task.
-            raise
-        except asyncio.CancelledError:
-            # Cancellation can race with a successful database commit. If it
-            # did, the durable row will converge to cancelled on its next poll;
-            # compensating is safer than leaving a live remote task untracked.
-            await self._cancel_untracked_task(
-                driver=driver,
-                task_reference=task_reference,
-                driver_name=driver_name,
-                reason="caller cancellation during local persistence",
-            )
             raise
         except Exception:
             await self._cancel_untracked_task(
@@ -378,6 +386,22 @@ class McpTaskService:
                 reason="local submission finalization failure",
             )
             raise
+
+    async def _cancel_owned_submission(self, submission: _PersistedSubmission) -> None:
+        """Cancel only the durable row this submission actually created."""
+        task_id = submission.reference.local_task_id
+        owned = await self._repository.request_cancel_owned_submission(
+            submission.reference,
+            driver_name=submission.driver_name,
+            requested_at=datetime.now(UTC),
+        )
+        if owned is None:
+            logger.warning("Abandoned MCP submission no longer owns its durable row (task_id=%s)", task_id)
+            return
+        # The persisted intent survives a stopped/full poller or a failed
+        # attempt. An immediate attempt uses the same capacity and lease fences
+        # as ordinary worker cancellation, including during bounded shutdown.
+        await self._run_cancellations(now=datetime.now(UTC), task_id=task_id)
 
     async def _cancel_untracked_task(
         self,
@@ -901,7 +925,7 @@ class McpTaskService:
             raise LookupError("The selected background task no longer exists")
         return result
 
-    async def _run_cancellations(self, *, now: datetime) -> None:
+    async def _run_cancellations(self, *, now: datetime, task_id: str | None = None) -> None:
         claim = getattr(self._repository, "claim_cancel_requests", None)
         capacity = self._max_concurrent_polls - len(self._active_control_calls)
         if claim is None or capacity <= 0:
@@ -912,6 +936,7 @@ class McpTaskService:
                 lease_owner=self._lease_owner,
                 lease_seconds=self._lease_seconds,
                 limit=capacity,
+                **({"task_id": task_id} if task_id is not None else {}),
                 **({"exclude_task_ids": tuple(self._active_control_calls)} if self._active_control_calls else {}),
             ),
             phase="cancel",
@@ -1655,7 +1680,7 @@ class McpTaskService:
             raise McpTaskProtocolError(f"MCP task {field_name} is not valid JSON: {exc}") from exc
 
     async def start(self) -> None:
-        if self._task is not None:
+        if self._task is not None or self._compensation_tasks or not self._submissions.start():
             return
         self._stop.clear()
         self._stopping_task = None
@@ -1700,6 +1725,7 @@ class McpTaskService:
 
     async def _drain_compensation_tasks(self, *, deadline: float) -> None:
         """Drain service-owned compensation work before Gateway dependencies close."""
+        await self._submissions.drain(deadline=deadline)
         loop = asyncio.get_running_loop()
         while self._compensation_tasks:
             tasks = tuple(self._compensation_tasks)
@@ -1737,15 +1763,16 @@ class McpTaskService:
 
     async def stop(self) -> None:
         loop = asyncio.get_running_loop()
+        deadline = self._submissions.close(timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS)
         task = self._task
         if task is None:
             await self._drain_compensation_tasks_preserving_cancellation(
-                deadline=loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                deadline=deadline,
             )
             return
         if self._stopping_task is not task:
             self._stopping_task = task
-            self._stop_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+            self._stop_deadline = deadline
             self._stop_timeout_logged = False
             task.cancel()
         self._stop.set()
@@ -1772,6 +1799,13 @@ class McpTaskService:
             )
             return
         await self._drain_compensation_tasks_preserving_cancellation(deadline=deadline)
+
+    async def drain_submissions(self) -> None:
+        """Final bounded pass after run drain, while SQL and MCP remain open."""
+        self._submissions.close(timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS)
+        await self._drain_compensation_tasks_preserving_cancellation(
+            deadline=asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+        )
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
