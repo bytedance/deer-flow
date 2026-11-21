@@ -50,6 +50,11 @@ class MemoryInboundDedupeStore:
         ttl_seconds: int = INBOUND_DEDUPE_TTL_SECONDS,
         max_entries: int = INBOUND_DEDUPE_MAX_ENTRIES,
     ) -> None:
+        # A non-positive bound would make the make-room loop below pop from an
+        # empty store on every call. Validate like the sibling bounded store
+        # (feishu_card_interaction.py) rather than silently degrading.
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
         self._ttl = ttl_seconds
         self._max = max_entries
         # Insertion order == chronological (keys are never re-inserted), so an
@@ -67,11 +72,14 @@ class MemoryInboundDedupeStore:
                 self._store.popitem(last=False)
             else:
                 break
-        while len(self._store) > self._max:
-            self._store.popitem(last=False)
-
         if key in self._store:
             return True
+
+        # Make room before inserting so the store never exceeds ``max_entries``.
+        # Evicting only while ``len > max`` (checked before the insert) let the
+        # store reach ``max + 1`` entries: the bound ran first, then the insert.
+        while len(self._store) >= self._max:
+            self._store.popitem(last=False)
 
         self._store[key] = now
         return False
