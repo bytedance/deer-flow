@@ -540,6 +540,11 @@ async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, mon
             admitted = await manager.get(repeated.json()["run_id"], user_id=owner)
             await admitted.task
             assert {key: val for key, val in worker.await_args.kwargs["config"]["context"].items() if key in keys} == original
+            await manager.set_status(admitted.run_id, services.RunStatus.success)
+            await manager.input_store.mutate_run_inputs(source.run_id, lambda state, _: state["items"].append({"mode": "steer", "status": "applied"}), user_id=owner)
+            for route, params in (("regenerate", {"message_id": "answer"}), ("edit-regenerate", {"human_message_id": "question", "replacement_text": "Another edit"})):
+                blocked = await client.post(f"{path}/{route}/prepare", json=params)
+                assert blocked.status_code == 409 and "adjusted" in blocked.json()["detail"], blocked.text
 
 
 @pytest.mark.asyncio
@@ -631,13 +636,17 @@ async def test_replay_recovers_only_the_legacy_source_runs_options(_stub_app_con
         ("unknown", {"mode": "chat"}, {}),
         ("empty-record", {"mode": "ultra", "subagent_enabled": True}, {"mode": "ultra", "subagent_enabled": True}),
         ("empty-record-with-checkpoint", {"mode": "ultra"}, {"mode": "flash"}),
+        ("partial-with-checkpoint", {"mode": "ultra", "subagent_enabled": True}, {"mode": "flash", "thinking_enabled": False}),
+        ("partial-no-checkpoint", {"mode": "ultra", "subagent_enabled": True}, {"thinking_enabled": False}),
         ("summary-only", {"mode": "chat"}, {"mode": "flash"}),
         ("unrelated-prefix", {"mode": "chat"}, {}),
         ("pruned-id-same-answer", {"mode": "chat"}, {}),
         ("incomplete-journal", {"mode": "chat"}, {"mode": "flash", "thinking_enabled": False}),
+        ("pruned-journal-with-stamp", {"mode": "chat"}, {"mode": "flash", "thinking_enabled": False}),
         ("ambiguous-summary", {"mode": "chat"}, {}),
         ("ownerless-cache", {"mode": "chat"}, {}),
         ("store-error", {"mode": "chat"}, None),
+        ("list-store-error", {"mode": "chat"}, None),
         ("invalid-record", {"mode": "chat"}, None),
     ],
 )
@@ -658,11 +667,11 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
     owner = str(get_current_user().id)
     runtime = request.app.state
     human = HumanMessage(id="question", content="First question", additional_kwargs={"run_id": "source"})
-    if origin in {"ambiguous-summary", "summary-only", "unrelated-prefix"}:
+    if origin in {"ambiguous-summary", "summary-only", "unrelated-prefix", "list-store-error"}:
         human.additional_kwargs.pop("run_id")
     answer = AIMessage(id="answer", content="First answer")
     messages = [human, answer]
-    states = [([], None), (messages, "flash" if origin in {"pruned-checkpoint", "empty-record-with-checkpoint"} else None)]
+    states = [([], None), (messages, "flash" if origin in {"pruned-checkpoint", "empty-record-with-checkpoint", "partial-with-checkpoint"} else None)]
     if origin == "pruned-checkpoint":
         states.append((messages + [HumanMessage(id="later", content="Later question"), AIMessage(id="later-answer", content="Later answer")], "chat"))
     checkpoint_config = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
@@ -676,13 +685,18 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
         checkpoint_config = await runtime.checkpointer.aput(checkpoint_config, checkpoint, metadata, {"messages": version})
 
     metadata = {"regenerate_from_message_id": "answer", "regenerate_from_run_id": "source"}
-    if origin == "incomplete-journal":
+    if origin in {"incomplete-journal", "pruned-journal-with-stamp"}:
         await store.put("source", thread_id=tid, user_id=owner, status="success", metadata={"mode": "flash"}, kwargs={"config": {"context": {"thinking_enabled": False}}})
         metadata["regenerate_from_run_id"] = "unconfirmed"
-        lookup = AsyncMock(side_effect=IncompleteMessageRunLookupError("missing cursor"))
-        monkeypatch.setattr(runtime.run_event_store, "find_latest_ai_message_run_ids", lookup)
+        if origin == "incomplete-journal":
+            lookup = AsyncMock(side_effect=IncompleteMessageRunLookupError("missing cursor"))
+            monkeypatch.setattr(runtime.run_event_store, "find_latest_ai_message_run_ids", lookup)
+        else:
+            await runtime.run_event_store.put(thread_id=tid, run_id="pruned", event_type="llm.ai.response", category="message", content={"type": "ai", "id": "answer"})
     elif origin in {"empty-record", "empty-record-with-checkpoint"}:
         await store.put("source", thread_id=tid, user_id=owner, status="success")
+    elif origin in {"partial-with-checkpoint", "partial-no-checkpoint"}:
+        await store.put("source", thread_id=tid, user_id=owner, status="success", kwargs={"config": {"context": {"thinking_enabled": False}}})
     elif origin in {"summary-only", "unrelated-prefix"}:
         if origin == "summary-only":
             metadata.pop("regenerate_from_run_id")
@@ -699,17 +713,17 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
         await store.put("source", thread_id=tid, user_id=None, status="success", metadata={"mode": "ultra"})
         cached = await runtime.run_manager.get("source", user_id=None)
         monkeypatch.setitem(runtime.run_manager._runs, "source", cached)
-    elif origin in {"store-error", "invalid-record"}:
-        lookup = AsyncMock(side_effect=OSError("transient storage error") if origin == "store-error" else TypeError("invalid stored shape"))
-        monkeypatch.setattr(store, "get", lookup)
+    elif origin in {"store-error", "list-store-error", "invalid-record"}:
+        lookup = AsyncMock(side_effect=TypeError("invalid stored shape") if origin == "invalid-record" else OSError("transient storage error"))
+        monkeypatch.setattr(store, "list_by_thread" if origin == "list-store-error" else "get", lookup)
 
     worker = AsyncMock()
     monkeypatch.setattr(services, "run_agent", worker)
     body = _run_create_request("First question", context=selection, metadata=metadata)
     if expected is None:
-        with pytest.raises(HTTPException if origin == "store-error" else TypeError) as failure:
+        with pytest.raises(TypeError if origin == "invalid-record" else HTTPException) as failure:
             await services.start_run(body, tid, request)
-        if origin == "store-error":
+        if origin != "invalid-record":
             assert failure.value.status_code == 503
         lookup.assert_awaited()
         worker.assert_not_awaited()
@@ -721,6 +735,17 @@ async def test_legacy_replay_fallbacks(_stub_app_config, monkeypatch, origin, se
     for name in ("context", "configurable"):
         config = worker.await_args.kwargs["config"].get(name, {})
         assert {key: config[key] for key in ("mode", "subagent_enabled", "thinking_enabled") if key in config} == expected
+
+
+@pytest.mark.asyncio
+async def test_legacy_replay_without_an_owner_does_not_read_run_history(monkeypatch):
+    from app.gateway import services
+
+    request, _, _ = _make_start_run_persistence_context()
+    monkeypatch.setattr(services, "get_current_user", lambda: None)
+    monkeypatch.setattr(services, "get_run_manager", lambda _: pytest.fail("unscoped run lookup"))
+    monkeypatch.setattr(services, "get_run_event_store", lambda _: pytest.fail("unscoped journal lookup"))
+    assert await services.find_legacy_replay_run(request, "thread", "answer", {}, None, None) is None
 
 
 @pytest.mark.asyncio

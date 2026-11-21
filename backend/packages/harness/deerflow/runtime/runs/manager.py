@@ -1246,6 +1246,7 @@ class RunManager:
         limit: int = 100,
         before_created_at: str | None = None,
         before_run_id: str | None = None,
+        raise_on_store_error: bool = False,
     ) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
@@ -1261,6 +1262,7 @@ class RunManager:
             limit: Maximum number of runs to return.
             before_created_at: ISO timestamp of the last run on the previous page.
             before_run_id: Run id of the last run on the previous page.
+            raise_on_store_error: Require a complete owner-scoped page for source attribution.
         """
         before_created_at = _cursor_part(before_created_at)
         before_run_id = _cursor_part(before_run_id)
@@ -1282,6 +1284,7 @@ class RunManager:
                 for record in self._thread_records_locked(thread_id)
                 if record.operation_kind == ThreadOperationKind.run
                 and not record.evicted
+                and (not raise_on_store_error or user_id is None or record.user_id == user_id)
                 and run_is_before_cursor(
                     record.created_at,
                     record.run_id,
@@ -1305,6 +1308,8 @@ class RunManager:
         try:
             rows = await self._store.list_by_thread(thread_id, **store_kwargs)
         except Exception:
+            if raise_on_store_error:
+                raise
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return _page(memory_records)
         for row in rows:
@@ -1321,6 +1326,8 @@ class RunManager:
                 try:
                     records_by_id[run_id] = self._record_from_store(row)
                 except Exception:
+                    if raise_on_store_error:
+                        raise
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return _page(list(records_by_id.values()))
 

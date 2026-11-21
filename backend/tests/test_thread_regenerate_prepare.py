@@ -212,7 +212,7 @@ class FakeRunManager:
     def __init__(self, records):
         self.records = records
 
-    async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
+    async def list_by_thread(self, thread_id, *, user_id=None, limit=100, raise_on_store_error=False):
         return self.records[:limit]
 
     async def get(self, run_id, *, user_id=None):
@@ -1632,6 +1632,37 @@ def test_prepare_regenerate_payload_uses_server_stamped_human_run_id_without_par
     response = asyncio.run(_prepare_regenerate_payload("thread-1", "ai-1", _request(checkpointer, event_store)))
 
     assert response.target_run_id == "parent-run"
+
+
+@pytest.mark.parametrize("content", ["Partial answer", [{"type": "text", "text": "Partial answer"}]])
+def test_prepare_recognizes_length_notice_added_after_the_journal_summary(content):
+    from app.gateway.routers.thread_runs import _find_target_run_id
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+
+    raw = AIMessage(id="ai", content=content, tool_calls=[{"name": "search", "args": {}, "id": "call"}], response_metadata={"finish_reason": "length"})
+    answer = ModelLengthFinishReasonMiddleware().after_model({"messages": [raw]}, SimpleNamespace(context={}))["messages"][0]
+    assert answer.content != raw.content
+    run = SimpleNamespace(run_id="source", status=RunStatus.success, last_ai_message="Partial answer")
+    request = _request(None, FakeEventStore([]), run_manager=FakeRunManager([run]))
+    assert asyncio.run(_find_target_run_id("thread", "ai", answer, None, request)) == "source"
+
+
+@pytest.mark.parametrize("failure", ["duplicate", "journal-outage", "run-list-outage"])
+def test_prepare_requires_one_verified_run_when_looking_up_legacy_answers(monkeypatch, failure):
+    from unittest.mock import AsyncMock
+
+    from app.gateway.routers.thread_runs import _find_target_run_id
+
+    records = [SimpleNamespace(run_id=key, status=RunStatus.success, last_ai_message="Repeated answer") for key in ("first", "second")]
+    manager = FakeRunManager(records)
+    events = FakeEventStore([])
+    if failure == "journal-outage":
+        monkeypatch.setattr(events, "list_messages", AsyncMock(side_effect=OSError("temporary storage failure")))
+    if failure == "run-list-outage":
+        monkeypatch.setattr(manager, "list_by_thread", AsyncMock(side_effect=OSError("temporary storage failure")))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_find_target_run_id("thread", "ai", AIMessage(id="ai", content="Repeated answer"), None, _request(None, events, run_manager=manager)))
+    assert exc.value.status_code == (409 if failure == "duplicate" else 503)
 
 
 def test_prepare_regenerate_payload_rejects_unverified_run_fallback_when_events_are_missing():

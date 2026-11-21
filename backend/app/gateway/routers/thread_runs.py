@@ -706,7 +706,8 @@ async def _find_target_run_id(
 ) -> str:
     user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
-    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT, user_id=user_id)
+    with replay_source_read_errors(thread_id):
+        rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT, user_id=user_id)
     for row in reversed(rows):
         if row.get("event_type") not in {"ai_message", "llm.ai.response"}:
             continue
@@ -720,10 +721,13 @@ async def _find_target_run_id(
         return source_run_id
 
     run_mgr = get_run_manager(request)
-    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
+    with replay_source_read_errors(thread_id):
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10, raise_on_store_error=True)
     matches = replay_runs_matching_answer(records, target_message)
-    if matches:
+    if len(matches) == 1:
         return matches[0].run_id
+    if matches:
+        raise HTTPException(status_code=409, detail="Multiple runs match this assistant message")
     if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
@@ -813,6 +817,15 @@ def _run_status_value(record: Any) -> str | None:
     return str(status) if status is not None else None
 
 
+async def _seeded_replay_source(thread_id: str, run_id: str, request: Request, human: Any, answer: Any) -> RunRecord | None:
+    if is_history_seed_run(thread_id, run_id) and (answer_id := _message_id(answer)):
+        # A history group can hide superseded messages, but only an actual
+        # source run can prove successful completion or record steering inputs.
+        with replay_source_read_errors(thread_id):
+            return await find_legacy_replay_run(request, thread_id, answer_id, _message_additional_kwargs(human), run_id, answer)
+    return None
+
+
 async def _require_successful_source_run(thread_id: str, run_id: str, request: Request, *, source_human: Any = None, source_ai: Any = None) -> RunRecord:
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
@@ -822,11 +835,8 @@ async def _require_successful_source_run(thread_id: str, run_id: str, request: R
         # only covers recent in-memory/store hydration gaps for the latest turn.
         records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)
         record = next((candidate for candidate in records if getattr(candidate, "run_id", None) == run_id), None)
-    if record is None and is_history_seed_run(thread_id, run_id) and (answer_id := _message_id(source_ai)):
-        # Keep the synthetic ID for hiding the superseded history, but validate
-        # completion and steering against an identifiable run in this thread.
-        with replay_source_read_errors(thread_id):
-            record = await find_legacy_replay_run(request, thread_id, answer_id, _message_additional_kwargs(source_human), run_id, source_ai)
+    if record is None:
+        record = await _seeded_replay_source(thread_id, run_id, request, source_human, source_ai)
     if record is None:
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
     record_thread_id = getattr(record, "thread_id", None)
@@ -928,7 +938,8 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
         raise HTTPException(status_code=409, detail="Could not find the user message for this assistant response")
     if target_run_id is None:
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
-    await _reject_multi_input_replay(target_run_id, request, user_id=await _run_scope_user_id(request, thread_id))
+    source = await _seeded_replay_source(thread_id, target_run_id, request, previous_human, messages[target_index] if target_index is not None else None)
+    await _reject_multi_input_replay(source.run_id if source else target_run_id, request, user_id=await _run_scope_user_id(request, thread_id))
     previous_human_id = _message_id(previous_human)
     if not previous_human_id:
         raise HTTPException(status_code=409, detail="The source user message is missing an id")

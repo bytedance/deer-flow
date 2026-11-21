@@ -58,6 +58,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONT
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_NOTICE, MODEL_LENGTH_TERMINATION_MARKER
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
 from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
@@ -2390,7 +2391,12 @@ def replay_runs_matching_answer(records: list[RunRecord], message: Any) -> list[
     text = message_to_text(message)
     if not text:
         return []
-    summaries = {answer[:RUN_ANSWER_SUMMARY_LIMIT].strip() for answer in (text.strip(), strip_leading_think_blocks(text))}
+    raw_texts = [text]
+    # The journal observes the generation before the length middleware appends its notice.
+    termination = _message_additional_kwargs(message).get(MODEL_LENGTH_TERMINATION_MARKER)
+    if isinstance(termination, Mapping) and termination.get("suppressed_tool_call_count") and text.endswith(MODEL_LENGTH_CAPPED_NOTICE):
+        raw_texts.append(text.removesuffix(MODEL_LENGTH_CAPPED_NOTICE).rstrip())
+    summaries = {answer[:RUN_ANSWER_SUMMARY_LIMIT].strip() for raw in raw_texts for answer in (raw.strip(), strip_leading_think_blocks(raw))}
     matches = []
     for record in records:
         if record.status != RunStatus.success:
@@ -2423,10 +2429,12 @@ async def find_legacy_replay_run(request: Request, thread_id: str, message_id: s
     """Find a run attributable to this answer and caller, including before turn markers existed."""
     user = get_current_user()
     owner = get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
+    if owner is None:
+        return None
     manager = get_run_manager(request)
-    run_id = source.get("run_id")
-    record = None
-    if not run_id or (target_run_id and target_run_id != run_id):
+    source_id = source.get("run_id")
+    journal_id = None
+    if not source_id or (target_run_id and target_run_id != source_id):
         # A regenerated answer can belong to a different run from its copied prompt.
         # The prepare response is a hint; verify a different ID against the journal.
         try:
@@ -2436,21 +2444,18 @@ async def find_legacy_replay_run(request: Request, thread_id: str, message_id: s
             # still identify the run when a legacy journal cannot page back.
             origins = {}
         journal_id = origins.get(message_id)
-        if journal_id and not is_history_seed_run(thread_id, journal_id):
-            run_id = journal_id
-    if isinstance(run_id, str) and run_id and not is_history_seed_run(thread_id, run_id):
+    run_ids = [value for value in (journal_id, source_id) if isinstance(value, str) and value and not is_history_seed_run(thread_id, value)]
+    for run_id in dict.fromkeys(run_ids):
         record = await manager.get(run_id, user_id=owner, raise_on_store_error=True)
-    elif answer is not None:
-        # A summary can identify a run only when history supplies no real ID.
+        # A cache hit alone does not prove the run belongs to this turn and caller.
+        if record is not None and record.thread_id == thread_id and record.user_id == owner:
+            return record
+    if run_ids or answer is None:
         # A pruned run must never borrow another run's identical answer.
-        records = await manager.list_by_thread(thread_id, user_id=owner, limit=10)
-        matches = replay_runs_matching_answer([row for row in records if row.user_id == owner], answer)
-        if len(matches) == 1:
-            record = matches[0]
-    # get() can return a cached run without applying the store's owner filter.
-    if record is None or record.thread_id != thread_id or record.user_id != owner:
         return None
-    return record
+    records = await manager.list_by_thread(thread_id, user_id=owner, limit=10, raise_on_store_error=True)
+    matches = replay_runs_matching_answer(records, answer)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _stored_mode_options(record: RunRecord | None) -> dict[str, Any] | None:
@@ -2542,16 +2547,16 @@ async def _recover_source_message_metadata(
             with replay_source_read_errors(thread_id):
                 record = await find_legacy_replay_run(request, thread_id, target_message_id, metadata, target_run_id, answer)
                 options = _stored_mode_options(record)
-                if options is None and answer is not None and not metadata.get(CHAT_MODE_KEY):
+                if selected_mode(options) is None and answer is not None and not metadata.get(CHAT_MODE_KEY):
                     # A later turn can have changed the head's mode. Only the
                     # checkpoint which introduced this exact answer can supply it.
                     try:
                         origin = await find_checkpoint_introducing_message(accessor, snapshot, target_message_id, max_depth=32)
                     except CheckpointLineageError:
-                        return metadata
+                        origin = None
                     origin_metadata = getattr(origin, "metadata", None) or {}
                     if origin_metadata.get("source") in {"input", "loop"} and (mode := selected_mode(origin_metadata)):
-                        options = {"mode": mode}
+                        options = {**(options or {}), "mode": mode}
             if options is not None:
                 return {**metadata, _TURN_MODE_OPTIONS: options}
         return metadata

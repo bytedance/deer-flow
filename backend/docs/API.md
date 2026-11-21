@@ -444,12 +444,14 @@ Regenerating a reply or editing and resending its prompt uses the original
 turn's mode and its recorded reasoning, planning, and delegation options.
 For example, a Flash turn with an attachment can be regenerated after
 selecting Chat for the next message. Older turns recover settings from their
-source run or the mode from the checkpoint that introduced the response. If
-neither records a mode or options, an explicitly selected ordinary mode can
-be used. Selecting Chat in this case replays the turn with ordinary agent
-defaults. A temporary storage error reading the identified source run or
-checkpoint returns a retryable `503`. Editing a backfilled answer still
-requires a successful source run on the same thread.
+source run and can recover a missing mode from the checkpoint that introduced
+the response. If only individual options were recorded, those options apply
+with the ordinary agent defaults. If both sources lack settings, an explicitly
+selected ordinary mode can be used. Selecting Chat in this case replays the
+turn with ordinary agent defaults. A temporary storage error during source
+lookup returns a retryable `503`. Duplicate answer summaries alone cannot
+identify an original run for preparation (`409`). Editing a backfilled
+answer still requires a successful source run on the same thread.
 When regenerating an interrupted answer, forward the checkpoint and metadata
 returned by `runs/regenerate/prepare`. Submitting a run whose original turn
 can no longer be identified returns `409`.
