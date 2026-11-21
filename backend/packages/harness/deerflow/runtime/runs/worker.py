@@ -1084,6 +1084,10 @@ async def run_agent(
     # earlier runs on the same thread — without it, one stale fallback in
     # history would mark every subsequent run on this thread as ``error``.
     pre_existing_message_ids: set[str] = set()
+    # First values frame replayed when the pre-run capture failed. It is an
+    # emission boundary, not current output: only later message IDs can decide
+    # this run's fallback.
+    fallback_boundary_ids: set[str] | None = None
 
     # Bound agent graph accessor + captured pre-run rollback point; assigned
     # inside the try block so the finally rollback path can fork the pre-run
@@ -1715,6 +1719,31 @@ async def run_agent(
                 pending_pause = True
                 remember_approval(streamed_interrupts)
 
+        def _fallback_scope(chunk: Any, mode: str) -> set[str] | None:
+            """Message IDs allowed to decide this run's fallback for one frame.
+
+            ``None`` means this frame only establishes the boundary and must not
+            latch a fallback. Without a captured pre-run snapshot, the first values
+            frame can be entirely replayed history; later frames are compared
+            against that baseline.
+            """
+            nonlocal fallback_boundary_ids
+            if not snapshot_capture_failed or checkpointer is None:
+                return pre_existing_message_ids
+            if mode in {"checkpoints", "debug"}:
+                # Introspection snapshots can contain the full pre-run state.
+                # They seed the boundary but never decide the current status.
+                fallback_boundary_ids = (fallback_boundary_ids or set()) | _collect_message_ids_deep(chunk)
+                return None
+            if mode not in {"values", "updates"}:
+                return pre_existing_message_ids
+            if fallback_boundary_ids is None:
+                # Establish the boundary even when the frame is empty: a new
+                # thread's first message-bearing frame can be the current fallback.
+                fallback_boundary_ids = _collect_message_ids_deep(chunk)
+                return None
+            return pre_existing_message_ids | fallback_boundary_ids
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
             if input_control is not None:
@@ -1736,7 +1765,9 @@ async def run_agent(
                                 if single_mode != "custom":
                                     # Custom frames carry task_* events whose payload can hold a delegated
                                     # subagent's messages; see the multi-mode branch below.
-                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                    scope_ids = _fallback_scope(chunk, single_mode)
+                                    if scope_ids is not None:
+                                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, scope_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
                                 single_payload = serialize(chunk, mode=single_mode)
                                 if single_mode == "values" and seq_stamper is not None:
@@ -1792,7 +1823,9 @@ async def run_agent(
                                 # executor's to map (task_failed), not this run's. That
                                 # includes the child messages task_running custom events
                                 # carry, which are root frames too.
-                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                scope_ids = _fallback_scope(chunk, mode)
+                                if scope_ids is not None:
+                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, scope_ids)
                             observe_stream_pause(mode, chunk, namespace)
                             await _publish_stream_item(
                                 bridge=bridge,
@@ -4010,6 +4043,34 @@ def _collect_pre_existing_message_ids(values: Any) -> set[str]:
     if not isinstance(messages, (list, tuple)):
         return set()
     return {message_id for message in messages if (message_id := _message_id(message)) is not None}
+
+
+def _collect_message_ids_deep(value: Any) -> set[str]:
+    """Collect message IDs from values or nested updates frames."""
+    ids: set[str] = set()
+    seen: set[int] = set()
+
+    def walk(obj: Any) -> None:
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+        if isinstance(obj, dict):
+            message_id = _message_id(obj)
+            if message_id is not None:
+                ids.add(message_id)
+            for item in obj.values():
+                walk(item)
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                walk(item)
+        else:
+            message_id = _message_id(obj)
+            if message_id is not None:
+                ids.add(message_id)
+
+    walk(value)
+    return ids
 
 
 def _unpack_stream_item(
