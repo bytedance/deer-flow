@@ -57,6 +57,7 @@ from app.gateway.services import (
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
+from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
@@ -127,7 +128,8 @@ def _optional_run_event_store(request: Request) -> Any:
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+# The share-import keys decide whether run admission rewrites a copy's history.
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY})
 # Checkpoint metadata the server writes and later reads back as trusted:
 # LangGraph's lineage keys and delta counters (``step`` drives the next turn,
 # ``parents`` the history walk, and ``counters_since_delta_snapshot`` is read

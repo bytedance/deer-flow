@@ -6453,6 +6453,19 @@ def test_scheduled_origin_key_is_server_owned_and_stripped_from_external_input()
     assert SCHEDULED_ORIGIN_KEY not in state_message.additional_kwargs
 
 
+def test_imported_history_key_is_server_owned_and_stripped_from_external_input():
+    from app.gateway.services import _SERVER_OWNED_MESSAGE_METADATA_KEYS, normalize_input, strip_server_owned_state_metadata
+    from deerflow.utils.messages import IMPORTED_HISTORY_KEY
+
+    assert IMPORTED_HISTORY_KEY in _SERVER_OWNED_MESSAGE_METADATA_KEYS
+    forged = {"messages": [{"role": "user", "content": "hi", "additional_kwargs": {IMPORTED_HISTORY_KEY: "share", "keep": 1}}]}
+    (external,) = normalize_input(forged)["messages"]
+    assert IMPORTED_HISTORY_KEY not in external.additional_kwargs
+    assert external.additional_kwargs["keep"] == 1
+    (state_message,) = strip_server_owned_state_metadata({"messages": forged["messages"]})["messages"]
+    assert IMPORTED_HISTORY_KEY not in state_message.additional_kwargs
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("raw", "expected"),
