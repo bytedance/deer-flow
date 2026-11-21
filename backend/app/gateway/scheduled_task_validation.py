@@ -75,7 +75,7 @@ def _validate_once_wall_time(schedule_spec: dict[str, Any], timezone: str) -> No
     if isinstance(run_at, str):
         try:
             _resolve_local_datetime(datetime.fromisoformat(run_at), timezone)
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             raise ValueError(f"run_at: {exc}") from exc
 
 
