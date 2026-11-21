@@ -147,6 +147,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - [Conversation Sharing](docs/guide/sharing.md) - Expiring read-only snapshots, artifact previews and workspace copies
 - [Architecture Overview](docs/ARCHITECTURE.md) - How the services fit together
 - [Contributing Guide](CONTRIBUTING.md) - Development environment, workflow and tests
+- [SQLAlchemy storage adapter example](examples/deerflow-storage-adapters/README.md) - Standalone storage for extensions
 - [Changelog](CHANGELOG.md) - Release notes
 
 ## ⚠️ Security Notice
