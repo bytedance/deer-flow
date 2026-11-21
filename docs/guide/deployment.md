@@ -306,6 +306,15 @@ rolling upgrade, route keyed runs with ID-less input and their retries to
 upgraded workers until all Gateway workers are upgraded; older workers may
 reject those retries with 409. See the [run API contract](../../backend/docs/API.md#create-run).
 
+### Redis checkpoint history cache upgrade
+
+The v2 cache rebuilds histories under a new default prefix. Deleting or pruning
+a thread also purges its v1 entries for the same database, including entries
+without expiry. If `database.checkpoint_cache.key_prefix` is set, stop all
+workers using that prefix, clear this deployment's Redis checkpoint history
+keys, and then start the upgraded workers. Custom prefixes keep the same name
+across cache versions.
+
 ## Option 2: Local Development
 
 If you prefer running services locally:

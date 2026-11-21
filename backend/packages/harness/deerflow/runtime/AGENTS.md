@@ -44,6 +44,9 @@ make test-blocking-io
   effective schema. It preserves mode gates, parentage and pending writes.
 - **Delta resume and rollback rewrite the current head.** They do not fork.
   Reject a missing tuple or pending sends before the first write.
+- **Redis history cache purges include the previous default namespace.** On
+  the v1-to-v2 upgrade, purge thread data under both prefixes for the same
+  database identity. Custom namespaces have an operator-managed migration.
 
 ## Admission and terminal commit
 
