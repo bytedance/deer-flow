@@ -174,11 +174,13 @@ async def test_cancel_and_followup_in_separate_transactions(repo):
 async def test_coordination_migration_matches_model_and_downgrades(database):
     engine, _, schema = database
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
+    previous = "0058_mcp_browser_oauth"
+    revision = "0059_coordination_grants"
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
-    await asyncio.to_thread(command.upgrade, config, "0057_coordination_workers")
+    await asyncio.to_thread(command.upgrade, config, previous)
     repo = CoordinationTaskRepository(async_sessionmaker(engine))
     task = await repo.create("alice", request_id="root", objective="Test the upgraded schema")
-    await asyncio.to_thread(command.upgrade, config, "0058_coordination_grants")
+    await asyncio.to_thread(command.upgrade, config, revision)
     async with engine.connect() as conn:
 
         def diff(sync):
@@ -191,12 +193,18 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
         assert await conn.run_sync(diff) == []
     assert (await repo.get("alice", task["id"]))["status"] == TaskStatus.QUEUED
     await repo.append_input("alice", task["id"], request_id="update", content="Record an input")
+    await asyncio.to_thread(command.downgrade, config, previous)
+    async with engine.connect() as conn:
+        tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
+    assert "mcp_oauth_attempts" in tables
+    assert "coord_task_grants" not in tables
+    assert (await repo.get("alice", task["id"]))["latest_input_seq"] == 1
     await asyncio.to_thread(command.downgrade, config, "0055_thread_shares")
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
     assert "threads_meta" in tables
     assert not {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts", "coord_task_grants"} & tables
-    await asyncio.to_thread(command.upgrade, config, "0058_coordination_grants")
+    await asyncio.to_thread(command.upgrade, config, revision)
     assert (await repo.create("alice", request_id="root", objective="After re-upgrade"))["status"] == TaskStatus.QUEUED
 
 

@@ -3,8 +3,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0058_coordination_grants"
-down_revision = "0057_coordination_workers"
+revision = "0059_coordination_grants"
+down_revision = "0058_mcp_browser_oauth"
 branch_labels = None
 depends_on = None
 
