@@ -1039,7 +1039,7 @@ async def test_start_run_idempotency_distinguishes_static_resume_from_new_input(
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
-        patch("app.gateway.services._recover_run_knowledge_scope", new=AsyncMock(return_value=None)),
+        patch("app.gateway.services._recover_source_message_metadata", new=AsyncMock(return_value={})),
     ):
         reused = await start_run(body, "thread-1", _make_start_run_request(manager), idempotency_key="static-resume-key")
         with pytest.raises(HTTPException) as excinfo:

@@ -36,7 +36,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     state_schema = ThreadDataMiddlewareState
 
-    def __init__(self, base_dir: str | None = None, lazy_init: bool = True):
+    def __init__(self, base_dir: str | None = None, lazy_init: bool = True, *, include_workspace: bool = True):
         """Initialize the middleware.
 
         Args:
@@ -44,10 +44,12 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             lazy_init: If True, defer directory creation until needed.
                       If False, create directories eagerly in before_agent().
                       Default is True for optimal performance.
+            include_workspace: Whether this run uses thread workspace paths.
         """
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
         self._lazy_init = lazy_init
+        self._include_workspace = include_workspace
 
     def _get_thread_paths(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
         """Get the paths for a thread's data directories.
@@ -89,16 +91,6 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
-        user_id = resolve_runtime_user_id(runtime)
-
-        if self._lazy_init:
-            # Lazy initialization: only compute paths, don't create directories
-            paths = self._get_thread_paths(thread_id, user_id=user_id)
-        else:
-            # Eager initialization: create directories immediately
-            paths = self._create_thread_directories(thread_id, user_id=user_id)
-            logger.debug("Created thread data directories for thread %s", thread_id)
-
         messages = list(state.get("messages", []))
         last_message = messages[-1] if messages else None
 
@@ -114,9 +106,12 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
                 },
             )
 
-        return {
-            "thread_data": {
-                **paths,
-            },
-            "messages": messages,
-        }
+        if not self._include_workspace:
+            return {"messages": messages}
+        user_id = resolve_runtime_user_id(runtime)
+        if self._lazy_init:
+            paths = self._get_thread_paths(thread_id, user_id=user_id)
+        else:
+            paths = self._create_thread_directories(thread_id, user_id=user_id)
+            logger.debug("Created thread data directories for thread %s", thread_id)
+        return {"thread_data": paths, "messages": messages}

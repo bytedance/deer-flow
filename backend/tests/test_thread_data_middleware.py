@@ -36,6 +36,15 @@ class TestThreadDataMiddleware:
         assert result is not None
         assert "/users/runtime-user/threads/thread-123/" in _as_posix(result["thread_data"]["workspace_path"])
 
+    def test_conversation_only_stamps_the_input_without_provisioning_workspace_paths(self, tmp_path):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=False, include_workspace=False)
+        result = middleware.before_agent(state={"messages": [HumanMessage(content="hello")]}, runtime=Runtime(context={"thread_id": "t", "run_id": "r"}))
+
+        assert "thread_data" not in result
+        assert result["messages"][-1].name == "user-input"
+        assert result["messages"][-1].additional_kwargs["run_id"] == "r"
+        assert not list(tmp_path.iterdir())
+
     def test_before_agent_uses_thread_id_from_configurable_when_context_is_none(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         runtime = Runtime(context=None)

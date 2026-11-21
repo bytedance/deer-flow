@@ -2,6 +2,7 @@
 
 import asyncio
 import gc
+import json
 import logging
 import stat
 import sys
@@ -1132,6 +1133,84 @@ async def test_session_pool_tool_wrapping():
         await wrapped.coroutine(deerflow_runtime=mock_runtime, url="https://example.com")
 
     mock_session.call_tool.assert_awaited_once_with("navigate", {"url": "https://example.com"})
+
+
+@pytest.mark.asyncio
+async def test_chat_stdio_session_survives_mode_switch_without_publishing_files(tmp_path):
+    from pathlib import Path
+
+    from langchain_core.tools import StructuredTool
+    from langchain_mcp_adapters.sessions import create_session
+    from pydantic import BaseModel
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    server = """
+from pathlib import Path
+from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, ResourceLink, TextContent
+
+mcp = FastMCP("reports")
+calls = 0
+
+@mcp.tool()
+def search() -> CallToolResult:
+    global calls
+    calls += 1
+    if calls == 3:
+        return CallToolResult(content=[], structuredContent={"count": calls})
+    path = Path.cwd() / "report.txt"
+    path.write_text("report")
+    return CallToolResult(content=[TextContent(type="text", text=f"call {calls}"), ResourceLink(type="resource_link", name="report", uri=path.as_uri())])
+
+mcp.run(transport="stdio")
+"""
+    paths = Paths(tmp_path)
+    pool = MCPSessionPool()
+    runtime = SimpleNamespace(context={"user_id": "alice", "thread_id": "t", "thread_incarnation": "i", "mode": "chat"}, config={})
+    workspace = paths.sandbox_work_dir("t", user_id="alice")
+
+    tool = StructuredTool(name="search", description="search", args_schema=BaseModel, coroutine=AsyncMock())
+    connection = {"transport": "stdio", "command": sys.executable, "args": ["-c", server], "env": {"KEEP": "yes"}}
+    wrapped = _make_session_pool_tool(tool, "s", connection, pool=pool)
+    with patch("langchain_mcp_adapters.sessions.create_session", wraps=create_session) as sessions, patch("deerflow.mcp.tools.get_paths", return_value=paths):
+        try:
+            first, artifact = await wrapped.coroutine(deerflow_runtime=runtime)
+            assert [block["text"] for block in first] == ["call 1"]
+            assert artifact is None
+            assert not workspace.exists()
+            chat_connection = sessions.call_args.args[0]
+            private_dir = Path(chat_connection["cwd"])
+            assert private_dir.is_dir()
+            assert chat_connection["env"] == {"KEEP": "yes", **dict.fromkeys(("TMPDIR", "TMP", "TEMP"), str(private_dir))}
+            assert (private_dir / "report.txt").is_file()
+
+            runtime.context["mode"] = "pro"
+            _, artifact = await wrapped.coroutine(deerflow_runtime=runtime)
+            assert Path(sessions.call_args.args[0]["cwd"]) == workspace
+            assert artifact["resource_links"][0]["uri"].startswith("/mnt/user-data/")
+
+            runtime.context["mode"] = "chat"
+            third, artifact = await wrapped.coroutine(deerflow_runtime=runtime)
+            assert [block["text"] for block in third] == ["call 2"]
+            assert artifact is None
+            assert sessions.call_count == 2
+
+            structured, artifact = await wrapped.coroutine(deerflow_runtime=runtime)
+            assert [json.loads(block["text"]) for block in structured] == [{"count": 3}]
+            assert artifact is None
+
+            runtime.context["user_id"] = "bob"
+            await wrapped.coroutine(deerflow_runtime=runtime)
+            other_dir = Path(sessions.call_args.args[0]["cwd"])
+            assert other_dir != private_dir
+            await pool.close_thread_scope(user_id="alice", thread_id="t")
+            assert not private_dir.exists()
+            assert other_dir.is_dir()
+            assert workspace.is_dir()
+        finally:
+            await pool.close_all()
 
 
 @pytest.mark.asyncio

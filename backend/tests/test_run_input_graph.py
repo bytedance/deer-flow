@@ -8,6 +8,7 @@ import pytest
 from langchain.agents import create_agent
 from langchain.tools import ToolRuntime
 from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import InjectedToolCallId, tool
@@ -42,6 +43,29 @@ def test_input_control_reaches_the_factory_only_from_the_worker():
     assert INPUT_CONTEXT_KEY not in redact_config_secrets(config)["context"]
     _release_run_scoped_references([config], context, None)
     assert INPUT_CONTEXT_KEY not in config["context"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_mode", [False, True])
+async def test_checkpointed_steer_uses_its_owning_run_mode(chat_mode):
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    await inputs.submit("correction", "Use the new date", "steer")
+    saver = InMemorySaver()
+    control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=saver, chat_mode=chat_mode)
+    graph = create_agent(FakeMessagesListChatModel(responses=[AIMessage("Updated")]), middleware=[RunInputAdmissionMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+    config = {"configurable": {"thread_id": "thread"}}
+    previous = HumanMessage("Previous turn", additional_kwargs={"run_id": "old", "files": [{"filename": "past.pdf"}]})
+    await graph.ainvoke({"messages": [previous]}, config, context={INPUT_CONTEXT_KEY: control})
+
+    state = await graph.aget_state(config)
+    old, current = (message for message in state.values["messages"] if isinstance(message, HumanMessage))
+    assert old.additional_kwargs == previous.additional_kwargs
+    assert current.additional_kwargs["run_input_id"] == "correction"
+    assert current.additional_kwargs["run_input_source"] == "user"
+    assert current.additional_kwargs["run_id"] == "run"
+    assert current.additional_kwargs.get("deerflow_mode") == ("chat" if chat_mode else None)
 
 
 class InputModel(BaseChatModel):

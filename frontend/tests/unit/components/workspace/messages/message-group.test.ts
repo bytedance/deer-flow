@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { MessageArtifactPathsContext } from "@/components/workspace/messages/markdown-link";
+import {
+  MessageArtifactPathsContext,
+  TextOnlyMessageContext,
+} from "@/components/workspace/messages/markdown-link";
 import {
   MessageGroup,
   scheduleToolLabel,
@@ -67,6 +70,34 @@ describe("MessageGroup", () => {
     const html = renderGroup(messages);
     expect(html).toContain("second fetched title");
     expect(html).not.toContain("first fetched title");
+  });
+
+  it("keeps web search results visible when Chat also streams an invented file call", () => {
+    const messages: Message[] = [
+      {
+        type: "ai",
+        content: "",
+        tool_calls: [
+          { id: "web", name: "web_search", args: { query: "news" } },
+          {
+            id: "file",
+            name: "present_files",
+            args: { filepaths: ["/mnt/user-data/outputs/invented.txt"] },
+          },
+        ],
+      },
+      {
+        type: "tool",
+        tool_call_id: "web",
+        content: JSON.stringify([
+          { title: "News source", url: "https://example.com/news" },
+        ]),
+      },
+    ];
+    const html = renderGroup(messages, {}, null, true);
+    expect(html).toContain('href="https://example.com/news"');
+    expect(html).not.toContain("invented.txt");
+    expect(html).not.toContain("present_files");
   });
 
   it("resolves relative artifact links in chain-of-thought assistant text", () => {
@@ -939,8 +970,13 @@ function renderGroup(
   messages: Message[],
   props: Omit<ComponentProps<typeof MessageGroup>, "messages"> = {},
   artifactPaths: readonly string[] | null = null,
+  textOnly = false,
 ) {
-  const group = createElement(MessageGroup, { ...props, messages });
+  const group = createElement(
+    TextOnlyMessageContext.Provider,
+    { value: textOnly },
+    createElement(MessageGroup, { ...props, messages }),
+  );
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,

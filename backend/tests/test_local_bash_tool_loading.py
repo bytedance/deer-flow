@@ -21,6 +21,22 @@ def _make_config(*, allow_host_bash: bool, sandbox_use: str = "deerflow.sandbox.
     )
 
 
+def test_chat_uses_resolved_text_retrieval_tools_in_authorized_groups(monkeypatch):
+    config = _make_config(
+        allow_host_bash=True,
+        extra_tools=[
+            SimpleNamespace(name="engine_search", group="web", use="tests:search"),
+            SimpleNamespace(name="web_fetch", group="web", use="tests:capture"),
+            SimpleNamespace(name="reader", group="web", use="tests:read_conversation"),
+        ],
+    )
+    monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: config)
+    names = {"tests:search": "web_search", "tests:capture": "write_file", "tests:read_conversation": "read_conversation"}
+    monkeypatch.setattr("deerflow.tools.tools.resolve_variable", lambda use, _: SimpleNamespace(name=names[use]))
+    bound = get_available_tools(groups=["web"], include_mcp=False, chat_mode=True)
+    assert {t.name for t in bound} == {"web_search", "ask_clarification"}
+
+
 def test_get_available_tools_hides_bash_for_default_local_sandbox(monkeypatch):
     monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: _make_config(allow_host_bash=False))
     monkeypatch.setattr(

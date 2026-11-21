@@ -49,6 +49,7 @@ class McpTaskToolCaller(Protocol):
         request_scoped_headers: bool = False,
         connection_scope: Literal["deployment", "personal"] = "deployment",
         agent_auth: dict[str, Any] | None = None,
+        chat_mode: bool = False,
     ) -> Any: ...
 
 
@@ -150,7 +151,16 @@ def _artifact_dict(artifact: _ResultArtifact | None) -> dict[str, str] | None:
     return artifact.model_dump() if artifact is not None else None
 
 
-def _snapshot_from_status(payload: _StatusPayload | _CancelPayload) -> TaskSnapshot:
+def _call_options(driver_data: dict[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {"connection_scope": _connection_scope(driver_data)}
+    if "agent_auth" in driver_data:
+        options["agent_auth"] = driver_data["agent_auth"]
+    if driver_data.get("chat_mode") is True:
+        options["chat_mode"] = True
+    return options
+
+
+def _snapshot_from_status(payload: _StatusPayload | _CancelPayload, *, chat_mode: bool) -> TaskSnapshot:
     input_required = getattr(payload, "input_required", None)
     if getattr(payload, "error_code", None) == "task_not_found":
         return TaskSnapshot(
@@ -162,7 +172,7 @@ def _snapshot_from_status(payload: _StatusPayload | _CancelPayload) -> TaskSnaps
     return TaskSnapshot(
         status=_REMOTE_TO_LOCAL_STATUS[payload.status],
         result=payload.result,
-        result_artifact=_artifact_dict(payload.result_artifact),
+        result_artifact=None if chat_mode else _artifact_dict(payload.result_artifact),
         error=payload.error,
         input_required=input_required,
         poll_after_seconds=getattr(payload, "poll_after_seconds", None),
@@ -188,8 +198,7 @@ class OrdinaryMcpTaskDriver:
             # durable-task call that can carry the run's request-scoped
             # credentials; status and cancel run after that run ended.
             request_scoped_headers=True,
-            connection_scope=_connection_scope(request.driver_data),
-            **({"agent_auth": request.driver_data["agent_auth"]} if "agent_auth" in request.driver_data else {}),
+            **_call_options(request.driver_data),
         )
         payload = _parse(
             _SubmitPayload,
@@ -212,8 +221,7 @@ class OrdinaryMcpTaskDriver:
             user_id=task.user_id,
             thread_id=task.thread_id,
             thread_incarnation=task.thread_incarnation,
-            connection_scope=_connection_scope(task.driver_data),
-            **({"agent_auth": task.driver_data["agent_auth"]} if "agent_auth" in task.driver_data else {}),
+            **_call_options(task.driver_data),
         )
         payload = _parse(
             _StatusPayload,
@@ -222,7 +230,7 @@ class OrdinaryMcpTaskDriver:
         )
         assert isinstance(payload, _StatusPayload)
         self._require_matching_task_id(payload.task_id, task.remote_task_id)
-        return _snapshot_from_status(payload)
+        return _snapshot_from_status(payload, chat_mode=task.driver_data.get("chat_mode") is True)
 
     async def cancel(self, task: TaskReference) -> TaskSnapshot:
         tool_name = _tool_name(task.driver_data, "cancel_tool")
@@ -233,8 +241,7 @@ class OrdinaryMcpTaskDriver:
             user_id=task.user_id,
             thread_id=task.thread_id,
             thread_incarnation=task.thread_incarnation,
-            connection_scope=_connection_scope(task.driver_data),
-            **({"agent_auth": task.driver_data["agent_auth"]} if "agent_auth" in task.driver_data else {}),
+            **_call_options(task.driver_data),
         )
         payload = _parse(
             _CancelPayload,
@@ -243,7 +250,7 @@ class OrdinaryMcpTaskDriver:
         )
         assert isinstance(payload, _CancelPayload)
         self._require_matching_task_id(payload.task_id, task.remote_task_id)
-        return _snapshot_from_status(payload)
+        return _snapshot_from_status(payload, chat_mode=task.driver_data.get("chat_mode") is True)
 
     @staticmethod
     def _require_matching_task_id(actual: str, expected: str) -> None:

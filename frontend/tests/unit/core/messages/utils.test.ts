@@ -1,3 +1,4 @@
+import { AIMessageChunk } from "@langchain/core/messages";
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
@@ -39,6 +40,124 @@ function aiMessage(content: string): Message {
     content,
   } as Message;
 }
+
+test.each([false, true])(
+  "Chat presents the answer text without file cards (streaming %s)",
+  (isCurrentTurnLoading) => {
+    const present = (id: string): Message => ({
+      type: "ai",
+      id,
+      content: "你好 [来源](https://example.com)",
+      tool_calls: [
+        {
+          id,
+          name: "present_files",
+          args: { filepaths: ["/mnt/user-data/outputs/a.txt"] },
+        },
+      ],
+    });
+    const messages: Message[] = [
+      { type: "human", content: "previous" },
+      present("before"),
+      {
+        type: "human",
+        content: "生成一个文件，写你好",
+        additional_kwargs: { deerflow_mode: "chat" },
+      },
+      present("chat-answer"),
+    ];
+    const groups = getMessageGroups(messages, { isCurrentTurnLoading });
+    expect(
+      groups
+        .filter((g) => g.type === "assistant:present-files")
+        .map((g) => g.id),
+    ).toEqual(["before"]);
+    expect(
+      groups.find((g) => g.id === "chat-answer")?.messages[0]?.content,
+    ).toBe("你好 [来源](https://example.com)");
+    expect(groups.find((g) => g.id === "chat-answer")?.messages[0]).toBe(
+      messages[3],
+    );
+    expect(
+      getMessageGroups([
+        ...messages,
+        { type: "human", content: "normal" },
+        present("after"),
+      ]).at(-1)?.type,
+    ).toBe("assistant:present-files");
+  },
+);
+
+test("concatenated Chat stream markers keep file cards out of a full or paged turn", () => {
+  const chunk = new AIMessageChunk({
+    id: "answer",
+    content: "你",
+    additional_kwargs: { deerflow_mode: "chat" },
+  });
+  const merged = chunk.concat(
+    new AIMessageChunk({
+      id: "answer",
+      content: "好",
+      additional_kwargs: { deerflow_mode: "chat" },
+    }),
+  );
+  expect(merged.additional_kwargs.deerflow_mode).toBe("chatchat");
+  const ai: Message = {
+    id: "answer",
+    type: "ai",
+    content: "你好",
+    additional_kwargs: merged.additional_kwargs,
+    tool_calls: [
+      { id: "file", name: "present_files", args: { filepaths: ["out.txt"] } },
+    ],
+  };
+  const human: Message = {
+    type: "human",
+    content: "say hi",
+    additional_kwargs: { deerflow_mode: "chat" },
+  };
+  for (const messages of [[human, ai], [ai]]) {
+    const last = getMessageGroups(messages).at(-1);
+    expect(last?.type).toBe("assistant");
+    expect(last?.textOnly).toBe(true);
+  }
+});
+
+test.each(["web_search", "present_files"])(
+  "a history page beginning with a tagged %s result inherits Chat through the next answer",
+  (name) => {
+    const groups = getMessageGroups([
+      {
+        id: "result",
+        type: "tool",
+        tool_call_id: "first",
+        name,
+        content: "result",
+        additional_kwargs: { deerflow_mode: "chat" },
+      },
+      {
+        id: "answer",
+        type: "ai",
+        content: "你好",
+        tool_calls: [
+          {
+            id: "file",
+            name: "present_files",
+            args: { filepaths: ["out.txt"] },
+          },
+        ],
+      },
+    ]);
+    const first = groups.find((group) => group.id === "result");
+    if (name === "web_search") expect(first?.textOnly).toBe(true);
+    else expect(first).toBeUndefined();
+    expect(groups.at(-1)).toMatchObject({
+      id: "answer",
+      type: "assistant",
+      textOnly: true,
+    });
+  },
+);
 
 test.each(["OK", "Error: failed"])(
   "selected unique calls resolve a leading result: %s",

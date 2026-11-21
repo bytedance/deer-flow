@@ -10,6 +10,18 @@ const settings = {
 } as unknown as LocalSettings["context"];
 
 describe("buildRunContext", () => {
+  it("sends Chat explicitly and defers thinking to the selected model", () => {
+    const context = buildRunContext({
+      settings: { ...settings, mode: "chat", reasoning_effort: "high" },
+      threadId: "t-1",
+      extraContext: { thinking_enabled: false, reasoning_effort: "low" },
+    });
+    expect(context.mode).toBe("chat");
+    expect(context).not.toHaveProperty("thinking_enabled");
+    expect(context).not.toHaveProperty("reasoning_effort");
+    expect(context.is_plan_mode).toBe(false);
+    expect(context.subagent_enabled).toBe(false);
+  });
   it("uses the current UI locale instead of stale saved or caller context", () => {
     const stale = { ...settings, locale: "en-US" };
     const context = buildRunContext({

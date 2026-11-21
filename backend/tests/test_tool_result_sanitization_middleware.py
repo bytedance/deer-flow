@@ -259,3 +259,95 @@ class TestAsyncPath:
 
         result = asyncio.run(mw.awrap_tool_call(_request("bash"), handler))
         assert result is msg
+
+
+def test_chat_tool_results_keep_authorized_text_without_attachments():
+    from deerflow.agents.middlewares.chat_mode_middleware import ChatModeMiddleware
+
+    mixed = ToolMessage(
+        name="search_docs",
+        tool_call_id="query-1",
+        content=[{"type": "text", "text": "A result with https://example.org/source"}, {"type": "image", "base64": "aW1hZ2U=", "mime_type": "image/png"}],
+        artifact={"resource_links": [{"uri": "file:///private/output.pdf"}], "human_input": {"kind": "human_input_request", "source": "ask_clarification"}},
+    )
+    result = ChatModeMiddleware().wrap_tool_call(_request("search_docs"), lambda _: mixed)
+    assert result.content == [{"type": "text", "text": "A result with https://example.org/source"}]
+    assert result.artifact is None
+    assert result.additional_kwargs["deerflow_mode"] == "chat"
+    assert "deerflow_mode" not in mixed.additional_kwargs
+    assert len(mixed.content) == 2
+
+
+def test_chat_preserves_the_pending_clarification_and_its_options():
+    from deerflow.agents.human_input import extract_unanswered_human_input_request
+    from deerflow.agents.middlewares.chat_mode_middleware import ChatModeMiddleware
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+    request = _request("ask_clarification")
+    request.tool_call["args"] = {"question": "Which region?", "clarification_type": "approach_choice", "options": ["East", "West"]}
+    command = ClarificationMiddleware().wrap_tool_call(request, lambda _: None)
+    original = command.update["messages"][0]
+    result = ChatModeMiddleware().wrap_tool_call(request, lambda _: command)
+    projected = result.update["messages"][0]
+
+    assert projected.artifact == original.artifact
+    assert [option["label"] for option in projected.artifact["human_input"]["options"]] == ["East", "West"]
+    assert extract_unanswered_human_input_request([projected])["request_id"] == original.id
+
+
+def test_chat_projects_dict_messages_in_tool_commands_before_the_state_reducer():
+    from langgraph.graph.message import add_messages
+    from langgraph.types import Overwrite
+
+    from deerflow.agents.middlewares.chat_mode_middleware import ChatModeMiddleware
+
+    message = {"role": "tool", "name": "lookup", "tool_call_id": "tc-1", "content": [{"type": "text", "text": "Found it"}, {"type": "image", "base64": "AA=="}], "artifact": {"resource_links": [{"uri": "file:///report.pdf"}]}}
+    pair = ({"role": "assistant", "content": "Looking it up"}, message)
+    for messages in ([message], message, pair, list(pair), Overwrite([message])):
+        command = Command(update={"messages": messages, "tool_artifacts": [{"handle": "report.pdf"}]}, goto="done")
+        projected = ChatModeMiddleware().wrap_tool_call(_request("lookup"), lambda _: command)
+        update = projected.update["messages"]
+        if isinstance(messages, Overwrite):
+            assert isinstance(update, Overwrite)
+            update = update.value
+        batch = add_messages([], update)
+        if messages == pair or messages == list(pair):
+            assert len(batch) == 2 and batch[0].content == "Looking it up"
+        stored = batch[-1]
+        assert stored.artifact is None
+        assert stored.content == [{"type": "text", "text": "Found it"}]
+        assert stored.additional_kwargs["deerflow_mode"] == "chat"
+        assert "tool_artifacts" not in projected.update
+        assert projected.goto == command.goto
+    assert message["artifact"]["resource_links"]
+
+
+def test_chat_stamps_model_output_and_projects_historical_attachments_without_rewriting_history():
+    from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from deerflow.agents.middlewares.chat_mode_middleware import ChatModeMiddleware
+
+    previous = HumanMessage(content=[{"type": "text", "text": "Earlier message"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,QQ=="}}], additional_kwargs={"files": [{"filename": "old.png"}]})
+    request = ModelRequest(model=None, messages=[previous])
+
+    def handler(projected):
+        assert projected.messages[0].text == "Earlier message"
+        assert "image_url" not in str(projected.messages[0].content)
+        assert "files" not in projected.messages[0].additional_kwargs
+        return ModelResponse(result=[AIMessage(content="你好")])
+
+    result = ChatModeMiddleware().wrap_model_call(request, handler)
+    assert result.result[0].additional_kwargs["deerflow_mode"] == "chat"
+    assert result.result[0].content == "你好"
+    assert previous.additional_kwargs["files"]
+
+
+def test_chat_returns_structured_only_mcp_result_as_inline_json():
+    import json
+
+    from deerflow.agents.chat_mode import chat_message
+
+    result = chat_message(ToolMessage(content=[], artifact={"structured_content": {"results": [{"title": "你好"}]}, "resource_links": [{"uri": "file:///ignored.pdf"}]}, tool_call_id="search"))
+    assert json.loads(result.content) == {"results": [{"title": "你好"}]}
+    assert result.artifact is None

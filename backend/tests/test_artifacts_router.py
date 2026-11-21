@@ -452,6 +452,26 @@ def _patch_artifact_update_dependencies(monkeypatch, artifact_path: Path, provid
     monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: provider or _MountedSandboxProvider())
 
 
+def test_chat_artifact_update_is_rejected_before_sandbox_acquisition(tmp_path, monkeypatch):
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    provider = Mock(return_value=_MountedSandboxProvider())
+    monkeypatch.setattr(artifacts_router, "get_sandbox_provider", provider)
+    app = make_authed_test_app()
+    app.state.thread_store.get = AsyncMock(return_value={"metadata": {"mode": "chat"}})
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        url = "/api/threads/text-only/artifacts/mnt/user-data/outputs/note.txt"
+        response = client.put(url, json={"content": "after", "expected_sha256": _artifact_sha256("before")})
+        historical = client.get(url)
+    assert response.status_code == 422
+    assert historical.status_code == 200 and historical.text == "before"
+    assert artifact_path.read_text(encoding="utf-8") == "before"
+    provider.assert_not_called()
+
+
 def test_update_artifact_replaces_utf8_text_atomically(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "note.txt"
     artifact_path.write_text("before", encoding="utf-8")

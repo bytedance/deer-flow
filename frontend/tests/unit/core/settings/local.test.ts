@@ -31,3 +31,16 @@ test("falls back when localStorage access is blocked", () => {
   expect(() => saveLocalSettings(DEFAULT_LOCAL_SETTINGS)).not.toThrow();
   expect(() => saveThreadModelName("thread-1", "model-1")).not.toThrow();
 });
+
+test("ignores a Chat default left by an older browser session", () => {
+  rs.stubGlobal("window", {
+    localStorage: {
+      getItem: () =>
+        JSON.stringify({ context: { mode: "chat", model_name: "configured" } }),
+    },
+  });
+  expect(getLocalSettings().context).toMatchObject({
+    mode: undefined,
+    model_name: "configured",
+  });
+});

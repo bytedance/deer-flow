@@ -157,7 +157,7 @@ class _BoundAgentRuns:
         return _BoundAgentRuns(self._host, self._user_id, self._token_version, self._source, self._permissions, namespace, self._origin, self._delegation_validator)
 
     @asynccontextmanager
-    async def _request(self, permission: str, thread_id: str | None = None):
+    async def _request(self, permission: str, thread_id: str | None = None, *, thread_files: bool = False):
         if not self._host.active:
             raise AgentRunError(503, "Agent run host unavailable")
         if self._source == AUTH_SOURCE_AUTH_DISABLED:
@@ -194,6 +194,10 @@ class _BoundAgentRuns:
                 store = self._host.app.state.thread_store
                 if not await store.check_access(thread_id, self._user_id, require_existing=True):
                     raise AgentRunError(404, "Thread not found")
+                if thread_files:
+                    from app.gateway.thread_mode import require_thread_files
+
+                    await require_thread_files(store, thread_id, user_id=self._user_id)
             yield request
         except HTTPException as exc:
             raise AgentRunError(exc.status_code, str(exc.detail)) from exc
@@ -231,7 +235,7 @@ class _BoundAgentRuns:
             origin = (run.metadata or {}).get(DEERFLOW_ORIGIN_KEY) if run is not None else None
             if run is None or run.thread_id != thread_id or run.status != "running" or run.idempotency_key != key or origin != make_origin("extension", namespace=self._plugin_namespace):
                 raise AgentRunError(422, "Register files during the executing team run")
-        async with self._request("threads:read", thread_id) as request:
+        async with self._request("threads:read", thread_id, thread_files=True) as request:
             await await_drained(validate_capture_support(request, self._user_id, thread_id))
 
     async def read_artifact(self, *, thread_id, path, expected_checkpoint_id=None):
@@ -240,7 +244,7 @@ class _BoundAgentRuns:
         from deerflow.runtime.runs.manager import ConflictError
         from deerflow.utils.file_io import await_drained
 
-        async with self._request("threads:read", thread_id) as request:
+        async with self._request("threads:read", thread_id, thread_files=True) as request:
             try:
                 async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
                     if expected_checkpoint_id is not None:
@@ -261,7 +265,7 @@ class _BoundAgentRuns:
 
         if self._plugin_namespace is None:
             raise AgentRunError(422, "Artifact import requires a plugin-scoped capability")
-        async with self._request("threads:write", thread_id) as request:
+        async with self._request("threads:write", thread_id, thread_files=True) as request:
             try:
                 async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
                     return await await_drained(import_snapshot(request, self._user_id, thread_id, self._plugin_namespace, filename, content))

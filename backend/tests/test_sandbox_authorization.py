@@ -1154,3 +1154,15 @@ def test_abefore_agent_deny_skips_acquisition(monkeypatch):
 
     assert result is None  # no sandbox assigned
     assert acquired["called"] is False  # acquire_async never touched
+
+
+@pytest.mark.parametrize("async_call", [False, True])
+def test_chat_mode_denies_sandbox_even_when_authorization_disabled(async_call):
+    from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async
+
+    context = _context(mode="chat")
+    with pytest.raises(SandboxAuthorizationError, match="Chat mode"):
+        if async_call:
+            asyncio.run(authorize_sandbox_execution_async(context=context, app_config=None))
+        else:
+            authorize_sandbox_execution(context=context, app_config=None)

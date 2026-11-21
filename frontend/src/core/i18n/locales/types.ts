@@ -547,6 +547,10 @@ export interface Translations {
     voiceInputNoSpeech: string;
     voiceInputFailed: string;
     mode: string;
+    chatMode: string;
+    retryMode: string;
+    chatModeDescription: string;
+    chatTextOnly: string;
     flashMode: string;
     flashModeDescription: string;
     reasoningMode: string;

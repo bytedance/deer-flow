@@ -10,6 +10,40 @@ beforeEach(() => {
   fetchWithAuth.mockReset();
 });
 
+test("prepares a new project Chat with its file policy on the first request", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({ thread_id: "t", metadata: { mode: "chat" } }),
+  });
+  const { createThread } = await import("@/core/threads/api");
+  await createThread("t", "p", "chat");
+  expect(JSON.parse(fetchWithAuth.mock.calls[0]![1].body as string)).toEqual({
+    thread_id: "t",
+    project_id: "p",
+    metadata: { mode: "chat" },
+  });
+});
+
+test("reconciles Chat when a command already materialized the new thread ID", async () => {
+  fetchWithAuth
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ thread_id: "existing", metadata: {} }),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ thread_id: "existing", metadata: { mode: "chat" } }),
+    });
+  const { createThread } = await import("@/core/threads/api");
+  expect(
+    (await createThread("existing", undefined, "chat")).metadata?.mode,
+  ).toBe("chat");
+  expect(fetchWithAuth.mock.calls[1]?.[1]).toMatchObject({
+    method: "PATCH",
+    body: JSON.stringify({ metadata: { mode: "chat" } }),
+  });
+});
+
 test("fetchThreadTokenUsage uses shared auth fetch without JSON GET headers", async () => {
   fetchWithAuth.mockResolvedValue({
     ok: true,

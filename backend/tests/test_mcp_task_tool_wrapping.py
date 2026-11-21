@@ -129,7 +129,8 @@ def test_configured_task_toolsets_fail_when_a_raw_tool_is_missing() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("connection_scope", ["deployment", "personal"])
-async def test_submit_wrapper_persists_before_returning_only_the_local_handle(connection_scope: str) -> None:
+@pytest.mark.parametrize("mode", ["pro", "chat"])
+async def test_submit_wrapper_persists_before_returning_only_the_local_handle(connection_scope: str, mode: str) -> None:
     submitter = FakeSubmitter()
     set_mcp_task_submitter(submitter)
     try:
@@ -146,7 +147,7 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle(co
         )
         submit_tool = configured[0]
         runtime = SimpleNamespace(
-            context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"},
+            context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1", "mode": mode},
             config={},
             tool_call_id="call-1",
         )
@@ -172,6 +173,7 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle(co
             "status_tool": "get_report_status",
             "cancel_tool": "cancel_report",
             "connection_scope": connection_scope,
+            **({"chat_mode": True} if mode == "chat" else {}),
         }
     finally:
         set_mcp_task_submitter(None)

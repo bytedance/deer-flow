@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -29,10 +30,12 @@ const mocks = rs.hoisted(() => ({
   sendMessage: rs.fn(),
   toastError: rs.fn(),
   streamOptions: undefined as unknown,
+  messages: [] as Message[],
   threadMetadata: {
     data: undefined as unknown,
     isLoading: false,
     isFetching: false,
+    isError: false,
   },
 }));
 
@@ -68,7 +71,7 @@ rs.mock("@/core/threads/hooks", () => ({
   useThreadStream: (options: unknown) => {
     mocks.streamOptions = options;
     return {
-      thread: { isLoading: false, messages: [], values: {} },
+      thread: { isLoading: false, messages: mocks.messages, values: {} },
       sendMessage: mocks.sendMessage,
       isUploading: false,
       isHistoryLoading: false,
@@ -152,6 +155,8 @@ beforeEach(() => {
   mocks.sendMessage.mockReset();
   mocks.toastError.mockReset();
   mocks.streamOptions = undefined;
+  mocks.messages = [];
+  mocks.threadMetadata.isError = false;
   mocks.threadMetadata.data = undefined;
   mocks.threadMetadata.isLoading = false;
   mocks.threadMetadata.isFetching = false;
@@ -162,6 +167,75 @@ afterEach(() => {
 });
 
 describe("SidecarPanel keeps the draft when a send fails", () => {
+  it("restores Chat from the side thread and posts only text", async () => {
+    mocks.threadMetadata.data = { metadata: { mode: "chat" } };
+    mocks.sendMessage.mockResolvedValue(undefined);
+    render(renderPanel("sidecar-1"));
+    const composer = await screen.findByRole("textbox");
+    await screen.findByRole("button", { name: "Chat" });
+    expect(screen.queryByTestId("sidecar-add-attachments-button")).toBeNull();
+    const file = new File(["secret"], "hidden.txt", { type: "text/plain" });
+    fireEvent.drop(composer.closest("form")!, {
+      dataTransfer: { files: [file], types: ["Files"] },
+    });
+    fireEvent.paste(composer, {
+      clipboardData: { items: [{ kind: "file", getAsFile: () => file }] },
+    });
+    await submitDraft("hello");
+    await waitFor(() => expect(mocks.sendMessage).toHaveBeenCalledTimes(1));
+    expect(mocks.sendMessage.mock.calls[0]?.[1]).toEqual({
+      text: "hello",
+      files: [],
+    });
+    expect(mocks.streamOptions).toMatchObject({ context: { mode: "chat" } });
+  });
+
+  it("answers a clarification from history while the metadata read failed and the composer is locked", async () => {
+    mocks.threadMetadata.isError = true;
+    mocks.messages = [
+      {
+        type: "tool",
+        id: "question",
+        name: "ask_clarification",
+        tool_call_id: "clarify",
+        content: "Choose a color",
+        artifact: {
+          human_input: {
+            version: 1,
+            kind: "human_input_request",
+            source: "ask_clarification",
+            request_id: "clarification:clarify",
+            tool_call_id: "clarify",
+            question: "Choose a color",
+            input_mode: "single_choice",
+            options: [{ id: "blue", label: "Blue", value: "blue" }],
+          },
+        },
+      } as Message,
+    ];
+    render(renderPanel("sidecar-1"));
+    const blue = await screen.findByRole("button", { name: "Blue" });
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox").disabled).toBe(
+      true,
+    );
+    fireEvent.click(blue);
+    await waitFor(() =>
+      expect(mocks.sendMessage).toHaveBeenCalledWith(
+        "sidecar-1",
+        { text: expect.stringContaining("blue"), files: [] },
+        undefined,
+        expect.objectContaining({
+          additionalKwargs: expect.objectContaining({
+            human_input_response: expect.objectContaining({
+              request_id: "clarification:clarify",
+              value: "blue",
+            }),
+          }),
+        }),
+      ),
+    );
+  });
+
   it("forwards restored interrupts and initial metadata loading to the stream", async () => {
     const interrupts = { task: [{ value: { kind: "hitl_approval" } }] };
     mocks.threadMetadata.data = { interrupts };

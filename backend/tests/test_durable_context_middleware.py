@@ -1258,6 +1258,23 @@ class TestSkillContextInjection:
 
 
 class TestDurableContextInjection:
+    def test_chat_preserves_the_summary_without_reactivating_prior_task_context(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="ok")])
+        agent = create_agent(model=model, tools=[], middleware=[DurableContextMiddleware(chat_mode=True)], state_schema=ThreadState)
+        result = agent.invoke(
+            {
+                "messages": [HumanMessage(content="Discuss the findings.")],
+                "summary_text": "We previously chose French.",
+                "skill_context": [{"path": "/mnt/skills/public/research/SKILL.md", "name": "research", "description": "Inspect files."}],
+                "tool_artifacts": [TestArtifactRegistryProjection()._artifact_entry()],
+            }
+        )
+
+        data = [message.content for message in model.received[-1] if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data")]
+        assert len(data) == 1 and "We previously chose French." in data[0]
+        assert "/mnt/skills" not in data[0] and "report.html" not in data[0]
+        assert result["tool_artifacts"][0]["display_name"] == "report.html"
+
     def test_injects_summary_and_ledger_together(self):
         model = RecordingFakeModel(responses=[AIMessage(content="ok")])
         agent = create_agent(

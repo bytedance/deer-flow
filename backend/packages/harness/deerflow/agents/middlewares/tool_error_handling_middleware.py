@@ -72,17 +72,21 @@ def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error:
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
 
-    def __init__(self, *, app_config: AppConfig | None = None, skill_authorization=None, user_id: str | None = None) -> None:
+    def __init__(self, *, app_config: AppConfig | None = None, skill_authorization=None, user_id: str | None = None, chat_mode: bool = False) -> None:
         super().__init__()
         self._app_config = app_config
         self._skill_authorization = skill_authorization
         self._user_id = user_id
+        self._chat_mode = chat_mode
         if app_config is None:
             self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
             self._skills_root = DEFAULT_SKILLS_CONTAINER_PATH
         else:
             self._skill_read_tool_names = frozenset(app_config.summarization.skill_file_read_tool_names)
             self._skills_root = app_config.skills.container_path
+        if chat_mode:
+            # An authorized remote MCP operation may share a local tool's name.
+            self._skill_read_tool_names = frozenset()
 
     @staticmethod
     def _model_request(request: ModelRequest) -> ModelRequest:
@@ -158,7 +162,8 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # failures raised before task_tool can build its own Command still
         # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
-        message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
+        if not self._chat_mode:
+            message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
         return stamp_exception_meta(message, exc)
 
     def _stamp_skill_read_metadata(
@@ -388,6 +393,7 @@ def _build_runtime_middlewares(
     owns_agent_skill_projection: bool = True,
     skill_authorization=None,
     user_id: str | None = None,
+    chat_mode: bool = False,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -396,7 +402,6 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
-    from deerflow.sandbox.middleware import SandboxMiddleware
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
     # InputSanitizationMiddleware is first so it becomes the outermost
@@ -425,19 +430,22 @@ def _build_runtime_middlewares(
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
     thread_hooks: list[AgentMiddleware] = [
-        ThreadDataMiddleware(lazy_init=lazy_init),
+        ThreadDataMiddleware(lazy_init=lazy_init, include_workspace=not chat_mode),
     ]
     if include_uploads:
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 
         thread_hooks.append(UploadsMiddleware())
-    thread_hooks.append(
-        SandboxMiddleware(
-            lazy_init=lazy_init,
-            available_skills=available_skills,
-            owns_agent_skill_projection=owns_agent_skill_projection,
+    if not chat_mode:
+        from deerflow.sandbox.middleware import SandboxMiddleware
+
+        thread_hooks.append(
+            SandboxMiddleware(
+                lazy_init=lazy_init,
+                available_skills=available_skills,
+                owns_agent_skill_projection=owns_agent_skill_projection,
+            )
         )
-    )
 
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
@@ -463,7 +471,7 @@ def _build_runtime_middlewares(
 
     # Resolve handles before any policy inspects arguments. Receipts enclose
     # this layer too, so unknown-handle errors remain part of the ledger.
-    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
+    if not chat_mode and app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
         from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
 
         tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
@@ -517,9 +525,10 @@ def _build_runtime_middlewares(
         provider = provider_cls(**provider_kwargs)
         tail.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
 
-    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    if not chat_mode:
+        from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
-    tail.append(SandboxAuditMiddleware())
+        tail.append(SandboxAuditMiddleware())
 
     # ReadBeforeWriteMiddleware is the outermost write gate: it blocks writes to files
     # the model hasn't read in their current version.  It must sit outside ToolProgress
@@ -528,12 +537,12 @@ def _build_runtime_middlewares(
     # ToolMessage itself so downstream callers receive a well-formed result, and its
     # wrap_model_call elides the dead payload of blocked calls from model-bound
     # requests (config-gated, state untouched).
-    if app_config.read_before_write.enabled:
+    if not chat_mode and app_config.read_before_write.enabled:
         from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 
         tail.append(ReadBeforeWriteMiddleware(config=app_config.read_before_write))
 
-    if getattr(app_config, "harness_guard", None) and app_config.harness_guard.enabled:
+    if not chat_mode and getattr(app_config, "harness_guard", None) and app_config.harness_guard.enabled:
         from deerflow.agents.middlewares.harness_guard_middleware import HarnessGuardMiddleware
 
         tail.append(HarnessGuardMiddleware(config=app_config.harness_guard))
@@ -548,7 +557,7 @@ def _build_runtime_middlewares(
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
-    tail.append(ToolErrorHandlingMiddleware(app_config=app_config, skill_authorization=skill_authorization, user_id=user_id))
+    tail.append(ToolErrorHandlingMiddleware(app_config=app_config, skill_authorization=skill_authorization, user_id=user_id, chat_mode=chat_mode))
     # Artifact capture is a `before_model` hook that reads state messages, so
     # its position in the tool-execution wrap chain is functionally irrelevant:
     # it always sees the normalized results stored in state, and error results
@@ -557,7 +566,7 @@ def _build_runtime_middlewares(
     # lightweight metadata only, so ToolOutputBudgetMiddleware truncating the
     # content does not affect it. The configured cap (max_entries) is enforced
     # inside the middleware when it emits updates; no assembly-time side effect.
-    if app_config.tool_artifacts.enabled:
+    if not chat_mode and app_config.tool_artifacts.enabled:
         from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
 
         tail.append(ArtifactCaptureMiddleware(config=app_config.tool_artifacts))
@@ -581,12 +590,14 @@ def build_lead_runtime_middlewares(
     owns_agent_skill_projection: bool = True,
     skill_authorization=None,
     user_id: str | None = None,
+    chat_mode: bool = False,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
         app_config=app_config,
-        include_uploads=True,
+        include_uploads=not chat_mode,
         include_dangling_tool_call_patch=True,
+        chat_mode=chat_mode,
         lazy_init=lazy_init,
         # The lead renders the receipt ledger only while processing subagent
         # results (default "delegation_only"); stamping stays always-on.

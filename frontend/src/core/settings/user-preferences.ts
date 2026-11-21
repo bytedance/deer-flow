@@ -54,7 +54,9 @@ export function preferencesFromSettings(settings: LocalSettings): Preferences {
   return {
     notification_enabled: settings.notification.enabled,
     model_name: settings.context.model_name ?? null,
-    mode: settings.context.mode ?? null,
+    ...(settings.context.mode !== "chat" && {
+      mode: settings.context.mode ?? null,
+    }),
     reasoning_effort: settings.context.reasoning_effort ?? null,
   };
 }

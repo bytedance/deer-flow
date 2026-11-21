@@ -20,7 +20,7 @@ import {
   ShieldCheckIcon,
   WrenchIcon,
 } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useContext, useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -44,6 +44,7 @@ import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   extractTextFromMessage,
+  isFilePresentationTool,
 } from "@/core/messages/utils";
 import type { ArtifactEntry } from "@/core/threads/types";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
@@ -59,6 +60,7 @@ import { MarkdownContent } from "./markdown-content";
 import {
   createMarkdownLinkComponent,
   isSafeHref,
+  TextOnlyMessageContext,
   UnsafeLink,
 } from "./markdown-link";
 import { MessageReasoning } from "./message-reasoning";
@@ -100,9 +102,10 @@ function MessageGroupComponent({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
+  const textOnly = useContext(TextOnlyMessageContext);
   const allSteps = useMemo(
-    () => convertToSteps(messages, toolArtifacts),
-    [messages, toolArtifacts],
+    () => convertToSteps(messages, toolArtifacts, textOnly),
+    [messages, toolArtifacts, textOnly],
   );
   // Keep the original messages and tool associations intact. Only the display
   // of clarification context moves outside the execution disclosure (#5503).
@@ -781,7 +784,18 @@ function ToolCall({
   threadId?: string;
 }) {
   const { t } = useI18n();
-  const kind = getToolCallKind(name);
+  const textOnly = useContext(TextOnlyMessageContext);
+  const toolKind = getToolCallKind(name);
+  // These renderers can open an artifact or fetch a preview while arguments
+  // are still streaming. In Chat their arguments/results remain plain text.
+  const kind =
+    textOnly &&
+    (toolKind === "browser" ||
+      toolKind === "image_search" ||
+      toolKind === "write_file" ||
+      toolKind === "str_replace")
+      ? "generic"
+      : toolKind;
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
   const browserViewPanel = useMaybeBrowserView();
@@ -1287,6 +1301,7 @@ function indexToolCallData(messages: Message[]) {
 function convertToSteps(
   messages: Message[],
   toolArtifacts?: ArtifactEntry[],
+  textOnly = false,
 ): CoTStep[] {
   const steps: CoTStep[] = [];
   const { browserViews, toolCallResults, resultMessages } =
@@ -1328,7 +1343,10 @@ function convertToSteps(
         });
       }
       for (const tool_call of message.tool_calls ?? []) {
-        if (tool_call.name === "task") {
+        if (
+          tool_call.name === "task" ||
+          (textOnly && isFilePresentationTool(tool_call.name))
+        ) {
           continue;
         }
         const step: CoTToolCallStep = {

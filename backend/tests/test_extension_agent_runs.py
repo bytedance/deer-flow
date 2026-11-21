@@ -227,6 +227,21 @@ async def test_real_run_lifecycle_and_automatic_followup(runtime):
 
 
 @pytest.mark.asyncio
+async def test_chat_thread_rejects_extension_artifact_import_before_allocation(runtime, monkeypatch):
+    from unittest.mock import Mock
+
+    runs, _, _, _, _ = runtime
+    runs = runs.for_plugin("artifact-fixture")
+    thread = await runs.create_thread(thread_id="chat-import", metadata={"mode": "chat"})
+    provider = Mock(return_value=SimpleNamespace(uses_thread_data_mounts=True))
+    monkeypatch.setattr("app.gateway.extension_artifacts.get_sandbox_provider", provider)
+    with pytest.raises(AgentRunError) as rejected:
+        await runs.import_artifact(thread_id=thread, filename="data.txt", content=b"text")
+    assert rejected.value.status_code == 422
+    provider.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.name != "posix", reason="Descriptor-confined artifact imports require POSIX")
 async def test_team_artifact_import_is_authorized_idempotent_and_confined(runtime):
     import asyncio

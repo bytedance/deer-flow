@@ -307,6 +307,16 @@ def test_wrap_unassigned_run_inserts_nothing():
     assert assembled_request.messages == messages
 
 
+def test_chat_projects_keep_instructions_without_advertising_the_document_shelf():
+    snapshot = {**_SNAPSHOT, "shelf": {"total": 1, "entries": [{"id": "d1", "name": "budget.xlsx"}]}}
+    runtime = _runtime(snapshot=snapshot)
+    _, assembled = _wrap(DynamicContextMiddleware(chat_mode=True), [HumanMessage(content="hello")], runtime)
+
+    (project,) = _project_messages(assembled)
+    assert _SNAPSHOT["instructions"] in project.content
+    assert "<documents" not in project.content
+
+
 def test_wrap_unassigned_run_still_strips_a_recognized_transient():
     mw = DynamicContextMiddleware()
     transient = build_project_context_message('<project id="p-1" name="Roadmap">\nx\n</project>', "run-1")

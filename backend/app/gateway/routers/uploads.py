@@ -392,7 +392,7 @@ def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
 
 
 @router.post("", response_model=UploadResponse)
-@require_permission("threads", "write", owner_check=True, require_existing=False)
+@require_permission("threads", "write", owner_check=True, require_existing=False, thread_files=True)
 async def upload_files(
     thread_id: ThreadId,
     request: Request,

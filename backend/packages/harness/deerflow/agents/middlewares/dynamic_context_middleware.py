@@ -395,11 +395,13 @@ class DynamicContextMiddleware(AgentMiddleware):
         *,
         app_config: AppConfig | None = None,
         memory_enabled: bool = True,
+        chat_mode: bool = False,
     ):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
         self._memory_enabled = memory_enabled
+        self._chat_mode = chat_mode
         # Message ID of the ``__memory`` block this instance injected during
         # the current run's ``before_agent`` (assembly is per run). The
         # request-time journal selection trusts a non-checkpointed ``__memory``
@@ -723,6 +725,8 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     def _shelf_index_limits(self) -> tuple[int, int]:
         """Shelf index caps without I/O: the assembly config, else defaults."""
+        if self._chat_mode:
+            return 0, 0
         if self._app_config is not None:
             projects = self._app_config.projects
             return projects.shelf_index_max_entries, projects.shelf_index_max_bytes

@@ -1,16 +1,12 @@
 "use client";
 
 import type { Message } from "@langchain/langgraph-sdk";
+import { useQueryClient } from "@tanstack/react-query";
 import {
-  CheckIcon,
-  GraduationCapIcon,
-  LightbulbIcon,
   MessageSquareTextIcon,
   PaperclipIcon,
-  RocketIcon,
   Trash2Icon,
   XIcon,
-  ZapIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -23,11 +19,6 @@ import { toast } from "sonner";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import {
-  PromptInput,
-  PromptInputActionMenu,
-  PromptInputActionMenuContent,
-  PromptInputActionMenuItem,
-  PromptInputActionMenuTrigger,
   PromptInputAttachment,
   PromptInputAttachments,
   PromptInputBody,
@@ -51,10 +42,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  DropdownMenuGroup,
-  DropdownMenuLabel,
-} from "@/components/ui/dropdown-menu";
-import {
   isArtifactRewriteClarification,
   type ArtifactSelectionEdit,
 } from "@/core/artifacts/selection";
@@ -69,10 +56,8 @@ import {
 import { useModels } from "@/core/models/hooks";
 import {
   getResolvedMode,
-  isThinkingRequired,
   reasoningEffortForMode,
   resolveReasoningEffort,
-  supportsThinking as modelSupportsThinking,
 } from "@/core/models/reasoning";
 import type { Model } from "@/core/models/types";
 import { useLocalSettings } from "@/core/settings";
@@ -85,10 +70,10 @@ import {
 import { createSidecarThread } from "@/core/sidecar/api";
 import {
   useDeleteThread,
-  useThreadMetadata,
   useThreadStream,
   type ThreadStreamOptions,
 } from "@/core/threads/hooks";
+import { useThreadInputMode } from "@/core/threads/use-thread-input-mode";
 import {
   formatUploadSize,
   useUploadLimits,
@@ -99,9 +84,10 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+import { ComposerPromptInput } from "../composer-prompt-input";
+import { InputModeMenu } from "../input-mode-menu";
 import { MessageList, MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "../messages";
 import { useThread as useParentThread } from "../messages/context";
-import { ModeHoverGuide } from "../mode-hover-guide";
 import {
   ModelPicker,
   ModelPickerContent,
@@ -161,10 +147,6 @@ export function SidecarPanel({ className }: { className?: string }) {
     resolve: () => void;
     reject: (error: unknown) => void;
   } | null>(null);
-  const { data: uploadLimits } = useUploadLimits(
-    sidecar.sidecarThreadId ?? sidecar.parentThreadId,
-  );
-
   const selectedModel = useMemo(() => {
     if (models.length === 0) {
       return undefined;
@@ -175,10 +157,27 @@ export function SidecarPanel({ className }: { className?: string }) {
     );
   }, [models, sidecar.context.model_name]);
 
-  const threadMetadata = useThreadMetadata(sidecar.sidecarThreadId, {
-    enabled: !sidecar.isMock,
+  const queryClient = useQueryClient();
+  const {
+    mode,
+    context,
+    pending: modePending,
+    changeMode,
+    prepareThread,
+    threadMetadata,
+    retryMode,
+  } = useThreadInputMode({
+    threadId: sidecar.sidecarThreadId,
+    preferred: sidecar.context,
     isMock: sidecar.isMock,
+    restoring: sidecar.restoring,
+    userId: user?.id,
   });
+  const textOnly = mode === "chat";
+  const filesBlocked = textOnly || modePending;
+  const { data: uploadLimits } = useUploadLimits(
+    filesBlocked ? "" : (sidecar.sidecarThreadId ?? sidecar.parentThreadId),
+  );
 
   const {
     thread,
@@ -194,7 +193,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   } = useThreadStream({
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
-    context: sidecar.context,
+    context,
     isMock: sidecar.isMock,
     onStart: (createdThreadId) => {
       sidecar.setSidecarThreadId(createdThreadId);
@@ -223,6 +222,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const disabled =
+    modePending ||
     (!hasSidecarThread && !hasPendingReferences) ||
     thread.isLoading ||
     creatingThread ||
@@ -239,31 +239,36 @@ export function SidecarPanel({ className }: { className?: string }) {
     }
 
     const currentModel = models.find(
-      (model) => model.name === sidecar.context.model_name,
+      (model) => model.name === context.model_name,
     );
     const fallbackModel = currentModel ?? models[0]!;
     const nextModelName = fallbackModel.name;
-    const nextMode = getResolvedMode(sidecar.context.mode, fallbackModel);
-    const modeChanged = sidecar.context.mode !== nextMode;
+    const nextMode = getResolvedMode(context.mode, fallbackModel);
+    const modeChanged = context.mode !== nextMode;
     const nextEffort = modeChanged
       ? reasoningEffortForMode(nextMode, fallbackModel)
-      : resolveReasoningEffort(fallbackModel, sidecar.context.reasoning_effort);
+      : resolveReasoningEffort(fallbackModel, context.reasoning_effort);
 
     if (
-      sidecar.context.model_name === nextModelName &&
+      context.model_name === nextModelName &&
       !modeChanged &&
-      nextEffort === sidecar.context.reasoning_effort
+      nextEffort === context.reasoning_effort
     ) {
       return;
     }
 
-    sidecar.setContext({
-      ...sidecar.context,
-      model_name: nextModelName,
-      mode: nextMode,
-      reasoning_effort: nextEffort,
-    });
-  }, [models, sidecar]);
+    changeMode(
+      nextMode,
+      () =>
+        sidecar.setContext({
+          ...context,
+          model_name: nextModelName,
+          mode: nextMode,
+          reasoning_effort: nextEffort,
+        }),
+      true,
+    );
+  }, [changeMode, context, models, sidecar]);
 
   const reportUploadLimitViolations = useCallback(
     (violations: UploadLimitViolation[]) => {
@@ -298,31 +303,35 @@ export function SidecarPanel({ className }: { className?: string }) {
       if (!model) {
         return;
       }
-      const nextMode = getResolvedMode(sidecar.context.mode, model);
-      const modeChanged = sidecar.context.mode !== nextMode;
-      sidecar.setContext({
-        ...sidecar.context,
-        model_name: modelName,
-        mode: nextMode,
-        reasoning_effort: modeChanged
-          ? reasoningEffortForMode(nextMode, model)
-          : resolveReasoningEffort(model, sidecar.context.reasoning_effort),
-      });
+      const nextMode = getResolvedMode(context.mode, model);
+      const modeChanged = context.mode !== nextMode;
+      changeMode(nextMode, () =>
+        sidecar.setContext({
+          ...context,
+          model_name: modelName,
+          mode: nextMode,
+          reasoning_effort: modeChanged
+            ? reasoningEffortForMode(nextMode, model)
+            : resolveReasoningEffort(model, context.reasoning_effort),
+        }),
+      );
       setModelDialogOpen(false);
     },
-    [models, sidecar],
+    [changeMode, context, models, sidecar],
   );
 
   const handleModeSelect = useCallback(
     (mode: SidecarInputMode) => {
       const nextMode = getResolvedMode(mode, selectedModel);
-      sidecar.setContext({
-        ...sidecar.context,
-        mode: nextMode,
-        reasoning_effort: reasoningEffortForMode(nextMode, selectedModel),
-      });
+      changeMode(nextMode, () =>
+        sidecar.setContext({
+          ...context,
+          mode: nextMode,
+          reasoning_effort: reasoningEffortForMode(nextMode, selectedModel),
+        }),
+      );
     },
-    [sidecar, selectedModel],
+    [changeMode, context, sidecar, selectedModel],
   );
 
   const ensureSidecarThread = useCallback(
@@ -341,15 +350,20 @@ export function SidecarPanel({ className }: { className?: string }) {
       try {
         const created = await createSidecarThread({
           parentThreadId: sidecar.parentThreadId,
+          mode,
           context: references.map((reference) => reference.context),
         });
+        queryClient.setQueryData(
+          ["thread", "metadata", created.thread_id, false],
+          created,
+        );
         sidecar.setSidecarThreadId(created.thread_id);
         return created.thread_id;
       } finally {
         setCreatingThread(false);
       }
     },
-    [sidecar, t.sidecar.noContext],
+    [mode, queryClient, sidecar, t.sidecar.noContext],
   );
 
   const submitToSidecarThread = useCallback(
@@ -359,8 +373,11 @@ export function SidecarPanel({ className }: { className?: string }) {
       references: SidecarReference[],
       artifactEdit: ArtifactSelectionEdit | null,
       onSent?: () => void,
-      additionalKwargs?: Record<string, unknown>,
+      answer?: HumanInputResponse,
     ) => {
+      if ((answer || textOnly) && message.files.length)
+        throw new Error(t.inputBox.chatTextOnly);
+      if (!answer) await prepareThread();
       const referencedContexts = references.map(
         (reference) => reference.context,
       );
@@ -397,12 +414,21 @@ export function SidecarPanel({ className }: { className?: string }) {
           ...(contexts.length > 0
             ? buildReferenceMessageMetadata(contexts)
             : {}),
-          ...additionalKwargs,
+          ...(answer
+            ? { hide_from_ui: true, human_input_response: answer }
+            : {}),
         },
         onSent,
       });
     },
-    [parentThread.messages, sendMessage, sidecar.parentThreadId],
+    [
+      parentThread.messages,
+      prepareThread,
+      sendMessage,
+      sidecar.parentThreadId,
+      t.inputBox.chatTextOnly,
+      textOnly,
+    ],
   );
 
   const handleSubmitHumanInput = useCallback(
@@ -435,10 +461,7 @@ export function SidecarPanel({ className }: { className?: string }) {
             sidecar.clearActiveReferences();
           }
         },
-        {
-          hide_from_ui: true,
-          human_input_response: response,
-        },
+        response,
       );
       return sent;
     },
@@ -457,7 +480,12 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   useEffect(() => {
-    if (!queuedSubmit || !sidecar.sidecarThreadId || thread.isLoading) {
+    if (
+      !queuedSubmit ||
+      !sidecar.sidecarThreadId ||
+      modePending ||
+      thread.isLoading
+    ) {
       return;
     }
 
@@ -472,6 +500,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     ).then(nextSubmit.resolve, nextSubmit.reject);
   }, [
     queuedSubmit,
+    modePending,
     sidecar,
     sidecar.sidecarThreadId,
     submitToSidecarThread,
@@ -482,6 +511,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     async (message: PromptInputMessage, event: FormEvent<HTMLFormElement>) => {
       const text = message.text.trim();
       const files = promptMessageFiles(message);
+      if (modePending) throw new Error("thread-mode-changed");
       if ((!text && message.files.length === 0) || disabled) {
         return;
       }
@@ -536,6 +566,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     [
       disabled,
       ensureSidecarThread,
+      modePending,
       reportUploadLimitViolations,
       sidecar,
       submitToSidecarThread,
@@ -682,20 +713,24 @@ export function SidecarPanel({ className }: { className?: string }) {
       )}
       <div className="bg-background/95 shrink-0 px-3 pt-3 pb-4 sm:px-4">
         <PromptInputProvider key={sidecar.parentThreadId}>
-          <PromptInput
+          <ComposerPromptInput
+            filesBlocked={filesBlocked}
+            textOnly={textOnly}
             className="bg-background/85 rounded-2xl backdrop-blur-sm *:data-[slot='input-group']:rounded-2xl"
             disabled={disabled}
             multiple
             onSubmit={handleSubmit}
           >
             <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
-              <PromptInputAttachments className="contents p-0">
-                {(attachment) => (
-                  <div className="max-w-48">
-                    <PromptInputAttachment data={attachment} />
-                  </div>
-                )}
-              </PromptInputAttachments>
+              {!filesBlocked && (
+                <PromptInputAttachments className="contents p-0">
+                  {(attachment) => (
+                    <div className="max-w-48">
+                      <PromptInputAttachment data={attachment} />
+                    </div>
+                  )}
+                </PromptInputAttachments>
+              )}
               {sidecar.activeReferences.length > 0 && (
                 <ReferenceAttachmentSummary
                   references={sidecar.activeReferences}
@@ -713,11 +748,22 @@ export function SidecarPanel({ className }: { className?: string }) {
             </PromptInputBody>
             <PromptInputFooter className="@container flex flex-nowrap gap-2">
               <PromptInputTools className="min-w-0 flex-1 flex-nowrap overflow-hidden">
-                <SidecarAddAttachmentsButton uploadLimits={uploadLimits} />
-                <SidecarModeMenu
-                  context={sidecar.context}
+                {!filesBlocked && (
+                  <SidecarAddAttachmentsButton uploadLimits={uploadLimits} />
+                )}
+                <InputModeMenu
+                  className="max-w-20"
+                  disabled={
+                    modePending ||
+                    creatingThread ||
+                    !!queuedSubmit ||
+                    isUploading
+                  }
+                  runActive={thread.isLoading}
+                  onRetry={retryMode}
+                  mode={mode}
                   model={selectedModel}
-                  onModeSelect={handleModeSelect}
+                  onSelect={handleModeSelect}
                 />
               </PromptInputTools>
               <PromptInputTools className="min-w-0 justify-end">
@@ -753,7 +799,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 )}
               </PromptInputTools>
             </PromptInputFooter>
-          </PromptInput>
+          </ComposerPromptInput>
         </PromptInputProvider>
       </div>
 
@@ -835,174 +881,6 @@ function SidecarAddAttachmentsButton({
         <PaperclipIcon className="size-3" />
       </PromptInputButton>
     </Tooltip>
-  );
-}
-
-function SidecarModeMenu({
-  context,
-  model,
-  onModeSelect,
-}: {
-  context: ThreadStreamOptions["context"];
-  model: Model | undefined;
-  onModeSelect: (mode: SidecarInputMode) => void;
-}) {
-  const { t } = useI18n();
-  const supportThinking = modelSupportsThinking(model);
-  const thinkingRequired = isThinkingRequired(model);
-  const mode = getResolvedMode(context.mode, model);
-
-  return (
-    <PromptInputActionMenu>
-      <ModeHoverGuide mode={mode}>
-        <PromptInputActionMenuTrigger className="max-w-20 min-w-0 gap-1! px-2!">
-          <div>
-            {mode === "flash" && <ZapIcon className="size-3" />}
-            {mode === "thinking" && <LightbulbIcon className="size-3" />}
-            {mode === "pro" && <GraduationCapIcon className="size-3" />}
-            {mode === "ultra" && (
-              <RocketIcon className="size-3 text-[#dabb5e]" />
-            )}
-          </div>
-          <div
-            className={cn(
-              "truncate text-xs font-normal",
-              mode === "ultra" && "golden-text",
-            )}
-          >
-            {(mode === "flash" && t.inputBox.flashMode) ||
-              (mode === "thinking" && t.inputBox.reasoningMode) ||
-              (mode === "pro" && t.inputBox.proMode) ||
-              (mode === "ultra" && t.inputBox.ultraMode)}
-          </div>
-        </PromptInputActionMenuTrigger>
-      </ModeHoverGuide>
-      <PromptInputActionMenuContent className="w-80">
-        <DropdownMenuGroup>
-          <DropdownMenuLabel className="text-muted-foreground text-xs">
-            {t.inputBox.mode}
-          </DropdownMenuLabel>
-          {!thinkingRequired && (
-            <PromptInputActionMenuItem
-              className={cn(
-                mode === "flash"
-                  ? "text-accent-foreground"
-                  : "text-muted-foreground/65",
-              )}
-              onSelect={() => onModeSelect("flash")}
-            >
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-1 font-bold">
-                  <ZapIcon
-                    className={cn(
-                      "mr-2 size-4",
-                      mode === "flash" && "text-accent-foreground",
-                    )}
-                  />
-                  {t.inputBox.flashMode}
-                </div>
-                <div className="pl-7 text-xs">
-                  {t.inputBox.flashModeDescription}
-                </div>
-              </div>
-              {mode === "flash" ? (
-                <CheckIcon className="ml-auto size-4" />
-              ) : (
-                <div className="ml-auto size-4" />
-              )}
-            </PromptInputActionMenuItem>
-          )}
-          {supportThinking && (
-            <PromptInputActionMenuItem
-              className={cn(
-                mode === "thinking"
-                  ? "text-accent-foreground"
-                  : "text-muted-foreground/65",
-              )}
-              onSelect={() => onModeSelect("thinking")}
-            >
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-1 font-bold">
-                  <LightbulbIcon
-                    className={cn(
-                      "mr-2 size-4",
-                      mode === "thinking" && "text-accent-foreground",
-                    )}
-                  />
-                  {t.inputBox.reasoningMode}
-                </div>
-                <div className="pl-7 text-xs">
-                  {t.inputBox.reasoningModeDescription}
-                </div>
-              </div>
-              {mode === "thinking" ? (
-                <CheckIcon className="ml-auto size-4" />
-              ) : (
-                <div className="ml-auto size-4" />
-              )}
-            </PromptInputActionMenuItem>
-          )}
-          <PromptInputActionMenuItem
-            className={cn(
-              mode === "pro"
-                ? "text-accent-foreground"
-                : "text-muted-foreground/65",
-            )}
-            onSelect={() => onModeSelect("pro")}
-          >
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-1 font-bold">
-                <GraduationCapIcon
-                  className={cn(
-                    "mr-2 size-4",
-                    mode === "pro" && "text-accent-foreground",
-                  )}
-                />
-                {t.inputBox.proMode}
-              </div>
-              <div className="pl-7 text-xs">
-                {t.inputBox.proModeDescription}
-              </div>
-            </div>
-            {mode === "pro" ? (
-              <CheckIcon className="ml-auto size-4" />
-            ) : (
-              <div className="ml-auto size-4" />
-            )}
-          </PromptInputActionMenuItem>
-          <PromptInputActionMenuItem
-            className={cn(
-              mode === "ultra"
-                ? "text-accent-foreground"
-                : "text-muted-foreground/65",
-            )}
-            onSelect={() => onModeSelect("ultra")}
-          >
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-1 font-bold">
-                <RocketIcon
-                  className={cn(
-                    "mr-2 size-4",
-                    mode === "ultra" && "text-[#dabb5e]",
-                  )}
-                />
-                <div className={cn(mode === "ultra" && "golden-text")}>
-                  {t.inputBox.ultraMode}
-                </div>
-              </div>
-              <div className="pl-7 text-xs">
-                {t.inputBox.ultraModeDescription}
-              </div>
-            </div>
-            {mode === "ultra" ? (
-              <CheckIcon className="ml-auto size-4" />
-            ) : (
-              <div className="ml-auto size-4" />
-            )}
-          </PromptInputActionMenuItem>
-        </DropdownMenuGroup>
-      </PromptInputActionMenuContent>
-    </PromptInputActionMenu>
   );
 }
 

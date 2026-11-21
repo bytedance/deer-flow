@@ -868,8 +868,11 @@ class DeerFlowClient:
         The embedded entry point, and like every other one it binds a trace id
         for the turn so logs, Langfuse metadata, and delegated work correlate.
         A caller that opened its own scope with ``request_trace_context`` keeps
-        that id; otherwise the turn gets a fresh one.
+        that id; otherwise the turn gets a fresh one. For text-only Chat
+        mode, send the turn through the Gateway HTTP API.
         """
+        if kwargs.get("mode") == "chat":
+            raise ValueError("Chat mode is available through the Gateway HTTP API. Embedded clients run the agent directly.")
         # Resolve the id once, without mutating the caller's context.
         trace_id = get_current_trace_id() or generate_trace_id()
 
@@ -1319,7 +1322,8 @@ class DeerFlowClient:
         **last** AI message to complete.  Intermediate AI messages (e.g.
         planner drafts) are discarded — only the final id's accumulated
         text is returned.  Use :meth:`stream` directly if you need every
-        delta as it arrives.
+        delta as it arrives. This method runs an embedded agent turn. The
+        text-only Chat mode is available through the Gateway HTTP API.
 
         Args:
             message: User message text.

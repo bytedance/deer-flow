@@ -148,6 +148,32 @@ async def test_stdio_task_call_reuses_exact_scope_and_raw_tool_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_stdio_task_call_uses_private_session_without_preparing_workspace() -> None:
+    from deerflow.mcp_scope import mcp_scope_belongs_to_thread, mcp_session_scope_key
+
+    session = SimpleNamespace(call_tool=AsyncMock())
+    pool = MagicMock()
+    pool.get_session = AsyncMock(return_value=session)
+    with patch("deerflow.mcp.task_tool_caller.get_session_pool", return_value=pool), patch("deerflow.mcp.task_tool_caller._prepare_stdio_connection") as prepare:
+        await McpTaskToolCaller(_config()).call_tool(
+            server_name="reports",
+            tool_name="status_report",
+            arguments={"task_id": "remote-1"},
+            user_id="user-1",
+            thread_id="thread-1",
+            thread_incarnation="i",
+            chat_mode=True,
+        )
+
+    prepare.assert_not_called()
+    scope = pool.get_session.call_args.args[1]
+    assert scope == mcp_session_scope_key(user_id="user-1", thread_id="thread-1", thread_incarnation="i", chat_stdio=True)
+    assert scope != mcp_session_scope_key(user_id="user-1", thread_id="thread-1", thread_incarnation="i")
+    assert mcp_scope_belongs_to_thread(scope, user_id="user-1", thread_id="thread-1")
+    session.call_tool.assert_awaited_once_with("status_report", {"task_id": "remote-1"})
+
+
+@pytest.mark.asyncio
 async def test_personal_stdio_task_call_uses_personal_pool_domain() -> None:
     result = SimpleNamespace(structuredContent={"task_id": "remote-1", "status": "running"}, isError=False)
     session = SimpleNamespace(call_tool=AsyncMock(return_value=result))

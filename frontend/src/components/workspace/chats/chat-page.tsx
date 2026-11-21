@@ -1,6 +1,5 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
 import { Folder } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -68,11 +67,8 @@ import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
 import { useScheduleToolResultRefresh } from "@/core/scheduled-tasks/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { resolveThreadContext, selectThreadModel } from "@/core/settings/store";
-import { createThread } from "@/core/threads/api";
 import {
   useBranchThread,
-  INFINITE_THREADS_QUERY_KEY_PREFIX,
-  useThreadMetadata,
   useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
@@ -80,7 +76,12 @@ import {
   selectContextUsage,
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
-import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
+import { useThreadInputMode } from "@/core/threads/use-thread-input-mode";
+import {
+  pathOfThread,
+  projectIdOfThread,
+  textOfMessage,
+} from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -113,8 +114,7 @@ export default function ChatPage() {
   // the moment the user submits so the UI animates immediately, even though
   // `isNewThread` stays true until the backend actually creates the thread.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
-  const queryClient = useQueryClient();
-  const [settings, setSettings] = useThreadSettings(threadId);
+  const [preferences, setSettings] = useThreadSettings(threadId);
   const modelControl = useModelControl(
     `${user?.id ?? "anonymous"}:${threadId}`,
     locale,
@@ -129,9 +129,22 @@ export default function ChatPage() {
     isNewThread || isMock ? undefined : threadId,
     { enabled: !isMock },
   );
-  const threadMetadata = useThreadMetadata(threadId, {
-    enabled: !isNewThread && !isMock,
+  const {
+    context,
+    mode,
+    changeMode,
+    prepareThread,
+    threadMetadata,
+    pending: modePending,
+    retryMode,
+  } = useThreadInputMode({
+    threadId,
+    preferred: preferences.context,
+    isNewThread,
     isMock,
+    userId: user?.id,
+    projectId: projectParam,
+    projectUnavailable: t.projects.projectUnavailable,
   });
   // A saved thread that exists on the server is being read while open:
   // clears its unread dot (sidebar and chats list) on every device.
@@ -221,7 +234,7 @@ export default function ChatPage() {
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
-    context: settings.context,
+    context,
     isMock,
     // onSend only animates the UI; do NOT flip `isNewThread` here — the
     // LangGraph SDK eagerly fetches /history the moment it receives a
@@ -282,42 +295,6 @@ export default function ChatPage() {
     threadMetadata.isLoading,
   ]);
 
-  // Born assigned: pre-create the thread row with its project so the sidebar
-  // lists it under the project immediately. Idempotent server-side on
-  // `thread_id`, so retrying the same first message (same `threadId` while
-  // `isNewThread`) reuses the existing row instead of double-creating. This
-  // is the sole membership channel — run requests never carry the project
-  // key.
-  //
-  // Also runs before InputBox issues a `/goal <condition>` PUT (via
-  // `onPrepareThread`): the goal endpoint materializes a missing thread row
-  // itself, and an unassigned row would make this later idempotent create a
-  // membership no-op.
-  const ensureProjectThread = useCallback(async () => {
-    if (!projectParam) {
-      return;
-    }
-    try {
-      const created = await createThread(threadId, projectParam);
-      // Keep confirmed membership available while the first metadata read is pending
-      // or fails after the composer materializes this new project thread.
-      queryClient.setQueryData(
-        ["thread", "metadata", threadId, false],
-        created,
-      );
-      void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      });
-    } catch (error) {
-      // Any failure (e.g. the project was deleted/archived between page load
-      // and submit): do NOT submit unassigned. Reject so PromptInput keeps
-      // the composer's text for a retry; the send in-flight guard is never
-      // engaged on this path, so retrying works immediately.
-      toast.error(t.projects.projectUnavailable);
-      throw error;
-    }
-  }, [threadId, projectParam, queryClient, t]);
-
   // Submission fence. The cleanup runs when `threadId` changes (conversation
   // switch on a persisted page — sidebar navigation keeps this component
   // mounted), when the new-chat project scope changes (the sidebar "New
@@ -332,7 +309,7 @@ export default function ChatPage() {
     return () => {
       submissionEpochRef.current += 1;
     };
-  }, [threadId, projectParam]);
+  }, [threadId, projectParam, mode, user?.id]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
@@ -345,7 +322,7 @@ export default function ChatPage() {
       const runModelContext: Record<string, unknown> = {};
       if (choice?.model_name) {
         if (choice.scope === "task") {
-          if (settings.context.mode !== "ultra") {
+          if (mode !== "ultra") {
             toast.error(
               locale.startsWith("zh")
                 ? "当前未启用子任务，请先启用 Ultra 模式。"
@@ -359,24 +336,17 @@ export default function ChatPage() {
           runModelContext.model_selection_requested = choice.model_name;
         }
       }
-      await ensureProjectThread();
+      const modelOnly =
+        choice?.scope === "conversation" &&
+        !modelInput.text &&
+        message.files.length === 0;
+      await prepareThread(modelOnly);
       // Conversation switched (or the page unmounted) while the project
       // pre-create was pending: drop the submission. Reject silently — the
       // user has already moved on, so a toast would land on the new
       // conversation — and PromptInput keeps the current composer text.
       if (submissionEpochRef.current !== submissionEpoch) {
         throw new Error("thread-submission-stale");
-      }
-      if (
-        choice?.scope === "conversation" &&
-        !modelInput.text &&
-        message.files.length === 0 &&
-        isNewThread &&
-        !projectParam
-      ) {
-        await createThread(threadId);
-        if (submissionEpochRef.current !== submissionEpoch)
-          throw new Error("thread-submission-stale");
       }
       if (choice?.model_name) {
         if (choice.scope === "conversation")
@@ -427,11 +397,7 @@ export default function ChatPage() {
         );
         throw new Error("model-task-missing");
       }
-      if (
-        choice?.scope === "conversation" &&
-        !modelInput.text &&
-        message.files.length === 0
-      ) {
+      if (modelOnly) {
         if (isNewThread) {
           history.replaceState(null, "", `/workspace/chats/${threadId}`);
           setThreadId(threadId);
@@ -478,12 +444,11 @@ export default function ChatPage() {
       currentKnowledgeScopeSnapshot,
       sendMessage,
       threadId,
-      ensureProjectThread,
+      prepareThread,
+      mode,
       prepareModelControl,
-      settings.context.mode,
       locale,
       isNewThread,
-      projectParam,
       setThreadId,
       setIsNewThread,
     ],
@@ -559,7 +524,11 @@ export default function ChatPage() {
           messageIds,
         });
         toast.success(t.conversation.branchCreated);
-        router.push(`/workspace/chats/${response.thread_id}`);
+        router.push(
+          pathOfThread(response.thread_id, {
+            agent_name: response.assistant_id ?? undefined,
+          }),
+        );
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : t.conversation.branchFailed,
@@ -573,7 +542,12 @@ export default function ChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
-  const browserEnabled = !isNewThread && !isMock && browserControlEnabled;
+  const browserEnabled =
+    mode !== "chat" &&
+    !modePending &&
+    !isNewThread &&
+    !isMock &&
+    browserControlEnabled;
   const { activeGoal, hasGoal, goalOutcome, setLocalGoal } = useActiveGoal(
     threadId,
     thread.values.goal,
@@ -611,7 +585,7 @@ export default function ChatPage() {
     <ThreadContext.Provider value={{ thread, isMock }}>
       <SidecarProvider
         parentThreadId={threadId}
-        context={settings.context}
+        context={preferences.context}
         isMock={isMock}
       >
         <ChatBox threadId={threadId} browserEnabled={browserEnabled}>
@@ -847,11 +821,11 @@ export default function ChatPage() {
                               ? "streaming"
                               : "ready"
                         }
-                        context={settings.context}
+                        context={context}
                         extraHeader={
                           isWelcomeMode &&
                           !hasGoal &&
-                          !hasTodos && <Welcome mode={settings.context.mode} />
+                          !hasTodos && <Welcome mode={mode} />
                         }
                         disabled={
                           isMock ||
@@ -862,13 +836,21 @@ export default function ChatPage() {
                           hasPendingApproval
                         }
                         inputLocked={hasPendingApproval}
+                        modePending={modePending}
+                        onRetryMode={retryMode}
                         onContextChange={(context, options) => {
-                          if (options?.automatic)
-                            resolveThreadContext(threadId, context);
-                          else setSettings("context", context);
+                          changeMode(
+                            context.mode,
+                            () => {
+                              if (options?.automatic)
+                                resolveThreadContext(threadId, context);
+                              else setSettings("context", context);
+                            },
+                            options?.automatic,
+                          );
                         }}
                         onGoalChange={setLocalGoal}
-                        onPrepareThread={ensureProjectThread}
+                        onPrepareThread={prepareThread}
                         onReferenceFileAttached={() => {
                           if (!isNewThread) return;
                           history.replaceState(
