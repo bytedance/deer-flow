@@ -119,6 +119,7 @@ def test_rollback_restores_all_registration_buckets_positionally():
         registry.system_model_observer(_Contributor("drop-observer"))
         registry.service(_Contributor("drop-service"))
         registry.routers((_Contributor("drop-router"),))
+        registry.run_event_store("drop-store", lambda cfg: object())
 
     registry.rollback_to(mark)
     loaded = registry.build()
@@ -128,6 +129,7 @@ def test_rollback_restores_all_registration_buckets_positionally():
     assert loaded.system_model_observers == ()
     assert loaded.services == ()
     assert loaded.routers == ()
+    assert loaded.run_event_store_factories == ()
 
 
 def test_registration_order_is_preserved():
@@ -154,6 +156,7 @@ def test_discard_removes_every_entry_of_one_source():
         registry.system_model_observer(drop)
         registry.service(drop)
         registry.routers((drop,))
+        registry.run_event_store("drop-store", lambda cfg: object())
     registry.discard("bad:install")
     loaded = registry.build()
     assert loaded.middleware_contributors == (("good:install", keep),)
@@ -161,6 +164,7 @@ def test_discard_removes_every_entry_of_one_source():
     assert loaded.system_model_observers == ()
     assert loaded.services == ()
     assert loaded.routers == ()
+    assert loaded.run_event_store_factories == ()
 
 
 def test_registering_outside_attributed_to_raises():
@@ -181,3 +185,41 @@ def test_app_store_is_created_at_build_time():
     loaded = ExtensionRegistry().build()
     assert loaded.app_store is not None
     assert loaded.app_store.scope_id == "app"
+
+
+def _factory(cfg):
+    return object()
+
+
+def test_run_event_store_registration_collected():
+    registry = ExtensionRegistry()
+    with registry.attributed_to("ext-a"):
+        assert registry.run_event_store("kurrent", _factory) is True
+    built = registry.build()
+    assert built.run_event_store_factories == (("ext-a", ("kurrent", _factory)),)
+    assert EMPTY_EXTENSIONS.run_event_store_factories == ()
+
+
+@pytest.mark.parametrize("name", ["memory", "db", "jsonl"])
+def test_run_event_store_rejects_builtin_name(name):
+    registry = ExtensionRegistry()
+    with registry.attributed_to("ext-a"):
+        assert registry.run_event_store(name, _factory) is False
+    assert registry.build().run_event_store_factories == ()
+
+
+def test_run_event_store_rejects_duplicate_name():
+    registry = ExtensionRegistry()
+    with registry.attributed_to("ext-a"):
+        assert registry.run_event_store("kurrent", _factory) is True
+    with registry.attributed_to("ext-b"):
+        assert registry.run_event_store("kurrent", _factory) is False
+    assert len(registry.build().run_event_store_factories) == 1
+
+
+@pytest.mark.parametrize("name", ["", "Kurrent", "1abc", "_a", "a b", "a" * 65, None, 5])
+def test_run_event_store_rejects_bad_name(name):
+    registry = ExtensionRegistry()
+    with registry.attributed_to("ext-a"):
+        assert registry.run_event_store(name, _factory) is False
+    assert registry.build().run_event_store_factories == ()

@@ -212,7 +212,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     monkeypatch.setattr("deerflow.persistence.engine.init_engine_from_config", fake_init_engine)
     monkeypatch.setattr("deerflow.persistence.engine.close_engine", fake_close_engine)
     monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", fake_session_factory)
-    monkeypatch.setattr("deerflow.runtime.events.store.make_run_event_store", lambda _cfg: object())
+    monkeypatch.setattr("deerflow.runtime.events.store.make_run_event_store", lambda _cfg, **_kwargs: object())
     monkeypatch.setattr("deerflow.persistence.thread_meta.make_thread_store", lambda _sf, _store: object())
     monkeypatch.setattr(RunManager, "shutdown", spy_shutdown, raising=False)
     monkeypatch.setattr("deerflow.extensions.notify.set_extension_notify_loop", spy_set_extension_notify_loop)

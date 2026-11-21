@@ -2579,6 +2579,8 @@ memory:
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
+    # KurrentDB (examples/deerflow-extension-kurrentdb, plugin + KURRENTDB_* env vars):
+    # storage_class: deerflow_extension_kurrentdb.memory.KurrentdbMemoryStorage
     strict_user_scope: false    # set true in authenticated deployments after all callers propagate user_id
     manifest_filename: memory.json # user-global JSON: version/revision/time + user/history only; no facts or fact index
     file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
@@ -2903,6 +2905,9 @@ database:
 # backend: memory  -- No persistence, data lost on restart (default)
 # backend: db      -- SQL database via ORM, full query capability (production)
 # backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
+# backend: <name>  -- A store an enabled extension registers; startup stops if none provides it
+#                     e.g. kurrent from examples/deerflow-extension-kurrentdb (single
+#                     Gateway process; keep database.backend sqlite or postgres for run metadata)
 #
 # run_events:
 #   backend: memory
@@ -3846,3 +3851,10 @@ authorization:
 #                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any
+#   - name: kurrentdb                     # memory and run events in KurrentDB; settings
+#     package: deerflow-extension-kurrentdb # come from KURRENTDB_* env vars, not config
+#     use: deerflow_extension_kurrentdb:install
+#     enabled: true
+#     required: true
+#     # See examples/deerflow-extension-kurrentdb/README.md for storage_class and
+#     # run_events.backend: kurrent.

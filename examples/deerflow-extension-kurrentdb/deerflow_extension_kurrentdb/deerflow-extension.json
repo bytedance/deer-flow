@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "catalog/kurrentdb",
+  "locales": {
+    "zh-CN": {
+      "title": "KurrentDB",
+      "description": "将 DeerFlow 记忆和运行事件以事件溯源方式存储到 KurrentDB。",
+      "usage": [
+        {
+          "title": "将记忆存储到 KurrentDB",
+          "description": "在 config.yaml 中设置 memory.backend_config.storage_class: deerflow_extension_kurrentdb.memory.KurrentdbMemoryStorage。"
+        },
+        {
+          "title": "选择运行事件后端",
+          "description": "在 config.yaml 中设置 run_events.backend: kurrent，运行事件将写入 KurrentDB 流。"
+        }
+      ],
+      "requirements": [
+        "管理员已部署 KurrentDB 并设置 KURRENTDB_CONNECTION_STRING 环境变量。",
+        "运行事件后端要求单个 Gateway 进程，且 database.backend 为 sqlite 或 postgres。"
+      ]
+    },
+    "en-US": {
+      "title": "KurrentDB",
+      "description": "Store DeerFlow memory and run events in KurrentDB as event-sourced streams.",
+      "usage": [
+        {
+          "title": "Store memory in KurrentDB",
+          "description": "Set memory.backend_config.storage_class: deerflow_extension_kurrentdb.memory.KurrentdbMemoryStorage in config.yaml."
+        },
+        {
+          "title": "Select the run-event backend",
+          "description": "Set run_events.backend: kurrent in config.yaml so run events are written to KurrentDB streams."
+        }
+      ],
+      "requirements": [
+        "The administrator must run KurrentDB and set the KURRENTDB_CONNECTION_STRING environment variable.",
+        "The run-event backend needs a single Gateway process and database.backend sqlite or postgres."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-kurrentdb#readme"
+}

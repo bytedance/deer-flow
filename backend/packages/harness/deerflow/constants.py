@@ -84,3 +84,10 @@ RUN_EVENT_CATEGORY_MAX_LENGTH = 16
 # event identity also lives here rather than in the runtime event catalog.
 WORKSPACE_CHANGES_EVENT_TYPE = "workspace_changes"
 WORKSPACE_CHANGES_EVENT_CATEGORY = "workspace"
+
+# Run-event store backend names. The core builds the built-ins itself; any
+# other name matching the pattern is an extension-provided store. Config
+# validation, the registry and the store factory share these so they cannot
+# drift.
+BUILTIN_RUN_EVENT_BACKENDS = ("memory", "db", "jsonl")
+RUN_EVENTS_BACKEND_PATTERN = r"^[a-z][a-z0-9_-]{0,63}$"
