@@ -164,7 +164,7 @@ class CustomSkillHistoryResponse(BaseModel):
 
 
 class SkillRollbackRequest(BaseModel):
-    history_index: int = Field(default=-1, description="History entry index to restore from, defaulting to the latest change.")
+    history_index: int = Field(default=-1, strict=True, description="History entry index to restore from, defaulting to the latest change.")
 
 
 # Custom-skill mutations (edit, delete, rollback) each span three steps —
