@@ -479,7 +479,12 @@ def test_fresh_machine_restores_thread_files(installed, paths: Paths) -> None:
     outputs = paths.sandbox_outputs_dir("thread", user_id="owner")
     (outputs / "nested").mkdir(parents=True)
     (outputs / "nested" / "report.md").write_text("# report")
-    (outputs / "link").symlink_to(uploads / "data.csv")
+    try:
+        (outputs / "link").symlink_to(uploads / "data.csv")
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
 
     provider.acquire("thread", user_id="owner")
     files = fake.files["m-1"]

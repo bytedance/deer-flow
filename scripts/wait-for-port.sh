@@ -29,29 +29,40 @@ if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     exit 1
 fi
 
+# Resolve probe commands once. Repeated PATH probing is especially slow under
+# Windows/Git Bash and can dominate short readiness checks.
+HAVE_POWERSHELL=false
+HAVE_LSOF=false
+HAVE_SS=false
+HAVE_NETSTAT=false
+command -v powershell.exe >/dev/null 2>&1 && HAVE_POWERSHELL=true
+command -v lsof >/dev/null 2>&1 && HAVE_LSOF=true
+command -v ss >/dev/null 2>&1 && HAVE_SS=true
+command -v netstat >/dev/null 2>&1 && HAVE_NETSTAT=true
+
 elapsed=0
 interval=1
 
 is_port_listening() {
-    if command -v powershell.exe >/dev/null 2>&1; then
+    if $HAVE_POWERSHELL; then
         if WAIT_FOR_PORT_PORT="$PORT" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference='SilentlyContinue'; \$Port = [int]\$env:WAIT_FOR_PORT_PORT; if (Get-NetTCPConnection -LocalPort \$Port -State Listen) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
             return 0
         fi
     fi
 
-    if command -v lsof >/dev/null 2>&1; then
+    if $HAVE_LSOF; then
         if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
         fi
     fi
 
-    if command -v ss >/dev/null 2>&1; then
+    if $HAVE_SS; then
         if ss -ltn "( sport = :$PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
             return 0
         fi
     fi
 
-    if command -v netstat >/dev/null 2>&1; then
+    if $HAVE_NETSTAT; then
         if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${PORT}$"; then
             return 0
         fi
@@ -66,9 +77,13 @@ while ! is_port_listening; do
         echo "✗ $SERVICE failed to start on port $PORT after ${TIMEOUT}s"
         exit 1
     fi
-    printf "\r  Waiting for %s on port %s... %ds" "$SERVICE" "$PORT" "$elapsed"
+    if [ -t 1 ]; then
+        printf "\r  Waiting for %s on port %s... %ds" "$SERVICE" "$PORT" "$elapsed"
+    fi
     sleep "$interval"
     elapsed=$((elapsed + interval))
 done
 
-printf "\r  %-60s\r" ""   # clear the waiting line
+if [ -t 1 ]; then
+    printf "\r  %-60s\r" ""   # clear the waiting line
+fi

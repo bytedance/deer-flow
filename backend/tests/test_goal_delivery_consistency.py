@@ -278,6 +278,7 @@ async def test_successful_delivery_clears_satisfied_goal(tmp_path, monkeypatch, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Shared artifact handoff requires POSIX directory descriptors")
 async def test_shared_artifact_delivery_clears_satisfied_goal(tmp_path, monkeypatch):
     result = await _run_goal_delivery(tmp_path, monkeypatch, present_on_turn=1, shared_handoff=True)
 
@@ -288,6 +289,16 @@ async def test_shared_artifact_delivery_clears_satisfied_goal(tmp_path, monkeypa
     assert result.delivery[0]["by_tool"] == {"present_shared_artifact": [OUTPUT_PATH]}
     assert result.delivery[0]["matched_paths"] == [OUTPUT_PATH]
     assert result.delivery[0]["satisfied"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "posix", reason="Checks the unsupported host path")
+async def test_unsupported_shared_artifact_handoff_records_no_delivery(tmp_path, monkeypatch):
+    result = await _run_goal_delivery(tmp_path, monkeypatch, present_on_turn=1, shared_handoff=True)
+
+    assert result.delivery == [{"presented": 0, "paths": [], "by_tool": {}}]
+    outputs = Paths(base_dir=tmp_path).sandbox_outputs_dir(result.record.thread_id, user_id=get_effective_user_id())
+    assert not (outputs / "report.md").exists()
 
 
 @pytest.mark.asyncio
