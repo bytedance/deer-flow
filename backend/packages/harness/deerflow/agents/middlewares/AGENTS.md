@@ -27,7 +27,9 @@ make test-blocking-io
   needs to see its output.
 - **Lead and subagent chains differ on purpose.** Subagents skip the lead-only
   part. A middleware declared in config needs an explicit scope from each builder;
-  there is no implicit lead default.
+  there is no implicit lead default. `IdentityHooksMiddleware` is lead-only,
+  appended with `UploadsMiddleware`. With no `identityHooks` block, or with
+  `enabled: false`, it does not call MCP and does not write state.
 - **Tool wrappers nest.** Receipts wrap authorization, audit and write checks, so
   a denied call still gets a receipt. Progress tracking wraps error handling, so it
   sees the result that error handling produced.
