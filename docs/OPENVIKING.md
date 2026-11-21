@@ -45,7 +45,9 @@ configurations and are outside this adapter's supported setup.
 `default` when DeerFlow authentication is disabled. In an authenticated
 single-user deployment, use that user's DeerFlow ID. A request for another
 DeerFlow user is rejected before OpenViking is contacted, preventing one USER
-key from silently sharing memory across users.
+key from silently sharing memory across users. The failure policies below
+decide what that rejection does to the turn: with `write: log_and_drop` the
+other user's capture is logged and dropped, and the run still completes.
 
 Multi-user credential provisioning and storage are intentionally outside this
 first adapter PR.
