@@ -141,8 +141,8 @@ async def test_chat_accepts_replayed_assistant_and_tool_protocol_blocks(_stub_ap
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("context", [{}, {"mode": "flash"}], ids=["default", "explicit-flash"])
-async def test_thread_run_checks_the_owner_at_entry_and_once_at_admission(_stub_app_config, mode_app, monkeypatch, context):
+@pytest.mark.parametrize(("context", "expected_reads"), [({}, (1, 2)), ({"mode": "flash"}, (2, 1))], ids=["default", "explicit-flash"])
+async def test_thread_run_checks_the_owner_at_entry_and_once_at_admission(_stub_app_config, mode_app, monkeypatch, context, expected_reads):
     from unittest.mock import AsyncMock
 
     from httpx import ASGITransport, AsyncClient
@@ -160,7 +160,7 @@ async def test_thread_run_checks_the_owner_at_entry_and_once_at_admission(_stub_
     admission_reads = []
 
     async def count_at_admission(*args, **kwargs):
-        admission_reads.append(check.await_count + get.await_count)
+        admission_reads.append((check.await_count, get.await_count))
         return await admit(*args, **kwargs)
 
     monkeypatch.setattr(manager, "create_or_reject", count_at_admission)
@@ -169,7 +169,9 @@ async def test_thread_run_checks_the_owner_at_entry_and_once_at_admission(_stub_
         response = await client.post("/api/threads/read-count/runs", json={"input": {"messages": [{"role": "user", "content": "hello"}]}, "context": context})
     assert response.status_code == 200, response.text
     await (await manager.get(response.json()["run_id"], user_id=owner)).task
-    assert admission_reads == [2]
+    # Both paths check the owner at entry and read the row for share-history migration.
+    # At admission, the default mode reads the owner and mode together. Flash checks access.
+    assert admission_reads == [expected_reads]
 
 
 @pytest.mark.asyncio
@@ -213,7 +215,8 @@ async def test_mode_admission_recovers_the_owner_row_after_transient_storage_fai
 
     async def flaky_read(thread_id, **kwargs):
         reads.append(kwargs)
-        if len(reads) == 1:
+        # Let the share-history migration read the real row, then fail the first mode read.
+        if len(reads) == 2:
             raise OSError("transient metadata read failure")
         return await get_row(thread_id, **kwargs)
 
@@ -225,6 +228,7 @@ async def test_mode_admission_recovers_the_owner_row_after_transient_storage_fai
     assert response.status_code == 200, response.text
     record = await app.state.run_manager.get(response.json()["run_id"], user_id=owner)
     await record.task
+    assert reads[:3] == [{"user_id": None}] * 3
     assert worker.await_args.kwargs["config"].get("context", {}).get("mode") is None
     assert (await threads.get("mode-recovery", user_id=owner))["metadata"].get("mode") == (None if saved_mode == "chat" else saved_mode)
 
@@ -240,14 +244,16 @@ async def test_unknown_chat_mode_fails_closed_even_for_a_plain_text_run(_stub_ap
 
     app, owner, _, threads = mode_app
     await threads.create("unknown-mode", user_id=owner, metadata={"mode": "chat"})
-    lookup = AsyncMock(side_effect=failure)
+    # The migration succeeds. Only the subsequent mode-policy reads fail.
+    row = await threads.get("unknown-mode", user_id=owner)
+    lookup = AsyncMock(side_effect=[row] + [failure] * reads)
     monkeypatch.setattr(threads, "get", lookup)
     worker = AsyncMock()
     monkeypatch.setattr(services, "run_agent", worker)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/threads/unknown-mode/runs", json={"input": {"messages": [{"role": "user", "content": "Generate a file"}]}})
     assert response.status_code == 503, response.text
-    assert lookup.await_count == reads
+    assert lookup.await_count == 1 + reads
     worker.assert_not_awaited()
 
 
