@@ -186,6 +186,17 @@ provisioner does not delete an existing Pod to upgrade its capacity, including
 after a transient Gateway discovery failure. If the old Pod has already gone
 but its Service remains, create can safely provision the missing Pod.
 
+The Gateway also forwards the operator's `sandbox.environment` map, and the
+provisioner writes those entries to the sandbox container so image-level knobs
+such as `DISABLE_JUPYTER=true` or `DISABLE_CODE_SERVER=true` reach Kubernetes
+sandboxes the same way they reach local Docker ones. Entries named
+`AIO_BASH_MAX_SESSIONS`, `MAX_SHELL_SESSIONS` or `DEERFLOW_LARK_BROKER_URL` are
+ignored: the provisioner sets those from the dedicated request fields above, and
+one Pod keeps a single source per setting. A request may carry at most 32
+entries, keys must match `[A-Za-z_][A-Za-z0-9_]*` within 64 characters, and a
+value is limited to 1024 characters. Requests from older Gateways omit the map
+and produce the same Pods as before.
+
 ### Custom sandbox image
 
 Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environment variable. This is separate from `sandbox.image` in `config.yaml`, which applies to local Docker or Apple Container mode.

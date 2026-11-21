@@ -153,6 +153,7 @@ class RemoteSandboxBackend(SandboxBackend):
         *,
         required_shell_sessions: int = 0,
         max_bash_sessions: int | None = None,
+        environment: dict[str, str] | None = None,
     ):
         """Initialize with the provisioner service URL and optional API key.
 
@@ -165,12 +166,16 @@ class RemoteSandboxBackend(SandboxBackend):
                                 to each provisioned sandbox Pod.
             required_shell_sessions: Minimum usable capacity, even when new Pods use the image default.
             max_bash_sessions: Bash capacity to provision and attest before admission.
+            environment: Operator ``sandbox.environment`` forwarded to the
+                sandbox Pod so optional AIO services can be disabled per
+                deployment (for example ``DISABLE_JUPYTER``).
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
         self._max_shell_sessions = max_shell_sessions
         self._max_bash_sessions = max_bash_sessions
         self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
+        self._environment = dict(environment or {})
 
     @property
     def provisioner_url(self) -> str:
@@ -354,6 +359,8 @@ class RemoteSandboxBackend(SandboxBackend):
             payload["max_shell_sessions"] = self._max_shell_sessions
         if self._max_bash_sessions is not None:
             payload["max_bash_sessions"] = self._max_bash_sessions
+        if self._environment:
+            payload["environment"] = dict(self._environment)
         provisioner_extra_mounts = _provisioner_extra_mounts_payload(
             extra_mounts,
             skills_container_path=normalized_skills_container_path,
