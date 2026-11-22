@@ -20,6 +20,14 @@ Cancel claim transactions reserve SQLite's writer with `BEGIN IMMEDIATE` before
 reading candidates. PostgreSQL continues using `FOR UPDATE SKIP LOCKED`.
 These transactions contain only claim bookkeeping, never remote calls.
 
+Lease expiry is authoritative at the database, not at the poller's host clock.
+PostgreSQL lease predicates and expiry assignments use `clock_timestamp()`;
+SQLite uses its database clock in the conditional write (and reads it after
+`BEGIN IMMEDIATE` for cancel claims). The caller-supplied `now` remains the
+scheduler timestamp for due times and activity metadata. This prevents a
+clock-skewed worker from stealing a live claim or renewing/committing after the
+database lease has expired.
+
 Each control operation verifies and extends its claim before calling the driver,
 then renews every one third of the lease duration. Each renewal has its own
 one-third-duration deadline, so a database stall cannot leave a live remote
