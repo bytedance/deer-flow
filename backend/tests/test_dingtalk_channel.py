@@ -1209,12 +1209,12 @@ class TestGroupMessageMarkdownFormat:
                     return FakeResponse()
 
             with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
-                await channel._send_group_message("bot", "conv1", "Use ``flag``.")
+                await channel._send_group_message("bot", "conv1", "Use `` `--flag` ``.")
 
             assert len(captured_json) == 1
             payload = captured_json[0]
             assert payload["msgKey"] == "sampleMarkdown"
-            assert json.loads(payload["msgParam"])["text"] == "Use **flag**."
+            assert json.loads(payload["msgParam"])["text"] == "Use **`--flag`**."
 
         _run(go())
 
@@ -1240,6 +1240,10 @@ class TestAdaptMarkdownForDingtalk:
             ("Use `pip install` to install", "Use **pip install** to install"),
             ("Use ``a`b`` and `pwd`.", "Use **a`b** and **pwd**."),
             ("Use ```a``b```.", "Use **a``b**."),
+            ("Use `` cmd ``.", "Use **cmd**."),
+            ("Use `` `--flag` ``.", "Use **`--flag`**."),
+            ("Keep `  cmd  `.", "Keep ** cmd **."),
+            ("Keep ` cmd` and `   `.", "Keep ** cmd** and **   **."),
             ("Keep ``unfinished and use `pwd`.", "Keep ``unfinished and use **pwd**."),
             ("Keep ``one\ntwo`` across lines.", "Keep ``one\ntwo`` across lines."),
         ],
