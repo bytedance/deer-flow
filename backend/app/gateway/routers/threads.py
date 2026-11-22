@@ -665,7 +665,15 @@ class ThreadHistoryRequest(BaseModel):
     """Request body for checkpoint history."""
 
     limit: int = Field(default=10, ge=1, le=100, description="Maximum entries")
-    before: str | None = Field(default=None, description="Cursor for pagination")
+    before: str | None = Field(
+        default=None,
+        description=(
+            "Inclusive checkpoint ID cursor. The page starts with the cursor checkpoint if it still exists, "
+            "followed by older checkpoints up to `limit` entries. If retention removed the cursor, the page starts "
+            "with the first surviving older checkpoint, if any. When continuing, skip the first entry only if "
+            "its `checkpoint_id` equals `before`."
+        ),
+    )
 
 
 class ThreadBranchRequest(BaseModel):
@@ -2138,8 +2146,9 @@ async def get_thread_history(
 
     Only the latest (first) checkpoint carries the ``messages`` key to
     avoid duplicating the complete conversation across every entry. It also
-    carries an active ``goal`` and an achieved ``goal_outcome``, because
-    ``useStream`` rebuilds thread values from this head after every run.
+    carries the persisted ``todos`` list, an active ``goal`` and an achieved
+    ``goal_outcome``, because ``useStream`` rebuilds thread values from this
+    head after every run.
     """
     checkpointer = get_checkpointer(request)
     try:
@@ -2171,6 +2180,8 @@ async def get_thread_history(
                 values["thread_data"] = thread_data
 
             if is_latest_checkpoint:
+                if isinstance(todos := materialized_values.get("todos"), list):
+                    values["todos"] = [todo for todo in todos if isinstance(todo, dict) and isinstance(todo.get("content"), str)]
                 if is_active_goal(goal := materialized_values.get("goal")):
                     values["goal"] = goal
                 outcome = materialized_values.get(GOAL_OUTCOME_CHANNEL)

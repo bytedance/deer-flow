@@ -413,13 +413,19 @@ Cold agent imports during run creation use a dedicated worker pool, keeping
 unrelated Gateway requests responsive while the agent stack loads. A failed
 factory import prevents the run from being admitted.
 
-For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
-then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
-from the same directory. The build includes public demo assets and resolves
-supported demo API reads locally; writes are unavailable. To display the homepage
-GitHub star count, set `GITHUB_OAUTH_TOKEN` in `frontend/.env` before starting Node.
-The token stays on the server; missing credentials or GitHub failures hide the
-count. Restart Node after changing the token; no rebuild is needed.
+For a read-only demo without the Gateway, run these commands from `frontend/`:
+
+```bash
+make build-static
+HOSTNAME=127.0.0.1 PORT=3000 node .next/standalone/server.js
+```
+
+The build includes public demo assets and resolves supported demo API reads
+locally. Writes are unavailable. To display the homepage GitHub star count, set
+`GITHUB_OAUTH_TOKEN` in `frontend/.env` and add `--env-file=.env` before
+`.next/standalone/server.js` in the launch command. The token stays on the server.
+Missing credentials or GitHub failures hide the count. Restart Node after
+changing the token to load the new value.
 
 ## LangGraph Studio (Optional)
 

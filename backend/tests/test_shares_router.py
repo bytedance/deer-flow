@@ -739,6 +739,24 @@ async def test_imported_nested_files_have_sandbox_write_permissions(share_app):
         assert stat.S_IMODE(directory.stat().st_mode) == 0o777
 
 
+async def test_artifact_import_off_posix_is_refused_before_any_state(share_app, monkeypatch):
+    ctx = share_app
+    share = await make_share(ctx)
+    snapshot = await ctx.client.get(f"/api/shares/{share['token']}")
+    assert snapshot.json()["artifacts"]
+    url = f"/api/shares/{share['token']}/fork"
+    request_id = str(uuid4())
+    monkeypatch.setattr(share_fork, "_ARTIFACT_IMPORT_SUPPORTED", False)
+    refused = await ctx.client.post(url, json={"request_id": request_id}, headers=headers("bob"))
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == "Importing a share with artifacts requires POSIX"
+    # The refusal precedes any workspace state, so the same request can succeed
+    # once the descriptor-confined writer is available again.
+    monkeypatch.setattr(share_fork, "_ARTIFACT_IMPORT_SUPPORTED", True)
+    retried = await ctx.client.post(url, json={"request_id": request_id}, headers=headers("bob"))
+    assert retried.status_code == 200, retried.text
+
+
 async def test_unsafe_artifact_fails_without_publishing_partial_share(share_app):
     ctx = share_app
     ctx.output.unlink()
