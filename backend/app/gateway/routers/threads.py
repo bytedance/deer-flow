@@ -38,6 +38,12 @@ from app.gateway.checkpoint_lineage import (
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
+from app.gateway.checkpoint_mode_errors import (
+    CHECKPOINT_MODE_ERRORS as _CHECKPOINT_MODE_ERRORS,
+)
+from app.gateway.checkpoint_mode_errors import (
+    checkpoint_mode_http_error as _checkpoint_mode_http_error,
+)
 from app.gateway.deps import get_checkpointer, get_config, get_current_user_from_request, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.hitl_approval import find_pending_interrupts
@@ -51,6 +57,7 @@ from app.gateway.services import (
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
+from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
@@ -59,8 +66,7 @@ from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
-from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
-from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
+from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels, validate_state_mutation_node
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
@@ -102,8 +108,6 @@ from deerflow.utils.time import coerce_iso, now_iso
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
-_CHECKPOINT_MODE_ERRORS = (CheckpointModeMismatchError, CheckpointModeReconfigurationError)
-
 
 def _optional_run_event_store(request: Request) -> Any:
     """Return the run event store, or ``None`` when the app has none wired.
@@ -116,20 +120,6 @@ def _optional_run_event_store(request: Request) -> Any:
     return getattr(request.app.state, "run_event_store", None)
 
 
-def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException:
-    """Map checkpoint-mode guard failures to precise HTTP statuses.
-
-    A mismatch means the thread's persisted checkpoints conflict with the
-    process's frozen mode (operator-actionable, 409); a reconfiguration means
-    the process itself is mid mode-flip (transient, 503). Both must surface
-    their message — a generic 500 would force operators to grep logs to
-    discover the root cause after a mode flip.
-    """
-    if isinstance(exc, CheckpointModeMismatchError):
-        return HTTPException(status_code=409, detail=f"Thread {thread_id}: {exc}")
-    return HTTPException(status_code=503, detail=str(exc))
-
-
 # Metadata keys that the server controls; clients are not allowed to set
 # them. Pydantic ``@field_validator("metadata")`` strips them on every
 # inbound model below so a malicious client cannot reflect a forged
@@ -138,7 +128,8 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+# The share-import keys decide whether run admission rewrites a copy's history.
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY})
 # Checkpoint metadata the server writes and later reads back as trusted:
 # LangGraph's lineage keys and delta counters (``step`` drives the next turn,
 # ``parents`` the history walk, and ``counters_since_delta_snapshot`` is read
@@ -597,6 +588,16 @@ class ThreadStateUpdateRequest(BaseModel):
     checkpoint_id: str | None = Field(default=None, description="Checkpoint to branch from")
     checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
     as_node: str | None = Field(default=None, description="Node identity for the update")
+
+    @field_validator("as_node")
+    @classmethod
+    def _as_node_is_a_graph_node_name(cls, value: str | None) -> str | None:
+        # The name becomes the mutation graph's node; reject what LangGraph
+        # cannot compile as a 422 instead of an unhandled 500. An empty value
+        # keeps falling back to the default node in the route.
+        if value:
+            validate_state_mutation_node(value)
+        return value
 
 
 class ThreadGoalRequest(BaseModel):
@@ -1482,6 +1483,10 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
     if not moved:
         raise HTTPException(status_code=404, detail="Thread or project not found")
     record = await thread_store.get(thread_id)
+    if record is None:
+        # The move takes no thread lock, so a DELETE can remove the row
+        # between ``set_project`` and this read. The thread is gone either way.
+        raise HTTPException(status_code=404, detail="Thread or project not found")
     return ThreadResponse(
         thread_id=thread_id,
         status=record.get("status", "idle"),
@@ -2127,8 +2132,9 @@ async def get_thread_history(
 
     Only the latest (first) checkpoint carries the ``messages`` key to
     avoid duplicating the complete conversation across every entry. It also
-    carries an active ``goal`` and an achieved ``goal_outcome``, because
-    ``useStream`` rebuilds thread values from this head after every run.
+    carries the persisted ``todos`` list, an active ``goal`` and an achieved
+    ``goal_outcome``, because ``useStream`` rebuilds thread values from this
+    head after every run.
     """
     checkpointer = get_checkpointer(request)
     try:
@@ -2160,6 +2166,8 @@ async def get_thread_history(
                 values["thread_data"] = thread_data
 
             if is_latest_checkpoint:
+                if isinstance(todos := materialized_values.get("todos"), list):
+                    values["todos"] = [todo for todo in todos if isinstance(todo, dict) and isinstance(todo.get("content"), str)]
                 if is_active_goal(goal := materialized_values.get("goal")):
                     values["goal"] = goal
                 outcome = materialized_values.get(GOAL_OUTCOME_CHANNEL)

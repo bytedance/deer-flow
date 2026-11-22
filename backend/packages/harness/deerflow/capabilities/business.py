@@ -5,6 +5,7 @@ stay in MCP process environment, never in tool arguments or discovery results.
 """
 
 import argparse
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -81,8 +82,18 @@ class BusinessClient:
 
         if self.http is not None:
             return await perform(self.http)
-        async with httpx.AsyncClient() as client:
+        # Client construction loads the TLS trust store synchronously; keep it off
+        # the MCP server's event loop, like the community fetch clients.
+        #
+        # Cancellation-safety: if this coroutine is cancelled while awaiting
+        # `to_thread(...)`, the background thread may still construct the client,
+        # but we would never enter an `async with` block to close it. Shield the
+        # construction and always close the client in a finally.
+        client = await asyncio.shield(asyncio.to_thread(httpx.AsyncClient))
+        try:
             return await perform(client)
+        finally:
+            await asyncio.shield(client.aclose())
 
     async def send_message(self, content: str, message_type: Literal["text", "markdown"] = "text", title: str = "Notification") -> dict[str, Any]:
         if self.provider not in ("dingtalk", "wecom"):

@@ -191,7 +191,7 @@ async def test_two_root_completions_keep_legacy_outputs_and_one_terminal(runtime
 
 
 @pytest.mark.asyncio
-async def test_graph_success_before_failed_artifact_delivery_has_error_terminal(runtime, monkeypatch):
+async def test_graph_success_waits_for_delivery_verdict_before_terminal(runtime, monkeypatch):
     """Catches terminal success published before real output verification."""
     entered, release = asyncio.Event(), asyncio.Event()
     original = worker_module._produced_output_paths
@@ -224,12 +224,13 @@ async def test_graph_success_before_failed_artifact_delivery_has_error_terminal(
         release.set()
         await settled(run.task)
     row = await runtime.runs.get(run.record.run_id, user_id=run.record.user_id)
-    assert row["status"] == "error"
-    assert row["error"] == "Artifact delivery incomplete: no produced output artifact was presented"
+    assert row["status"] == "success"
+    assert row["error"] is None
     delivery = await runtime.events.list_events(run.record.thread_id, run.record.run_id, event_types=["run.delivery"])
     assert delivery[0]["content"]["produced_paths"] == ["/mnt/user-data/outputs/report.md"]
     assert delivery[0]["content"]["satisfied"] is False
-    confirmed_terminal(await terminal_events(runtime, run.record), run.record, "error")
+    assert delivery[0]["content"]["enforcement"] == "advisory"
+    confirmed_terminal(await terminal_events(runtime, run.record), run.record, "success")
 
 
 @pytest.mark.asyncio

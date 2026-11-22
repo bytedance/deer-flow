@@ -98,7 +98,7 @@ def _graph(checkpointer, mode, answer):
 @pytest.mark.parametrize("origin", ["remote", "local"])
 async def test_slow_late_rollback_renews_slot_and_cannot_erase_peer_turn(database_runtime, monkeypatch, mode, origin):
     store, checkpointer = database_runtime
-    ownership = RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=5, grace_seconds=0)
+    ownership = RunOwnershipConfig.model_construct(heartbeat_enabled=True, lease_seconds=2, grace_seconds=0)
     owner = RunManager(store=store, worker_id="owner", run_ownership_config=ownership)
     peer = RunManager(store=store, worker_id="peer", run_ownership_config=ownership)
     metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Report"}

@@ -4,10 +4,12 @@ import asyncio
 import logging
 import socket
 import uuid
+from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.authz.provider import Principal
 from deerflow.community.ragflow.sources import durable_source_artifact
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
@@ -160,6 +162,7 @@ class SubagentBatchService:
         prepare_continuation=None,
         dispatch_continuation=None,
         cancel_continuation=None,
+        resolve_principal: Callable[[dict[str, Any]], Awaitable[Principal]] | None = None,
     ) -> None:
         self._repository = repository
         self._config = config
@@ -181,6 +184,7 @@ class SubagentBatchService:
         self._prepare_continuation = prepare_continuation
         self._dispatch_continuation = dispatch_continuation
         self._cancel_continuation = cancel_continuation
+        self._resolve_principal = resolve_principal
         self._continuations: dict[str, asyncio.Task] = {}
 
     async def start(self) -> None:
@@ -468,6 +472,32 @@ class SubagentBatchService:
             if lease.valid:
                 await self._execute_leased_item(item, lease)
 
+    def _bind_principal_resolver(self, batch: dict[str, Any]) -> Callable[[], Awaitable[Principal]] | None:
+        if self._resolve_principal is None:
+            return None
+        owner_loop = asyncio.get_running_loop()
+
+        async def resolve() -> Principal:
+            principal = await self._resolve_principal(batch)
+            if not isinstance(principal, Principal) or principal.user_id != batch["user_id"]:
+                raise PermissionError("Batch principal does not match its owner")
+            return principal
+
+        async def resolve_on_owner_loop() -> Principal:
+            # Native executors use a separate loop; the host's async database
+            # pool must stay on the Gateway loop, including after capacity waits.
+            if asyncio.get_running_loop() is owner_loop:
+                return await resolve()
+            coro = resolve()
+            try:
+                pending = asyncio.run_coroutine_threadsafe(coro, owner_loop)
+            except BaseException:
+                coro.close()
+                raise
+            return await asyncio.wrap_future(pending)
+
+        return resolve_on_owner_loop
+
     async def _execute_leased_item(self, item: dict[str, Any], lease: BatchItemLease) -> None:
         item_id = item["id"]
         execution_id: str | None = None
@@ -475,13 +505,15 @@ class SubagentBatchService:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
             spec = batch["execution_spec"]
+            principal_resolver = self._bind_principal_resolver(batch)
+            principal = await principal_resolver() if principal_resolver is not None else None
             config_data = spec["subagent_config"]
             if "prompt_overlay" in config_data:
                 from deerflow.config.prompt_overlay import PromptOverlay
 
                 config_data = {**config_data, "prompt_overlay": PromptOverlay.model_validate(config_data["prompt_overlay"])}
             config = SubagentConfig(**config_data)
-            app_config = self._app_config or get_app_config()
+            app_config = self._app_config or await run_assembly(get_app_config)
             from deerflow.tools import get_available_tools
 
             effective_model = resolve_subagent_model_name(
@@ -513,6 +545,8 @@ class SubagentBatchService:
                 )
                 return
             executor_kwargs = {}
+            if principal_resolver is not None:
+                executor_kwargs["principal_resolver"] = principal_resolver
             if "mcp_agent_auth" in spec:
                 from deerflow.mcp.agent_auth import restore_agent_authority
 
@@ -526,13 +560,13 @@ class SubagentBatchService:
                 parent_model=spec.get("parent_model"),
                 thread_id=batch["thread_id"],
                 user_id=batch["user_id"],
-                user_role=spec.get("user_role"),
-                oauth_provider=spec.get("oauth_provider"),
-                oauth_id=spec.get("oauth_id"),
+                user_role=principal.role if principal is not None else spec.get("user_role"),
+                oauth_provider=principal.oauth_provider if principal is not None else spec.get("oauth_provider"),
+                oauth_id=principal.oauth_id if principal is not None else spec.get("oauth_id"),
                 run_id=batch.get("run_id"),
-                channel_user_id=spec.get("channel_user_id"),
-                is_internal=spec.get("is_internal") is True,
-                authz_attributes=spec.get("authz_attributes"),
+                channel_user_id=principal.channel_user_id if principal is not None else spec.get("channel_user_id"),
+                is_internal=principal.is_internal if principal is not None else spec.get("is_internal") is True,
+                authz_attributes=principal.attributes if principal is not None else spec.get("authz_attributes"),
                 knowledge_scope=spec.get("knowledge_scope"),
                 execution_capacity=self._execution_capacity,
                 extensions=self._extensions,

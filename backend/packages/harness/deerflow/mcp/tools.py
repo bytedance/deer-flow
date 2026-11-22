@@ -473,6 +473,23 @@ def _extract_thread_id(runtime: Runtime | None) -> str:
         return "default"
 
 
+def _describe_non_text_result(blocks: list[dict[str, Any]]) -> str:
+    """Name the non-text blocks of an error result without their payloads.
+
+    The tool error reported to the model is built from the result's text
+    blocks. An error result that carries only images or files has none, and
+    stringifying the blocks instead would put their base64 payload into the
+    model-visible message (and into the checkpointed ToolMessage). Report the
+    block kinds and MIME types, which is all the model can act on anyway.
+    """
+    parts: list[str] = []
+    for block in blocks:
+        kind = block.get("type", "unknown")
+        mime_type = block.get("mime_type")
+        parts.append(f"{kind} ({mime_type})" if mime_type else str(kind))
+    return ", ".join(parts)
+
+
 def _convert_call_tool_result(
     call_tool_result: Any,
     *,
@@ -549,10 +566,18 @@ def _convert_call_tool_result(
     # Convert MCP content blocks to LangChain content blocks.
     lc_content = []
     resource_links: list[dict[str, Any]] = []
+    is_error = bool(call_tool_result.isError)
+    # Empty binary payloads cannot become LangChain blocks (``create_file_block``
+    # rejects an empty base64 string). On an error result that would hide the
+    # server's diagnostics, so name the shape in the fallback message instead.
+    empty_binary_shapes: list[str] = []
     for item in call_tool_result.content:
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
+            if is_error and not item.data:
+                empty_binary_shapes.append(f"image ({item.mimeType})")
+                continue
             lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
         elif isinstance(item, AudioContent):
             raise NotImplementedError(f"AudioContent conversion to LangChain content blocks is not yet supported. Received audio with mime type: {item.mimeType}")
@@ -601,6 +626,10 @@ def _convert_call_tool_result(
                 lc_content.append(create_text_block(text=_resolve_text(res.text)))
             elif isinstance(res, BlobResourceContents):
                 mime = res.mimeType or None
+                if is_error and not res.blob:
+                    kind = "image" if mime and mime.startswith("image/") else "file"
+                    empty_binary_shapes.append(f"{kind} ({mime or 'application/octet-stream'})")
+                    continue
                 if mime and mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
                 else:
@@ -622,7 +651,18 @@ def _convert_call_tool_result(
 
     if call_tool_result.isError:
         error_parts = [item["text"] for item in lc_content if isinstance(item, dict) and item.get("type") == "text"]
-        raise ToolException("\n".join(error_parts) if error_parts else str(lc_content))
+        if error_parts:
+            raise ToolException("\n".join(error_parts))
+        # No text block to report: describe the payload shapes instead of
+        # stringifying the blocks, which would put image/file base64 into the
+        # model-visible error message.
+        described = _describe_non_text_result(lc_content)
+        if empty_binary_shapes:
+            described = ", ".join(filter(None, [described, ", ".join(empty_binary_shapes)]))
+        message = "MCP tool returned an error result without text content"
+        if described:
+            message += f" ({described}); the payload is not shown"
+        raise ToolException(message + ".")
 
     artifact = None
     if call_tool_result.structuredContent is not None:
@@ -1347,7 +1387,7 @@ def _prepare_server_discovery(
     session_pool: MCPSessionPool | None,
 ) -> _PreparedServerDiscovery | None:
     """Build selected connections and capture bindings before discovery."""
-    all_enabled = extensions_config.get_enabled_mcp_servers()
+    all_enabled = extensions_config.get_discoverable_mcp_servers()
     requested = set(all_enabled) if server_names is None else set(server_names) & set(all_enabled)
     selected_names = [name for name in all_enabled if name in requested]
     if not selected_names:
@@ -1465,6 +1505,100 @@ async def _discover_and_wrap_prepared(
         len(groups),
     )
     return groups
+
+
+async def get_browser_mcp_tools(config: ExtensionsConfig, owner: str, selected: set[str] | None = None) -> list[BaseTool]:
+    """Discover as the signed-in lead agent, without publishing to the shared cache."""
+    import httpx
+    from langchain_core.tools import ToolException
+
+    from deerflow.approvals.policy import digest
+    from deerflow.mcp.browser_oauth import browser_grant_fingerprint, get_browser_oauth_server, get_call_token, mcp_client_factory
+    from deerflow.mcp.client import build_server_params
+    from deerflow.runtime.context_keys import MCP_BROWSER_USER_CONTEXT_KEY
+
+    adapter = _load_mcp_adapter_symbols()
+    if adapter is None:
+        return []
+    client_cls, load_tools = adapter
+    redirect_hint = "Connect or reconnect this MCP server in Capability Center."
+
+    async def discover(name: str, server: McpServerConfig) -> tuple[BaseTool, ...]:
+        fingerprint = browser_grant_fingerprint(server)
+
+        async def check_current():
+            try:
+                current = await asyncio.to_thread(get_browser_oauth_server, name)
+            except Exception:
+                raise ToolException("MCP credential policy is unavailable") from None
+            if current is None or browser_grant_fingerprint(current) != fingerprint:
+                raise ToolException(redirect_hint)
+            return current
+
+        try:
+            await check_current()
+            _, epoch = await get_call_token(name, server, owner)
+        except ToolException:
+            return ()
+
+        class CurrentGrant(httpx.Auth):
+            async def async_auth_flow(self, request):
+                current = await check_current()
+                token, _ = await get_call_token(name, current, owner, expected_epoch=epoch)
+                await check_current()
+                request.headers["Authorization"] = f"Bearer {token}"
+                response = yield request
+                if response.status_code == 401:
+                    # Do not replay remote calls. A later request can use the rotated token.
+                    await get_call_token(name, current, owner, expected_epoch=epoch, rejected_token=token)
+
+        async def require_current_grant(request, handler):
+            runtime = getattr(request, "runtime", None)
+            context = getattr(runtime, "context", None)
+            if not isinstance(context, Mapping) or context.get(MCP_BROWSER_USER_CONTEXT_KEY) != owner:
+                raise ToolException(redirect_hint)
+            current = await check_current()
+            await get_call_token(name, current, owner, expected_epoch=epoch)
+            return await handler(request)
+
+        connection = build_server_params(name, server)
+        connection.update(auth=CurrentGrant(), httpx_client_factory=mcp_client_factory(server))
+        view = config.model_copy(update={"mcp_servers": {name: server}})
+        interceptors = [
+            require_current_grant,
+            *build_mcp_tool_interceptors(view, connection_scope="personal"),
+        ]
+        client = client_cls({name: connection}, tool_interceptors=interceptors, tool_name_prefix=True)
+        prepared = _PreparedServerClient(name, connection, client, interceptors, server.tool_name_prefix, _resolve_session_init_timeout(server))
+        _, raw = await _discover_server_tools(prepared, load_mcp_tools_fn=load_tools)
+        if raw is None:
+            return ()
+        tools = _wrap_discovered_server_tools(
+            config,
+            name,
+            connection,
+            raw,
+            tool_name_prefix=server.tool_name_prefix,
+            session_init_timeout=prepared.session_init_timeout,
+            pool=None,
+            binding=None,
+            ownership_domain="deployment",
+            connection_scope="deployment",
+        ).tools
+        for tool in tools:
+            metadata = tool.metadata or {}
+            tool.metadata = {**metadata, "deerflow_approval_binding": digest([metadata.get("deerflow_approval_binding"), owner, epoch])}
+        return tools
+
+    async def discover_safely(name, server):
+        try:
+            return await discover(name, server)
+        except Exception as exc:
+            logger.warning("Skipping browser MCP discovery for '%s' (%s)", name, type(exc).__name__)
+            return ()
+
+    groups = await asyncio.gather(*(discover_safely(name, server) for name, server in config.get_enabled_mcp_servers().items() if server.uses_browser_oauth and (selected is None or name in selected)))
+    return [tool for group in groups for tool in group]
 
 
 async def get_mcp_tools_by_server(
