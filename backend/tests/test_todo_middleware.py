@@ -12,11 +12,15 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import ModelRequest
 from langchain.tools import tool
+from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langchain_openai.chat_models.base import _convert_dict_to_message
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import (
     ModelLengthFinishReasonMiddleware,
 )
@@ -456,6 +460,91 @@ class TestWriteTodosIdNormalization:
         assert structured[1] != "dup"
         assert [block["id"] for block in ai.content if block["type"] == "tool_use"] == structured
         assert [call["id"] for call in ai.additional_kwargs["tool_calls"]] == structured
+
+    @staticmethod
+    def _retry_messages(message: AIMessage) -> list[Any]:
+        model = _CapturingFakeMessagesListChatModel(responses=[message, AIMessage(content="Done.")])
+        graph = create_agent(model=model, tools=[], middleware=[DanglingToolCallMiddleware(), TodoMiddleware()])
+        graph.invoke({"messages": [HumanMessage(content="Write a plan.")]})
+        assert len(model.seen_messages) == 2
+        return model.seen_messages[1]
+
+    @pytest.mark.parametrize("use_previous_response_id", [False, True])
+    def test_openai_responses_retry_keeps_item_ids_and_pairs_calls_with_results(self, use_previous_response_id):
+        content = [{"type": "function_call", "id": item_id, "call_id": "call_dup", "name": "write_todos", "arguments": '{"todos":[]}'} for item_id in ("fc_first", "fc_second")]
+        message = AIMessage(
+            content=content,
+            response_metadata={"id": "resp_original", "model_provider": "openai"},
+            tool_calls=[{"name": "write_todos", "id": "call_dup", "args": {"todos": []}} for _ in content],
+        )
+
+        retry = self._retry_messages(message)
+        adapter = ChatOpenAI(model="gpt-5", api_key="test", use_responses_api=True, use_previous_response_id=use_previous_response_id)
+        payload = adapter._get_request_payload(retry)
+
+        assert "previous_response_id" not in payload
+        calls = [item for item in payload["input"] if item["type"] == "function_call"]
+        results = [item["call_id"] for item in payload["input"] if item["type"] == "function_call_output"]
+        assert [call["id"] for call in calls] == ["fc_first", "fc_second"]
+        assert [call["call_id"] for call in calls] == results == ["call_dup", "deerflow_write_todos_synthetic_1"]
+        assert [block["call_id"] for block in message.content] == ["call_dup", "call_dup"]
+
+    @pytest.mark.parametrize("id_fields", [{"id": None}, {}], ids=["null", "missing"])
+    def test_anthropic_retry_rewrites_idless_tool_use_blocks(self, id_fields):
+        todos = [{"todos": []}, {"todos": [{"content": "Plan", "status": "pending"}]}]
+        content = [
+            {"type": "tool_use", "id": "", "name": "write_todos", "input": todos[0]},
+            {"type": "tool_use", "name": "write_todos", "input": todos[1], **id_fields},
+        ]
+        message = AIMessage(
+            content=content,
+            tool_calls=[{"name": "write_todos", "id": call_id, "args": args} for call_id, args in zip(("", None), todos, strict=True)],
+        )
+
+        retry = self._retry_messages(message)
+        adapter = ChatAnthropic(model="claude-sonnet-4-5", api_key="test")
+        payload = adapter._get_request_payload(retry)
+
+        blocks = [block for item in payload["messages"] for block in item["content"] if isinstance(block, dict)]
+        calls = [block for block in blocks if block["type"] == "tool_use"]
+        results = [block["tool_use_id"] for block in blocks if block["type"] == "tool_result"]
+        assert [call["input"] for call in calls] == todos
+        assert [call["id"] for call in calls] == results == ["deerflow_write_todos_synthetic_0", "deerflow_write_todos_synthetic_1"]
+
+    @pytest.mark.parametrize(
+        ("invalid_name", "todo_id", "invalid_id"),
+        [
+            ("echo", "call_dup", "call_dup"),
+            ("write_todos", "call_dup", "call_dup"),
+            ("echo", None, "deerflow_write_todos_synthetic_0"),
+        ],
+    )
+    def test_chat_completions_retry_reserves_ids_of_invalid_calls(self, invalid_name, todo_id, invalid_id):
+        raw_calls = [
+            {"type": "function", "id": invalid_id, "function": {"name": invalid_name, "arguments": "{"}},
+            {"type": "function", "id": todo_id, "function": {"name": "write_todos", "arguments": '{"todos":[]}'}},
+        ]
+        message = _convert_dict_to_message({"role": "assistant", "content": None, "tool_calls": raw_calls})
+        assert isinstance(message, AIMessage)
+        assert [call["id"] for call in message.invalid_tool_calls] == [invalid_id]
+        # Some integrations keep the raw provider calls alongside the decoded calls.
+        message = message.model_copy(update={"additional_kwargs": {"tool_calls": raw_calls}})
+
+        retry = self._retry_messages(message)
+        adapter = ChatOpenAI(model="gpt-4o", api_key="test", use_responses_api=False)
+        payload = adapter._get_request_payload(retry)
+
+        calls = [call for item in payload["messages"] for call in item.get("tool_calls", [])]
+        results = [item["tool_call_id"] for item in payload["messages"] if item["role"] == "tool"]
+        repaired_id = "deerflow_write_todos_synthetic_0"
+        if invalid_id == repaired_id:
+            repaired_id += "_"
+        assert [call["id"] for call in calls] == [repaired_id, invalid_id]
+        assert set(results) == {repaired_id, invalid_id}
+        assert len(results) == 2
+        retry_raw_calls = next(item for item in retry if isinstance(item, AIMessage)).additional_kwargs["tool_calls"]
+        assert [call["id"] for call in retry_raw_calls] == [invalid_id, repaired_id]
+        assert [call["id"] for call in raw_calls] == [invalid_id, todo_id]
 
     def test_well_formed_ids_are_left_to_the_base_hook(self):
         mw = TodoMiddleware()

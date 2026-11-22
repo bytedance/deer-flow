@@ -24,6 +24,7 @@ suppress reminders in later Goal continuation turns of the same run.
 from __future__ import annotations
 
 import threading
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, override
 
@@ -34,7 +35,6 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
-from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.agents.thread_state import ThreadState
 
 TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
@@ -141,50 +141,66 @@ def _has_tool_call_intent_or_error(message: AIMessage) -> bool:
 _SYNTHETIC_WRITE_TODOS_ID_PREFIX = "deerflow_write_todos_synthetic_"
 
 
+def _usable_call_id(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _relabel_provider_tool_call_ids(
     message: AIMessage,
-    occurrence_plans: dict[str, list[str | None]],
+    calls: list[dict[str, Any]],
+    occurrence_plans: dict[str | None, list[str]],
 ) -> AIMessage:
-    """Apply the structured relabelling to the provider's own tool-call surfaces.
+    """Rename each todo occurrence in the original provider blocks and raw calls."""
+    invalid_arguments = {(_usable_call_id(call.get("id")), args) for call in message.invalid_tool_calls if isinstance(call, dict) and call.get("name") == "write_todos" and ((args := call.get("args")) is None or isinstance(args, str))}
 
-    ``clone_ai_message_with_tool_calls`` keeps content blocks and raw
-    ``additional_kwargs.tool_calls`` entries by id but never renames them, so a
-    relabelled structured call would leave duplicate ids in the payload sent on
-    the next request. ``occurrence_plans`` maps each original id to one entry
-    per occurrence in ``tool_calls`` (``None`` for an occurrence that kept its
-    id), so the same occurrence in every surface is renamed.
-    """
-    if not occurrence_plans:
-        return message
-
-    def _rewrite(entries: list[Any], *, tool_use_only: bool) -> list[Any]:
-        counters: dict[str, int] = {}
+    def _rewrite(entries: list[Any], *, raw: bool) -> list[Any]:
+        pending = {call_id: deque(ids) for call_id, ids in occurrence_plans.items()}
         rewritten: list[Any] = []
         for entry in entries:
-            if isinstance(entry, dict) and (not tool_use_only or entry.get("type") == "tool_use"):
-                original = entry.get("id")
-                if isinstance(original, str) and original in occurrence_plans:
-                    index = counters.get(original, 0)
-                    counters[original] = index + 1
-                    plan = occurrence_plans[original]
-                    if index < len(plan) and plan[index] is not None:
-                        entry = {**entry, "id": plan[index]}
+            if not isinstance(entry, dict):
+                rewritten.append(entry)
+                continue
+
+            details = entry
+            id_key = "id"
+            if raw:
+                function = entry.get("function")
+                if isinstance(function, dict):
+                    details = function
+            elif entry.get("type") == "function_call":
+                # Responses has a separate item id, even if the call id is missing.
+                if "call_id" in entry or "arguments" in entry:
+                    id_key = "call_id"
+            elif entry.get("type") not in ("tool_use", "tool_call", "tool_call_chunk"):
+                rewritten.append(entry)
+                continue
+
+            original = _usable_call_id(entry.get(id_key))
+            remaining = pending.get(original)
+            arguments = details.get("arguments", details.get("args", details.get("input")))
+            is_invalid = (arguments is None or isinstance(arguments, str)) and (original, arguments) in invalid_arguments
+            if details.get("name") == "write_todos" and remaining and not is_invalid:
+                new_id = remaining.popleft()
+                if new_id != entry.get(id_key):
+                    entry = {**entry, id_key: new_id}
             rewritten.append(entry)
         return rewritten
 
-    update: dict[str, Any] = {}
-
-    additional_kwargs = dict(getattr(message, "additional_kwargs", None) or {})
+    update: dict[str, Any] = {"tool_calls": calls}
+    additional_kwargs = message.additional_kwargs
     raw_calls = additional_kwargs.get("tool_calls")
     if isinstance(raw_calls, list):
-        additional_kwargs["tool_calls"] = _rewrite(raw_calls, tool_use_only=False)
-        update["additional_kwargs"] = additional_kwargs
+        update["additional_kwargs"] = {**additional_kwargs, "tool_calls": _rewrite(raw_calls, raw=True)}
 
-    content = message.content
-    if isinstance(content, list):
-        update["content"] = _rewrite(list(content), tool_use_only=True)
+    if isinstance(message.content, list):
+        update["content"] = _rewrite(message.content, raw=False)
 
-    return message.model_copy(update=update) if update else message
+    # A Responses continuation would replay the server's uncorrected call IDs.
+    response_id = message.response_metadata.get("id")
+    if isinstance(response_id, str) and response_id.startswith("resp_"):
+        update["response_metadata"] = {key: value for key, value in message.response_metadata.items() if key != "id"}
+
+    return message.model_copy(update=update)
 
 
 def _normalize_write_todos_ids(message: AIMessage) -> AIMessage | None:
@@ -199,48 +215,34 @@ def _normalize_write_todos_ids(message: AIMessage) -> AIMessage | None:
     give those calls synthetic ids and replace the message in place (same
     message id, so the reducer substitutes it).
 
-    Ids used by another tool in the same response are reserved: a
-    ``write_todos`` call sharing one is relabelled, so every emitted result
-    has a unique address. The structured ``tool_calls`` and the provider's
-    raw/content surfaces are relabelled by occurrence.
+    Reserve ids from other valid calls and invalid calls in the response.
+    DanglingToolCallMiddleware can produce results for invalid calls too.
     """
     calls = list(message.tool_calls or [])
     todo_positions = [position for position, call in enumerate(calls) if call.get("name") == "write_todos"]
     if not todo_positions:
         return None
 
-    original_ids = [call.get("id") for call in calls]
-    other_ids = {call_id for position, call_id in enumerate(original_ids) if position not in todo_positions and isinstance(call_id, str) and call_id.strip()}
-    used = {call_id for call_id in original_ids if isinstance(call_id, str) and call_id.strip()}
-    seen: set[str] = set()
-    relabelled_positions: dict[int, str] = {}
+    other_calls = [call for call in calls if call.get("name") != "write_todos"]
+    seen = {call_id for call in [*other_calls, *message.invalid_tool_calls] if isinstance(call, dict) and (call_id := _usable_call_id(call.get("id"))) is not None}
+    used = seen | {call_id for call in calls if (call_id := _usable_call_id(call.get("id"))) is not None}
+    changed = False
+    occurrence_plans: dict[str | None, list[str]] = defaultdict(list)
     for position in todo_positions:
         call = calls[position]
-        call_id = original_ids[position]
-        if isinstance(call_id, str) and call_id.strip() and call_id not in seen and call_id not in other_ids:
-            seen.add(call_id)
-            continue
+        original = _usable_call_id(call.get("id"))
+        call_id = original
+        if call_id is None or call_id in seen:
+            call_id = f"{_SYNTHETIC_WRITE_TODOS_ID_PREFIX}{position}"
+            while call_id in used:
+                call_id += "_"
+            used.add(call_id)
+            calls[position] = {**call, "id": call_id}
+            changed = True
+        seen.add(call_id)
+        occurrence_plans[original].append(call_id)
 
-        synthetic = f"{_SYNTHETIC_WRITE_TODOS_ID_PREFIX}{position}"
-        while synthetic in used:
-            synthetic += "_"
-        used.add(synthetic)
-        seen.add(synthetic)
-        calls[position] = {**call, "id": synthetic}
-        relabelled_positions[position] = synthetic
-
-    if not relabelled_positions:
-        return None
-
-    occurrence_plans: dict[str, list[str | None]] = {}
-    for position, call_id in enumerate(original_ids):
-        if not isinstance(call_id, str) or not call_id.strip():
-            continue
-        occurrence_plans.setdefault(call_id, []).append(relabelled_positions.get(position))
-    occurrence_plans = {call_id: plan for call_id, plan in occurrence_plans.items() if any(new is not None for new in plan)}
-
-    normalized = clone_ai_message_with_tool_calls(message, calls)
-    return _relabel_provider_tool_call_ids(normalized, occurrence_plans)
+    return _relabel_provider_tool_call_ids(message, calls, occurrence_plans) if changed else None
 
 
 class TodoMiddleware(TodoListMiddleware):
