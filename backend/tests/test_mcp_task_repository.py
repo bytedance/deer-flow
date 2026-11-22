@@ -2748,7 +2748,6 @@ async def test_control_lease_clock_uses_database_time_not_worker_clock(tmp_path,
     # Simulate expiry in the database while the old worker's local clock is
     # still behind. Renewal and snapshot writes must both fail closed.
     token = claimed[0]["lease_token"]
-    await repo._sf()  # Ensure the repository remains backed by the production session factory.
     async with repo._sf() as session:
         await session.execute(
             update(McpTaskRow)
