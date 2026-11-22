@@ -1,8 +1,9 @@
-"""Public-network policy for non-operator personal HTTP MCP connections."""
+"""Destination-pinned HTTP transport; personal MCP connections require public network addresses."""
 
 import asyncio
 import ipaddress
 import ssl
+from collections.abc import Callable
 
 import httpx
 
@@ -23,20 +24,22 @@ def _public_addresses(url: httpx.URL) -> list[str]:
     return list(dict.fromkeys(addresses)) if addresses else [str(ipaddress.ip_address(url.host))]
 
 
-class _PersonalTransport(httpx.AsyncBaseTransport):
-    def __init__(self):
+class DestinationPinnedTransport(httpx.AsyncBaseTransport):
+    def __init__(self, *, resolve: Callable[[httpx.URL], list[str]] = _public_addresses, tls_context: Callable[[], ssl.SSLContext] | None = None):
+        self._resolve = resolve
+        self._tls_context = tls_context
         self._ssl_context: ssl.SSLContext | None = None
         self._ssl_context_lock = asyncio.Lock()
         self._transports: dict[tuple[bytes, bytes, int | None], httpx.AsyncHTTPTransport] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        addresses = await asyncio.to_thread(_public_addresses, request.url)
+        addresses = await asyncio.to_thread(self._resolve, request.url)
         # The synchronous client factory can run on the event loop. Load TLS
         # trust lazily off-loop, sharing one context across concurrent requests.
         if self._ssl_context is None:
             async with self._ssl_context_lock:
                 if self._ssl_context is None:
-                    self._ssl_context = await asyncio.to_thread(httpx.create_ssl_context, trust_env=False)
+                    self._ssl_context = await asyncio.to_thread(self._tls_context) if self._tls_context else await asyncio.to_thread(httpx.create_ssl_context, trust_env=False)
         origin = (request.url.raw_scheme, request.url.raw_host, request.url.port)
         # Pin TCP to the vetted IP, but isolate pools by original origin so two
         # names sharing an IP cannot reuse a connection authenticated for one.
@@ -64,7 +67,7 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
 
 
 def personal_httpx_client_factory(headers=None, timeout=None, auth=None):
-    kwargs = {"headers": headers, "auth": auth, "follow_redirects": False, "trust_env": False, "transport": _PersonalTransport()}
+    kwargs = {"headers": headers, "auth": auth, "follow_redirects": False, "trust_env": False, "transport": DestinationPinnedTransport()}
     if timeout is not None:
         kwargs["timeout"] = timeout
     return httpx.AsyncClient(**kwargs)

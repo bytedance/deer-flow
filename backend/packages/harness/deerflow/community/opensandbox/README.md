@@ -107,6 +107,25 @@ count against the file limit. Each release revisits retained outputs, including
 unchanged files; equal file size does not prove equal content. Large accumulated
 output directories may reach the pass limits before all files are mirrored.
 
+Skill synchronization is required before a new or reclaimed sandbox is exposed
+to the run. OpenSandbox stages the enabled skill view under `skills.container_path`;
+an explicit Agent policy replaces the four managed directories with its own view,
+including an empty view for an empty list. The provider refuses symlinks in the
+skills root or its ancestors. Within a package it preserves relative links to
+files and directories in the same package, and skips unsafe links and
+non-portable path components with a warning.
+
+A pass uploads at most 2,000 files and links, 512 MiB of file content, and
+100 MiB per file. Its 120-second deadline is cooperative: it is checked
+between operations, and an in-flight SDK file call is bounded separately by
+`request_timeout`. The remote image needs `mkdir`, `rm`, `mv`, `rmdir`, and
+`ln -sT` for staging and publication. Unlike output mirroring, a skill sync
+failure fails the acquire or turn. A failed upload before publication leaves
+an existing sandbox unavailable to tools in the same scope's warm pool, where
+normal expiry and eviction still apply. A retry clears the abandoned staging
+directory before uploading again. Failure to set up or publish the staged tree
+discards the sandbox rather than making an uncertain skill view available.
+
 Create returns only after the SDK readiness check and DeerFlow's
 `/mnt/user-data/{workspace,uploads,outputs}` bootstrap succeed. A bootstrap
 failure explicitly destroys the newly created remote sandbox.
@@ -131,7 +150,7 @@ The full DeerFlow surface is implemented:
   signal status need additional deadline information before it can safely be
   normalized to 124.
 - Text and binary file operations use OpenSandbox's native filesystem API.
-  Append is serialized as a read-modify-write because SDK 0.1.x has no append
+  Append is serialized as a read-modify-write because the SDK has no append
   primitive.
 - `list_dir`, `glob`, and `grep` use portable `find`/`grep` commands and the
   shared DeerFlow result parsers.

@@ -229,6 +229,12 @@ GET /api/langgraph/threads/{thread_id}/state
 POST /api/langgraph/threads/{thread_id}/history
 ```
 
+Set `before` to the last checkpoint ID from the previous page. The next page
+includes that checkpoint if it still exists, followed by older checkpoints,
+up to `limit` entries total. If checkpoint retention removed the cursor, the
+page starts with the first surviving older checkpoint, if any. Skip the first
+entry only when its `checkpoint_id` equals `before`.
+
 Only the newest entry carries `messages`, the `goal` while it is active, and
 `goal_outcome` (the latest met goal, kept until the next goal change). Older
 entries carry only `title` and `thread_data`. `goal_outcome` is server-owned:
@@ -361,7 +367,7 @@ does not accept this header and keeps the existing missing-stream close of
 **Run Option Compatibility:**
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
-- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option. A run failed this way is stored as `error`, and its stream carries an `error` event (name `RunError`) with the delivery message before `end`, matching the `/wait` error envelope and the step-limit event described under `recursion_limit`.
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option. A run failed this way is stored as `error`, and its stream carries an `error` event (name `RunError`) with the delivery message before `end`, matching the `/wait` error envelope and the step-limit event described under `recursion_limit`. Any other terminal `error` the worker commits after the graph ends — an unpersisted delivery receipt, or a scheduled-goal cleanup that failed — publishes the same event with that error message.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
@@ -1776,6 +1782,8 @@ specified instant. Unchanged live once definitions keep their previously
 accepted execution time; a changed definition or a PATCH that rearms a terminal
 task is validated again. Ordinary Resume retains the admitted stored schedule
 without revalidating its wall time; a renewed `end_at` is still checked.
+Values outside the supported date-time range after UTC conversion return the
+same 422 codes, with the offending field named in the message.
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
 `stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:

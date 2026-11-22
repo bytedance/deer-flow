@@ -362,14 +362,14 @@ def _update_tree_digest(
             if entry.is_symlink():
                 kind = "link"
                 if follow_package_directory_symlinks and relative_root == Path(".") and entry.is_dir(follow_symlinks=True):
-                    digest.update(f"{label}:{relative.as_posix()}:target:{Path(entry.path).resolve(strict=False)}\0".encode())
+                    digest.update(f"{label}:{relative.as_posix()}:target:{Path(entry.path).resolve(strict=False)}\0".encode(errors="surrogatepass"))
                     child_dirs.append((Path(entry.path), relative))
             elif entry.is_dir(follow_symlinks=False):
                 kind = "dir"
                 child_dirs.append((Path(entry.path), relative))
             else:
                 kind = "file"
-            digest.update((f"{label}:{relative.as_posix()}:{kind}:{metadata.st_ino}:{metadata.st_mode}:{metadata.st_size}:{metadata.st_mtime_ns}\0").encode())
+            digest.update((f"{label}:{relative.as_posix()}:{kind}:{metadata.st_ino}:{metadata.st_mode}:{metadata.st_size}:{metadata.st_mtime_ns}\0").encode(errors="surrogatepass"))
         stack.extend(reversed(child_dirs))
 
 
