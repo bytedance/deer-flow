@@ -1766,7 +1766,10 @@ def test_mask_local_paths_in_output_hides_acp_workspace_host_paths() -> None:
 
 def test_apply_cwd_prefix_prepends_workspace() -> None:
     """Command is prefixed with cd <workspace> && when workspace_path is set."""
-    result = _apply_cwd_prefix("ls -la", _THREAD_DATA)
+    # Pin the POSIX shell: the prefix follows the shell that will run it (see
+    # test_local_command_path_spaces.py for the PowerShell/cmd.exe forms), so the
+    # default would make this assertion host-dependent.
+    result = _apply_cwd_prefix("ls -la", _THREAD_DATA, shell="/bin/bash")
     assert result.startswith("cd ")
     assert "ls -la" in result
     assert "/tmp/deer-flow/threads/t1/user-data/workspace" in result
@@ -1784,8 +1787,10 @@ def test_apply_cwd_prefix_missing_workspace_path() -> None:
 
 def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
     """Workspace path containing spaces is properly shell-quoted."""
+    # The prefix follows the shell that will run it, so this POSIX assertion has
+    # to name the shell or it would depend on the host.
     thread_data = {**_THREAD_DATA, "workspace_path": "/tmp/my workspace/t1"}
-    result = _apply_cwd_prefix("echo hello", thread_data)
+    result = _apply_cwd_prefix("echo hello", thread_data, shell="/bin/bash")
     assert result == "cd '/tmp/my workspace/t1' && echo hello"
 
 

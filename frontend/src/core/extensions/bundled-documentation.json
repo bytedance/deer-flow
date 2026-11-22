@@ -585,15 +585,19 @@
   },
   "deerflow-extension-run-postmortem": {
     "schema_version": 1,
-    "id": "catalog/runPostmortem",
+    "id": "community.run-postmortem",
     "locales": {
       "zh-CN": {
         "title": "运行复盘",
-        "description": "把一次已封存运行的事件证据整理成时间线、异常清单与可分享的 Markdown 报告，用来回答“这次为什么失败/卡住”。",
+        "description": "在会话页把一次已封存运行的事件证据整理成结论、异常清单与时间线，并可下载 Markdown 报告。",
         "usage": [
           {
             "title": "安装并授权",
             "description": "通过 make extension-install 安装示例，在 config.yaml 的 plugins 中授予 host_access.evidence 后重启 Gateway。"
+          },
+          {
+            "title": "在工作区打开运行复盘页",
+            "description": "侧边栏进入“运行复盘”，填入会话与运行 ID（或点“最新一次运行”），生成报告后可下载 Markdown。"
           },
           {
             "title": "查看单次运行报告",
@@ -611,11 +615,15 @@
       },
       "en-US": {
         "title": "Run postmortem",
-        "description": "Turns one sealed run's event evidence into a timeline, an anomaly list and a shareable Markdown report that answers \"why did this run fail or stall\".",
+        "description": "Explain one sealed run from its own evidence on a workspace page: verdict, anomalies and a timeline, with a downloadable Markdown report.",
         "usage": [
           {
             "title": "Install and grant access",
             "description": "Install the example with make extension-install, grant host_access.evidence in config.yaml plugins, then restart Gateway."
+          },
+          {
+            "title": "Open the workspace page",
+            "description": "Open Run postmortem from the sidebar, enter a thread and run ID (or load the latest run), then generate and download the Markdown report."
           },
           {
             "title": "Open a run report",

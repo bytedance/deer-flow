@@ -191,13 +191,18 @@ backend-owned `(change_seq, run_id)` key rather than timestamps or per-thread
 event sequence numbers. The singleton SQL clock allocates positions in the same
 transaction as each public record mutation; memory uses a process-local counter.
 The clock row serializes position-bearing SQL mutations globally until their
-transactions commit, so every mutator must acquire it before any run-row lock.
+transactions commit, so every position-bearing mutator must acquire it before
+any run-row lock.
 An atomic thread operation uses one position for its interrupted rows and new
-row, with `run_id` ordering ties. High-frequency progress snapshots and lease
-heartbeats do not advance this position: they are not lifecycle-discovery
-signals, progress evidence remains available from the event stream, and
-excluding them bounds clock contention. A later lifecycle change exposes the
-run row's latest `updated_at` and accumulated progress fields to internal readers.
+row, with `run_id` ordering ties. High-frequency progress snapshots, lease
+heartbeats and run-input appends do not advance this position: they are not
+lifecycle-discovery signals, progress evidence remains available from the event
+stream, and excluding them bounds clock contention. A run-input append writes
+only `run_inputs_json`, so no changed-run cursor could read back a position it
+took; because it reads the row before it writes it, on SQLite it takes the
+write lock up front with `BEGIN IMMEDIATE` instead. A later lifecycle change
+exposes the run row's latest `updated_at` and accumulated progress fields to
+internal readers.
 Rows from before the migration retain `change_seq=0` and page deterministically
 by run id. Because a later mutation only moves a row forward, concurrent paging
 may replay a run but cannot move an unseen run behind the committed cursor.
