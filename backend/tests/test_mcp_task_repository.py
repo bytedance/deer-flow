@@ -2738,9 +2738,7 @@ async def test_control_lease_clock_uses_database_time_not_worker_clock(tmp_path,
     lease_expires_at = datetime.fromisoformat(claimed[0]["lease_expires_at"])
     if lease_expires_at.tzinfo is None:
         lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
-    assert (
-        lease_expires_at >= database_now + timedelta(seconds=100)
-    ), "lease expiry must use the database clock"
+    assert lease_expires_at >= database_now + timedelta(seconds=100), "lease expiry must use the database clock"
 
     # A worker whose clock is ahead must not steal a lease that is still live
     # according to the database.
@@ -2756,11 +2754,7 @@ async def test_control_lease_clock_uses_database_time_not_worker_clock(tmp_path,
     # still behind. Renewal and snapshot writes must both fail closed.
     token = claimed[0]["lease_token"]
     async with repo._sf() as session:
-        await session.execute(
-            update(McpTaskRow)
-            .where(McpTaskRow.id == task_id)
-            .values(lease_expires_at=database_now - timedelta(seconds=1))
-        )
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == task_id).values(lease_expires_at=database_now - timedelta(seconds=1)))
         await session.commit()
 
     renewed = await repo.renew_control_claim(
