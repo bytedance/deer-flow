@@ -2384,19 +2384,14 @@ export function useThreadStream({
       let retiredReleased = false;
       if (threadId) {
         const released = releasedSendsRef.current;
-        let match = released.findIndex(
+        // Identity only. A released attempt whose created thread was never
+        // reported cannot claim a frame: that would retire a draft whose run
+        // never started. Such an attempt is dropped when its request fails
+        // instead of adopting another chat's acceptance.
+        const match = released.findIndex(
           (send) =>
             send.threadId === threadId || send.serverThreadId === threadId,
         );
-        if (match < 0) {
-          const unnamed = released.filter(
-            (send) => send.newThread && !send.serverThreadId,
-          );
-          const candidate = unnamed[0];
-          if (unnamed.length === 1 && candidate) {
-            match = released.indexOf(candidate);
-          }
-        }
         if (match >= 0) {
           const [accepted] = released.splice(match, 1);
           retiredReleased = true;
@@ -2489,6 +2484,23 @@ export function useThreadStream({
     ];
     pending.resolve();
   }, []);
+
+  /**
+   * Drop a released send whose run request failed before its created thread
+   * was reported. It can never be accepted now, so keeping it would let a
+   * later acceptance retire its draft and would leave it in the unbound queue,
+   * where the next new-chat `onThreadId` would bind another send's thread to
+   * it. `onSent` does not run: the run never started, so the draft stays.
+   */
+  const discardReleasedSend = useCallback(
+    (send: PendingSend) => {
+      releasedSendsRef.current = releasedSendsRef.current.filter(
+        (candidate) => candidate !== send,
+      );
+      forgetUnboundSend(send);
+    },
+    [forgetUnboundSend],
+  );
 
   const handleStreamStart = useCallback(
     (_threadId: string, _runId: string) => {
@@ -2833,7 +2845,19 @@ export function useThreadStream({
       // send can still be accepted afterwards: settle it from its own
       // run-creation result instead of rejecting it (#8092 review).
       if (!run && !isHistoryError(error)) {
-        rejectPendingSend(error);
+        if (pendingSendRef.current) {
+          rejectPendingSend(error);
+        } else {
+          // No caller is waiting, so the refused request belongs to a send that
+          // was released on navigation. Its run never started: drop the record
+          // instead of letting a later acceptance retire its draft (#8092 review).
+          const orphan = releasedSendsRef.current.find(
+            (send) => send.newThread && !send.serverThreadId,
+          );
+          if (orphan) {
+            discardReleasedSend(orphan);
+          }
+        }
       }
       if (pendingApprovalSubmissionRef.current) {
         settlePendingApproval(false);
@@ -3605,6 +3629,11 @@ export function useThreadStream({
         // not report a newer send as failed.
         if (pendingSendRef.current === pendingSend) {
           rejectPendingSend(error);
+        } else if (pendingSend) {
+          // This attempt was released by a navigation before the submit path
+          // failed, so its run can never be accepted: drop it rather than let it
+          // adopt a later create or block a later send (#8092 review).
+          discardReleasedSend(pendingSend);
         }
         setOptimisticMessages([]);
         setOptimisticThreadId(null);

@@ -505,6 +505,72 @@ test("does not retire a released new-chat send when another chat is accepted", a
   expect(onSentB).toHaveBeenCalledTimes(1);
 });
 
+test("drops a released new-chat send whose run request failed before its thread was reported", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result, rerender } = await renderThreadStream(null);
+  const onSentA = rs.fn(() => {
+    mocks.events.push("onSentA");
+  });
+  const onSentB = rs.fn(() => {
+    mocks.events.push("onSentB");
+  });
+
+  // Chat A is submitted and released on navigation before the SDK reports the
+  // thread it would create, so the send stays unnamed.
+  let sendA: Promise<unknown> | undefined;
+  act(() => {
+    sendA = result.current.sendMessage(
+      "placeholder-a",
+      { text: "Hello from A", files: [] },
+      undefined,
+      { onSent: onSentA },
+    );
+  });
+  await flushFrames();
+  rerender({ threadId: "thread-other" });
+  await flushFrames();
+  await act(async () => {
+    await sendA;
+  });
+
+  // Its run request is then refused. The draft stays (the run never started),
+  // but the record must not survive to claim a later acceptance or to bind the
+  // next new chat's created thread to itself.
+  await act(async () => {
+    mocks.callbacks.onError?.(new Error("HTTP 500"), undefined);
+  });
+  expect(onSentA).not.toHaveBeenCalled();
+
+  // Chat B starts another new conversation; its own run is accepted and both
+  // its thread binding and its acceptance must belong to B alone.
+  rerender({ threadId: null });
+  await flushFrames();
+  let sendB: Promise<unknown> | undefined;
+  act(() => {
+    sendB = result.current.sendMessage(
+      "placeholder-b",
+      { text: "Hello from B", files: [] },
+      undefined,
+      { onSent: onSentB },
+    );
+  });
+  await flushFrames();
+  await act(async () => {
+    mocks.callbacks.onThreadId?.("server-b");
+  });
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "server-b", run_id: "run-b" });
+  });
+  await act(async () => {
+    await sendB;
+  });
+
+  expect(onSentA).not.toHaveBeenCalled();
+  expect(onSentB).toHaveBeenCalledTimes(1);
+});
+
 test("resolves an accepted send whose onSent throws and reports the failure", async () => {
   stubUploadFetch(async () => {
     throw new Error("no upload expected");
