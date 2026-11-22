@@ -665,9 +665,10 @@ class ThreadHistoryRequest(BaseModel):
     before: str | None = Field(
         default=None,
         description=(
-            "Inclusive pagination cursor (a checkpoint ID): the response starts with this checkpoint, "
-            "then strictly older ones, up to `limit` entries. Unlike LangGraph's exclusive `before`, "
-            "the cursor checkpoint itself is returned, so skip it when continuing from a previous page."
+            "Inclusive checkpoint ID cursor. The page starts with the cursor checkpoint if it still exists, "
+            "followed by older checkpoints up to `limit` entries. If retention removed the cursor, the page starts "
+            "with the first surviving older checkpoint, if any. When continuing, skip the first entry only if "
+            "its `checkpoint_id` equals `before`."
         ),
     )
 

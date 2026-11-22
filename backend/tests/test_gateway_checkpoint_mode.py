@@ -26,7 +26,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
 from langgraph.store.memory import InMemoryStore
 
-from app.gateway import context_usage
+from app.gateway import checkpoint_retention, context_usage
 from app.gateway import services as gateway_services
 from app.gateway.routers import thread_runs, threads
 from deerflow.agents.thread_state import get_thread_state_schema
@@ -35,6 +35,7 @@ from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime import RunManager
 from deerflow.runtime.checkpoint_mode import checkpoint_metadata_uses_delta, inject_checkpoint_mode
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import persist_run_history_metadata
 
 _THREAD_ID = "thread-gateway-parity"
 
@@ -118,7 +119,7 @@ def test_thread_state_endpoints_are_mode_invariant(_stub_app_config, monkeypatch
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_history_before_cursor_continues_the_walk(mode: str, _stub_app_config, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``before`` pages the graph path like the degraded raw path: anchor plus older entries."""
+    """A history page includes its cursor only while the checkpoint survives."""
     app = make_authed_test_app()
     store = InMemoryStore()
     checkpointer = InMemorySaver()
@@ -145,9 +146,20 @@ def test_history_before_cursor_continues_the_walk(mode: str, _stub_app_config, m
 
         anchor_id = all_ids[1]
         paged = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 10, "before": anchor_id})
+        assert paged.status_code == 200, paged.text
+        assert [entry["checkpoint_id"] for entry in paged.json()] == all_ids[1:]
 
-    assert paged.status_code == 200, paged.text
-    assert [entry["checkpoint_id"] for entry in paged.json()] == all_ids[1:]
+        assert asyncio.run(persist_run_history_metadata(checkpointer=checkpointer, thread_id=_THREAD_ID, durations={"run-1": 3}))
+        first_page = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 1})
+        assert first_page.status_code == 200, first_page.text
+        cursor = first_page.json()[0]["checkpoint_id"]
+        assert cursor not in all_ids
+        report = asyncio.run(checkpoint_retention.enforce_trailing_duration_retention(checkpointer, _THREAD_ID))
+        assert report.deleted_checkpoint_ids == [cursor]
+
+        paged = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 2, "before": cursor})
+        assert paged.status_code == 200, paged.text
+        assert [entry["checkpoint_id"] for entry in paged.json()] == all_ids[:2]
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
