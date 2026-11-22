@@ -6,6 +6,7 @@ Runs each DeerFlow thread sandbox on **BytePlus Function Service (veFaaS) Cloud 
 - **Data plane**: Reuses DeerFlow's `AioSandbox` HTTP client via the Sandbox App's unified access domain (`X-Faas-Instance-Name: <SandboxId>`) or a `{sandbox_id}` URL template.
 - **Per-agent skills isolation**: Advertises `supports_agent_skill_isolation = True` and uploads bounded `tar.gz` skill projections into the remote sandbox.
 - **Persistent storage**: Supports optional scoped `InstanceTosMountConfig` mounts (bucket prefix derived from `derive_sandbox_scope_token(user_id, thread_id)`) or automatic output mirroring on release.
+- **Speculative prewarm**: Supports `sandbox.prewarm: true` (and `prewarm_max_concurrent`) to overlap veFaaS sandbox creation and readiness polling with the first model turn on shared-view runs.
 
 If shutdown overlaps an output mirror, it reports incomplete cleanup and keeps
 the sandbox available for the copy. Retry shutdown after release finishes.

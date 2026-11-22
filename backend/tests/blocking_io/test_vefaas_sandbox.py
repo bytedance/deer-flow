@@ -11,14 +11,24 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from blockbuster import BlockingError
-from test_vefaas_sandbox_provider import _FakeVeFaaSServer, _install_provider
+from langchain_core.messages import HumanMessage
+from test_vefaas_sandbox_provider import _FakeVeFaaSServer, _install_provider, _make_app_config
 
 from deerflow.community.aio_sandbox.ownership import RenewOutcome
 from deerflow.community.vefaas_sandbox import VeFaaSClient
+from deerflow.sandbox import prewarm
+from deerflow.sandbox.lease import (
+    ensure_sandbox_lease_owner,
+    register_sandbox_prewarm_cleanup,
+    release_sandbox_execution_lease_async,
+)
+from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
+from deerflow.sandbox.tools import ensure_sandbox_initialized_async
 
 pytestmark = pytest.mark.asyncio
 
@@ -123,3 +133,44 @@ async def test_client_construction_is_non_blocking_on_event_loop() -> None:
     )
     assert client._client is None
     client.close()
+
+
+async def test_prewarm_acquire_and_claim_stay_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Speculative veFaaS prewarm, tool claim, and lease cleanup must stay off the event loop."""
+    probing_server = _FileIOProbingVeFaaSServer(tmp_path)
+    provider, _server, _aio = await asyncio.to_thread(
+        lambda: _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=probing_server,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 0},
+        )
+    )
+    provider._ownership = await asyncio.to_thread(_BlockingProbeOwnershipStore, tmp_path / "ownership-probe-prewarm")
+    app_cfg = await asyncio.to_thread(
+        lambda: _make_app_config(
+            tmp_path,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 0},
+        )
+    )
+    monkeypatch.setattr(prewarm, "get_app_config", lambda: app_cfg)
+    set_sandbox_provider(provider)
+    try:
+        context: dict[str, object] = {"user_id": "u-pw-bio", "thread_id": "t-pw-bio", "app_config": app_cfg}
+        ensure_sandbox_lease_owner(context)
+        register_sandbox_prewarm_cleanup(context)
+        rt = SimpleNamespace(context=context, state={})
+
+        prewarm.start_sandbox_prewarm({"messages": [HumanMessage(content="```sh\npytest tests\n```")]}, rt)
+        handle = context["__deerflow_sandbox_prewarm"]
+        sandbox_id = await handle.task
+        assert isinstance(sandbox_id, str) and sandbox_id
+
+        sandbox = await ensure_sandbox_initialized_async(rt)
+        assert sandbox.id == sandbox_id
+
+        await release_sandbox_execution_lease_async(context)
+        assert not prewarm._permits
+    finally:
+        await asyncio.to_thread(reset_sandbox_provider)
+        await asyncio.to_thread(provider.shutdown)

@@ -96,6 +96,9 @@ class _FakeAioSandbox:
             raise ValueError("download exceeded max_bytes")
         return data
 
+    def release_command_scope(self, scope_id: str) -> None:
+        del scope_id
+
     def close(self) -> None:
         self.closed = True
 
@@ -1649,3 +1652,178 @@ class TestVeFaaSSandboxProviderLifecycle:
             assert remote_files_d["uploads/report.txt"] == b"untouched"
         finally:
             provider_d.shutdown()
+
+
+# ── 10. Prewarm Integration ──────────────────────────────────────────────
+
+
+class TestPrewarmIntegration:
+    @pytest.mark.anyio
+    async def test_prewarm_claims_single_vefaas_sandbox_and_releases_to_warm_pool(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from deerflow.sandbox import prewarm
+        from deerflow.sandbox.lease import (
+            ensure_sandbox_lease_owner,
+            get_sandbox_lease_manager,
+            register_sandbox_prewarm_cleanup,
+            release_sandbox_execution_lease_async,
+        )
+        from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
+        from deerflow.sandbox.tools import ensure_sandbox_initialized_async
+
+        provider, server, _aio = _install_provider(
+            monkeypatch,
+            tmp_path,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 600},
+        )
+        app_cfg = _make_app_config(
+            tmp_path,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 600},
+        )
+        monkeypatch.setattr(prewarm, "get_app_config", lambda: app_cfg)
+        set_sandbox_provider(provider)
+        try:
+            context: dict[str, Any] = {"user_id": "u-prewarm", "thread_id": "t-prewarm", "app_config": app_cfg}
+            ensure_sandbox_lease_owner(context)
+            register_sandbox_prewarm_cleanup(context)
+            rt = SimpleNamespace(context=context, state={})
+
+            prewarm.start_sandbox_prewarm({"messages": [HumanMessage(content="```sh\npytest tests\n```")]}, rt)
+            handle = context["__deerflow_sandbox_prewarm"]
+            expected_sid = derive_sandbox_scope_token(user_id="u-prewarm", thread_id="t-prewarm")
+            assert await handle.task == expected_sid
+
+            sandbox = await ensure_sandbox_initialized_async(rt)
+            assert sandbox.id == expected_sid
+            assert handle.claimed is True
+            assert sum(1 for a, _, _ in server.requests if a == "CreateSandbox") == 1
+
+            await release_sandbox_execution_lease_async(context)
+            assert get_sandbox_lease_manager(provider).binding_for(context["sandbox_lease_owner_id"]) is None
+            assert expected_sid in provider._warm_pool
+            assert not prewarm._permits
+        finally:
+            reset_sandbox_provider()
+            provider.shutdown()
+
+    @pytest.mark.anyio
+    async def test_unused_vefaas_prewarm_releases_to_warm_pool_and_frees_budget(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from deerflow.sandbox import prewarm
+        from deerflow.sandbox.lease import (
+            ensure_sandbox_lease_owner,
+            get_sandbox_lease_manager,
+            register_sandbox_prewarm_cleanup,
+            release_sandbox_execution_lease_async,
+        )
+        from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
+
+        provider, server, _aio = _install_provider(
+            monkeypatch,
+            tmp_path,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 600},
+        )
+        app_cfg = _make_app_config(
+            tmp_path,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 600},
+        )
+        monkeypatch.setattr(prewarm, "get_app_config", lambda: app_cfg)
+        set_sandbox_provider(provider)
+        try:
+            context: dict[str, Any] = {"user_id": "u-unused", "thread_id": "t-unused", "app_config": app_cfg}
+            ensure_sandbox_lease_owner(context)
+            register_sandbox_prewarm_cleanup(context)
+            rt = SimpleNamespace(context=context, state={})
+
+            prewarm.start_sandbox_prewarm({"messages": [HumanMessage(content="```python\nprint(1)\n```")]}, rt)
+            handle = context["__deerflow_sandbox_prewarm"]
+            expected_sid = derive_sandbox_scope_token(user_id="u-unused", thread_id="t-unused")
+            assert await handle.task == expected_sid
+            assert handle.claimed is False
+
+            # No tool called — execution lease cleanup drains startup, releases the sandbox
+            # to the warm pool, clears the lease binding, and frees the speculative permit.
+            await release_sandbox_execution_lease_async(context)
+            assert provider.get(expected_sid) is None
+            assert expected_sid in provider._warm_pool
+            assert get_sandbox_lease_manager(provider).binding_for(context["sandbox_lease_owner_id"]) is None
+            assert not prewarm._permits
+        finally:
+            reset_sandbox_provider()
+            provider.shutdown()
+        assert any(a == "KillSandbox" for a, _, _ in server.requests)
+
+    @pytest.mark.anyio
+    async def test_vefaas_explicit_skill_policy_uses_eager_sync_not_prewarm(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from langchain_core.messages import HumanMessage
+
+        from deerflow.sandbox.lease import (
+            ensure_sandbox_lease_owner,
+            register_sandbox_prewarm_cleanup,
+            release_sandbox_execution_lease_async,
+        )
+        from deerflow.sandbox.middleware import SandboxMiddleware
+        from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
+        from deerflow.skills.projection import SkillProjectionPaths
+
+        provider, server, _aio = _install_provider(
+            monkeypatch,
+            tmp_path,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 0},
+        )
+        app_cfg = _make_app_config(
+            tmp_path,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 0},
+        )
+        set_sandbox_provider(provider)
+
+        public_dir = tmp_path / "proj" / "public"
+        custom_dir = tmp_path / "proj" / "custom"
+        legacy_dir = tmp_path / "proj" / "legacy"
+        integrations_dir = tmp_path / "proj" / "integrations"
+        (public_dir / "demo-skill").mkdir(parents=True)
+        (public_dir / "demo-skill" / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
+        custom_dir.mkdir(parents=True)
+        legacy_dir.mkdir(parents=True)
+        integrations_dir.mkdir(parents=True)
+        projection = SkillProjectionPaths(
+            public=public_dir,
+            custom=custom_dir,
+            legacy=legacy_dir,
+            integrations=integrations_dir,
+        )
+
+        sync_calls: list[str] = []
+        orig_sync = provider.sync_agent_skills
+
+        def spy_sync(sandbox_id: str, **kwargs: Any) -> None:
+            sync_calls.append(sandbox_id)
+            orig_sync(sandbox_id, **kwargs)
+
+        monkeypatch.setattr(provider, "sync_agent_skills", spy_sync)
+
+        middleware = SandboxMiddleware(lazy_init=True)
+        monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *args, **kwargs: projection)
+
+        context: dict[str, Any] = {"user_id": "u-skills", "thread_id": "t-skills", "app_config": app_cfg}
+        ensure_sandbox_lease_owner(context)
+        register_sandbox_prewarm_cleanup(context)
+        rt = SimpleNamespace(context=context)
+        state: dict[str, Any] = {"messages": [HumanMessage(content="```sh\npytest tests\n```")]}
+        try:
+            updates = await middleware.abefore_agent(state, rt)
+            expected_sid = derive_sandbox_scope_token(user_id="u-skills", thread_id="t-skills")
+            assert updates == {"sandbox": {"sandbox_id": expected_sid}}
+            assert sync_calls == [expected_sid]
+
+            state.update(updates)
+            await middleware.abefore_model(state, rt)
+            # Eager path already populated state["sandbox"], so speculative prewarm is skipped.
+            assert "__deerflow_sandbox_prewarm" not in context
+            assert sum(1 for a, _, _ in server.requests if a == "CreateSandbox") == 1
+        finally:
+            await release_sandbox_execution_lease_async(context)
+            reset_sandbox_provider()
+            provider.shutdown()
