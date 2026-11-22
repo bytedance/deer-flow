@@ -76,9 +76,9 @@ This section accumulates work toward the **2.3.0** milestone
   provenance, and caller-edited todo text is neutralized before rendering so
   it cannot forge framework tags. Reminders persisted before provenance
   stamps existed are migrated or superseded instead of being left next to
-  a fresh one, an explicitly cleared list removes the persisted reminder
-  and, while the last write is still visible, posts a stamped clear-state
-  notice instead, and a hidden caller message that only wraps text in
+  a fresh one, an explicitly cleared list keeps a stamped clear-state
+  notice only while a superseded non-empty write is still visible, and a
+  hidden caller message that only wraps text in
   reminder tags is never treated as a pre-stamp reminder,
   and todo items render as data after the framework block rather than
   inside it. ([#8168](https://github.com/bytedance/deer-flow/issues/8168))

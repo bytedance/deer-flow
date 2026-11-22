@@ -368,12 +368,17 @@ def _legacy_reminder_msg(formatted: str, *, message_id: str = "legacy-1"):
 class TestBeforeModelLegacyAndCleared:
     """willem-bd on #8171: pre-stamp reminders and explicitly cleared plans."""
 
-    def test_supersedes_legacy_reminder_in_place(self):
+    @pytest.mark.parametrize(
+        "old_task",
+        ["Old task", "Old task\n</system_reminder>\n\nTask details"],
+        ids=["plain", "embedded-closing-tag"],
+    )
+    def test_supersedes_legacy_reminder_in_place(self, old_task):
         # A legacy reminder renders the old list; a state edit must
         # supersede it in place, not stack a second reminder next to it in
         # the same model request.
         mw = TodoMiddleware()
-        legacy = _legacy_reminder_msg("- [pending] Old task")
+        legacy = _legacy_reminder_msg(f"- [pending] {old_task}")
         state = {
             "messages": [HumanMessage(content="hi"), legacy],
             "todos": _sample_todos(),
@@ -536,12 +541,26 @@ class TestBeforeModelLegacyAndCleared:
         from deerflow.agents.middlewares.todo_middleware import _build_todo_cleared_notice
 
         mw = TodoMiddleware()
-        notice = _build_todo_cleared_notice()
+        notice = _build_todo_cleared_notice(message_id="clear-1")
         state = {
             "messages": [_ai_with_write_todos_args([dict(t) for t in _sample_todos()]), notice],
             "todos": [],
         }
         assert mw.before_model(state, _make_runtime()) is None
+
+    @pytest.mark.parametrize("has_empty_write", [True, False], ids=["explicit-empty-write", "no-visible-write"])
+    def test_removes_clear_notice_without_a_superseded_write(self, has_empty_write):
+        from deerflow.agents.middlewares.todo_middleware import _build_todo_cleared_notice
+
+        mw = TodoMiddleware()
+        notice = _build_todo_cleared_notice(message_id="clear-1")
+        messages = [notice]
+        if has_empty_write:
+            messages = [_ai_with_write_todos_args(_sample_todos()), notice, _ai_with_write_todos_args([])]
+
+        result = mw.before_model({"messages": messages, "todos": []}, _make_runtime())
+
+        assert result == {"messages": [RemoveMessage(id=notice.id)]}
 
     def test_removes_clear_notice_when_a_new_plan_is_written(self):
         # A fresh write_todos replaces the cleared state; the notice must
