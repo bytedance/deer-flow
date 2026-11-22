@@ -981,6 +981,29 @@ async def test_naive_end_at_uses_task_timezone(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_extreme_end_at_does_not_break_the_created_task_view(monkeypatch):
+    prepare, repo, *_ = _setup(monkeypatch)
+    capability = await prepare()
+    # A valid UTC instant near datetime.max leaves the range when rendered in a
+    # +14 zone; creating the task must not fail after it was persisted.
+    created = await capability.manage(
+        action="create",
+        request={**_INTERVAL, "timezone": "Pacific/Kiritimati", "end_at": "9999-12-31T23:59:00+00:00"},
+    )
+    assert repo.create.await_args.kwargs["end_at"] == datetime(9999, 12, 31, 23, 59, tzinfo=UTC)
+    assert "code" not in created
+    assert created["task"]["end_at_local"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_keeps_a_task_whose_end_at_leaves_the_display_range(monkeypatch):
+    prepare, *_ = _setup(monkeypatch, task=_task(timezone="Pacific/Kiritimati", end_at=datetime(9999, 12, 31, 23, 59, tzinfo=UTC)))
+    capability = await prepare()
+    listed = await capability.manage(action="list", request={})
+    assert listed["tasks"][0]["end_at_local"] is None
+
+
+@pytest.mark.asyncio
 async def test_resume_clear_fields_removes_cap_and_reactivates(monkeypatch, tmp_path):
     from _scheduled_rows import occurrence
 

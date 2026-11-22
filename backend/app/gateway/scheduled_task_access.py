@@ -84,7 +84,13 @@ def _local(value: datetime | str | None, timezone: Any) -> str | None:
         zone = ZoneInfo(timezone)
     except _ZONE_ERRORS:
         return None
-    return f"{moment.astimezone(zone):%Y-%m-%d %H:%M} ({timezone})"
+    try:
+        local = moment.astimezone(zone)
+    except OverflowError:
+        # A valid UTC instant near the datetime range edge can leave it in a
+        # far-offset zone. There is no local rendering, but the task still works.
+        return None
+    return f"{local:%Y-%m-%d %H:%M} ({timezone})"
 
 
 def _now_local(timezone: Any) -> str | None:
