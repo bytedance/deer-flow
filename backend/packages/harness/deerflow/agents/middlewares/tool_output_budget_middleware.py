@@ -48,7 +48,7 @@ from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SK
 from deerflow.agents.middlewares.tool_call_args import ToolCallOccurrence, pair_tool_call_results, rewrite_messages_tool_call_args
 from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
-from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
+from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform, tool_content_fingerprint
 from deerflow.community.ragflow.sources import budget_source_artifact
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -739,9 +739,15 @@ def _patch_tool_message(
     new_kwargs.pop(TOOL_OUTPUT_BLOB_KEY, None)
     if budgeted is not None and budgeted.blob_metadata is not None:
         new_kwargs[TOOL_OUTPUT_BLOB_KEY] = budgeted.blob_metadata
+    # The replacement can name a per-call file, so record what it replaced:
+    # identical outputs of repeated calls must still compare equal.
+    try:
+        source_sha256 = tool_content_fingerprint(msg.content)
+    except (TypeError, ValueError, RecursionError):
+        source_sha256 = None
     if citation_result is not None and budgeted is not None and budgeted.transform_kind == "externalized":
-        append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware")
-    append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware")
+        append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware", source_sha256=source_sha256)
+    append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware", source_sha256=source_sha256)
     update["additional_kwargs"] = new_kwargs
     return msg.model_copy(update=update)
 

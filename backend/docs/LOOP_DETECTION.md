@@ -31,6 +31,12 @@ from being counted. Frequency thresholds only emit INFO metrics with
 or set a stop reason. The hash warning and hard-stop behavior remains scoped to
 identical calls whose results show no progress.
 
+A result is compared by the data the tool returned. Content block `id`s are
+ignored, because LangChain generates a fresh one for each block it builds
+(every MCP result has them). A result that `ToolOutputBudgetMiddleware`
+replaced is compared by the `source_sha256` its transform-trail entry records
+for the replaced output, because the preview names a per-call file.
+
 The lead agent applies the subagent call limit before loop detection, so the
 detector reconciles results against the admitted batch. A successful
 `write_file` or `str_replace` invalidates the predicted result for older
