@@ -168,7 +168,7 @@ HTTP client 必须显式使用 `httpx.AsyncClient(trust_env=False)`，避免 `HT
 | --- | --- |
 | connect / total timeout | 3 秒 / 15 秒 |
 | 每进程每用户上游读取 | 20 次/分钟，超限 429 |
-| 每进程来源请求并发 | 4，超出立即 429，不排队 |
+| 每进程来源请求及 preflight 并发 | 4，超出立即 429，不排队；槽位覆盖网络、JSON 解析、ZIP/静态检查及取消 drain |
 | 文件数 | 256 |
 | 单文件 UTF-8 内容 | 1 MiB |
 | 全部文件 UTF-8 内容 | 8 MiB |

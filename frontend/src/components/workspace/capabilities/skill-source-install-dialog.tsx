@@ -196,8 +196,11 @@ export function SkillSourceInstallDialog({
   };
   const toggleInstalled = async (enabled: boolean) => {
     try {
-      await setSkillEnabled({ skillName: installedName, enabled });
-      setInstalledEnabled(enabled);
+      const updated = await setSkillEnabled({
+        skillName: installedName,
+        enabled,
+      });
+      setInstalledEnabled(updated.enabled);
     } catch (caught) {
       toast.error(
         caught instanceof SkillRequestError && caught.status === 403

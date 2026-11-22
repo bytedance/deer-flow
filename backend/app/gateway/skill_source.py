@@ -320,7 +320,7 @@ async def _fetch_snapshot_payload(reference: SkillSourceRef, user_id: str) -> An
         raise SkillSourceError(503, "skill_source_not_configured", "This deployment does not have skills.sh credentials.")
     timeout = httpx.Timeout(_SOURCE_TOTAL_TIMEOUT_SECONDS, connect=_SOURCE_CONNECT_TIMEOUT_SECONDS)
     try:
-        async with asyncio.timeout(_SOURCE_TOTAL_TIMEOUT_SECONDS), _upstream_request_slot(user_id):
+        async with asyncio.timeout(_SOURCE_TOTAL_TIMEOUT_SECONDS):
             # TLS trust initialization is synchronous in HTTPX.
             client = await asyncio.to_thread(httpx.AsyncClient, timeout=timeout, trust_env=False, follow_redirects=False)
             async with client:
@@ -362,17 +362,18 @@ async def _fetch_snapshot_payload(reference: SkillSourceRef, user_id: str) -> An
 async def prepare_skill_source(source: str, *, user_id: str, app_config: Any) -> PreparedSkillSource:
     """Fetch, bound, and deterministically preflight one source snapshot."""
     reference = parse_skill_source(source)
-    payload = await _fetch_snapshot_payload(reference, user_id)
-    task = asyncio.ensure_future(asyncio.to_thread(_prepare_snapshot, reference, payload, app_config=app_config))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        while not task.done():
-            try:
-                await asyncio.wait({task})
-            except asyncio.CancelledError:
-                continue
-        if not task.cancelled() and task.exception() is None:
-            prepared = task.result()
-            await asyncio.to_thread(discard_prepared_source, prepared)
-        raise
+    async with _upstream_request_slot(user_id):
+        payload = await _fetch_snapshot_payload(reference, user_id)
+        task = asyncio.ensure_future(asyncio.to_thread(_prepare_snapshot, reference, payload, app_config=app_config))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.wait({task})
+                except asyncio.CancelledError:
+                    continue
+            if not task.cancelled() and task.exception() is None:
+                prepared = task.result()
+                await asyncio.to_thread(discard_prepared_source, prepared)
+            raise

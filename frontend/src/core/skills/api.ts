@@ -159,7 +159,10 @@ export async function loadSkills() {
   return json.skills as Skill[];
 }
 
-export async function enableSkill(skillName: string, enabled: boolean) {
+export async function enableSkill(
+  skillName: string,
+  enabled: boolean,
+): Promise<Skill> {
   const response = await fetch(
     `${getBackendBaseURL()}/api/skills/${skillName}`,
     {
@@ -176,7 +179,7 @@ export async function enableSkill(skillName: string, enabled: boolean) {
     const detail = await readErrorDetail(response);
     throw new SkillRequestError(response.status, detail.message, detail);
   }
-  return response.json();
+  return response.json() as Promise<Skill>;
 }
 
 export interface InstallSkillRequest {

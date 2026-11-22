@@ -72,7 +72,9 @@ async function openPreview(onClose = rs.fn(), onInstalled = rs.fn()) {
 beforeEach(() => {
   mocks.inspect.mockReset();
   mocks.install.mockReset();
-  mocks.enable.mockReset().mockResolvedValue(undefined);
+  mocks.enable
+    .mockReset()
+    .mockImplementation(({ enabled }) => Promise.resolve({ enabled }));
   mocks.remove.mockReset().mockResolvedValue({ success: true });
   mocks.invalidate.mockReset().mockResolvedValue(undefined);
 });
@@ -145,6 +147,35 @@ describe("source skill installation", () => {
 
     await screen.findByText(text.sourceSuccessDisabledDescription);
     expect(screen.queryByText(text.sourceSuccessDescription)).toBeNull();
+    expect(
+      screen
+        .getByRole("switch", { name: `${text.sourceEnabled} demo` })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("uses the effective enabled state returned by a toggle", async () => {
+    mocks.install.mockResolvedValue({
+      success: true,
+      skill_name: "demo",
+      message: "Installed",
+      enabled: false,
+    });
+    mocks.enable.mockResolvedValue({ enabled: false });
+    await openPreview();
+    fireEvent.click(screen.getByRole("button", { name: text.sourceInstall }));
+    await screen.findByText(text.sourceSuccessDisabledDescription);
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("switch", { name: `${text.sourceEnabled} demo` }),
+      );
+      await Promise.resolve();
+    });
+    expect(mocks.enable).toHaveBeenCalledWith({
+      skillName: "demo",
+      enabled: true,
+    });
     expect(
       screen
         .getByRole("switch", { name: `${text.sourceEnabled} demo` })

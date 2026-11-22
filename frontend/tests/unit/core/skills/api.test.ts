@@ -227,12 +227,12 @@ describe("skills api", () => {
 
   test("updates a skill enabled flag", async () => {
     mockedFetch.mockResolvedValueOnce(
-      jsonResponse(200, { success: true, skill_name: "data-analysis" }),
+      jsonResponse(200, { name: "data-analysis", enabled: false }),
     );
 
     await expect(enableSkill("data-analysis", false)).resolves.toMatchObject({
-      success: true,
-      skill_name: "data-analysis",
+      name: "data-analysis",
+      enabled: false,
     });
     expect(mockedFetch).toHaveBeenCalledWith(
       "/backend/api/skills/data-analysis",

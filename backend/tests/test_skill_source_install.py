@@ -319,6 +319,42 @@ async def test_local_user_and_concurrency_limits_reject_without_queuing():
 
 
 @pytest.mark.asyncio
+async def test_source_concurrency_limit_covers_preflight(monkeypatch):
+    limiter = _SourceRateLimiter()
+    monkeypatch.setattr(skill_source, "_source_rate_limiter", limiter)
+    fetch = AsyncMock(return_value=_payload())
+    monkeypatch.setattr(skill_source, "_fetch_snapshot_payload", fetch)
+    all_entered = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    entered = 0
+
+    def _hold_preflight(*args, **kwargs):
+        nonlocal entered
+        with lock:
+            entered += 1
+            if entered == 4:
+                all_entered.set()
+        assert release.wait(5)
+        raise ValueError("preflight finished")
+
+    monkeypatch.setattr(skill_source, "_prepare_snapshot", _hold_preflight)
+    tasks = [asyncio.create_task(skill_source.prepare_skill_source(_SOURCE, user_id=f"preflight-user-{index}", app_config=_config())) for index in range(4)]
+    try:
+        assert await asyncio.to_thread(all_entered.wait, 5)
+        with pytest.raises(SkillSourceError) as caught:
+            await skill_source.prepare_skill_source(_SOURCE, user_id="preflight-user-5", app_config=_config())
+        assert caught.value.status_code == 429
+        assert entered == 4
+        assert fetch.await_count == 4
+    finally:
+        release.set()
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(isinstance(outcome, ValueError) for outcome in outcomes)
+    assert limiter._active == 0
+
+
+@pytest.mark.asyncio
 async def test_source_limiter_prunes_stale_users_and_releases_on_cancellation(monkeypatch):
     limiter = _SourceRateLimiter()
     now = 0.0
