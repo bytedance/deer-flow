@@ -23,8 +23,9 @@ rs.mock("@/core/skills/api", () => ({
 rs.mock("@/core/skills/hooks", () => ({
   useEnableSkill: () => ({ mutateAsync: mocks.enable, isPending: false }),
 }));
+const queryClient = { invalidateQueries: mocks.invalidate };
 rs.mock("@tanstack/react-query", () => ({
-  useQueryClient: () => ({ invalidateQueries: mocks.invalidate }),
+  useQueryClient: () => queryClient,
 }));
 rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({ locale: "en-US", t: enUS }),
@@ -51,13 +52,13 @@ const preview: SkillSourcePreview = {
 };
 
 function renderDialog(onClose = rs.fn(), onInstalled = rs.fn()) {
-  render(
+  const view = render(
     <SkillSourceInstallDialog onClose={onClose} onInstalled={onInstalled} />,
   );
   fireEvent.change(screen.getByLabelText(text.sourceLabel), {
     target: { value: preview.source },
   });
-  return { onClose, onInstalled };
+  return { onClose, onInstalled, unmount: view.unmount };
 }
 
 async function openPreview(onClose = rs.fn(), onInstalled = rs.fn()) {
@@ -268,5 +269,34 @@ describe("source skill installation", () => {
       await Promise.resolve();
     });
     expect(mocks.invalidate).toHaveBeenCalledTimes(2);
+  });
+
+  it("follows a pending install through direct unmount", async () => {
+    let installSignal: AbortSignal | undefined;
+    let finishInstall: (result: InstallSkillResponse) => void = () => undefined;
+    mocks.install.mockImplementation((_request, signal?: AbortSignal) => {
+      installSignal = signal;
+      // ES2022 target: Promise.withResolvers is not in the configured libs.
+      return new Promise<InstallSkillResponse>((resolve) => {
+        finishInstall = resolve;
+      });
+    });
+    const { unmount } = await openPreview();
+    fireEvent.click(screen.getByRole("button", { name: text.sourceInstall }));
+    unmount();
+
+    expect(installSignal?.aborted).toBe(false);
+    expect(mocks.invalidate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishInstall({
+        success: true,
+        skill_name: "demo",
+        message: "Installed",
+        enabled: true,
+      });
+      await Promise.resolve();
+    });
+    expect(mocks.invalidate).toHaveBeenCalledTimes(1);
   });
 });

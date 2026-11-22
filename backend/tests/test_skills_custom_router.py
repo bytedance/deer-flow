@@ -164,7 +164,7 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     assert refresh_calls == [("refresh", "default")]
 
 
-def test_reinstall_returns_persisted_disabled_state(monkeypatch, tmp_path):
+def test_install_returns_effective_enabled_state(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     (skills_root / "custom").mkdir(parents=True)
     archive = _make_skill_archive(tmp_path, "archive-skill")
@@ -191,6 +191,21 @@ def test_reinstall_returns_persisted_disabled_state(monkeypatch, tmp_path):
         first = client.post("/api/skills/install", json=request)
         assert first.status_code == 200
         assert first.json()["enabled"] is True
+        assert client.delete("/api/skills/custom/archive-skill").status_code == 200
+
+        # No per-user override exists yet: the operator's global disable must
+        # still determine both the install response and the skill detail.
+        from unittest.mock import patch
+
+        global_config = SimpleNamespace(skills={}, is_skill_enabled=lambda name, _category: name != "archive-skill")
+        with patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=global_config):
+            globally_disabled = client.post("/api/skills/install", json=request)
+            assert globally_disabled.status_code == 200
+            assert globally_disabled.json()["enabled"] is False
+            global_detail = client.get("/api/skills/custom/archive-skill")
+            assert global_detail.status_code == 200
+            assert global_detail.json()["enabled"] is False
+
         assert client.put("/api/skills/archive-skill", json={"enabled": False}).status_code == 200
         assert client.delete("/api/skills/custom/archive-skill").status_code == 200
 

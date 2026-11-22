@@ -7,7 +7,7 @@ import {
   LoaderIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -95,20 +95,29 @@ export function SkillSourceInstallDialog({
   const { mutateAsync: setSkillEnabled, isPending: isEnabling } =
     useEnableSkill();
 
-  useEffect(() => () => active.current?.abort(), []);
-
-  const refreshSkills = () => {
+  const refreshSkills = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["skills"] });
-  };
-  const close = () => {
+  }, [queryClient]);
+  const preservePendingInstall = useCallback(() => {
     const request = pendingInstall.current;
-    if (request) {
-      // The Gateway drains installs after client cancellation. Keep this request
-      // alive so its settlement, rather than the close, triggers the final read.
-      void request.then(refreshSkills, refreshSkills);
-    } else {
-      active.current?.abort();
-    }
+    if (!request) return false;
+    pendingInstall.current = null;
+    // The Gateway drains installs after client cancellation. Follow the request
+    // once so its settlement, rather than dismissal, triggers the final read.
+    void request.then(refreshSkills, refreshSkills);
+    return true;
+  }, [refreshSkills]);
+
+  useEffect(
+    () => () => {
+      if (!preservePendingInstall()) active.current?.abort();
+      active.current = null;
+    },
+    [preservePendingInstall],
+  );
+
+  const close = () => {
+    if (!preservePendingInstall()) active.current?.abort();
     active.current = null;
     refreshSkills();
     onClose();
