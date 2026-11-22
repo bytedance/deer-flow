@@ -3493,7 +3493,6 @@ export function InputBox({
                 contextWindow={selectedModel?.context_window}
                 modelName={selectedModel?.name}
                 onOpen={onContextUsageOpen}
-                className="hidden sm:inline-flex"
               />
             )}
             <ModelPicker
