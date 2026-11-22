@@ -399,3 +399,50 @@ async def test_list_thread_inputs_starves_receipts_when_all_inputs_are_unresolve
     assert len(items) == 32
     assert all(i["status"] == "not_applied" for i in items)
     assert not any(i["id"] == "input-032" for i in items)
+
+
+@pytest.mark.asyncio
+async def test_input_mutations_leave_the_run_change_clock_alone(tmp_path):
+    """Input-only writes never publish a run-change position.
+
+    mutate_run_inputs used to take a global run-change clock write and drop
+    the position, so every queued or steering message burned the single clock
+    row while the run's change_seq stayed put. The clock belongs to
+    changed-run discovery (evidence sealing); input state is read directly
+    from the row and the in-memory store never advanced either.
+    """
+    from deerflow.persistence.run.model import RunChangeClockRow
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'inputs-clock.db'}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+
+        async def clock_value():
+            async with async_sessionmaker(engine)() as session:
+                return await session.scalar(sa.select(RunChangeClockRow.value).where(RunChangeClockRow.id == 1))
+
+        await store.put(
+            "run",
+            thread_id="thread",
+            user_id=USER_ID,
+            status="running",
+            owner_worker_id="worker",
+            lease_expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+        )
+        # Run creation legitimately publishes a position; input writes must not.
+        baseline = await clock_value()
+        assert baseline is not None
+
+        inputs = RunInputs(store, "run", USER_ID, "worker")
+        await inputs.submit("req-1", "hello", "queue")
+        after_submit = await clock_value()
+        await inputs.acknowledge(["req-1"])
+        assert await clock_value() == after_submit == baseline
+
+        row = await store.get("run", user_id=USER_ID)
+        assert row["run_inputs"]["items"][0]["id"] == "req-1"
+        assert row["run_inputs"]["items"][0]["status"] == "pending"
+    finally:
+        await engine.dispose()

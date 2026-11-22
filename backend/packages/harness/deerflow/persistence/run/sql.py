@@ -53,9 +53,11 @@ class RunRepository(RunStore):
         from deerflow.runtime.runs.inputs import InputConflict, empty_input_state
 
         async with self._sf() as session:
-            # Preserve the existing global-clock -> row lock order (SQLite's
-            # first write serializes peer connections as well).
-            await self._next_change_seq(session)
+            # Input-only mutations stay off the run-change clock: nothing
+            # discovers them through the changed-run cursor, the in-memory
+            # store does not advance its clock either, and taking the global
+            # write here would serialize every queued or steering message
+            # against all other run writers while publishing nothing.
             row = (await session.execute(select(RunRow).where(RunRow.run_id == run_id).with_for_update())).scalar_one_or_none()
             if row is None or (user_id is not None and row.user_id != user_id):
                 raise InputConflict("Run not found")
