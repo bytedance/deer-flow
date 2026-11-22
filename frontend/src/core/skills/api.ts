@@ -188,6 +188,7 @@ export interface InstallSkillResponse {
   success: boolean;
   skill_name: string;
   message: string;
+  enabled: boolean;
 }
 
 export async function installSkill(
@@ -211,6 +212,7 @@ export async function installSkill(
       success: false,
       skill_name: "",
       message: detail.message,
+      enabled: false,
     };
   }
 
@@ -244,6 +246,7 @@ export async function uploadSkillArchive(
       success: false,
       skill_name: "",
       message: detail.message,
+      enabled: false,
     };
   }
 

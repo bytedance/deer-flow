@@ -58,6 +58,7 @@ describe("skills api", () => {
       success: false,
       skill_name: "",
       message: "HTTP 500: Error",
+      enabled: false,
     });
   });
   test("uploads a local .skill archive as multipart form data", async () => {

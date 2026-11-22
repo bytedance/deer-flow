@@ -2831,6 +2831,8 @@ export const enUS: Translations = {
       sourceSuccessTitle: "Skill installed",
       sourceSuccessDescription:
         "The custom skill is enabled and takes effect immediately in your subsequent agent runs.",
+      sourceSuccessDisabledDescription:
+        "The custom skill remains disabled from your previous setting. Enable it to use it in subsequent agent runs.",
       sourceVisibilityNotice:
         "If your visibility policy filters this skill, it is installed but may not appear in My skills.",
       sourceEnabled: "Skill enabled",

@@ -265,7 +265,7 @@ POST /api/skills/install/source
 
 不新增 source 表、后台任务或安装历史字段。
 
-**Provenance 边界**：第一版不提供可查询、持久化的来源记录，不在安装目录写元数据文件，也不扩展 SkillInstallResponse。source 与 snapshot_digest 可以写入普通进程日志，但日志滚动后不可查询，My skills 不显示来源，重新预览/升级需要重新输入 source。不得把该日志描述成审计设施；若未来需要持久 provenance，另开覆盖摘要、导出和编辑语义的切片。
+**Provenance 边界**：第一版不提供可查询、持久化的来源记录，不在安装目录写元数据文件。`SkillInstallResponse` 仅新增 `enabled`，用于反映重安装后保留的调用方状态，不携带 provenance；source 与 snapshot_digest 可以写入普通进程日志，但日志滚动后不可查询，My skills 不显示来源，重新预览/升级需要重新输入 source。不得把该日志描述成审计设施；若未来需要持久 provenance，另开覆盖摘要、导出和编辑语义的切片。
 
 ## 7. 前端与混合版本
 

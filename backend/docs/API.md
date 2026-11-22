@@ -1163,7 +1163,8 @@ Content-Type: application/json
 {
   "success": true,
   "skill_name": "my-skill",
-  "message": "Skill 'my-skill' installed successfully"
+  "message": "Skill 'my-skill' installed successfully",
+  "enabled": true
 }
 ```
 

@@ -145,6 +145,7 @@ class SkillInstallResponse(BaseModel):
     success: bool = Field(..., description="Whether the installation was successful")
     skill_name: str = Field(..., description="Name of the installed skill")
     message: str = Field(..., description="Installation result message")
+    enabled: bool = Field(default=True, description="Whether the installed skill is enabled for the caller")
 
 
 class SkillReloadResponse(BaseModel):

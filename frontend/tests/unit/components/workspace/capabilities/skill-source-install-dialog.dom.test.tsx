@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 
 const mocks = rs.hoisted(() => ({
   inspect: rs.fn(),
@@ -26,7 +32,11 @@ rs.mock("@/core/i18n/hooks", () => ({
 
 import { SkillSourceInstallDialog } from "@/components/workspace/capabilities/skill-source-install-dialog";
 import { enUS } from "@/core/i18n/locales/en-US";
-import { SkillRequestError, type SkillSourcePreview } from "@/core/skills/api";
+import {
+  SkillRequestError,
+  type InstallSkillResponse,
+  type SkillSourcePreview,
+} from "@/core/skills/api";
 
 const text = enUS.settings.skills;
 const preview: SkillSourcePreview = {
@@ -50,9 +60,9 @@ function renderDialog(onClose = rs.fn(), onInstalled = rs.fn()) {
   return { onClose, onInstalled };
 }
 
-async function openPreview() {
+async function openPreview(onClose = rs.fn(), onInstalled = rs.fn()) {
   mocks.inspect.mockResolvedValue(preview);
-  const callbacks = renderDialog();
+  const callbacks = renderDialog(onClose, onInstalled);
   fireEvent.click(screen.getByRole("button", { name: text.sourceInspect }));
   await screen.findByText(preview.skill_name);
   return callbacks;
@@ -88,6 +98,7 @@ describe("source skill installation", () => {
       success: true,
       skill_name: "demo",
       message: "Installed",
+      enabled: true,
     });
     const { onInstalled } = await openPreview();
 
@@ -119,6 +130,25 @@ describe("source skill installation", () => {
     fireEvent.click(screen.getByRole("button", { name: text.deleteSkill }));
     fireEvent.click(screen.getByRole("button", { name: text.confirmDelete }));
     expect(mocks.remove).toHaveBeenCalledWith("demo");
+  });
+
+  it("shows the persisted disabled state after reinstalling", async () => {
+    mocks.install.mockResolvedValue({
+      success: true,
+      skill_name: "demo",
+      message: "Installed",
+      enabled: false,
+    });
+    await openPreview();
+    fireEvent.click(screen.getByRole("button", { name: text.sourceInstall }));
+
+    await screen.findByText(text.sourceSuccessDisabledDescription);
+    expect(screen.queryByText(text.sourceSuccessDescription)).toBeNull();
+    expect(
+      screen
+        .getByRole("switch", { name: `${text.sourceEnabled} demo` })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
   });
 
   it.each([
@@ -207,5 +237,36 @@ describe("source skill installation", () => {
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(mocks.invalidate).toHaveBeenCalledWith({ queryKey: ["skills"] });
+  });
+
+  it("refreshes again when an install dismissed in flight settles", async () => {
+    const onClose = rs.fn();
+    let installSignal: AbortSignal | undefined;
+    let finishInstall: (result: InstallSkillResponse) => void = () => undefined;
+    mocks.install.mockImplementation((_request, signal?: AbortSignal) => {
+      installSignal = signal;
+      // ES2022 target: Promise.withResolvers is not in the configured libs.
+      return new Promise<InstallSkillResponse>((resolve) => {
+        finishInstall = resolve;
+      });
+    });
+    await openPreview(onClose);
+    fireEvent.click(screen.getByRole("button", { name: text.sourceInstall }));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(installSignal?.aborted).toBe(false);
+    expect(mocks.invalidate).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishInstall({
+        success: true,
+        skill_name: "demo",
+        message: "Installed",
+        enabled: true,
+      });
+      await Promise.resolve();
+    });
+    expect(mocks.invalidate).toHaveBeenCalledTimes(2);
   });
 });

@@ -2662,6 +2662,8 @@ export const zhCN: Translations = {
       sourceSuccessTitle: "技能已安装",
       sourceSuccessDescription:
         "此自定义技能已启用，并会立即在你的后续 Agent 运行中生效。",
+      sourceSuccessDisabledDescription:
+        "此自定义技能沿用了此前的禁用设置。启用后才会在后续 Agent 运行中生效。",
       sourceVisibilityNotice:
         "如果当前可见性策略过滤了此技能，它仍已安装，但可能不会显示在“我的技能”中。",
       sourceEnabled: "技能已启用",

@@ -29,6 +29,7 @@ import {
   inspectSkillSource,
   installSkillSource,
   SkillRequestError,
+  type InstallSkillResponse,
   type SkillSourcePreview,
 } from "@/core/skills/api";
 import { useEnableSkill } from "@/core/skills/hooks";
@@ -82,6 +83,7 @@ export function SkillSourceInstallDialog({
   const text = t.settings.skills;
   const queryClient = useQueryClient();
   const active = useRef<AbortController | null>(null);
+  const pendingInstall = useRef<Promise<InstallSkillResponse> | null>(null);
   const [phase, setPhase] = useState<Phase>("input");
   const [source, setSource] = useState("");
   const [preview, setPreview] = useState<SkillSourcePreview | null>(null);
@@ -99,10 +101,15 @@ export function SkillSourceInstallDialog({
     void queryClient.invalidateQueries({ queryKey: ["skills"] });
   };
   const close = () => {
-    active.current?.abort();
+    const request = pendingInstall.current;
+    if (request) {
+      // The Gateway drains installs after client cancellation. Keep this request
+      // alive so its settlement, rather than the close, triggers the final read.
+      void request.then(refreshSkills, refreshSkills);
+    } else {
+      active.current?.abort();
+    }
     active.current = null;
-    // Closing is not a server-side cancellation. Refresh because a drained
-    // install can still have completed after the request was aborted locally.
     refreshSkills();
     onClose();
   };
@@ -148,21 +155,24 @@ export function SkillSourceInstallDialog({
     active.current = controller;
     setError(null);
     setPhase("installing");
+    let request: Promise<InstallSkillResponse> | null = null;
     try {
-      const result = await installSkillSource(
+      request = installSkillSource(
         {
           source: preview.source,
           expected_snapshot_digest: preview.snapshot_digest,
         },
         controller.signal,
       );
+      pendingInstall.current = request;
+      const result = await request;
       if (active.current !== controller || controller.signal.aborted) return;
       if (!result.success) {
         fail(new SkillRequestError(400, result.message || text.installFailed));
         return;
       }
       setInstalledName(result.skill_name || preview.skill_name);
-      setInstalledEnabled(true);
+      setInstalledEnabled(result.enabled ?? true);
       setConfirmingDelete(false);
       setPhase("success");
       refreshSkills();
@@ -171,6 +181,7 @@ export function SkillSourceInstallDialog({
       if (active.current !== controller || controller.signal.aborted) return;
       fail(caught);
     } finally {
+      if (pendingInstall.current === request) pendingInstall.current = null;
       if (active.current === controller) active.current = null;
     }
   };
@@ -386,7 +397,11 @@ export function SkillSourceInstallDialog({
                 </p>
               </div>
             </div>
-            <p className="text-sm">{text.sourceSuccessDescription}</p>
+            <p className="text-sm">
+              {installedEnabled
+                ? text.sourceSuccessDescription
+                : text.sourceSuccessDisabledDescription}
+            </p>
             <p className="text-muted-foreground text-sm">
               {text.sourceVisibilityNotice}
             </p>

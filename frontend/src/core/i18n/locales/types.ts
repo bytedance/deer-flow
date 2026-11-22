@@ -2317,6 +2317,7 @@ export interface Translations {
       sourceRequestFailed: string;
       sourceSuccessTitle: string;
       sourceSuccessDescription: string;
+      sourceSuccessDisabledDescription: string;
       sourceVisibilityNotice: string;
       sourceEnabled: string;
       skillContent: string;

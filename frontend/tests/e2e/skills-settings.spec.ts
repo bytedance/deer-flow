@@ -285,7 +285,12 @@ test.describe("Skill gallery", () => {
         expected_snapshot_digest: preview.snapshot_digest,
       });
       await route.fulfill({
-        json: { success: true, skill_name: "demo", message: "Installed" },
+        json: {
+          success: true,
+          skill_name: "demo",
+          message: "Installed",
+          enabled: true,
+        },
       });
     });
 

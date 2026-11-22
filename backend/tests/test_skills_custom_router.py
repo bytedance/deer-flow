@@ -164,6 +164,44 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     assert refresh_calls == [("refresh", "default")]
 
 
+def test_reinstall_returns_persisted_disabled_state(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = _make_skill_archive(tmp_path, "archive-skill")
+
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+    monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", lambda user_id: _async_scan("allow", "ok"))
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        request = {"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"}
+        first = client.post("/api/skills/install", json=request)
+        assert first.status_code == 200
+        assert first.json()["enabled"] is True
+        assert client.put("/api/skills/archive-skill", json={"enabled": False}).status_code == 200
+        assert client.delete("/api/skills/custom/archive-skill").status_code == 200
+
+        reinstalled = client.post("/api/skills/install", json=request)
+        assert reinstalled.status_code == 200
+        assert reinstalled.json()["enabled"] is False
+        detail = client.get("/api/skills/custom/archive-skill")
+        assert detail.status_code == 200
+        assert detail.json()["enabled"] is False
+
+
 def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp_path):
     installed_paths: list[Path] = []
     refresh_calls: list[str] = []
