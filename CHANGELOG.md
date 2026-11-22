@@ -76,6 +76,16 @@ This section accumulates work toward the **2.3.0** milestone
   dispatch. The empty session Gateway admission may have created for that
   rejected send is left in place; identifying it safely needs a backend
   conditional delete. ([#8092](https://github.com/bytedance/deer-flow/pull/8092))
+
+- **scheduler:** Scheduled-task IM notices no longer forward a credential that
+  carries no secret-like key. A URL's user info
+  (`postgres://admin:hunter2@host`) and an `Authorization` or `Cookie` header
+  value (`Authorization: Bearer ...`) used to reach the platform verbatim; both
+  now read `[redacted]`, and the scheme with the rest of the sentence stays
+  readable. A URL without credentials is unchanged. A `Cookie` header or a
+  `Digest` credential is replaced through the end of the line, so text that
+  follows it on the same line is removed as well. ([#8250])
+
 - **frontend:** Cron presets in the task form now require minute 0-59, hour
   0-23 and day of month 1-31, so an out-of-range expression such as
   `0 24 * * *` stays a custom schedule and keeps its original text. Previously,
@@ -16449,3 +16459,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8151]: https://github.com/bytedance/deer-flow/pull/8151
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
+[#8250]: https://github.com/bytedance/deer-flow/pull/8250

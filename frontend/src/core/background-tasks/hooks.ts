@@ -25,7 +25,7 @@ export function useBackgroundTasks(
 ) {
   return useQuery({
     queryKey: backgroundTasksQueryKey(threadId),
-    queryFn: () => fetchBackgroundTasks(threadId),
+    queryFn: ({ signal }) => fetchBackgroundTasks(threadId, signal),
     enabled: options.enabled !== false && Boolean(threadId),
     refetchInterval: (query) =>
       query.state.data?.some(isActiveBackgroundTask) ? 3000 : 15000,
@@ -40,7 +40,7 @@ export function useBackgroundTask(
 ) {
   return useQuery({
     queryKey: backgroundTaskQueryKey(threadId, taskId),
-    queryFn: () => fetchBackgroundTask(threadId, taskId),
+    queryFn: ({ signal }) => fetchBackgroundTask(threadId, taskId, signal),
     enabled: options.enabled !== false && Boolean(threadId) && Boolean(taskId),
     refetchInterval: (query) =>
       query.state.data && shouldPollBackgroundTaskDetail(query.state.data)
@@ -56,13 +56,18 @@ export function useCancelBackgroundTask(threadId: string) {
   return useMutation({
     mutationFn: (taskId: string) => cancelBackgroundTask(threadId, taskId),
     onSuccess: async (task) => {
-      // This thread's task list and detail reads poll the same caches the
-      // confirmation is about to seed. A read that started before the cancel
-      // answered must not land afterwards and put the card back to "working"
-      // (#7177); same ordering contract as the memory mutations (#6959).
-      await queryClient.cancelQueries({
-        queryKey: backgroundTasksQueryKey(threadId),
-      });
+      // Fence older reads before seeding either cache, including queries whose
+      // panels closed while cancellation was in flight.
+      await Promise.all([
+        queryClient.cancelQueries({
+          queryKey: backgroundTasksQueryKey(threadId),
+          exact: true,
+        }),
+        queryClient.cancelQueries({
+          queryKey: backgroundTaskQueryKey(threadId, task.task_id),
+          exact: true,
+        }),
+      ]);
       queryClient.setQueryData(
         backgroundTaskQueryKey(threadId, task.task_id),
         task,
@@ -83,6 +88,7 @@ export function useCancelBackgroundTask(threadId: string) {
       );
       void queryClient.invalidateQueries({
         queryKey: backgroundTasksQueryKey(threadId),
+        exact: true,
       });
     },
     onError: (error: Error) => {

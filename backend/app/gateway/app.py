@@ -31,6 +31,7 @@ from app.gateway.routers import (
     channel_connections,
     channels,
     console,
+    coordination,
     features,
     feedback,
     github_webhooks,
@@ -40,6 +41,7 @@ from app.gateway.routers import (
     knowledge,
     mcp,
     mcp_tasks,
+    mcp_user_oauth,
     memory,
     models,
     personal_mcp,
@@ -62,6 +64,7 @@ from app.gateway.routers import (
     trash,
     uploads,
     user_preferences,
+    voice_input,
 )
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
@@ -926,6 +929,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
         if batch_repo is not None:
             from app.subagent_batches.continuation import BatchContinuations
+            from app.subagent_batches.identity import resolve_batch_principal
 
             continuations = BatchContinuations(app)
             app.state.batch_continuations = continuations
@@ -937,6 +941,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 prepare_continuation=continuations.prepare,
                 dispatch_continuation=continuations.dispatch,
                 cancel_continuation=continuations.cancel,
+                resolve_principal=lambda batch: resolve_batch_principal(batch, load_user=app.state.agent_runs_host.load_user),
             )
             app.state.subagent_batch_service = batch_service
             if subagent_batches_config.enabled:
@@ -1353,9 +1358,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(capabilities.router)
     app.include_router(mcp.router)
     app.include_router(personal_mcp.router)
+    app.include_router(mcp_user_oauth.router)
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)
+    app.include_router(coordination.router)
     app.include_router(subagent_batches.router)
 
     # Memory API is mounted at /api/memory
@@ -1410,6 +1417,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Input polishing API is mounted at /api/input-polish
     app.include_router(input_polish.router)
+    app.include_router(voice_input.router)
 
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)

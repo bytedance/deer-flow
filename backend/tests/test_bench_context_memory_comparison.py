@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.benchmark
+
 BACKEND = Path(__file__).resolve().parents[1]
 MODULE = "scripts.benchmark.context_memory_comparison"
 MANIFEST = BACKEND / "scripts/benchmark/context_memory_comparison/manifest.json"

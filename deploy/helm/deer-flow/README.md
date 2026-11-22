@@ -59,6 +59,13 @@ pull secret (step 1) and reference it via `image.pullSecrets`.
 > `appVersion`; always set `image.tag` to the release that matches your chart
 > `--version` unless you have a reason to pin differently.
 
+`image.gatewayTag`, `image.frontendTag` and `image.provisionerTag` override
+`image.tag` for one image, e.g. a backend you rebuild on top of a release
+(`v2.2.0-custom.1`) while the frontend stays on the published `v2.2.0`.
+They must be strings: `--set image.gatewayTag=20261118` passes an integer and
+fails the render, so quote a numeric tag in YAML (`gatewayTag: "20261118"`) or
+use `--set-string image.gatewayTag=20261118`.
+
 ## 1. Build & push images (custom builds only)
 
 Skip this section if you're using the published chart above. To build the
@@ -150,7 +157,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 66
+  config_version: 67
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -347,7 +354,17 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   string such as `"50%"`, while `0` fails the render -- disable the budget
   instead) is rendered automatically for a multi-instance gateway (same rule),
   and the rollout strategy is surge-then-drain (`maxSurge: 1`,
-  `maxUnavailable: 0`). The sandbox
+  `maxUnavailable: 0`). A single gateway whose ReadWriteOnce home PVC can't
+  attach on two nodes at once needs `gateway.strategy.type: Recreate`; the
+  chart then drops `rollingUpdate`, so the type alone is enough, also when
+  this chart is a dependency of yours. Switching an installed release from
+  the default to `Recreate` with Helm 4's server-side apply fails with
+  `spec.strategy.rollingUpdate: Forbidden` when the previous release's
+  manifest had no `strategy` (e.g. `gateway.strategy: null`): the API server
+  defaulted `rollingUpdate`, no field manager owns it, so the apply can't
+  remove it. Run that one upgrade with `--server-side=false`; its three-way
+  merge patch drops `rollingUpdate`, and later upgrades can use server-side
+  apply again. The sandbox
   provisioner is not on the single-instance list: it scales independently
   (next item).
 - **Provisioner replicas.** `provisioner.replicas` (default 1) scales the
