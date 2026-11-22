@@ -239,10 +239,21 @@ def _aio_service_environment(config_path: str | None) -> dict[str, str]:
     if not config_path:
         return {}
 
+    import yaml
+
     from deerflow.config.app_config import AppConfig
 
-    configured = AppConfig.from_file(config_path).sandbox.environment
-    flags = {key: configured[key] for key in _AIO_SERVICE_FLAGS if key in configured}
+    with AppConfig.resolve_config_path(config_path).open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    if config is None:
+        return {}
+    if not isinstance(config, dict) or not isinstance(sandbox := config.get("sandbox", {}), dict):
+        raise ValueError("Expected a config mapping with a sandbox mapping")
+    environment = sandbox.get("environment", {})
+    if not isinstance(environment, dict):
+        raise ValueError("sandbox.environment must be a mapping")
+
+    flags = {key: AppConfig.resolve_env_variables(environment[key]) for key in _AIO_SERVICE_FLAGS if key in environment}
     for key, value in flags.items():
         if value not in ("true", "false"):
             raise ValueError(f"sandbox.environment.{key} must be 'true' or 'false' for the AIO benchmark")

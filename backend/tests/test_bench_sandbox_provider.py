@@ -94,13 +94,12 @@ sandbox:
     DISABLE_JUPYTER: "$BENCH_JUPYTER"
     DISABLE_CODE_SERVER: "false"
     OTHER: private-fixture
+    UNUSED: "$BENCH_UNSET_UNUSED"
 """,
         encoding="utf-8",
     )
-    extensions = tmp_path / "extensions.json"
-    extensions.write_text("{}", encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions))
+    monkeypatch.delenv("BENCH_UNSET_UNUSED", raising=False)
     monkeypatch.setenv("BENCH_JUPYTER", "true")
     captured = {}
 
@@ -117,8 +116,13 @@ sandbox:
     assert json.loads(data)["aio_service_profile"] == "DISABLE_CODE_SERVER=false,DISABLE_JUPYTER=true"
     assert "private-fixture" not in data
 
-    monkeypatch.setenv("BENCH_JUPYTER", "private-invalid-value")
     captured.clear()
+    monkeypatch.delenv("BENCH_JUPYTER")
+    with pytest.raises(ValueError, match="BENCH_JUPYTER"):
+        bench.main(["--provider", "aio-docker", "--output", str(output)])
+    assert not captured
+
+    monkeypatch.setenv("BENCH_JUPYTER", "private-invalid-value")
     with pytest.raises(ValueError, match="DISABLE_JUPYTER") as exc:
         bench.main(["--provider", "aio-docker", "--output", str(output)])
     assert "private-invalid-value" not in str(exc.value)
