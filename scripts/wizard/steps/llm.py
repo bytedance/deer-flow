@@ -43,9 +43,7 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         model_name = provider.models[0]
 
     print()
-    base_url: str | None = None
-    if provider.name in {"openrouter", "vllm"}:
-        base_url = provider.extra_config.get("base_url")
+    base_url: str | None = provider.extra_config.get("base_url")
 
     if provider.base_url_prompt:
         print_header(f"{step_label} · Connection details")
