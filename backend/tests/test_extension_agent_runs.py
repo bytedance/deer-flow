@@ -227,6 +227,40 @@ async def test_real_run_lifecycle_and_automatic_followup(runtime):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Artifact capture requires POSIX")
+async def test_read_artifact_preserves_completed_output_after_switching_to_chat(runtime):
+    import asyncio
+
+    from deerflow.config.paths import get_paths
+
+    runs, state, request, _, _ = runtime
+    runs = runs.for_plugin("workflows")
+    owner = str(request.state.user.id)
+    thread = await runs.create_thread(thread_id="workflow-output")
+    output = get_paths().sandbox_outputs_dir(thread, user_id=owner) / "report.txt"
+
+    async def produce_report(_prompt, _runtime):
+        await asyncio.to_thread(output.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(output.write_bytes, b"completed report")
+
+    state.present_worker_report = produce_report
+    run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "Write the report"}]}, context={"mode": "flash"})
+    assert (await runs.wait(thread_id=thread, run_id=run.run_id, timeout=5)).status == "success"
+    checkpoint = (await runs.get_state(thread_id=thread))["checkpoint_id"]
+    assert checkpoint
+    path = "/mnt/user-data/outputs/report.txt"
+    assert await runs.read_artifact(thread_id=thread, path=path) == b"completed report"
+
+    await state.thread_store.update_metadata(thread, {"mode": "chat"}, user_id=owner)
+    assert (await state.thread_store.get(thread, user_id=owner))["metadata"]["mode"] == "chat"
+    assert await runs.read_artifact(thread_id=thread, path=path) == b"completed report"
+    assert await runs.read_artifact(thread_id=thread, path=path, expected_checkpoint_id=checkpoint) == b"completed report"
+    with pytest.raises(AgentRunError) as stale:
+        await runs.read_artifact(thread_id=thread, path=path, expected_checkpoint_id="stale-checkpoint")
+    assert stale.value.status_code == 412
+
+
+@pytest.mark.asyncio
 async def test_chat_thread_rejects_extension_artifact_import_before_allocation(runtime, monkeypatch):
     from unittest.mock import Mock
 

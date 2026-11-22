@@ -244,7 +244,7 @@ class _BoundAgentRuns:
         from deerflow.runtime.runs.manager import ConflictError
         from deerflow.utils.file_io import await_drained
 
-        async with self._request("threads:read", thread_id, thread_files=True) as request:
+        async with self._request("threads:read", thread_id) as request:
             try:
                 async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
                     if expected_checkpoint_id is not None:
