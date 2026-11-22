@@ -7,7 +7,8 @@ happened, and what should I check next?*
 
 It uses extension API 0.2.11 with no host code changes. The host owns evidence
 storage, sealing, retention and authorization; this package owns only the
-interpretation of one sealed run.
+interpretation of one sealed run, exposed both as HTTP routes and as a
+workspace page.
 
 ## What it produces
 
@@ -39,6 +40,23 @@ read-bound signals: `evidence_bounded` (the caller's `max_events` cut the read),
 
 The Markdown route renders the same data as a document that can be attached to
 an incident ticket. Query `max_events` (1–2000, default 200) bounds the work.
+
+
+### Workspace page
+
+The same plugin adds a **Run postmortem** page (sidebar entry, localized en/zh)
+with the same data. When the host supplies the current thread id to the surface,
+the page prefills it; hosts that mount pages without thread context leave the
+field empty, so it stays editable. The page can load the latest run the caller
+owns on that thread **when the changed-run feed can be read to its end**; a
+bounded scan that stops early says so and asks for a run ID instead of
+presenting an older run as latest. It renders the verdict, anomalies, activity
+and a timeline that reveals further events on demand, and downloads the
+Markdown report. It reaches the host only
+through three declared actions — `latest`, `report`, `markdown` — so the page
+holds no credentials and no network code of its own. A run the caller does not
+own answers `{"not_found": true}` rather than an error, and the action route's
+principal binding is the same one the HTTP routes use.
 
 ## Install and configure
 
