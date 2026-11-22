@@ -20,6 +20,8 @@ const AUTH_DISABLED_PERMISSIONS = [
   "memory:write",
   "agents:read",
   "agents:write",
+  "schedules:read",
+  "schedules:write",
   "projects:read",
   "projects:write",
   "projects:delete",

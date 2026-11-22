@@ -517,6 +517,141 @@ def test_pat_policy_does_not_pre_authorize_unimplemented_methods():
     assert is_pat_allowed_route("GET", "/api/threads") is False
 
 
+def test_pat_agent_and_schedule_policy_admits_only_pipeline_routes():
+    from fastapi.routing import APIRoute
+
+    from app.gateway.auth.pat import is_pat_allowed_route
+    from app.gateway.routers import agents, scheduled_tasks
+
+    admitted = set()
+    for router in (agents.router, scheduled_tasks.router):
+        for route in router.routes:
+            if isinstance(route, APIRoute):
+                path = route.path.replace("{name}", "researcher").replace("{task_id}", "task-1").replace("{thread_id}", "thread-1")
+                admitted.update((method, route.path) for method in route.methods if is_pat_allowed_route(method, path))
+
+    assert admitted == {
+        ("GET", "/api/agents"),
+        ("POST", "/api/agents"),
+        ("PUT", "/api/agents/{name}"),
+        ("DELETE", "/api/agents/{name}"),
+        ("GET", "/api/scheduled-tasks"),
+        ("POST", "/api/scheduled-tasks"),
+        ("PATCH", "/api/scheduled-tasks/{task_id}"),
+        ("DELETE", "/api/scheduled-tasks/{task_id}"),
+        ("POST", "/api/scheduled-tasks/{task_id}/pause"),
+        ("POST", "/api/scheduled-tasks/{task_id}/resume"),
+    }
+
+
+def test_pat_agent_named_import_can_be_deployed_and_read_by_session(client, monkeypatch, tmp_path):
+    from app.gateway.routers import agents
+    from deerflow.config.agents_api_config import AgentsApiConfig
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.agents_config.get_paths", lambda: paths)
+    monkeypatch.setattr(agents, "get_paths", lambda: paths)
+    monkeypatch.setattr(agents, "get_agents_api_config", lambda: AgentsApiConfig(enabled=True))
+    client.app.include_router(agents.router)
+    pat = _create_pat(client, scopes=["agents:read", "agents:write"])
+    bearer = {"Authorization": f"Bearer {pat['token']}"}
+
+    created = client.post("/api/agents", json={"name": "import", "soul": "Initial version"}, headers=bearer)
+    assert created.status_code == 201, created.text
+    updated = client.put("/api/agents/import", json={"soul": "Updated by the pipeline"}, headers=bearer)
+    assert updated.status_code == 200, updated.text
+    assert [agent["name"] for agent in client.get("/api/agents", headers=bearer).json()["agents"]] == ["import"]
+
+    for method in ("GET", "POST"):
+        denied = client.request(method, "/api/agents/import", headers=bearer)
+        assert denied.status_code == 403
+        assert denied.json()["detail"] == "PAT credentials are not permitted on this route"
+    session = client.get("/api/agents/import")
+    assert session.status_code == 200
+    assert session.json()["soul"] == "Updated by the pipeline"
+    assert client.delete("/api/agents/import", headers=bearer).status_code == 204
+
+
+def test_pat_cannot_preview_cron_but_a_session_can(client):
+    from app.gateway.routers import scheduled_tasks
+
+    client.app.include_router(scheduled_tasks.router)
+    pat = _create_pat(client, scopes=["threads:read", "schedules:read"])
+    body = {"cron": "0 9 * * *", "timezone": "UTC", "start_at": "2026-01-01T00:00:00Z", "count": 1}
+    url = "/api/scheduled-tasks/preview-cron"
+
+    denied = client.post(url, json=body, headers={"Authorization": f"Bearer {pat['token']}"})
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "PAT credentials are not permitted on this route"
+    session = client.post(url, json=body, headers={"X-CSRF-Token": client.cookies["csrf_token"]})
+    assert session.status_code == 200
+    assert session.json()["occurrences"] == [{"run_at": "2026-01-01T09:00:00Z", "local_time": "2026-01-01T09:00:00Z"}]
+
+
+@pytest.fixture
+def scheduled_task_client(client, pat_env):
+    from app.gateway.routers import scheduled_tasks
+    from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+
+    app, _, engine = pat_env
+    app.include_router(scheduled_tasks.router)
+    app.state.scheduled_task_repo = ScheduledTaskRepository(async_sessionmaker(engine, expire_on_commit=False))
+    return client
+
+
+def test_schedule_list_requires_schedule_scope_only_for_pat(scheduled_task_client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    client = scheduled_task_client
+    pat = _create_pat(client, scopes=["threads:read"])
+    monkeypatch.setattr("app.gateway.auth_middleware.resolve_route_permissions", AsyncMock(return_value=["threads:read"]))
+    denied = client.get("/api/scheduled-tasks", headers={"Authorization": f"Bearer {pat['token']}"})
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Permission denied: schedules:read"
+    session = client.get("/api/scheduled-tasks")
+    assert session.status_code == 200
+    assert session.json() == []
+
+
+def test_pat_manages_its_owners_schedule(scheduled_task_client, monkeypatch):
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.routers import scheduled_tasks
+    from deerflow.config.scheduler_config import SchedulerConfig
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    client = scheduled_task_client
+    client.app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
+    client.app.state.scheduled_task_service = SimpleNamespace(is_running=True)
+    monkeypatch.setattr(scheduled_tasks, "get_config", lambda: SimpleNamespace(scheduler=SchedulerConfig()))
+    scopes = ["threads:read", "threads:write", "runs:create", "schedules:read", "schedules:write"]
+    pat = _create_pat(client, scopes=scopes)
+    other = _create_pat(client, user_id="user-2", scopes=scopes)
+    bearer = {"Authorization": f"Bearer {pat['token']}"}
+    other_bearer = {"Authorization": f"Bearer {other['token']}"}
+    url = "/api/scheduled-tasks"
+    body = {"title": "Weekly report", "prompt": "Prepare the report", "schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * 1"}, "timezone": "UTC"}
+
+    created = client.post(url, json=body, headers=bearer)
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    item = f"{url}/{task_id}"
+    assert [task["id"] for task in client.get(url, headers=bearer).json()] == [task_id]
+    assert client.get(url, headers=other_bearer).json() == []
+    assert client.patch(item, json={"title": "Unauthorized edit"}, headers=other_bearer).status_code == 404
+    assert client.patch(item, json={"title": "Updated report"}, headers=bearer).json()["title"] == "Updated report"
+    assert client.post(f"{item}/pause", headers=bearer).json()["status"] == "paused"
+    assert client.post(f"{item}/resume", headers=bearer).json()["status"] == "enabled"
+    assert client.delete(item, headers=bearer).json() == {"id": task_id, "deleted": True}
+    assert client.get(url, headers=bearer).json() == []
+
+
+def test_pat_scope_validation_accepts_agent_and_schedule_scopes(client):
+    created = _create_pat(client, scopes=["agents:read", "agents:write", "schedules:read", "schedules:write"])
+    assert created["scopes"] == ["agents:read", "agents:write", "schedules:read", "schedules:write"]
+
+
 def test_pat_runs_policy_admits_exactly_the_mounted_routes():
     """The runs subtree is enumerated, not wildcarded: every GET/POST route
     the thread_runs router actually implements is admitted (derived from the

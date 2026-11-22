@@ -4129,7 +4129,11 @@ class ChannelManager:
     @staticmethod
     def _is_goal_in_flight_error(error: Exception) -> bool:
         """Recognize only the Gateway's known goal-write conflict, not arbitrary 409s."""
-        if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 409:
+        # Starlette's TestClient may expose a compatible HTTPStatusError from
+        # httpx2 while production channel clients use httpx.
+        response = getattr(error, "response", None)
+        request = getattr(error, "request", None)
+        if response is None or request is None or getattr(response, "status_code", None) != 409:
             return False
         # POST (from-chat synthesis) saves the goal like PUT, so it carries the
         # same "Set the goal ..." detail; recognizing it lets the IM reply reuse
@@ -4138,7 +4142,7 @@ class ChannelManager:
             "PUT": "Thread has a run in flight. Set the goal after the run finishes.",
             "POST": "Thread has a run in flight. Set the goal after the run finishes.",
             "DELETE": "Thread has a run in flight. Clear the goal after the run finishes.",
-        }.get(error.request.method)
+        }.get(getattr(request, "method", None))
         if detail is None:
             return False
         try:

@@ -85,6 +85,10 @@ class Permissions:
     AGENTS_READ = "agents:read"
     AGENTS_WRITE = "agents:write"
 
+    # Scheduled task deployment
+    SCHEDULES_READ = "schedules:read"
+    SCHEDULES_WRITE = "schedules:write"
+
 
 class AuthContext:
     """Authentication context for the current request.
@@ -169,6 +173,8 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.MEMORY_WRITE,
     Permissions.AGENTS_READ,
     Permissions.AGENTS_WRITE,
+    Permissions.SCHEDULES_READ,
+    Permissions.SCHEDULES_WRITE,
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,
@@ -958,6 +964,7 @@ def require_permission(
     action: str,
     owner_check: bool = False,
     require_existing: bool = False,
+    pat_only: bool = False,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """Decorator that checks permission for resource:action.
 
@@ -974,6 +981,9 @@ def require_permission(
                           **destructive / mutating** routes (DELETE, PATCH,
                           state-update) so a deleted thread can't be re-targeted
                           by another user via the missing-row code path.
+        pat_only: Enforce this permission for PAT callers while preserving the
+            existing session and internal caller permission contract. Use this
+            for scopes introduced for PAT access to an existing route family.
 
     Usage:
         # Read-style: legacy untracked threads are allowed
@@ -1031,8 +1041,14 @@ def require_permission(
             if not auth.is_authenticated:
                 raise HTTPException(status_code=401, detail="Authentication required")
 
-            # Check permission
-            if not auth.has_permission(resource, action):
+            # PAT-only scopes narrow the token's route access without changing
+            # the permission contract for existing session and internal callers.
+            # Those callers continue to be governed by their existing route
+            # permissions while deployments migrate to the new PAT scopes.
+            from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+            requires_permission = not pat_only or getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT
+            if requires_permission and not auth.has_permission(resource, action):
                 raise HTTPException(
                     status_code=403,
                     detail=f"Permission denied: {resource}:{action}",
