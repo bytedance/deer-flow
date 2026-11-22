@@ -2,13 +2,13 @@
 
 GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, fan-out'd to one `InboundMessage` per matching custom-agent binding, and shipped to the rest of DeerFlow through the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [channel guidance](../app/channels/AGENTS.md#github-channel).
 
-This document covers the **architecture** of that pipeline:
+This guide covers setup and the architecture of that pipeline:
 
 - Per-agent bindings (`config.yaml` → `github:` block)
 - Webhook → fan-out → `InboundMessage` dispatch
 - Mention-handle precedence for `require_mention` triggers
 - `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism
-- Configuring GitHub tools for webhook runs
+- [Configuring GitHub tools for webhook runs](#github-tool-setup)
 - `ConflictError` (HTTP 409) thread-create race recovery
 - Why **outbound is log-only**
 - Follow-up buffering while busy (issue #4121): buffer → watch → drain, and the single-process scope limit
@@ -142,10 +142,98 @@ Whitespace-only values at every level are treated as unset, so the chain falls t
 ## GitHub Tool Setup
 
 Webhook delivery starts the agent independently of its GitHub tool settings.
-To read private repositories or post changes, configure a dedicated integration
-such as a [GitHub MCP server](MCP_SERVER.md) and grant the agent access to the
-needed repositories and operations. Git and the GitHub CLI use their own
-authentication settings.
+`GITHUB_WEBHOOK_SECRET` verifies incoming deliveries. For repository operations,
+the [official GitHub MCP Server](https://github.com/github/github-mcp-server) can
+authenticate as a GitHub App installation in `stdio` mode. It obtains and
+refreshes installation tokens without an interactive login. Git and the GitHub
+CLI use their own authentication settings.
+
+### Configure the GitHub App and webhook
+
+1. [Register a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+   or reuse an existing App. Install it on the repositories the agent should
+   access. For the read-only tools below, grant read access to **Contents**,
+   **Issues**, and **Pull requests**.
+2. In the App settings, set the webhook URL to
+   `https://<deerflow-host>/api/webhooks/github` and subscribe to
+   [**Issue comment**](https://docs.github.com/en/webhooks/webhook-events-and-payloads#issue_comment)
+   events to trigger on issue and PR conversation comments. Set the same webhook
+   secret in GitHub and in the Gateway's `GITHUB_WEBHOOK_SECRET` environment
+   variable. Set `channels.github.enabled: true` in the deployment `config.yaml`.
+
+### Connect the MCP server
+
+Install [GitHub MCP Server v2.2.0](https://github.com/github/github-mcp-server/releases/tag/v2.2.0)
+on the Gateway. In the Gateway environment, set `GITHUB_APP_ID` to the App ID
+from its settings and `GITHUB_APP_INSTALLATION_ID` to the installation ID
+(`installation.id` in a GitHub App webhook payload). Generate a private key in
+the App settings and make its PEM file readable by the MCP process. For Docker,
+provide the Linux binary inside the Gateway container and mount the PEM as a
+read-only secret. Keep the key out of source control and outside agent-accessible
+mounts.
+
+Merge the `github-app` entry into `mcpServers` in
+[`extensions_config.json`](MCP_SERVER.md#setup). Adjust the executable and PEM
+paths for the Gateway environment.
+
+```json
+{
+  "mcpServers": {
+    "github-app": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "/usr/local/bin/github-mcp-server",
+      "args": [
+        "stdio",
+        "--read-only",
+        "--tools=issue_read,pull_request_read,get_file_contents"
+      ],
+      "env": {
+        "GITHUB_APP_ID": "$GITHUB_APP_ID",
+        "GITHUB_APP_INSTALLATION_ID": "$GITHUB_APP_INSTALLATION_ID",
+        "GITHUB_APP_PRIVATE_KEY_PATH": "/run/secrets/github-app.pem"
+      }
+    }
+  }
+}
+```
+
+This MCP server uses a deployment-wide credential. Use it on a trusted Gateway
+and scope repository access through the App installation and its permissions.
+See the [MCP server's GitHub App authentication guide](https://github.com/github/github-mcp-server/blob/v2.2.0/docs/github-app-auth.md)
+for installation-token errors and GitHub Enterprise configuration.
+
+### Bind and verify the agent
+
+Add or update the `github` block in the custom agent's `config.yaml`. Set
+`bot_login` to the App slug without `[bot]` and substitute the repository and App
+slug below.
+
+```yaml
+github:
+  bot_login: example-review-app
+  bindings:
+    - repo: your-org/your-repo
+      triggers:
+        issue_comment:
+          actions: [created]
+          require_mention: true
+```
+
+Restart the Gateway. In Docker, recreate the Gateway container to apply new
+environment variables and mounts. In the custom agent's **Plugins and skills**
+settings, select `github-app`. On a test PR in the bound repository, post a
+conversation comment such as `@example-review-app summarize this pull request`.
+Verify that GitHub's Recent Deliveries response lists the agent under
+`dispatch.fired_agents` and that the DeerFlow run successfully calls
+`pull_request_read`. This checks both the webhook dispatch and the
+installation's repository access.
+
+To let the bot post conversation comments, grant the App **Issues: Read and
+write** and approve the updated installation permissions if GitHub prompts you.
+Add `add_issue_comment` to `--tools`, remove `--read-only`, and restart the
+Gateway. The agent must call this tool to post a comment. Its final response is
+logged by the GitHub channel. See [GitHub's comment permissions](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment).
 
 ## Thread-create Race Recovery
 
