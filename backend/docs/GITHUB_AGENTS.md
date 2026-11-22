@@ -1,6 +1,6 @@
 # GitHub Event-Driven Agents
 
-GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, fan-out'd to one `InboundMessage` per matching custom-agent binding, and shipped to the rest of DeerFlow through the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [AGENTS.md](../AGENTS.md) → "GitHub event-driven agents".
+GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, fan-out'd to one `InboundMessage` per matching custom-agent binding, and shipped to the rest of DeerFlow through the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [channel guidance](../app/channels/AGENTS.md#github-channel).
 
 This document covers the **architecture** of that pipeline:
 
@@ -8,9 +8,9 @@ This document covers the **architecture** of that pipeline:
 - Webhook → fan-out → `InboundMessage` dispatch
 - Mention-handle precedence for `require_mention` triggers
 - `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism
-- GH token lifecycle (`GITHUB_APP_ID` + `PRIVATE_KEY` → `run_context["github_token"]` → sandbox `GH_TOKEN`/`GITHUB_TOKEN`)
+- Configuring GitHub tools for webhook runs
 - `ConflictError` (HTTP 409) thread-create race recovery
-- Why **outbound is log-only** (agents post via `gh` from their sandbox)
+- Why **outbound is log-only**
 - Follow-up buffering while busy (issue #4121): buffer → watch → drain, and the single-process scope limit
 
 ## Overview
@@ -86,7 +86,7 @@ sequenceDiagram
     Mgr->>Client: runs.create() [fire_and_forget=True]
     Client->>Gateway: start run
     Gateway-->>Client: pending
-    Note over Mgr: Manager returns immediately.<br/>Agent posts to GitHub via gh CLI.
+    Note over Mgr: Manager returns immediately.<br/>The agent can use configured GitHub tools.
 ```
 
 ## `preferred_thread_id = UUID5(...)` Thread Determinism
@@ -139,50 +139,13 @@ graph LR
 
 Whitespace-only values at every level are treated as unset, so the chain falls through cleanly. The `_is_self_event` gate uses the same precedence (with the agent's whole `bindings[*].triggers[*].mention_login` aggregated across all bindings, plus an `agent.name` fallback) so the self-loop gate and the mention gate stay coherent.
 
-## GH Token Lifecycle
+## GitHub Tool Setup
 
-GitHub Agents get push/write credentials as **per-call installation tokens**, not as inherited environment. The minted token string is bound into `run_context["github_token"]` on the bus-consumer side and exposed to the agent's sandbox commands as both `GH_TOKEN` and `GITHUB_TOKEN` via per-call `extra_env` on `execute_command`. No `os.environ` mutation, no cross-repo bleed.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Bus as MessageBus
-    participant Mgr as ChannelManager<br/>_handle_chat_on_thread
-    participant Pol as inject_github_credentials()<br/>(github/run_policy.py)
-    participant Auth as mint_installation_token<br/>(github/app_auth.py)
-    participant GH as GitHub API<br/>(POST /app/installations/{id}/access_tokens)
-    participant Run as runs.create
-    participant GW as Gateway runtime
-    participant Bash as bash_tool
-    participant Sandbox as Sandbox process
-    participant Cmd as Sandbox command<br/>(gh / git push)
-
-    Bus->>Mgr: msg (channel=github, metadata.github.installation_id)
-    Mgr->>Pol: _apply_channel_policy(msg, run_context)
-    Pol->>Auth: mint_installation_token(installation_id)
-    Auth->>GH: exchange installation_id for token<br/>(JWT signed with PRIVATE_KEY)
-    GH-->>Auth: {token, expires_at}
-    Auth-->>Pol: token string (cached ~55min)
-    Pol->>Mgr: run_context["github_token"] = token
-    Mgr->>Run: client.runs.create(<br/>thread_id, assistant_id,<br/>context={..., github_token})
-    Run->>GW: POST /threads/{id}/runs
-    GW-->>Run: pending
-    Run-->>Mgr: returns once pending
-    Note over Mgr: Manager returns immediately (fire_and_forget)
-
-    Note over GW,Bash: Harness side
-    GW->>Bash: bash_tool call<br/>cmd="git push https://x-access-token:$GH_TOKEN@..."
-    Bash->>Sandbox: execute_command(<br/>env={"GH_TOKEN": "...",<br/>     "GITHUB_TOKEN": "..."})
-    Note over Sandbox: AioSandbox: bash.exec(env=...) on fresh session<br/>LocalSandbox: subprocess.run(env=...)
-    Sandbox->>Cmd: gh pr comment / git push / etc.
-    Cmd->>GH: authenticated GitHub API call
-```
-
-Why a string and not a closure: `run_context` is JSON-encoded by the `langgraph_sdk` HTTP client before reaching Gateway. A Python callable does not survive that serialization. The harness side (`_github_env_from_runtime`) already accepts either shape, but only `str` round-trips through the SDK transport.
-
-**App JWT signing**: the mint builds the App JWT in a worker thread, because it reads `GITHUB_APP_PRIVATE_KEY_PATH` and signs with the key. The key is still read on every mint, but it is parsed again only when its PEM text changes (parsing an RSA-2048 key takes tens of milliseconds and holds the GIL). A rotated key, inline or on disk, is used by the next mint without a restart.
-
-**Token TTL caveat**: GitHub installation tokens are valid for ~1 hour. Most agent runs finish well inside that window. Truly long coder runs (multi-hour refactors at the higher `recursion_limit=250` ceiling) may see a 401 on a late `git push` / `gh pr create`. Auto-refresh past the 1h TTL is intentionally deferred — it requires registering a token-provider lookup on the harness side, which crosses the harness/app boundary (`tests/test_harness_boundary.py`). Until refresh ships, long runs should finish GitHub writes before expiry or accept the loss. If minting fails (bad App id, wrong installation_id, missing private key), the agent still runs without push/write credentials — read-only is better than no response.
+Webhook delivery starts the agent independently of its GitHub tool settings.
+To read private repositories or post changes, configure a dedicated integration
+such as a [GitHub MCP server](MCP_SERVER.md) and grant the agent access to the
+needed repositories and operations. Git and the GitHub CLI use their own
+authentication settings.
 
 ## Thread-create Race Recovery
 
@@ -278,33 +241,33 @@ graph LR
     classDef gh fill:#D7D3E8,stroke:#6B6680,color:#29263A
 
     Run["GitHub agent run"]:::agent
-    GhCLI["gh CLI<br/>(in sandbox)"]:::gh
+    GitHubTool["Configured GitHub tool"]:::gh
     Issue["GitHub issue / PR"]:::gh
     Channel["GitHubChannel.send()<br/>(log-only)"]:::send
     Log["gateway.log<br/>(INFO line)"]:::send
 
-    Run -->|"mid-run intentional writeback"| GhCLI --> Issue
+    Run -->|"mid-run intentional writeback"| GitHubTool --> Issue
     Run -->|"final assistant message"| Channel --> Log
 ```
 
-GitHub agents post to GitHub themselves via the `gh` CLI from inside their sandbox (`gh issue comment`, `gh pr comment`, `gh pr create`, etc.). The channel's `send()` is **log-only** by design — the agent's final assistant message is logged at INFO for visibility but never auto-posted.
+A configured GitHub tool can post comments or open pull requests during a run. The channel logs the final assistant message at INFO.
 
 Why:
 
-- **Multiple agents can bind the same event.** coder + reviewer on a mention would each auto-post a reply, producing two replies per mention even when only one had useful work. Letting the LLM call `gh` mid-run means silence is just "the LLM did not call `gh`".
+- **Multiple agents can bind the same event.** coder + reviewer on a mention would each auto-post a reply, producing two replies per mention even when only one had useful work. Each agent chooses whether to post during its run.
 - **The agent often wants to post intermediate updates** (an issue comment linking the PR, a sub-issue comment, a PR description edit). The auto-post-the-final-message contract didn't model that and forced the final message to play double duty.
-- **The dispatcher's per-agent `_is_self_event` gate** already prevents comments the LLM posts via `gh` from looping the webhook back into a new run for the same agent.
+- **The dispatcher's per-agent `_is_self_event` gate** already prevents comments the agent posts from looping the webhook back into a new run for the same agent.
 
 This is also why the GitHub channel registers `ChannelRunPolicy.fire_and_forget=True`: the manager calls `runs.create()` and returns once the run is `pending`, no outbound ferrying, no SDK 300s `httpx.ReadTimeout` on a legitimate long coder run.
 
 ## Cross-references
 
-- [AGENTS.md](../AGENTS.md) → "GitHub event-driven agents" — the index view in `backend/AGENTS.md` (binding shape, per-event triggers, mention precedence, token env summary, follow-up buffering summary)
+- [Channel guidance](../app/channels/AGENTS.md#github-channel)
 - [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md) — interactive IM channels (Telegram/Slack/etc.) for the full `_handle_chat` and owner-scoped file storage flow
 - `app/gateway/github/dispatcher.py` — `fanout_event`, `_is_self_event`, mention precedence chain
 - `app/channels/manager.py` — `_buffer_followup`, `_drain_followups_for_thread`, `_watch_run_and_drain_followups` (follow-up buffering while busy, issue #4121)
 - `app/gateway/github/identity.py` — `resolve_thread_id` (UUID5), `extract_target`
 - `app/gateway/github/triggers.py` — `event_should_fire`, `DEFAULT_TRIGGERS`
-- `app/gateway/github/run_policy.py` — `inject_github_credentials`, `register_policy`
+- `app/gateway/github/run_policy.py` — `register_policy`
 - `app/gateway/routers/github_webhooks.py` — HMAC verify, route mount predicate
 - `app/channels/github.py` — `GitHubChannel` (log-only outbound)

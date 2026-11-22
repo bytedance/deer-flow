@@ -56,7 +56,8 @@ Windows. The portable string assertions do not replace it.
 
 - **Environment.** `build_sandbox_env()` removes inherited credential variables.
   Values from `sandbox.environment` and per-request secrets are added after the
-  scrub. Route every new subprocess launch through it.
+  scrub. Route every new subprocess launch through it. Channel-managed
+  credentials belong to the integration that uses them.
 - **Network approval** needs a human. Runs with no interactive responder
   (scheduled, webhook, autonomous, subagent) deny automatically. Never show an
   approval card that nobody can answer.
