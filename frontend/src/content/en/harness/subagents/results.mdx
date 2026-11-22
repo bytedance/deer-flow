@@ -16,7 +16,7 @@ A subagent's report is its **self-report**. DeerFlow layers three kinds of check
 | `completed`           | The subgraph ended normally                                                                    | Completed | `Task Succeeded. Result:`                 |
 | `failed`              | The model call failed after retries, capacity was rejected, or a runtime error occurred        | Failed   | `Task failed.` or `Task failed (capped: <label>).` |
 | `cancelled`           | The user stopped the run, or the parent run was cancelled                                      | Failed   | `Task cancelled by user.`                 |
-| `timed_out`           | `timeout_seconds` elapsed                                                                      | Failed   | `Task timed out.`                         |
+| `timed_out`           | `timeout_seconds` elapsed after a capacity slot was granted                                    | Failed   | `Task timed out.`                         |
 | `polling_timed_out`   | The parent's polling budget ran out; the background task may be stuck. The runtime requested cancellation and scheduled deferred cleanup | Failed | `Task polling timed out after N minutes.` |
 
 `failed`, `cancelled`, and `timed_out` append `Error: <detail>` when a detail exists; `polling_timed_out` shows its detail as-is. The text body is display content only; the frontend and the Lead Agent rely on the structured fields in the message metadata, not on parsing text.

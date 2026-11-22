@@ -305,10 +305,8 @@ async def test_non_delta_writers_preserve_delta_messages_and_markers(saver_env: 
         durations={"run-1": 7},
     )
     assert durations_written
-    # Delta checkpoints carry no messages in channel_values, so the title
-    # helper has nothing to derive from and must stay inert (no write).
-    title = await _ensure_interrupted_title(checkpointer=saver_env.saver, thread_id=thread_id, app_config=None)
-    assert title is None
+    title = await _ensure_interrupted_title(checkpointer=saver_env.saver, thread_id=thread_id, app_config=None, accessor=accessor)
+    assert title == "hello goal writer"
 
     await saver_env.reopen()
     graph = _build_graph(DeltaThreadState, saver_env.saver)
@@ -319,6 +317,7 @@ async def test_non_delta_writers_preserve_delta_messages_and_markers(saver_env: 
 
     # Production materialized read path (same one the Gateway uses).
     snapshot = await accessor.aget(config)
+    assert snapshot.values["title"] == title
     assert [m.id for m in snapshot.values["messages"]] == ["u1", "a1"]
     assert [m.content for m in snapshot.values["messages"]] == ["hello goal writer", "reply"]
 

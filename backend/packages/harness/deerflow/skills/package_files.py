@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from pathlib import PurePath, PurePosixPath
 
+# Bound the amount of package text admitted to a model review.
+MAX_MODEL_FILES = 32
+MAX_MODEL_FILE_BYTES = 128 * 1024
+MAX_MODEL_BYTES = 1024 * 1024
+
 #: Filler bytes an executable magic may hide behind: ASCII whitespace (space,
 #: tab, LF, CR, vertical tab, form feed) and NUL padding.
 _EXEC_SNIFF_FILLER = b" \t\n\r\x0b\x0c\x00"

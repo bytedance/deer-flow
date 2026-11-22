@@ -1281,6 +1281,13 @@ class TestConvertMarkdownTable:
         text = f"{header}\n|---|---|\n{row}"
         assert _convert_markdown_table(text) == expected
 
+    @pytest.mark.parametrize("count", [1, 2, 3, 4])
+    def test_backslashes_before_pipe(self, count):
+        prefix = "path" + "\\" * count
+        text = f"| A | B |\n|---|---|\n|{prefix}|suffix|"
+        expected = f"> **A**: {prefix}|suffix\n" if count % 2 else f"> **A**: {prefix}\n> **B**: suffix\n"
+        assert _convert_markdown_table(text) == expected
+
     def test_fallback_adapter_preserves_table_values(self):
         text = "| Rule | Meaning |\n|---|---|\n| `foo\\|bar` | alternative |"
         assert _adapt_markdown_for_dingtalk(text) == "> **Rule**: **foo\\|bar**\n> **Meaning**: alternative\n"

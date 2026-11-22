@@ -24,7 +24,7 @@ from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
 
@@ -872,7 +872,7 @@ class LocalSandbox(Sandbox):
         command: str,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
-    ) -> str:
+    ) -> CommandOutput:
         # Validate ``env`` keys against the POSIX env-var rule. Defense in
         # depth: ``subprocess.run(env=...)`` does not go through a shell so a
         # metachar in a key here would not actually inject — but the public
@@ -987,7 +987,7 @@ class LocalSandbox(Sandbox):
 
         final_output = output if output else "(no output)"
         # Reverse resolve local paths back to container paths in output
-        return self._reverse_resolve_paths_in_output(final_output)
+        return CommandOutput(self._reverse_resolve_paths_in_output(final_output), 124 if timed_out else returncode)
 
     @staticmethod
     def _run_windows_command(

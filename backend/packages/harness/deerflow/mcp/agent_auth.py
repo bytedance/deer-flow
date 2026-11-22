@@ -227,6 +227,13 @@ def build_agent_auth_interceptor(extensions_config: ExtensionsConfig) -> Any | N
             return await handler(request)
         if not server.agent_auth:
             current = await asyncio.to_thread(_current_server, request.server_name)
+            try:
+                deployed = await asyncio.to_thread(get_extensions_config)
+            except Exception:
+                raise ToolException("MCP credential policy is unavailable") from None
+            browser_server = deployed.mcp_servers.get(request.server_name)
+            if browser_server is not None and browser_server.uses_browser_oauth:
+                raise ToolException(f"MCP server '{request.server_name}' now requires a browser connection. Start a new run to reload its tools.")
             if current is not None and current.agent_auth:
                 # The old chain may still contain user/context auth writers.
                 # Require rediscovery instead of injecting into that chain.
