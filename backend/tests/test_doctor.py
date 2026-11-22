@@ -1543,3 +1543,19 @@ class TestMainConfigResolution:
             assert exit_code == 1
             assert "✗ config.yaml found" in output
             assert str(Path("~/cfg.yaml")) in output
+
+    def test_dotenv_reference_expands_against_the_inherited_environment(self, tmp_path, runtime_path_env, capsys):
+        # serve.sh expands `.env` before the Gateway's own load, so
+        # `${NAME:-default}` sees only what the launcher inherited. A later
+        # assignment in the same file must not fill it again.
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "backend").mkdir()
+        (repo_root / "backend" / "default.yaml").write_text("config_version: 5\nmodels: []\n")
+        (repo_root / "backend" / "alternate.yaml").write_text("config_version: 5\nmodels:\n  - name: alternate-model\n")
+        (repo_root / ".env").write_text("DEER_FLOW_CONFIG_PATH=${BUNDLE_FIXTURE_CONFIG:-default.yaml}\nBUNDLE_FIXTURE_CONFIG=alternate.yaml\n")
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✗ models configured  (no models found)" in output

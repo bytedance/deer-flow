@@ -462,8 +462,13 @@ def _doctor_environ(launcher: dict[str, str], config_path: Path, resolution_erro
     bundle resolved with. That pins the expanded selectors: the doctor's own
     `.env` load would otherwise reintroduce the unexpanded `$PWD` the resolver
     already expanded.
+
+    The launcher overlay goes on top of the inherited environment, not in place
+    of it: the doctor probes `PATH` for node/pnpm/uv and reads shell-only model
+    credentials, and a doctor env built from the two selectors alone reports
+    every host tool missing.
     """
-    env = dict(launcher)
+    env = {**os.environ, **launcher}
     env.setdefault("PWD", str(config_path.parent))
     if resolution_error:
         env["DEER_FLOW_CONFIG_PATH"] = str(config_path)

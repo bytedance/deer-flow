@@ -1783,3 +1783,23 @@ def test_config_path_resolves_a_relative_project_root_from_backend(tmp_path, mon
 
     config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
     assert config_summary == {"models": [], "tools": []}
+
+
+def test_doctor_environment_overlays_the_launcher_on_the_inherited_environment(tmp_path, monkeypatch):
+    # The configured doctor probes PATH for host tools and reads shell-only
+    # credentials, so it must inherit the bundle's environment rather than run
+    # with the two resolved selectors as its whole environment.
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", "/opt/example/bin:/usr/bin")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", "/stale/inherited.yaml")
+
+    env = support_bundle._doctor_environ(
+        {"DEER_FLOW_CONFIG_PATH": str(config_path), "DEER_FLOW_PROJECT_ROOT": str(tmp_path)},
+        config_path,
+        False,
+    )
+
+    assert env["PATH"] == "/opt/example/bin:/usr/bin"
+    assert env["DEER_FLOW_CONFIG_PATH"] == str(config_path)
+    assert env["DEER_FLOW_PROJECT_ROOT"] == str(tmp_path)

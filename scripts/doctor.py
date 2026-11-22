@@ -279,19 +279,30 @@ def check_nginx() -> CheckResult:
 CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
 
 
-def _launcher_dotenv_values(env_path: Path, project_root: Path) -> dict[str, str]:
+def _launcher_dotenv_values(env_path: Path, project_root: Path, inherited: dict[str, str] | None = None) -> dict[str, str]:
     """Return ``.env`` as `serve.sh` exports it, not as python-dotenv reads it.
 
     `serve.sh` runs `scripts/dotenv_exports.py`, which expands ``$PWD`` and
     ``$NAME`` references against the checkout. `dotenv_values` leaves them
     literal, so a `DEER_FLOW_CONFIG_PATH=$PWD/active.yaml` would hand the
     resolver the unexpanded string and look for a file by that name.
+
+    ``inherited`` is the environment the launcher started from, before any
+    ``.env`` load; references resolve against it so a later assignment in the
+    file cannot change an earlier one's expansion.
     """
     from dotenv_exports import parse_dotenv
 
-    scope = dict(os.environ)
+    scope = dict(os.environ if inherited is None else inherited)
     scope["PWD"] = str(project_root)
-    return dict(parse_dotenv(env_path.read_text(encoding="utf-8-sig"), scope))
+    values = dict(parse_dotenv(env_path.read_text(encoding="utf-8-sig"), scope))
+    # The Gateway resolves a relative selector from its working directory,
+    # `backend/`, not from wherever the doctor started.
+    for name in CONFIG_LOCATION_ENV_VARS:
+        value = values.get(name)
+        if value and not Path(value).is_absolute():
+            values[name] = str(project_root / "backend" / value)
+    return values
 
 
 def resolve_config_path() -> tuple[Path, CheckResult | None]:
@@ -1046,13 +1057,15 @@ def main() -> int:
 
         env_path = project_root / ".env"
         if env_path.exists():
-            load_dotenv(env_path, override=False)
             # `make dev` (scripts/serve.sh) sources .env over the shell, so
             # for the variables that choose the config file, .env wins. Expand
             # them the way the launcher and the Gateway do, not the raw text
             # python-dotenv keeps; otherwise the doctor names a file that does
-            # not exist.
-            launcher_values = _launcher_dotenv_values(env_path, project_root)
+            # not exist. Resolve them against the inherited environment: the
+            # `load_dotenv` below would otherwise let a later `.env` assignment
+            # fill a reference the launcher left at its default.
+            launcher_values = _launcher_dotenv_values(env_path, project_root, dict(os.environ))
+            load_dotenv(env_path, override=False)
             for name in CONFIG_LOCATION_ENV_VARS:
                 value = launcher_values.get(name)
                 if value is not None:
