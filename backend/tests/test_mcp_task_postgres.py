@@ -415,7 +415,7 @@ async def test_postgres_control_write_checks_expiry_after_row_lock(postgres_repo
             blocker_pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
             pending = asyncio.create_task(write_with_expiring_lease())
             await _wait_for_postgres_lock_wait(session_factory, blocker_pid)
-            # Keep the row locked beyond its one-second lease without changing
+            # Keep the row locked beyond its five-second lease without changing
             # the row version; this is the READ COMMITTED clock-ordering race.
             await asyncio.sleep(5.1)
             await blocker.commit()
