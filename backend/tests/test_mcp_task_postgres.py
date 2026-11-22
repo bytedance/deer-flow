@@ -365,7 +365,7 @@ async def test_postgres_control_write_checks_expiry_after_row_lock(postgres_repo
             requested_at=now,
         )
     claim = task_repo.claim_cancel_requests if phase == "cancel" else task_repo.claim_due_tasks
-    claimed = await claim(now=now, lease_owner="worker", lease_seconds=1, limit=1)
+    claimed = await claim(now=now, lease_owner="worker", lease_seconds=5, limit=1)
     assert [row["id"] for row in claimed] == [task_id]
     token = claimed[0]["lease_token"]
 
@@ -417,7 +417,7 @@ async def test_postgres_control_write_checks_expiry_after_row_lock(postgres_repo
             await _wait_for_postgres_lock_wait(session_factory, blocker_pid)
             # Keep the row locked beyond its one-second lease without changing
             # the row version; this is the READ COMMITTED clock-ordering race.
-            await asyncio.sleep(1.1)
+            await asyncio.sleep(5.1)
             await blocker.commit()
         assert await asyncio.wait_for(pending, timeout=5) is False
     finally:
