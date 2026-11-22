@@ -1,13 +1,19 @@
 import base64
 from contextlib import ExitStack
+import ipaddress
 import json
 import os
+import re
+import sys
+from typing import BinaryIO
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
 MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 OPENAI_DEFAULT_MODEL = "gpt-image-2.5-flare"
+MAX_REDIRECTS = 5
 # MiniMax image-01 caps the prompt at 1500 characters and rejects longer requests
 # with a generic "invalid params" error, so validate before calling the API.
 MINIMAX_PROMPT_MAX_CHARS = 1500
@@ -131,6 +137,106 @@ def _ensure_output_dir(output_file: str) -> None:
         os.makedirs(output_dir, exist_ok=True)
 
 
+def _download_host(url: str) -> str:
+    """Validate one provider-supplied image URL before fetching it.
+
+    Accept HTTPS on port 443 with a DNS hostname or a public IPv4 literal.
+    Check DNS hostname syntax here and leave DNS resolution to the transport.
+    The caller validates each redirect before following it.
+    """
+    if not isinstance(url, str) or re.search(r"[\x00-\x20\x7f\\]", url):
+        raise ValueError("Invalid image download URL")
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.netloc.lower() not in {host, f"{host}:443"}
+    ):
+        raise ValueError(
+            "Image downloads require an HTTPS host on port 443 without user information"
+        )
+    try:
+        address = ipaddress.IPv4Address(host)
+    except ValueError:
+        if host == "localhost" or not re.fullmatch(
+            r"(?:[a-z0-9-]+\.)+[a-z][a-z0-9-]*", host
+        ):
+            raise ValueError("Invalid image download hostname")
+    else:
+        if not address.is_global or address.is_multicast:
+            raise ValueError(f"Image download host {host!r} is not a public address")
+    return host
+
+
+def _download_image(url: str) -> bytes:
+    """Download a provider image URL, validating the target and every redirect."""
+    for _ in range(MAX_REDIRECTS + 1):
+        _download_host(url)
+        response = requests.get(url, timeout=120, allow_redirects=False)
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = (getattr(response, "headers", None) or {}).get("Location")
+            if not location:
+                raise ValueError("Image download redirect has no destination")
+            url = urljoin(url, location)
+            continue
+        _require_success(response)
+        return response.content
+    raise ValueError("Too many image download redirects")
+
+
+def _require_success(response: requests.Response) -> None:
+    response.raise_for_status()
+    if not 200 <= response.status_code < 300:
+        raise ValueError(
+            f"Unexpected HTTP status {response.status_code} from image provider"
+        )
+
+
+def _api_origin(url: str) -> tuple[str, str, int]:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("Invalid image generation API URL")
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, parsed.hostname, port
+
+
+def _post_image(
+    url: str,
+    *,
+    files: list[tuple[str, tuple[str, BinaryIO, str]]] | None = None,
+    **kwargs,
+) -> requests.Response:
+    """Preserve the POST body and credentials only on same-origin redirects."""
+    origin = _api_origin(url)
+    for hop in range(MAX_REDIRECTS + 1):
+        response = requests.post(url, files=files, allow_redirects=False, **kwargs)
+        if response.status_code not in {307, 308}:
+            _require_success(response)
+            return response
+        if hop == MAX_REDIRECTS:
+            break
+        location = response.headers.get("Location")
+        if not location:
+            raise ValueError("Image generation redirect has no destination")
+        if re.search(r"[\x00-\x20\x7f\\]", location):
+            raise ValueError("Invalid image generation redirect destination")
+        destination = urljoin(url, location)
+        if _api_origin(destination) != origin:
+            raise ValueError("Image generation redirect points to a different origin")
+        url = destination
+        for _, (_, file, _) in files or ():
+            file.seek(0)
+    raise ValueError("Too many image generation redirects")
+
+
 def _minimax_prompt(raw: str) -> str:
     """Extract the single text prompt MiniMax image-01 expects.
 
@@ -181,7 +287,7 @@ def _generate_image_minimax(
             {"type": "character", "image_file": _to_data_url(p)}
             for p in reference_images
         ]
-    response = requests.post(
+    response = _post_image(
         f"{_minimax_host()}/v1/image_generation",
         headers={
             "Authorization": f"Bearer {bearer_value}",
@@ -190,7 +296,6 @@ def _generate_image_minimax(
         json=body,
         timeout=60,
     )
-    response.raise_for_status()
     payload = response.json()
     _check_base_resp(payload)
     images = (payload.get("data") or {}).get("image_base64") or []
@@ -226,7 +331,7 @@ def _generate_image_gemini(
     bearer_value = os.getenv("GEMINI_API_KEY")
     if not bearer_value:
         return "GEMINI_API_KEY is not set"
-    response = requests.post(
+    response = _post_image(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent",
         headers={"x-goog-api-key": bearer_value, "Content-Type": "application/json"},
         json={
@@ -234,7 +339,6 @@ def _generate_image_gemini(
             "contents": [{"parts": [*parts, {"text": prompt}]}],
         },
     )
-    response.raise_for_status()
     data = response.json()
     response_parts: list[dict] = data["candidates"][0]["content"]["parts"]
     image_parts = [part for part in response_parts if part.get("inlineData", False)]
@@ -267,9 +371,7 @@ def _write_openai_image(payload: dict, output_file: str) -> str:
             _, encoded = image_url.split(",", 1)
             image_bytes = base64.b64decode(encoded)
         else:
-            download = requests.get(image_url, timeout=120)
-            download.raise_for_status()
-            image_bytes = download.content
+            image_bytes = _download_image(image_url)
 
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
@@ -319,17 +421,16 @@ def _generate_image_openai(
                 )
                 for path in reference_images
             ]
-            response = requests.post(
+            response = _post_image(
                 url, headers=headers, data=fields, files=files, timeout=180
             )
     else:
-        response = requests.post(
+        response = _post_image(
             url,
             headers={**headers, "Content-Type": "application/json"},
             json=fields,
             timeout=180,
         )
-    response.raise_for_status()
     return _write_openai_image(response.json(), output_file)
 
 
@@ -398,4 +499,5 @@ if __name__ == "__main__":
             )
         )
     except Exception as e:
-        print(f"Error while generating image: {e}")
+        print(f"Error while generating image: {e}", file=sys.stderr)
+        sys.exit(1)
