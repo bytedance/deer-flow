@@ -1790,6 +1790,80 @@ def test_multi_user_fail_closed_when_provider_raises_never_leaks_secret(
         drop_manager.close()
 
 
+def test_provider_memory_read_error_respects_configured_read_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.agents import memory as memory_pkg
+    from deerflow.agents.lead_agent.prompt import _get_memory_context
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    recorders, retrievers = _track_official_integration(monkeypatch)
+
+    def failing_provider(user_id: str) -> Any:
+        raise MemoryReadError(f"vault outage for {user_id}: sk-vault-secret-999")
+
+    fail_open_mgr = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path / "open", failure_policy={"read": "fail_open"}),
+        credential_provider=failing_provider,
+    )
+    raise_mgr = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path / "raise", failure_policy={"read": "raise"}),
+        credential_provider=failing_provider,
+    )
+    try:
+        with pytest.raises(MemoryManagerError, match="MemoryReadError") as ctx_exc:
+            fail_open_mgr.get_context("alice")
+        assert type(ctx_exc.value) is MemoryManagerError
+        assert ctx_exc.value.__cause__ is None
+        assert "sk-vault-secret-999" not in str(ctx_exc.value)
+
+        with pytest.raises(MemoryManagerError, match="MemoryReadError") as search_exc:
+            fail_open_mgr.search("prefs", user_id="alice")
+        assert type(search_exc.value) is MemoryManagerError
+        assert search_exc.value.__cause__ is None
+        assert "sk-vault-secret-999" not in str(search_exc.value)
+
+        fail_open_app_cfg = AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            memory=MemoryConfig(
+                enabled=True,
+                injection_enabled=True,
+                manager_class="openviking",
+                backend_config=fail_open_mgr.backend_config,
+            ),
+        )
+        monkeypatch.setattr(memory_pkg, "get_memory_manager", lambda: fail_open_mgr)
+        assert _get_memory_context(app_config=fail_open_app_cfg, user_id="alice") == ""
+
+        with pytest.raises(MemoryReadError) as strict_exc:
+            raise_mgr.get_context("alice")
+        assert isinstance(strict_exc.value.__cause__, MemoryManagerError)
+        assert "sk-vault-secret-999" not in str(strict_exc.value)
+        assert "sk-vault-secret-999" not in str(strict_exc.value.__cause__)
+
+        strict_app_cfg = AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            memory=MemoryConfig(
+                enabled=True,
+                injection_enabled=True,
+                manager_class="openviking",
+                backend_config=raise_mgr.backend_config,
+            ),
+        )
+        monkeypatch.setattr(memory_pkg, "get_memory_manager", lambda: raise_mgr)
+        with pytest.raises(MemoryReadError):
+            _get_memory_context(app_config=strict_app_cfg, user_id="alice")
+
+        assert recorders == []
+        assert retrievers == []
+    finally:
+        fail_open_mgr.close()
+        raise_mgr.close()
+
+
 def test_dynamic_credential_provider_class_callable_and_hook_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

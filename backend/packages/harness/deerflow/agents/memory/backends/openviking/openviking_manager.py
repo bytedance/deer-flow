@@ -617,8 +617,6 @@ class OpenVikingMemoryManager(MemoryManager):
                     raw = resolve_fn(resolved_user)
                 else:
                     raw = self._credential_provider(resolved_user)
-            except MemoryManagerError:
-                raise
             except Exception as exc:
                 raise MemoryManagerError(f"OpenViking credential provider failed for DeerFlow user {resolved_user!r} ({type(exc).__name__})") from None
             try:
