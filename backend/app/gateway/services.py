@@ -2897,6 +2897,8 @@ async def start_run(
         )
         if project_context is not None:
             config["context"][PROJECT_CONTEXT_KEY] = project_context
+        # Set before admission by prepare_share_copy_run; None means unknown.
+        share_copy: bool | None = None
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
@@ -2997,6 +2999,12 @@ async def start_run(
                             "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
                             sanitize_log_param(thread_id),
                         )
+            from app.gateway.share_fork import resolve_share_copy
+
+            # Admission's read can fail where the metadata record above
+            # succeeded; the flag must not depend on that one read.
+            if resolve_share_copy(share_copy, metadata_record, thread_id):
+                config["context"][SHARE_COPY_CONTEXT_KEY] = True
             from app.gateway.scheduled_task_access import prepare_scheduler_capability
 
             human_text = ""
@@ -3079,8 +3087,7 @@ async def start_run(
                 )
                 from app.gateway.share_fork import prepare_share_copy_run
 
-                if await prepare_share_copy_run(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS):
-                    config["context"][SHARE_COPY_CONTEXT_KEY] = True
+                share_copy = await prepare_share_copy_run(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
                 # A strict caller may have observed the thread before a
                 # concurrent delete removed it while checkpoint preparation
                 # yielded. Recheck immediately before durable admission. The

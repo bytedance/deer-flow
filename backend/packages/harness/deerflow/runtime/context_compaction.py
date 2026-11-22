@@ -15,7 +15,7 @@ from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE, SHARE_COPY_CONTEXT_KEY
 from deerflow.runtime.goal import _call_checkpointer_method
 from deerflow.utils.assembly_io import run_assembly
 
@@ -156,8 +156,14 @@ async def compact_thread_context(
     agent_name: str | None = None,
     model_name: str | None = None,
     app_config: AppConfig | None = None,
+    share_copy: bool = False,
 ) -> ThreadCompactionResult:
-    """Summarize old messages in a thread and write a compacted checkpoint."""
+    """Summarize old messages in a thread and write a compacted checkpoint.
+
+    ``share_copy`` is the caller's verdict that the thread is a copy of someone
+    else's conversation. The memory flush needs it, because no run admission
+    sets the flag for a manual compaction.
+    """
     # Off the event loop (see utils/AGENTS.md): reading the live config stats
     # and hashes config.yaml. The route passes no app_config.
     resolved_app_config = app_config or await run_assembly(get_app_config)
@@ -233,6 +239,8 @@ async def compact_thread_context(
     runtime_context = {"thread_id": thread_id, "user_id": user_id}
     if effective_agent_name:
         runtime_context["agent_name"] = effective_agent_name
+    if share_copy:
+        runtime_context[SHARE_COPY_CONTEXT_KEY] = True
     runtime = SimpleNamespace(context=runtime_context)
     try:
         # ``raise_on_failure`` is independent of ``force``: a manual caller always wants

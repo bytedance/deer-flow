@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 
 from fastapi import HTTPException, Request
@@ -166,13 +167,49 @@ async def _imported_message_ids(request: Request, accessor, config: dict) -> set
     return ids or None
 
 
-async def prepare_share_copy_run(request: Request, thread_id: str, *, threads: ThreadMetaStore | None, metadata_timeout: float) -> bool:
+def is_share_copy_metadata(metadata: object) -> bool:
+    """Return whether thread *metadata* records a completed share import."""
+    return isinstance(metadata, Mapping) and metadata.get(SHARE_IMPORT_COMPLETE_KEY) is True
+
+
+def resolve_share_copy(admission_result: bool | None, metadata_record: Mapping | None, thread_id: str) -> bool:
+    """Decide whether memory capture treats a run's thread as a share copy.
+
+    ``admission_result`` is what :func:`prepare_share_copy_run` returned;
+    ``None`` means its read failed, and the run's later thread-metadata record
+    decides. When neither is available the thread counts as a copy: on an
+    ordinary thread that adds one DeerMem note for this run, while the
+    opposite mistake records a sharer's details as the visitor's.
+    """
+    if admission_result is not None:
+        return admission_result
+    if metadata_record is not None:
+        return is_share_copy_metadata(metadata_record.get("metadata"))
+    logger.warning("Share provenance of thread %s is unknown; memory capture treats it as a share copy for this run", sanitize_log_param(thread_id))
+    return True
+
+
+async def is_share_copy_thread(threads: ThreadMetaStore | None, thread_id: str, *, metadata_timeout: float) -> bool:
+    """Whether memory capture outside a run, such as manual compaction, treats *thread_id* as a share copy."""
+    if threads is None:
+        return False
+    try:
+        async with asyncio.timeout(metadata_timeout):
+            record = await threads.get(thread_id, user_id=None)
+    except Exception:
+        logger.warning("Could not read metadata of thread %s", sanitize_log_param(thread_id), exc_info=True)
+        return resolve_share_copy(None, None, thread_id)
+    return is_share_copy_metadata(record.get("metadata") if isinstance(record, dict) else None)
+
+
+async def prepare_share_copy_run(request: Request, thread_id: str, *, threads: ThreadMetaStore | None, metadata_timeout: float) -> bool | None:
     """Return whether *thread_id* is a share copy, marking legacy copies first.
 
     Runs before admission like ``ensure_checkpoint_history_seeded``. The
     result lets memory capture treat the thread as a copy even after
     compaction has removed the copied messages and their marks. A metadata
-    read failure returns ``False`` and never blocks the run.
+    read failure returns ``None``, so the caller can decide later through
+    :func:`resolve_share_copy`; it never blocks the run.
 
     Marking is a migration shim for copies imported before marks existed:
     without it, such a copy's history reaches memory extraction on the owner's
@@ -183,15 +220,16 @@ async def prepare_share_copy_run(request: Request, thread_id: str, *, threads: T
     interrupt. The shim is best effort: a failure is logged.
     """
     if threads is None:
+        # Sharing needs a thread store, so a thread without one is no copy.
         return False
     try:
         async with asyncio.timeout(metadata_timeout):
             record = await threads.get(thread_id, user_id=None)
     except Exception:
         logger.warning("Could not read metadata of thread %s; its copied share history is checked on a later run", sanitize_log_param(thread_id), exc_info=True)
-        return False
+        return None
     metadata = record.get("metadata") if isinstance(record, dict) else None
-    if not isinstance(metadata, dict) or metadata.get(SHARE_IMPORT_COMPLETE_KEY) is not True:
+    if not is_share_copy_metadata(metadata):
         return False
     if metadata.get(SHARE_IMPORT_HISTORY_MARKED_KEY) is not True:
         await _mark_legacy_share_copy(request, thread_id, threads)

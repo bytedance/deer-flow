@@ -386,6 +386,88 @@ async def test_copy_stays_a_copy_for_memory_after_compaction_removed_the_copied_
     assert captured and all(message.additional_kwargs.get(FOLLOWS_IMPORTED_HISTORY_KEY) is True for message in captured)
 
 
+async def test_manual_compaction_of_a_copy_flushes_the_visitors_turns_marked(share_app, monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+    from deerflow.agents.memory import summarization_hook
+    from deerflow.agents.middlewares import summarization_middleware
+    from deerflow.config import app_config
+    from deerflow.utils.messages import FOLLOWS_IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    await share_fork.prepare_share_copy_run(ctx.request, thread_id, threads=ctx.app.state.thread_store, metadata_timeout=5)
+    # An earlier compaction removed the copied turns, so no message carries the import mark.
+    head = await accessor.aget(config)
+    await accessor.aupdate(config, {"messages": Overwrite([message for message in head.values["messages"] if message.id in {"bob-q", "bob-a"}])}, as_node="branch")
+    await _run_and_capture(ctx, manager, thread_id)
+    current = app_config._app_config
+    monkeypatch.setattr(app_config, "_app_config", current.model_copy(update={"summarization": current.summarization.model_copy(update={"enabled": True})}))
+    monkeypatch.setattr(summarization_middleware, "create_chat_model", lambda **kwargs: FakeListChatModel(responses=["SUMMARY"]))
+    flush_manager = MagicMock()
+    monkeypatch.setattr(summarization_hook, "get_memory_manager", lambda: flush_manager)
+    monkeypatch.setattr(summarization_hook, "get_memory_config", lambda: SimpleNamespace(enabled=True))
+
+    # The manual route does not go through run admission.
+    response = await ctx.client.post(f"/api/threads/{thread_id}/compact", json={"force": True, "keep": {"type": "messages", "value": 1}}, headers=headers("bob"))
+    assert response.status_code == 200 and response.json()["compacted"] is True, response.text
+
+    flushed = flush_manager.add_nowait.call_args.args[1]
+    assert flushed and all(message.additional_kwargs.get(FOLLOWS_IMPORTED_HISTORY_KEY) is True for message in flushed)
+
+
+async def test_copy_is_flagged_from_the_later_metadata_record_when_the_admission_read_fails(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import FOLLOWS_IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    await share_fork.prepare_share_copy_run(ctx.request, thread_id, threads=ctx.app.state.thread_store, metadata_timeout=5)
+    head = await accessor.aget(config)
+    await accessor.aupdate(config, {"messages": Overwrite([message for message in head.values["messages"] if message.id in {"bob-q", "bob-a"}])}, as_node="branch")
+    real_prepare = share_fork.prepare_share_copy_run
+    admission_results = []
+
+    class TimingOut:
+        async def get(self, *args, **kwargs):
+            raise TimeoutError("metadata read timed out")
+
+    async def prepare_with_failing_read(request, thread_id, *, threads, metadata_timeout):
+        # Only admission's read fails; the run's later metadata record still loads.
+        result = await real_prepare(request, thread_id, threads=TimingOut(), metadata_timeout=metadata_timeout)
+        admission_results.append(result)
+        return result
+
+    monkeypatch.setattr(share_fork, "prepare_share_copy_run", prepare_with_failing_read)
+
+    captured = await _run_and_capture(ctx, manager, thread_id)
+
+    assert admission_results == [None]
+    assert captured and all(message.additional_kwargs.get(FOLLOWS_IMPORTED_HISTORY_KEY) is True for message in captured)
+
+
+def test_unknown_share_provenance_counts_as_a_copy():
+    copy, ordinary = {"metadata": {share_fork.SHARE_IMPORT_COMPLETE_KEY: True}}, {"metadata": {}}
+
+    assert share_fork.resolve_share_copy(True, ordinary, "t") is True
+    assert share_fork.resolve_share_copy(False, copy, "t") is False
+    assert share_fork.resolve_share_copy(None, copy, "t") is True
+    assert share_fork.resolve_share_copy(None, ordinary, "t") is False
+    assert share_fork.resolve_share_copy(None, None, "t") is True
+
+
+async def test_manual_compaction_treats_a_thread_with_unreadable_metadata_as_a_copy():
+    class Failing:
+        async def get(self, *args, **kwargs):
+            raise TimeoutError("metadata read timed out")
+
+    assert await share_fork.is_share_copy_thread(Failing(), "t", metadata_timeout=5) is True
+    assert await share_fork.is_share_copy_thread(None, "t", metadata_timeout=5) is False
+
+
 async def test_a_caller_cannot_flag_its_own_thread_as_a_share_copy(share_app, monkeypatch, tmp_path):
     from deerflow.runtime.context_keys import SHARE_COPY_CONTEXT_KEY
     from deerflow.utils.messages import FOLLOWS_IMPORTED_HISTORY_KEY

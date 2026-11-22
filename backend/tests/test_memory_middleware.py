@@ -86,6 +86,24 @@ def test_share_copy_flag_in_run_context_marks_capture_after_compaction(monkeypat
     assert all(message.additional_kwargs[FOLLOWS_IMPORTED_HISTORY_KEY] is True for message in manager.add.call_args.args[1])
 
 
+def test_compaction_flush_marks_capture_from_the_share_copy_flag(monkeypatch):
+    import deerflow.agents.memory.summarization_hook as hook_module
+    from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
+    from deerflow.runtime.context_keys import SHARE_COPY_CONTEXT_KEY
+
+    manager = MagicMock()
+    monkeypatch.setattr(hook_module, "get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr(hook_module, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(hook_module, "resolve_runtime_user_id", lambda runtime: "importer")
+
+    # The batch holds only the visitor's turns; only the run context says this is a copy.
+    runtime = Runtime(context={"thread_id": "copy", SHARE_COPY_CONTEXT_KEY: True})
+    event = SummarizationEvent(messages_to_summarize=tuple(_imported_then_own()[2:]), preserved_messages=(), thread_id="copy", agent_name=None, runtime=runtime)
+    hook_module.memory_flush_hook(event)
+
+    assert all(message.additional_kwargs[FOLLOWS_IMPORTED_HISTORY_KEY] is True for message in manager.add_nowait.call_args.args[1])
+
+
 def test_deermem_prompt_warns_that_restated_copied_details_are_not_the_users():
     from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
     from deerflow.agents.memory.backends.deermem.deermem.core.storage import create_empty_memory

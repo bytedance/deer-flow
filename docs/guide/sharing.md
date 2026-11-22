@@ -39,7 +39,9 @@ the copy are remembered as in any other conversation. With the default DeerMem
 backend, extraction is also told that the conversation continues someone else's,
 so details an assistant reply repeats from the copy, such as the sharer's name or
 preferences, are not recorded as the visitor's. This holds after compaction too,
-because the Gateway flags the copy on every run. Other memory backends receive
+because the Gateway flags the copy on every run and on manual compaction. When
+the Gateway cannot read the thread's metadata, it treats the thread as a copy for
+that run. Other memory backends receive
 the visitor's turns without that note. A copy made before this behavior existed
 has its copied messages marked before its next run.
 
