@@ -26,6 +26,12 @@ filtering and read-only mounts still apply. Configured category mounts such as
 category mount stops the root search, and the Gateway warning log identifies its
 virtual path.
 
+Explicit `glob` patterns and `grep` file filters can name data directories such
+as `logs/*.txt`, `**/logs/*.txt` or `.cache/*.txt`, even outside the user-data
+mounts. Generic searches keep ignoring those directories outside user data.
+Repository metadata, dependency directories and in-flight `.upload-*.part`
+files remain filtered.
+
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
 checkpoint, the runtime resolves the reference against the authenticated user
@@ -88,6 +94,12 @@ same-size content edits are still copied on release.
 Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
+
+OpenSandbox also uploads enabled skills to `skills.container_path`. An explicit
+Agent skill list replaces the managed skill directories before tools run; an
+empty list exposes no skills there. Switching Agents in the same thread
+refreshes the managed view. It does not delete files already copied to the
+workspace.
 
 The optional [boxd provider](../../backend/packages/harness/deerflow/community/boxd_sandbox/README.md)
 runs each user/thread scope in an isolated boxd machine. A new machine receives

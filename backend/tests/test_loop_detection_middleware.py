@@ -1,5 +1,6 @@
 """Tests for LoopDetectionMiddleware."""
 
+import asyncio
 import copy
 from collections import OrderedDict
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import tool as as_tool
 from pydantic import PrivateAttr
@@ -63,7 +65,7 @@ def _capture_handler():
 
     def handler(req):
         captured.append(req)
-        return MagicMock()
+        return AIMessage(content="answer")
 
     return captured, handler
 
@@ -1323,8 +1325,10 @@ class TestLoopDetectionAgentGraphIntegration:
             _scope_key("cached-thread", "run-2"),
         }
 
-    def test_loop_warning_survives_a_retried_model_call_in_real_agent_graph(self):
-        """LLMErrorHandlingMiddleware retries a failed call by running the inner wraps again; the retry must still carry the warning."""
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("failure", ["provider-error", "empty-response"])
+    def test_loop_warning_survives_a_retried_model_call_in_real_agent_graph(self, failure, invoke_async):
+        """LLMErrorHandlingMiddleware retries a failed call or an empty stop response by running the inner wraps again; the retry must still carry the warning."""
         from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
         from deerflow.config.app_config import AppConfig, LlmCallConfig
         from deerflow.config.sandbox_config import SandboxConfig
@@ -1342,6 +1346,8 @@ class TestLoopDetectionAgentGraphIntegration:
                 if not self._failed and any(isinstance(message, HumanMessage) and message.name == "loop_warning" for message in messages):
                     self._failed = True
                     self._seen_messages.append(list(messages))
+                    if failure == "empty-response":
+                        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", response_metadata={"finish_reason": "stop"}))])
                     raise ProviderUnavailable()
                 return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
@@ -1369,11 +1375,9 @@ class TestLoopDetectionAgentGraphIntegration:
             middleware=[LLMErrorHandlingMiddleware(app_config=app_config), LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)],
         )
 
-        result = graph.invoke(
-            {"messages": [("user", "inspect the directory")]},
-            context={"thread_id": "retry-thread", "run_id": "retry-run"},
-            config={"recursion_limit": 20},
-        )
+        invoke_args = ({"messages": [("user", "inspect the directory")]},)
+        invoke_kwargs = {"context": {"thread_id": "retry-thread", "run_id": "retry-run"}, "config": {"recursion_limit": 20}}
+        result = asyncio.run(graph.ainvoke(*invoke_args, **invoke_kwargs)) if invoke_async else graph.invoke(*invoke_args, **invoke_kwargs)
 
         # Three tool-calling requests, then the failed attempt and its retry.
         assert len(model.seen_messages) == 5

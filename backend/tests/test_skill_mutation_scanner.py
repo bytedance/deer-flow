@@ -40,12 +40,13 @@ async def test_host_scan_covers_support_files_and_forces_fail_closed(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_static_block_prevents_model_scan(monkeypatch):
+@pytest.mark.parametrize(("path", "executable"), [("scripts/run.py", True), ("data/calculation.dat", False)])
+async def test_static_block_prevents_model_scan(monkeypatch, path, executable):
     from deerflow.skills.mutations.scanner import CandidateScanner
 
     model = AsyncMock(return_value=ScanResult("allow", "fine"))
     monkeypatch.setattr("deerflow.skills.mutations.scanner.scan_skill_content", model)
-    package = PackageSnapshot((PackageFile("SKILL.md", CONTENT, False), PackageFile("scripts/run.py", b"eval(input())", True)))
+    package = PackageSnapshot((PackageFile("SKILL.md", CONTENT, False), PackageFile(path, b'eval("1 + 2")', executable)))
     result = await CandidateScanner(configuration).scan(package, "example")
     assert result.decision == "reject"
     model.assert_not_called()

@@ -247,4 +247,4 @@ uv run pytest tests/test_title_middleware_core_logic.py tests/test_title_generat
 
 - [LangGraph Checkpointer 文档](https://langchain-ai.github.io/langgraph/concepts/persistence/)
 - [LangGraph State 管理](https://langchain-ai.github.io/langgraph/concepts/low_level/#state)
-- [LangGraph Middleware](https://langchain-ai.github.io/langgraph/concepts/middleware/)
+- [LangGraph Middleware](https://docs.langchain.com/oss/python/langchain/middleware/overview)

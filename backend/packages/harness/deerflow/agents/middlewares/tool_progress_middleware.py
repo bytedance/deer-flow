@@ -71,6 +71,7 @@ from deerflow.agents.middlewares.audit_context import (
     TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.model_response import is_empty_stop_response
 from deerflow.agents.middlewares.tool_result_meta import (
     PROGRESS_GUARD_ERROR_TYPE,
     TOOL_META_KEY,
@@ -598,11 +599,11 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             return self._pending.pop(key, [])
 
     def _restore_pending(self, runtime: Runtime, hints: list[str], *, entry_epoch: object | None = None) -> None:
-        """Requeue hints taken for a model call that raised.
+        """Requeue hints taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the hints.
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the hints.
         """
         if not hints:
             return
@@ -770,10 +771,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         entry_epoch = self._entry_epoch(request.runtime)
         hints = self._drain_pending(request.runtime)
         try:
-            return handler(self._inject_hints(request, hints))
+            response = handler(self._inject_hints(request, hints))
         except Exception:
             self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
+        return response
 
     @override
     async def awrap_model_call(
@@ -784,10 +788,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         entry_epoch = self._entry_epoch(request.runtime)
         hints = self._drain_pending(request.runtime)
         try:
-            return await handler(self._inject_hints(request, hints))
+            response = await handler(self._inject_hints(request, hints))
         except Exception:
             self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
+        return response
 
     # ------------------------------------------------------------------
     # before_agent: clean up stale pending hints from previous runs

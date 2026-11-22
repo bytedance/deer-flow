@@ -15,7 +15,7 @@ export function useSkillManagement() {
   const { user } = useAuth();
   const { data } = useQuery({
     queryKey: ["features", "skill_management"],
-    queryFn: fetchFeatures,
+    queryFn: ({ signal }) => fetchFeatures(signal),
     staleTime: 0,
     refetchOnMount: true,
     retry: false,

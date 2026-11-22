@@ -71,10 +71,7 @@ describe("static skill gallery", () => {
     fireEvent.click(screen.getByRole("tab", { name: "My skills" }));
     expect(screen.queryByRole("switch", { name: /custom-demo/ })).toBeNull();
     expect(
-      screen.queryByRole("button", {
-        name: "View details custom-demo",
-        exact: true,
-      }),
+      screen.queryByRole("button", { name: /^View details custom-demo$/ }),
     ).toBeNull();
     expect(screen.queryByTestId("custom-skill-details")).toBeNull();
   });

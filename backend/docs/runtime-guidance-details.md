@@ -167,7 +167,15 @@ JSON, a `.work/` scratch tree) is excluded, so it never enters `produced_paths`.
 The worker passes this list through
 `_produced_output_paths()` to its delivery check; an empty list leaves
 `produced_paths` and `verification` absent from the delivery receipt, and
-`_delivery_error()` returns no error. When that empty list accompanies a truncated
+`_delivery_error()` returns no error. Delivery enforcement is required when the
+run took part in a goal: the continuation helper reports an active, expected
+goal through a participation callback before any evaluation write, a scheduled
+goal is installed, the evaluator verdict was persisted, or the goal state could
+not be read (unknown keeps delivery required). A failed verdict write therefore
+still requires delivery. An ordinary run records the same
+verdict with `enforcement: "advisory"` and stays successful, because working
+files and a local copy of a result written to an external system are not
+deliverables. When that empty list accompanies a truncated
 pre-run snapshot, the receipt includes
 `verification_skipped: "truncated_pre_run_snapshot"` on both normal completion and
 failure/cancellation cleanup. This marker explains the skipped check without

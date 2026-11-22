@@ -16,7 +16,7 @@ import { Callout } from "nextra/components";
 | `completed`           | 子图正常结束                                                         | 完成     | `Task Succeeded. Result:`          |
 | `failed`              | 模型调用最终失败、容量拒绝，或运行时异常                             | 失败     | `Task failed.` 或 `Task failed (capped: <label>).` |
 | `cancelled`           | 用户停止，或父 run 被取消                                            | 失败     | `Task cancelled by user.`          |
-| `timed_out`           | 超过 `timeout_seconds`                                               | 失败     | `Task timed out.`                  |
+| `timed_out`           | 拿到容量槽位后超过 `timeout_seconds`                                 | 失败     | `Task timed out.`                  |
 | `polling_timed_out`   | 父侧轮询次数用尽，后台任务可能卡住；运行时已请求取消并安排延迟清理   | 失败     | `Task polling timed out after N minutes.` |
 
 `failed`、`cancelled`、`timed_out` 在有错误详情时会追加 `Error: <详情>`；`polling_timed_out` 直接显示详情。正文只是给人看的展示内容，前端与 Lead Agent 都应依赖消息元数据里的结构化字段，而不是解析文本。

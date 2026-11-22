@@ -33,6 +33,10 @@ make test-blocking-io
   sees the result that error handling produced.
 - **Progress tracking fences late results and hint retries by graph entry**, also
   within one run.
+- **A model retry runs the inner wraps again.** LLM error handling retries a call
+  that raised and a call that returned an empty stop response
+  (`model_response.is_empty_stop_response`). A wrap that takes a queued hint for
+  one call puts it back in both cases, or the retry goes out without it.
 
 ## Rules for a middleware that changes messages
 
