@@ -32,11 +32,12 @@ async def _close_persistence_engine():
     await close_engine()
 
 
-async def _make_repo(tmp_path) -> McpTaskRepository:
+async def _make_repo(tmp_path, *, database_clock: bool = False) -> McpTaskRepository:
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
     assert session_factory is not None
-    return McpTaskRepository(session_factory)
+    lease_clock = None if database_clock else lambda now: now
+    return McpTaskRepository(session_factory, lease_clock=lease_clock)
 
 
 async def _create_working_task(
@@ -2706,3 +2707,99 @@ async def test_late_snapshot_apply_after_same_worker_reclaim_is_fenced(tmp_path)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["poll", "cancel"])
+async def test_control_lease_clock_uses_database_time_not_worker_clock(tmp_path, phase):
+    repo = await _make_repo(tmp_path, database_clock=True)
+    database_now = datetime.now(UTC)
+    slow_worker_now = database_now - timedelta(hours=1)
+    created_at = database_now - timedelta(hours=2)
+    task_id = f"task-clock-skew-{phase}"
+    await _create_working_task(repo, task_id=task_id, now=created_at)
+    if phase == "cancel":
+        await repo.request_cancel(
+            task_id,
+            user_id="user-1",
+            thread_id="thread-1",
+            thread_incarnation=None,
+            requested_at=created_at,
+        )
+
+    claim = repo.claim_due_tasks if phase == "poll" else repo.claim_cancel_requests
+    claimed = await claim(now=slow_worker_now, lease_owner="slow-worker", lease_seconds=120, limit=1)
+    assert [row["id"] for row in claimed] == [task_id]
+    lease_expires_at = datetime.fromisoformat(claimed[0]["lease_expires_at"])
+    if lease_expires_at.tzinfo is None:
+        lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+    assert lease_expires_at >= database_now + timedelta(seconds=100), "lease expiry must use the database clock"
+
+    # A worker whose clock is ahead must not steal a lease that is still live
+    # according to the database.
+    stolen = await claim(
+        now=database_now + timedelta(hours=1),
+        lease_owner="fast-worker",
+        lease_seconds=120,
+        limit=1,
+    )
+    assert stolen == []
+
+    # Simulate expiry in the database while the old worker's local clock is
+    # still behind. Renewal and snapshot writes must both fail closed.
+    token = claimed[0]["lease_token"]
+    await repo._sf()  # Ensure the repository remains backed by the production session factory.
+    async with repo._sf() as session:
+        await session.execute(
+            update(McpTaskRow)
+            .where(McpTaskRow.id == task_id)
+            .values(lease_expires_at=database_now - timedelta(seconds=1))
+        )
+        await session.commit()
+
+    renewed = await repo.renew_control_claim(
+        task_id,
+        phase=phase,
+        lease_owner="slow-worker",
+        lease_token=token,
+        now=slow_worker_now,
+        lease_seconds=120,
+    )
+    assert renewed is False
+
+    if phase == "poll":
+        applied = await repo.apply_snapshot(
+            task_id,
+            lease_owner="slow-worker",
+            lease_token=token,
+            status="completed",
+            result={"stale": True},
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            next_poll_at=None,
+            polled_at=slow_worker_now,
+        )
+    else:
+        applied = await repo.apply_cancel_snapshot(
+            task_id,
+            lease_owner="slow-worker",
+            lease_token=token,
+            status="cancelled",
+            result=None,
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            completed_at=slow_worker_now,
+        )
+    assert applied is False
+
+    stored = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["status"] == "working"
+    assert stored["lease_owner"] == "slow-worker"
+    assert stored["lease_token"] == token
