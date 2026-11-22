@@ -75,7 +75,7 @@ def _read_timing_number(timing_data: dict, key: str, timing_file: Path) -> int |
         or value < 0
         or (isinstance(value, float) and not math.isfinite(value))
     ):
-        print(f"Warning: ignoring invalid {key} in {timing_file}; expected a finite non-negative number")
+        print(f"Warning: ignoring invalid {key} in {timing_file}; expected a finite non-negative number", file=sys.stderr)
         return None
     return value
 
@@ -89,12 +89,12 @@ def load_run_results(benchmark_dir: Path) -> dict:
     """
     # Support both layouts: eval dirs directly under benchmark_dir, or under runs/
     runs_dir = benchmark_dir / "runs"
-    if runs_dir.exists():
+    if runs_dir.exists() and list(runs_dir.glob("eval-*")):
         search_dir = runs_dir
     elif list(benchmark_dir.glob("eval-*")):
         search_dir = benchmark_dir
     else:
-        print(f"No eval directories found in {benchmark_dir} or {benchmark_dir / 'runs'}")
+        print(f"No eval directories found in {benchmark_dir} or {benchmark_dir / 'runs'}", file=sys.stderr)
         return {}
 
     results: dict[str, list] = {}
@@ -117,26 +117,30 @@ def load_run_results(benchmark_dir: Path) -> dict:
         for config_dir in sorted(eval_dir.iterdir()):
             if not config_dir.is_dir():
                 continue
+            run_dirs = [(int(d.name.split("-")[1]), d) for d in sorted(config_dir.glob("run-*"))]
+            if not run_dirs and (config_dir / "grading.json").exists():
+                # Flat layout (eval-<ID>/<config>/{outputs/,grading.json}) as
+                # documented in SKILL.md and grader.md: the config dir is the run.
+                run_dirs = [(1, config_dir)]
             # Skip non-config directories (inputs, outputs, etc.)
-            if not list(config_dir.glob("run-*")):
+            if not run_dirs:
                 continue
             config = config_dir.name
             if config not in results:
                 results[config] = []
 
-            for run_dir in sorted(config_dir.glob("run-*")):
-                run_number = int(run_dir.name.split("-")[1])
+            for run_number, run_dir in run_dirs:
                 grading_file = run_dir / "grading.json"
 
                 if not grading_file.exists():
-                    print(f"Warning: grading.json not found in {run_dir}")
+                    print(f"Warning: grading.json not found in {run_dir}", file=sys.stderr)
                     continue
 
                 try:
                     with open(grading_file, encoding="utf-8") as f:
                         grading = json.load(f)
                 except json.JSONDecodeError as e:
-                    print(f"Warning: Invalid JSON in {grading_file}: {e}")
+                    print(f"Warning: Invalid JSON in {grading_file}: {e}", file=sys.stderr)
                     continue
 
                 # Extract metrics
@@ -158,14 +162,14 @@ def load_run_results(benchmark_dir: Path) -> dict:
                         with open(timing_file, encoding="utf-8") as tf:
                             timing_data = json.load(tf)
                         if not isinstance(timing_data, dict):
-                            print(f"Warning: ignoring non-object timing data in {timing_file}")
+                            print(f"Warning: ignoring non-object timing data in {timing_file}", file=sys.stderr)
                             timing_data = {}
                         duration = _read_timing_number(timing_data, "total_duration_seconds", timing_file)
                         if result["time_seconds"] == 0.0:
                             result["time_seconds"] = duration if duration is not None else 0.0
                         result["tokens"] = _read_timing_number(timing_data, "total_tokens", timing_file)
                 except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
-                    print(f"Warning: Unable to read timing data in {timing_file}: {e}")
+                    print(f"Warning: Unable to read timing data in {timing_file}: {e}", file=sys.stderr)
 
                 # Extract metrics if available
                 metrics = grading.get("execution_metrics", {})
@@ -179,7 +183,7 @@ def load_run_results(benchmark_dir: Path) -> dict:
                 raw_expectations = grading.get("expectations", [])
                 for exp in raw_expectations:
                     if "text" not in exp or "passed" not in exp:
-                        print(f"Warning: expectation in {grading_file} missing required fields (text, passed, evidence): {exp}")
+                        print(f"Warning: expectation in {grading_file} missing required fields (text, passed, evidence): {exp}", file=sys.stderr)
                 result["expectations"] = raw_expectations
 
                 # Extract notes from user_notes_summary
@@ -385,11 +389,16 @@ def main():
     args = parser.parse_args()
 
     if not args.benchmark_dir.exists():
-        print(f"Directory not found: {args.benchmark_dir}")
+        print(f"Directory not found: {args.benchmark_dir}", file=sys.stderr)
         sys.exit(1)
 
     # Generate benchmark
     benchmark = generate_benchmark(args.benchmark_dir, args.skill_name, args.skill_path)
+
+    # Refuse to write an all-zero benchmark when no run results were loaded
+    if not benchmark["runs"]:
+        print(f"No run results found in {args.benchmark_dir}; nothing to aggregate", file=sys.stderr)
+        sys.exit(1)
 
     # Determine output paths
     output_json = args.output or (args.benchmark_dir / "benchmark.json")
