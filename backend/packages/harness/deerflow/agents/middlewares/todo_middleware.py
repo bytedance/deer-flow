@@ -479,6 +479,18 @@ class TodoMiddleware(TodoListMiddleware):
             # The fixed reminder template is model-visible instruction text too;
             # hash it with an empty item list so per-run todo content stays out.
             "completion_reminder_template_hash": canonical_hash(_format_completion_reminder([])),
+            # The persisted state-reminder templates are model-visible
+            # instruction text too (edited / truncated / cleared wording);
+            # hash them with an empty item list for the same reason.
+            "todo_reminder_template_hash": canonical_hash(
+                "\n".join(
+                    (
+                        _build_todo_reminder("", edited_after_write=True).content,
+                        _build_todo_reminder("", edited_after_write=False).content,
+                        _build_todo_cleared_notice().content,
+                    )
+                )
+            ),
             "state_channel": "todos",
             "skip_completion_reminder_on_length_cap": True,
             "skip_completion_reminder_on_safety_cap": True,
