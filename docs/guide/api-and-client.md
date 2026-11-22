@@ -34,6 +34,12 @@ reference: [API Reference — Personal Access Tokens](../../backend/docs/API.md#
 
 ## Embedded Python Client
 
+For a named agent, `DeerFlowClient` uses the saved `model` before the global
+default. An explicit constructor or per-call `model_name` takes precedence.
+The agent's `model_settings` sampling overrides apply to the selected model,
+as they do through the Gateway. Call `client.reset_agent()` after editing the
+saved model configuration.
+
 User messages are framed as untrusted input. Reserved XML-like tags are escaped
 for model context only when present; tag-free URLs and shell commands retain
 their ampersands unchanged. Encoded payloads include a note to decode exactly

@@ -1543,6 +1543,63 @@ class TestClientMcpSelection:
 
 
 class TestEnsureAgent:
+    @pytest.mark.parametrize("selection", ["agent", "constructor", "request", "global"])
+    def test_named_agent_model_profile_reaches_provider(self, client, tmp_path, monkeypatch, selection):
+        import httpx
+
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths._paths", paths)
+        agent_dir = paths.user_agent_dir("test-user", "researcher")
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "config.yaml").write_text(
+            "name: researcher\nmodel: agent-model\nmodel_settings:\n  temperature: 0.7\n  max_tokens: 32\n",
+            encoding="utf-8",
+        )
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            chunk = {"id": "chatcmpl-profile", "choices": [{"index": 0, "delta": {"content": "Done"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+            app_config = AppConfig(
+                models=[
+                    {"name": name, "use": "langchain_openai:ChatOpenAI", "model": name, "api_key": "offline-placeholder", "http_client": transport, "use_responses_api": False, "temperature": 0.2, "max_tokens": 64}
+                    for name in ("global-default", "agent-model", "explicit-model")
+                ],
+                tools=[],
+                sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            )
+            app_config.tool_search.enabled = False
+            monkeypatch.setattr("deerflow.config.app_config._app_config", app_config)
+            monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
+            client._app_config = app_config
+            client._agent_name = None if selection == "global" else "researcher"
+            client._model_name = "explicit-model" if selection == "constructor" else None
+            overrides = {"model_name": "explicit-model"} if selection == "request" else {}
+            # Keep saved configuration, the real graph, model factory and SDK;
+            # isolate prompt/middleware work unrelated to model selection.
+            with (
+                patch("deerflow.client.build_middlewares", return_value=[]),
+                patch("deerflow.client.apply_prompt_template", return_value="Answer briefly."),
+                patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+                patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()),
+                patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            ):
+                assert client.chat("Hello", thread_id="model-profile", user_id="test-user", **overrides) == "Done"
+                assert client.chat("Again", thread_id="model-profile", user_id="test-user", **overrides) == "Done"
+
+        expected_model = "explicit-model" if selection in {"constructor", "request"} else "global-default" if selection == "global" else "agent-model"
+        assert len(requests) == 2
+        for request in requests:
+            assert request["model"] == expected_model
+            assert request["temperature"] == (0.2 if selection == "global" else 0.7)
+            assert request["max_completion_tokens"] == (64 if selection == "global" else 32)
+
     @pytest.mark.parametrize(
         ("groups", "expected"),
         [(None, {"read_file", "write_file"}), ([], set()), (["file:read"], {"read_file"})],

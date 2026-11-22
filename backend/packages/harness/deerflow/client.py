@@ -401,6 +401,10 @@ class DeerFlowClient:
 
         thinking_enabled = cfg.get("thinking_enabled", True)
         model_name = cfg.get("model_name")
+        if model_name is None:
+            model_name = getattr(agent_config, "model", None)
+        agent_model_settings = getattr(agent_config, "model_settings", None)
+        agent_model_overrides = agent_model_settings.model_dump(exclude_none=True) if agent_model_settings else None
         # Phase 3: enforce model:use authorization on the embedded/library path
         # too, mirroring the Gateway runtime path in ``_make_lead_agent`` so the
         # role-scoped model policy cannot be bypassed by constructing the agent
@@ -545,7 +549,7 @@ class DeerFlowClient:
             # callbacks at the graph invocation root so a single embedded run
             # produces one trace with correct session_id / user_id propagation.
             # Attaching them again on the model would emit duplicate spans.
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
+            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False, model_overrides=agent_model_overrides),
             "tools": final_tools,
             "middleware": bound_middlewares,
             "system_prompt": apply_prompt_template(
