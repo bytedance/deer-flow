@@ -231,6 +231,24 @@ def _make_boxlite_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]
     return provider, sandbox_attrs
 
 
+# Keep benchmark inputs and public profile labels limited to the AIO service switches.
+_AIO_SERVICE_FLAGS = ("DISABLE_BROWSER", "DISABLE_CODE_SERVER", "DISABLE_JUPYTER", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL", "DISABLE_VNC")
+
+
+def _aio_service_environment(config_path: str | None) -> dict[str, str]:
+    if not config_path:
+        return {}
+
+    from deerflow.config.app_config import AppConfig
+
+    configured = AppConfig.from_file(config_path).sandbox.environment
+    flags = {key: configured[key] for key in _AIO_SERVICE_FLAGS if key in configured}
+    for key, value in flags.items():
+        if value not in ("true", "false"):
+            raise ValueError(f"sandbox.environment.{key} must be 'true' or 'false' for the AIO benchmark")
+    return flags
+
+
 def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     """Create an AioSandboxProvider with stub config."""
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
@@ -562,7 +580,11 @@ def _write_results(results: list[BenchResult], output_path: Path, config_used: d
         result.image = config_used.get("image")
     with output_path.open("a", encoding="utf-8") as stream:
         for result in results:
-            stream.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
+            row = asdict(result)
+            if result.provider == "aio-docker":
+                environment = config_used.get("environment", {})
+                row["aio_service_profile"] = ",".join(f"{key}={environment[key]}" for key in _AIO_SERVICE_FLAGS if key in environment) or "image-defaults"
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _run_scenario(
@@ -781,6 +803,9 @@ def main(argv: list[str] | None = None) -> int:
         # Never discover/clean containers belonging to a user's regular stack.
         "container_prefix": f"deerflow-bench-{args.run_id}",
     }
+
+    if args.provider == "aio-docker":
+        config["environment"] = _aio_service_environment(os.getenv("DEER_FLOW_CONFIG_PATH"))
 
     factory = PROVIDER_FACTORIES[args.provider]
     provider, config_used = factory(config)
