@@ -348,11 +348,7 @@ async def test_postgres_control_write_checks_expiry_after_row_lock(postgres_repo
     task_id = f"task-lock-expiry-{operation}"
     await _create_task(task_repo, task_id, thread_incarnation=created["incarnation"])
     async with session_factory() as session:
-        await session.execute(
-            update(McpTaskRow)
-            .where(McpTaskRow.id == task_id)
-            .values(next_poll_at=now, next_cancel_at=now)
-        )
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == task_id).values(next_poll_at=now, next_cancel_at=now))
         await session.commit()
 
     phase = "cancel" if operation.endswith("cancel") else "poll"
