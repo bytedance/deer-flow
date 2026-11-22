@@ -1,0 +1,13 @@
+- id: agent-default-model
+  config:
+    provider: quote-fixture
+    model: quote-fixture
+- id: session-title-llm
+  disabled: true
+- id: session-persistence-jsonl
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: none
+- insert:
+    - id: quote-fixture-llm
+      name: './fixture.mjs'

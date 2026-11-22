@@ -1,0 +1,212 @@
+{
+  "deerflow_commit": "a9b5dd80f8a52d1d6e66d6462d2635f7ca91d76f",
+  "dsh_executed_commit": "e8f7b93a344964de3dca1ace9e72b6e4d6de87cb",
+  "dsh_version": "0.2.2-rc.2",
+  "python": "3.12.14",
+  "node": "26.12.0",
+  "os": "Darwin arm64",
+  "model": "deterministic, no remote requests",
+  "unittest_summary": "Ran 8 tests in 9.582s",
+  "result": "OK",
+  "observations": [
+    {
+      "test": "test_cancel_then_reopen",
+      "task": "Probe: wait",
+      "status": "interrupted",
+      "reason": "owner_cancel",
+      "exit": 0,
+      "events": [
+        "session",
+        "status",
+        "status"
+      ],
+      "elapsed_s": 0.93,
+      "group_gone": true
+    },
+    {
+      "test": "test_cancel_then_reopen",
+      "task": "Probe: recall quote",
+      "status": "success",
+      "reason": "completed",
+      "exit": 0,
+      "events": [
+        "session",
+        "status",
+        "status",
+        "text",
+        "status",
+        "status",
+        "final"
+      ],
+      "elapsed_s": 0.932,
+      "group_gone": true
+    },
+    {
+      "test": "test_cancel_then_reopen",
+      "cancel_log_before": [
+        "aborted"
+      ],
+      "after_reopen": [
+        "aborted",
+        "completed"
+      ]
+    },
+    {
+      "test": "test_incomplete_and_invalid_streams",
+      "task": "unused",
+      "status": "error",
+      "reason": "missing_final",
+      "exit": 0,
+      "events": [
+        "session"
+      ],
+      "elapsed_s": 0.019,
+      "group_gone": true
+    },
+    {
+      "test": "test_incomplete_and_invalid_streams",
+      "task": "unused",
+      "status": "error",
+      "reason": "invalid_stream",
+      "exit": -15,
+      "events": [],
+      "elapsed_s": 0.072,
+      "group_gone": true
+    },
+    {
+      "test": "test_incomplete_and_invalid_streams",
+      "task": "unused",
+      "status": "error",
+      "reason": "invalid_stream",
+      "exit": -15,
+      "events": [
+        "session"
+      ],
+      "elapsed_s": 0.069,
+      "group_gone": true
+    },
+    {
+      "test": "test_model_failure",
+      "task": "Probe: fail",
+      "status": "error",
+      "reason": "error",
+      "exit": 1,
+      "events": [
+        "session",
+        "status",
+        "status",
+        "status",
+        "status",
+        "final"
+      ],
+      "elapsed_s": 0.951,
+      "group_gone": true
+    },
+    {
+      "test": "test_read_then_resume_native_tool_history",
+      "task": "Probe: read quote",
+      "status": "success",
+      "reason": "completed",
+      "exit": 0,
+      "events": [
+        "session",
+        "status",
+        "status",
+        "tool_call",
+        "tool_result",
+        "status",
+        "status",
+        "text",
+        "status",
+        "status",
+        "final"
+      ],
+      "elapsed_s": 1.047,
+      "group_gone": true
+    },
+    {
+      "test": "test_read_then_resume_native_tool_history",
+      "task": "Probe: recall quote",
+      "status": "success",
+      "reason": "completed",
+      "exit": 0,
+      "events": [
+        "session",
+        "status",
+        "status",
+        "text",
+        "status",
+        "status",
+        "final"
+      ],
+      "elapsed_s": 0.946,
+      "group_gone": true
+    },
+    {
+      "test": "test_read_then_resume_native_tool_history",
+      "task": "Probe: recall quote",
+      "status": "success",
+      "reason": "completed",
+      "exit": 0,
+      "events": [
+        "session",
+        "status",
+        "status",
+        "text",
+        "status",
+        "status",
+        "final"
+      ],
+      "elapsed_s": 0.931,
+      "group_gone": true
+    },
+    {
+      "test": "test_reaps_an_inherited_pipe_holder",
+      "task": "unused",
+      "status": "timeout",
+      "reason": "deadline",
+      "exit": 0,
+      "events": [
+        "session"
+      ],
+      "elapsed_s": 1.064,
+      "group_gone": true
+    },
+    {
+      "test": "test_timeout",
+      "task": "Probe: wait",
+      "status": "timeout",
+      "reason": "deadline",
+      "exit": -15,
+      "events": [],
+      "elapsed_s": 0.844,
+      "group_gone": true
+    },
+    {
+      "test": "test_unexpected_process_loss",
+      "task": "Probe: crash",
+      "status": "error",
+      "reason": "missing_final",
+      "exit": -9,
+      "events": [
+        "session",
+        "status",
+        "status"
+      ],
+      "elapsed_s": 0.898,
+      "group_gone": true
+    },
+    {
+      "test": "test_unknown_session",
+      "task": "Probe: recall quote",
+      "status": "error",
+      "reason": "runner_error",
+      "exit": 1,
+      "events": [
+        "error"
+      ],
+      "elapsed_s": 0.844,
+      "group_gone": true
+    }
+  ]
+}
