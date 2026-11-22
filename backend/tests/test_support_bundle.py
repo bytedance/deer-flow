@@ -665,7 +665,7 @@ def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatc
     monkeypatch.setattr(
         support_bundle,
         "collect_doctor_output",
-        lambda _project_root: {
+        lambda _project_root, _env=None: {
             "ok": False,
             "returncode": 1,
             "stdout": "\n".join(
@@ -1689,3 +1689,74 @@ def test_fresh_harness_import_restores_the_process_environment(tmp_path, monkeyp
     # started with, not the variables the import loaded.
     assert "DEER_FLOW_SUPPORT_BUNDLE_PROBE" not in os.environ
     assert os.environ.get("DEER_FLOW_PROJECT_ROOT") is None
+
+
+def test_config_path_ignores_a_stale_inherited_selector_before_import(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (backend / "selected.yaml").write_text("models: []\ntools: []\n", encoding="utf-8")
+    # The launcher stages the checkout `.env` before it starts the Gateway, so a
+    # selector inherited from the bundle's own shell never reaches the import.
+    # Importing the harness would otherwise load `missing.env` and fail before
+    # the bundle can stage the checkout `.env`'s valid selector.
+    (backend / "stage.env").write_text("DEER_FLOW_CONFIG_PATH=selected.yaml\n", encoding="utf-8")
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=stage.env\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("DEER_FLOW_ENV_FILE", "missing.env")
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [], "tools": []}
+
+
+def test_config_path_rejects_a_non_regular_selector(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    fifo = backend / "pipe.env"
+    os.mkfifo(fifo)
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=pipe.env\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_ENV_FILE", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    # `load_selected_env_file` checks `is_file()` before it opens the selector,
+    # so a FIFO is the Gateway's startup error rather than a file to read:
+    # opening one would block the bundle instead of reporting it.
+    location = support_bundle._dotenv_config_location(project_root, dict(os.environ))
+    assert "must name a readable file" in location["DEER_FLOW_CONFIG_PATH"]
+
+
+def test_config_path_resolves_a_relative_project_root_from_backend(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    (backend / "profile").mkdir(parents=True)
+    (project_root / "profile").mkdir()
+    (project_root / "profile" / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    # The Gateway resolves a relative runtime root from its working directory,
+    # `backend/`, so `profile/config.yaml` there wins over the checkout one.
+    (backend / "profile" / "config.yaml").write_text("models: []\ntools: []\n", encoding="utf-8")
+    (project_root / ".env").write_text("DEER_FLOW_PROJECT_ROOT=profile\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [], "tools": []}

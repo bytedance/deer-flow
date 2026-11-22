@@ -279,12 +279,19 @@ def check_nginx() -> CheckResult:
 CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
 
 
-def _unquoted_dotenv_keys(env_path: Path) -> set[str]:
-    """Return the ``.env`` keys whose value is written without quotes."""
-    from dotenv.parser import parse_stream
+def _launcher_dotenv_values(env_path: Path, project_root: Path) -> dict[str, str]:
+    """Return ``.env`` as `serve.sh` exports it, not as python-dotenv reads it.
 
-    with open(env_path, encoding="utf-8") as stream:
-        return {binding.key for binding in parse_stream(stream) if binding.key and binding.original.string.split("=", 1)[-1].lstrip()[:1] not in ("'", '"')}
+    `serve.sh` runs `scripts/dotenv_exports.py`, which expands ``$PWD`` and
+    ``$NAME`` references against the checkout. `dotenv_values` leaves them
+    literal, so a `DEER_FLOW_CONFIG_PATH=$PWD/active.yaml` would hand the
+    resolver the unexpanded string and look for a file by that name.
+    """
+    from dotenv_exports import parse_dotenv
+
+    scope = dict(os.environ)
+    scope["PWD"] = str(project_root)
+    return dict(parse_dotenv(env_path.read_text(encoding="utf-8-sig"), scope))
 
 
 def resolve_config_path() -> tuple[Path, CheckResult | None]:
@@ -1035,26 +1042,33 @@ def main() -> int:
 
     # Load .env early so key checks work
     try:
-        from dotenv import dotenv_values, load_dotenv
+        from dotenv import load_dotenv
 
         env_path = project_root / ".env"
         if env_path.exists():
             load_dotenv(env_path, override=False)
             # `make dev` (scripts/serve.sh) sources .env over the shell, so
-            # for the variables that choose the config file, .env wins.
-            unquoted = _unquoted_dotenv_keys(env_path)
-            for name, value in dotenv_values(env_path).items():
-                if name in CONFIG_LOCATION_ENV_VARS and value is not None:
-                    # `source` expands an unquoted leading `~`, not a quoted one.
-                    os.environ[name] = os.path.expanduser(value) if name in unquoted else value
+            # for the variables that choose the config file, .env wins. Expand
+            # them the way the launcher and the Gateway do, not the raw text
+            # python-dotenv keeps; otherwise the doctor names a file that does
+            # not exist.
+            launcher_values = _launcher_dotenv_values(env_path, project_root)
+            for name in CONFIG_LOCATION_ENV_VARS:
+                value = launcher_values.get(name)
+                if value is not None:
+                    os.environ[name] = value
     except ImportError:
         pass
 
     # serve.sh then replaces an unset or empty runtime root with the
     # checkout, so config resolution and the loadable check see what the
-    # Gateway sees.
+    # Gateway sees. A relative runtime root is resolved from the Gateway's
+    # working directory, `backend/`; leaving it relative would resolve it from
+    # whatever directory ran the doctor instead.
     if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
         os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
+    elif not Path(os.environ["DEER_FLOW_PROJECT_ROOT"]).is_absolute():
+        os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root / "backend" / os.environ["DEER_FLOW_PROJECT_ROOT"])
     config_path, config_failure = resolve_config_path()
 
     print()
