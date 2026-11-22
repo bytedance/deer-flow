@@ -45,7 +45,7 @@ from deerflow.sandbox.lease import (
     sandbox_command_scope,
     sandbox_lease_owner,
 )
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path, escape_powershell_single_quoted
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.prewarm import claim_sandbox_prewarm
@@ -2050,20 +2050,45 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     return result
 
 
-def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
-    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None, *, shell: str | None = None) -> str:
+    """Anchor relative paths to the thread workspace with a shell-appropriate prefix.
+
+    The syntax has to follow the shell that will actually run the command, not
+    the POSIX one this used to assume unconditionally. ``LocalSandbox._get_shell``
+    falls back to ``powershell.exe`` and then ``cmd.exe`` on Windows, and a
+    ``cd '<path>' && ...`` prefix is unparseable in both: Windows PowerShell
+    before 7 rejects ``&&`` ("not a valid statement separator in this version",
+    surfaced as ``InvalidEndOfLine``), and cmd.exe does not strip single quotes,
+    so it looks for a directory literally named ``'<path>'``. Either way every
+    ``bash`` call fails before the command runs.
+
+    Each form keeps the fail-closed behaviour of ``&&``: the PowerShell variant
+    uses ``-ErrorAction Stop`` because ``Set-Location`` otherwise reports a
+    missing workspace as a non-terminating error and lets the command run from
+    the inherited working directory.
 
     Args:
         command: The bash command to execute.
         thread_data: The thread data containing the workspace path.
+        shell: The shell executable that will run the command. Defaults to the
+            one ``LocalSandbox`` resolves.
 
     Returns:
-        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
+        The command prefixed with a cwd change if workspace_path is available,
         otherwise the original command unchanged.
     """
-    if thread_data and (workspace := thread_data.get("workspace_path")):
-        return f"cd {shlex.quote(workspace)} && {command}"
-    return command
+    if not (thread_data and (workspace := thread_data.get("workspace_path"))):
+        return command
+    resolved_shell = shell or LocalSandbox._get_shell()
+    if LocalSandbox._is_powershell(resolved_shell):
+        # ``-ErrorAction Stop`` keeps the stop-on-failure semantics ``&&`` gives
+        # the POSIX form: ``Set-Location`` reports a missing directory as a
+        # non-terminating error, which would let the ``;``-separated command run
+        # from the gateway's inherited cwd.
+        return f"Set-Location -LiteralPath '{escape_powershell_single_quoted(workspace)}' -ErrorAction Stop; {command}"
+    if LocalSandbox._is_cmd_shell(resolved_shell):
+        return f'cd /d "{workspace}" && {command}'
+    return f"cd {shlex.quote(workspace)} && {command}"
 
 
 def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
@@ -2454,9 +2479,12 @@ def _execute_bash_command(
     runtime: Runtime,
     env: dict[str, str] | None,
     timeout: float | None = None,
+    cwd: str | None = None,
 ) -> str:
     """Route subagent bash calls through their isolated shell-session scope."""
     with command_owner(sandbox, sandbox_lease_owner(runtime.context)):
+        if cwd is not None and isinstance(sandbox, LocalSandbox):
+            return sandbox.execute_command(command, env=env, timeout=timeout, cwd=cwd)
         scope_id = sandbox_command_scope(runtime.context)
         scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
         if scope_id is not None and callable(scoped_execute):
@@ -2937,7 +2965,12 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | To
             thread_data = get_thread_data(runtime)
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
-            command = _apply_cwd_prefix(command, thread_data)
+            workspace = thread_data.get("workspace_path") if thread_data else None
+            cwd = None
+            if workspace and _is_windows() and isinstance(sandbox, LocalSandbox) and sandbox._is_cmd_shell(sandbox._get_shell()):
+                cwd = workspace
+            else:
+                command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
             # PowerShell/cmd.exe where `export` is not valid syntax, so the id
             # is published through the subprocess environment instead —
@@ -2968,6 +3001,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | To
                 runtime=runtime,
                 env=local_env,
                 timeout=command_timeout,
+                cwd=cwd,
             )
             content = _truncate_bash_output(
                 mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
