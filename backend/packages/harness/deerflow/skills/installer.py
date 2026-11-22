@@ -171,7 +171,7 @@ def resolve_and_validate_skill_dir(temp_path: Path) -> tuple[Path, str, str]:
         raise ValueError(f"Invalid skill name: {skill_name}")
     reason = windows_incompatible_segment(skill_name)
     if reason is not None:
-        raise ValueError(f"Invalid skill name: {skill_name} ({reason})")
+        raise ValueError(f"Invalid skill name: {skill_name} (not portable to Windows: {reason})")
 
     content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     parts, error = split_skill_markdown(content)
