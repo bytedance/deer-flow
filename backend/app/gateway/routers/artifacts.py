@@ -273,6 +273,12 @@ def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> byte
     Returns:
         The file content as bytes, or None if not found.
     """
+    if not internal_path:
+        # An empty internal path (e.g. ".../sample.skill/") must not match
+        # a directory entry via the "name.endswith('/' + internal_path)"
+        # fallback below, which would return b"" and answer 200.
+        return None
+
     if not zipfile.is_zipfile(zip_path):
         return None
 

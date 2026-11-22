@@ -1250,6 +1250,22 @@ def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, mon
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
 
+def test_get_skill_archive_preview_empty_internal_path_returns_404(tmp_path, monkeypatch) -> None:
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.writestr("my-skill/", "")
+        zip_ref.writestr("my-skill/SKILL.md", "# my skill\n")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: skill_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/")
+
+    assert response.status_code == 404
+
+
 def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> None:
     payload = ("skill preview \u4e2d\u6587\n" * 100).encode()
     skill_path = tmp_path / "sample.skill"
