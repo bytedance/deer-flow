@@ -323,14 +323,9 @@ async def _wait_for_postgres_lock_wait(session_factory, blocker_pid: int) -> Non
     async with session_factory() as observer:
         async with asyncio.timeout(5):
             while True:
+                await observer.execute(text("SELECT pg_stat_clear_snapshot()"))
                 blocked_pid = await observer.scalar(
-                    text(
-                        "SELECT pid FROM pg_stat_activity "
-                        "WHERE pid <> pg_backend_pid() "
-                        "AND wait_event_type = 'Lock' "
-                        "AND :blocker_pid = ANY(pg_blocking_pids(pid)) "
-                        "LIMIT 1"
-                    ),
+                    text("SELECT pid FROM pg_stat_activity " "WHERE pid <> pg_backend_pid() " "AND wait_event_type = 'Lock' " "AND :blocker_pid = ANY(pg_blocking_pids(pid)) " "LIMIT 1"),
                     {"blocker_pid": blocker_pid},
                 )
                 if blocked_pid is not None:
