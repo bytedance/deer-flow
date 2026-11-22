@@ -69,7 +69,7 @@ def build_servers_config(extensions_config: ExtensionsConfig) -> dict[str, dict[
     Returns:
         Dictionary mapping server names to their parameters.
     """
-    enabled_servers = extensions_config.get_enabled_mcp_servers()
+    enabled_servers = extensions_config.get_discoverable_mcp_servers()
 
     if not enabled_servers:
         logger.info("No enabled MCP servers found")

@@ -141,7 +141,8 @@ def test_deployment_template_takes_replicas_and_strategy_from_values() -> None:
     template = DEPLOYMENT_TEMPLATE.read_text(encoding="utf-8")
     assert "replicas: {{ .Values.provisioner.replicas }}" in template
     assert re.search(r"^\s*replicas:\s*\d+\s*$", template, flags=re.MULTILINE) is None, "a literal replica count ignores provisioner.replicas"
-    assert re.search(r"\{\{- with \.Values\.provisioner\.strategy \}\}\n\s+strategy:\n\s+\{\{- toYaml \. \| nindent 4 \}\}\n\s+\{\{- end \}\}", template), "the rollout strategy must come from values like the gateway's"
+    strategy_block = r'\{\{- with \.Values\.provisioner\.strategy \}\}\n\s+strategy:\n\s+\{\{- include "deer-flow\.strategy" \. \| nindent 4 \}\}\n\s+\{\{- end \}\}'
+    assert re.search(strategy_block, template), "the rollout strategy must come from values like the gateway's"
     assert SELECTOR_BLOCK.search(template), "the Deployment selector is what the budget has to match"
 
 

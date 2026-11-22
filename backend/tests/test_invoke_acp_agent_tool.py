@@ -43,6 +43,13 @@ def test_build_mcp_servers_filters_disabled_and_maps_transports():
         mcp_servers={
             "stdio": McpServerConfig(enabled=True, type="stdio", command="npx", args=["srv"]),
             "http": McpServerConfig(enabled=True, type="http", url="https://example.com/mcp"),
+            "browser": McpServerConfig.model_validate(
+                {
+                    "type": "http",
+                    "url": "https://browser.example.com/mcp",
+                    "user_oauth": {"issuer": "https://id.example.com", "client_id": "deerflow", "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback"},
+                }
+            ),
             "disabled": McpServerConfig(enabled=False, type="stdio", command="echo"),
         },
         skills={},
@@ -69,6 +76,13 @@ def test_build_acp_mcp_servers_formats_list_payload():
         mcp_servers={
             "stdio": McpServerConfig(enabled=True, type="stdio", command="npx", args=["srv"], env={"FOO": "bar"}),
             "http": McpServerConfig(enabled=True, type="http", url="https://example.com/mcp", headers={"Authorization": "Bearer token"}),
+            "browser": McpServerConfig.model_validate(
+                {
+                    "type": "http",
+                    "url": "https://browser.example.com/mcp",
+                    "user_oauth": {"issuer": "https://id.example.com", "client_id": "deerflow", "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback"},
+                }
+            ),
             "disabled": McpServerConfig(enabled=False, type="stdio", command="echo"),
         },
         skills={},

@@ -42,6 +42,25 @@ def _validate_extra_env(extra_env: dict[str, str] | None) -> None:
             raise ValueError(f"extra_env key {key!r} is not a valid POSIX environment variable name (must match ^[A-Za-z_][A-Za-z0-9_]*$). This protects shell-using sandbox implementations from command injection via the key.")
 
 
+class CommandOutput(str):
+    """String-compatible command output carrying the provider's actual exit code.
+
+    Providers may return this from either command execution hook. Ordinary
+    strings remain supported for providers without structured exit information.
+    Consumers must read the exit code before masking or truncating the text.
+    """
+
+    exit_code: int
+
+    def __new__(cls, output: str, exit_code: int) -> "CommandOutput":
+        result = super().__new__(cls, output)
+        result.exit_code = exit_code
+        return result
+
+    def __getnewargs__(self) -> tuple[str, int]:
+        return str(self), self.exit_code
+
+
 class Sandbox(ABC):
     """Abstract base class for sandbox environments"""
 
@@ -130,7 +149,9 @@ class Sandbox(ABC):
                 timeouts.
 
         Returns:
-            The standard or error output of the command.
+            The standard or error output of the command. Providers that know
+            the actual exit code can return :class:`CommandOutput` to preserve
+            execution status independently of the output text.
 
         Raises:
             ValueError: when an ``env`` key is not a valid env-var name.

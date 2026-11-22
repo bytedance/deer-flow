@@ -229,6 +229,12 @@ GET /api/langgraph/threads/{thread_id}/state
 POST /api/langgraph/threads/{thread_id}/history
 ```
 
+Set `before` to the last checkpoint ID from the previous page. The next page
+includes that checkpoint if it still exists, followed by older checkpoints,
+up to `limit` entries total. If checkpoint retention removed the cursor, the
+page starts with the first surviving older checkpoint, if any. Skip the first
+entry only when its `checkpoint_id` equals `before`.
+
 Only the newest entry carries `messages`, the `goal` while it is active, and
 `goal_outcome` (the latest met goal, kept until the next goal change). Older
 entries carry only `title` and `thread_data`. `goal_outcome` is server-owned:
@@ -1776,6 +1782,8 @@ specified instant. Unchanged live once definitions keep their previously
 accepted execution time; a changed definition or a PATCH that rearms a terminal
 task is validated again. Ordinary Resume retains the admitted stored schedule
 without revalidating its wall time; a renewed `end_at` is still checked.
+Values outside the supported date-time range after UTC conversion return the
+same 422 codes, with the offending field named in the message.
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
 `stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:

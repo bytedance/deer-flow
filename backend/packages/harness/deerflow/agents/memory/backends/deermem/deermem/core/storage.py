@@ -14,6 +14,7 @@ import abc
 import copy
 import hashlib
 import importlib
+import itertools
 import json
 import logging
 import math
@@ -2137,7 +2138,12 @@ class FileMemoryStorage(MemoryStorage):
         synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
         if scopes is None:
             root = Path(self._config.storage_path) if self._config.storage_path else memory_file_path(self._config).parent
-            candidates = root.glob("**/facts/**/*.md")
+            # Only the fact directories the scoped readers use: the legacy root
+            # bucket and each user's bucket. The host's default root is the
+            # runtime home, which also holds every thread's sandbox-writable
+            # workspace (users/{id}/threads/...), so a wider walk would index
+            # files a sandbox wrote as that user's memory.
+            candidates = itertools.chain(root.glob("agents/*/facts/**/*.md"), root.glob("users/*/agents/*/facts/**/*.md"))
             # One signature per manifest: every agent bucket of a user shares its
             # memory.json, and _scope_signature reads only that file.
             manifest_signatures: dict[Path, tuple[Any, ...]] = {}

@@ -4168,6 +4168,45 @@ def _create_extension_thread(client, checkpointer, custom_factory, mode, thread_
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize(
+    ("latest_todos", "expected_todos"),
+    [
+        ([{"content": "Verify the result", "status": "completed"}], [{"content": "Verify the result", "status": "completed"}]),
+        ([], []),
+        (None, None),
+        ([None, {"content": {"invalid": True}}, {"content": "Keep this task", "status": "pending"}], [{"content": "Keep this task", "status": "pending"}]),
+    ],
+)
+def test_history_head_preserves_current_todos(monkeypatch, mode, latest_todos, expected_todos) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"todo-head-{mode}"
+
+    async def write_todos():
+        accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        await accessor.aupdate(config, {"todos": [{"content": "Older task", "status": "pending"}]}, as_node="model")
+        await accessor.aupdate(config, {"todos": latest_todos}, as_node="model")
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        if latest_todos is not None:
+            asyncio.run(write_todos())
+        head_response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1})
+        history_response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert head_response.status_code == history_response.status_code == 200
+    history = history_response.json()
+    assert head_response.json() == history[:1]
+    if expected_todos is None:
+        assert "todos" not in history[0]["values"]
+    else:
+        assert history[0]["values"]["todos"] == expected_todos
+    assert len(history) > 1
+    assert all("todos" not in entry["values"] for entry in history[1:])
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
 def test_history_head_carries_goal_state_without_messages(monkeypatch, mode) -> None:
     """useStream rebuilds thread values from the head, so a goal set on /chats/new
     and a met-goal record must be there even before any message exists."""
@@ -5547,6 +5586,35 @@ def test_move_thread_does_not_bump_updated_at(tmp_path):
 
         after = client.get(f"/api/threads/{thread_id}").json()["updated_at"]
         assert after == before
+
+
+def test_move_thread_deleted_after_the_move_is_404(tmp_path):
+    """A DELETE that lands between the move and its re-read is a 404, not a 500.
+
+    The move takes no thread lock, so a concurrent DELETE can remove the row
+    after ``set_project`` commits and before the route reads the record back.
+    """
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    store = app.state.thread_store
+    set_project = store.set_project
+    moves: list[bool] = []
+
+    async def set_project_then_concurrent_delete(thread_id, project_id, **kwargs):
+        moved = await set_project(thread_id, project_id, **kwargs)
+        moves.append(moved)
+        await store.delete(thread_id)
+        return moved
+
+    store.set_project = set_project_then_concurrent_delete
+    with TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}).json()["thread_id"]
+
+        response = client.post(f"/api/threads/{thread_id}/move", json={"project_id": project["id"]})
+
+        assert moves == [True]
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"] == "Thread or project not found"
 
 
 def _seed_branchable_thread(app: FastAPI, thread_id: str) -> None:

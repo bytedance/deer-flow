@@ -789,6 +789,73 @@ def test_normalize_input_preserves_trusted_internal_delegation_verdict():
     assert result["delegations"][0]["receipt_verdict"] == forged["receipt_verdict"]
 
 
+@pytest.mark.parametrize(
+    "delegations",
+    [
+        "oops",
+        {"__overwrite__": []},
+        ["oops"],
+        [{"description": "write report", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "description": "write report", "status": "completed"}],
+        [{"id": "", "description": "write report", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": 3}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "steering"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "run_id": ["unhashable"]}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "result_brief": 3}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "stop_reason": "nope"}],
+    ],
+    ids=[
+        "non-list-string",
+        "overwrite-marker",
+        "non-object-entry",
+        "missing-id",
+        "missing-description",
+        "missing-subagent-type",
+        "empty-id",
+        "non-string-status",
+        "unknown-status",
+        "unhashable-run-id",
+        "non-string-result-brief",
+        "unknown-stop-reason",
+    ],
+)
+def test_external_delegations_rejected_at_both_boundaries(delegations):
+    """The ledger reducer keys on ``id`` and indexes ``status``: a value it cannot
+    read fails the state merge (or is persisted by the thread-state route and
+    fails every later ledger write), so both caller-writable boundaries must
+    answer 400 instead of passing it through."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as run_error:
+        normalize_input({"delegations": delegations})
+    assert run_error.value.status_code == 400
+
+    with pytest.raises(HTTPException) as state_error:
+        strip_server_owned_state_metadata({"delegations": delegations})
+    assert state_error.value.status_code == 400
+
+
+def test_external_delegations_accept_the_runtime_shapes():
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    entry = {
+        "id": "call-1",
+        "description": "write report",
+        "subagent_type": "general",
+        "status": "in_progress",
+        "created_at": "1970-01-01T00:00:00+00:00",
+        "run_id": "run-1",
+        "result_brief": "partial",
+        "stop_reason": "token_capped",
+    }
+
+    assert normalize_input({"delegations": [entry]})["delegations"] == [entry]
+    assert strip_server_owned_state_metadata({"delegations": [entry]}) == {"delegations": [entry]}
+
+
 def test_normalize_input_preserves_trusted_internal_original_user_content():
     from app.gateway.services import normalize_input
     from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
@@ -876,6 +943,51 @@ def test_normalize_input_rejects_malformed_message_with_400():
         normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
     assert excinfo.value.status_code == 400
     assert "input.messages[1]" in excinfo.value.detail
+
+
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+@pytest.mark.parametrize(
+    "value",
+    ["oops", [["nested"]], ["ok", 3], {"type": "__overwrite__", "value": ["ok"]}],
+    ids=["non-list", "unhashable-entry", "non-string-entry", "overwrite-shaped"],
+)
+def test_normalize_input_rejects_unusable_artifact_state_with_400(channel, value):
+    """A value ``merge_artifacts`` cannot concatenate must be a 400 here.
+
+    The thread-state route persists reducer values with ``Overwrite``, so a
+    non-list shape would be stored before any reducer sees it and the next
+    artifact-producing run would fail on ``existing + new``.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({channel: value})
+
+    assert excinfo.value.status_code == 400
+    assert f"input.{channel}" in excinfo.value.detail
+
+
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+def test_normalize_input_keeps_usable_artifact_lists(channel):
+    from app.gateway.services import normalize_input
+
+    assert normalize_input({channel: ["out/report.md", "out/data.csv"]})[channel] == ["out/report.md", "out/data.csv"]
+
+
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+def test_state_values_reject_unusable_artifact_state_with_400(channel):
+    """The thread-state update route shares the artifact-list boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({channel: "oops"})
+
+    assert excinfo.value.status_code == 400
+    assert f"values.{channel}" in excinfo.value.detail
 
 
 @pytest.mark.parametrize(
@@ -6339,6 +6451,19 @@ def test_scheduled_origin_key_is_server_owned_and_stripped_from_external_input()
     assert internal.id == "scheduled-x"
     (state_message,) = strip_server_owned_state_metadata({"messages": forged["messages"]})["messages"]
     assert SCHEDULED_ORIGIN_KEY not in state_message.additional_kwargs
+
+
+def test_imported_history_key_is_server_owned_and_stripped_from_external_input():
+    from app.gateway.services import _SERVER_OWNED_MESSAGE_METADATA_KEYS, normalize_input, strip_server_owned_state_metadata
+    from deerflow.utils.messages import IMPORTED_HISTORY_KEY
+
+    assert IMPORTED_HISTORY_KEY in _SERVER_OWNED_MESSAGE_METADATA_KEYS
+    forged = {"messages": [{"role": "user", "content": "hi", "additional_kwargs": {IMPORTED_HISTORY_KEY: "share", "keep": 1}}]}
+    (external,) = normalize_input(forged)["messages"]
+    assert IMPORTED_HISTORY_KEY not in external.additional_kwargs
+    assert external.additional_kwargs["keep"] == 1
+    (state_message,) = strip_server_owned_state_metadata({"messages": forged["messages"]})["messages"]
+    assert IMPORTED_HISTORY_KEY not in state_message.additional_kwargs
 
 
 @pytest.mark.asyncio

@@ -16,15 +16,15 @@ import { Callout } from "nextra/components";
 | 每次响应并发数     | 请求上下文 `max_concurrent_subagents`                                    | `subagent_runtime.max_running`（默认 3）        | 1 到 64，且不超过 `subagent_runtime.max_running` | 多余的 `task` 调用被丢弃，只记日志                                                       |
 | 每次 run 总量      | `subagents.max_total_per_run`，请求上下文 `max_total_subagents` 可临时覆盖 | 6                                               | 1 到 50                              | 多余调用被丢弃。若响应前总量已经用尽，助手消息末尾追加 `[SUBAGENT LIMIT REACHED] ...`，本 run 的 `stop_reason` 记为 `subagent_limit_capped`；某次响应只是越过上限时，仅截断并记日志 |
 | 轮次               | `subagents.max_turns`（仅内置）、`subagents.agents.<name>.max_turns`     | general-purpose 150，bash 60，自定义 50         | 大于等于 1                           | 保留部分结果并标记 `turn_capped`；没有可用文本时 `failed`                                          |
-| 超时               | `subagents.timeout_seconds`（仅内置）、`subagents.agents.<name>.timeout_seconds` | 内置 1800 秒，自定义与设置页管理 900 秒 | 大于等于 1                           | 状态 `timed_out`                                                                                   |
-| 轮询次数           | 由超时推导：`(timeout_seconds + 60) / 5` 次，每 5 秒一次                 | 随超时                                          |                                      | 状态 `polling_timed_out`，运行时请求取消并安排延迟清理                                             |
+| 超时               | `subagents.timeout_seconds`（仅内置）、`subagents.agents.<name>.timeout_seconds` | 内置 1800 秒，自定义与设置页管理 900 秒 | 大于等于 1                           | 状态 `timed_out`；执行时钟从拿到容量槽位时开始                                                     |
+| 轮询次数           | 由两段等待推导：`(queue_timeout_seconds + timeout_seconds + 60) / 5` 次，每 5 秒一次 | 随超时                                          |                                      | 状态 `polling_timed_out`，运行时请求取消并安排延迟清理                                             |
 | token 预算         | `subagents.token_budget`，`subagents.agents.<name>.token_budget`         | 开启；`max_tokens` 2,000,000，摘要压缩开启时 1,000,000；`warn_threshold` 0.7 | `max_tokens` 大于等于 1000 | 当前轮被截断并强制收尾，`completed` + `token_capped`                                                |
-| 循环检测           | `loop_detection`（与 Lead Agent 共用）                                   | 开启；`warn_threshold` 3，`hard_limit` 5，`window_size` 20，`tool_freq_warn` 30，`tool_freq_hard_limit` 50 |  | `completed` + `loop_capped`                                                                        |
+| 循环检测 | `loop_detection`（与 Lead Agent 共用） | 开启；`warn_threshold` 3，`hard_limit` 5，`window_size` 20；频次指标阈值为 30 和 50 次 |  | 相同且无进展的调用可产生 `completed` + `loop_capped`；工具频次只记录指标 |
 | 摘要压缩           | `summarization`（与 Lead Agent 共用）                                    | 示例配置开启，按 32,000 token 触发，保留最近 10 条消息 |                          | 压缩后系统提示与最新用户消息保留，摘要写入 `summary_text` 并每次回注                              |
 | 进程级容量         | `subagent_runtime.max_running`                                           | 3                                               | 1 到 64                              | 满时按 `admission_policy` 排队或拒绝                                                               |
 | 排队上限           | `subagent_runtime.max_queued`                                            | 64                                              | 0 到 10,000                          | 队列满时拒绝：`Subagent execution capacity is full (3 running, 64 queued)`                         |
 | 准入策略           | `subagent_runtime.admission_policy`                                      | `queue`                                         | `queue` / `reject`                   | `reject` 时槽位占满立即失败                                                                        |
-| 排队超时           | `subagent_runtime.queue_timeout_seconds`                                 | 300                                             | 1 到 86,400                          | `Timed out after 300s waiting for a subagent execution slot`，状态 `failed`                        |
+| 排队超时           | `subagent_runtime.queue_timeout_seconds`                                 | 300                                             | 1 到 86,400                          | `Timed out after 300s waiting for a subagent execution slot`，状态 `failed`；这段等待不消耗执行超时 |
 | AIO shell 会话数   | `sandbox.environment.MAX_SHELL_SESSIONS`                                 | 镜像默认 10；需要时自动设为 `max_running + 1`   | 不得小于 `max_running + 1`           | 不足时启动报错；见[沙箱与隔离](/docs/harness/subagents/sandbox)                                    |
 
 `subagent_runtime` 的四个字段在 Gateway 启动时固定，改动后需要重启；它们同时约束普通 `task` 和持久批处理。排队中的委派是异步等待，不占用执行线程。容量拒绝或排队超时对普通 `task` 表现为一条 `failed` 结果；持久批处理的条目则重新排队。
@@ -56,13 +56,13 @@ recursion_limit = max_turns × (每轮节点数) + (每次调用一次性节点�
 
 轮次用尽时执行器捕获 `GraphRecursionError`，保留最后一段助手文本作为部分结果并标记 `turn_capped`。
 
-超时以墙钟计算，超过后子 Agent 被取消，状态 `timed_out`。轮次和超时是两条独立的轴：调大 `max_turns` 时通常要同步调大 `timeout_seconds`，否则失败只是从轮次换成了超时。
+执行超时从容量控制器分配槽位时开始计算，包含最终结果的处理时间。排队等待由 `queue_timeout_seconds` 单独约束。执行超时后，即使子 Agent 已准备发布成功结果，也会报告 `timed_out`。轮次和超时是两条独立的轴：调大 `max_turns` 时通常要同步调大 `timeout_seconds`，否则失败只是从轮次换成了超时。
 
 ## 失控行为防护
 
 子 Agent 中间件链镜像了 Lead Agent 的四道防护：
 
-- **循环检测** `LoopDetectionMiddleware`：打断不取得进展却反复调用同一工具的循环。子 Agent 没有 `task`，所以只有工具循环启发式会触发。硬停止把结果标记为 `completed` + `subagent_stop_reason=loop_capped`。由 `loop_detection` 配置控制，可以用 `tool_freq_overrides` 按工具名单独设阈值。
+- **循环检测** `LoopDetectionMiddleware`：对相同且没有进展的工具调用发出警告并在达到硬限制时停止。子 Agent 没有 `task`，所以只有工具循环启发式会触发。基于哈希的硬停止把结果标记为 `completed` + `subagent_stop_reason=loop_capped`。工具名称频次只记录 INFO 指标，用于工作量和成本监测，不会发出警告或停止运行。由 `loop_detection` 配置控制，`tool_freq_overrides` 只调整各工具的指标阈值。
 - **token 预算** `TokenBudgetMiddleware`：按 `subagents.token_budget` 计算单次运行的累计 token。到达硬停止阈值时剥离当前轮的工具调用、强制产出最终答案，结果标记 `completed` + `token_capped`。到达 `warn_threshold` 比例时，会在子 Agent 的下一次模型调用中注入一次预算警告，并记一条 INFO 日志。
 - **输出长度** `ModelLengthFinishReasonMiddleware`：provider 因输出长度上限停止回答时（`finish_reason=length`、`stop_reason=max_tokens`、`MAX_TOKENS` 或 Responses 的 `max_output_tokens`），该回答里的工具调用参数可能不完整，会被丢弃，结果标记 `completed` + `model_length_capped`。
 - **摘要压缩** `DeerFlowSummarizationMiddleware`：用与 Lead Agent 相同的 `summarization.enabled` 开关压缩过长的子 Agent 记录，摘要模型默认就是子 Agent 自己在用的模型。压缩时子 Agent 的系统提示（角色、报告契约、验收说明、技能索引、延迟工具目录）和最新用户消息会被保留；`DurableContextMiddleware` 排在压缩之前，把 `summary_text` 回注到后续请求，避免压缩后出现以助手消息开头的历史。

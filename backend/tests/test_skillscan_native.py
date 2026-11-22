@@ -698,6 +698,47 @@ def test_secret_cloud_token_matches_canonical_token_families(tmp_path: Path, tok
     assert token not in (finding["evidence"] or "")
 
 
+@pytest.mark.parametrize("filename", ["references/shell.md", "references/notes.dat"])
+def test_plain_shell_documentation_reaches_contextual_review(tmp_path: Path, filename: str) -> None:
+    path = tmp_path / filename
+    path.parent.mkdir()
+    path.write_bytes(b"Bash documents the virtual path `/dev/tcp/` and the spelling nc -e.\nThe glossary also lists /etc/passwd and curl.\n")
+
+    result = scan_skill_dir(tmp_path)
+
+    assert result["scanner_errors"] == []
+    assert result["blocked"] is False
+    assert {(item["rule_id"], item["severity"]) for item in result["findings"]} == {("shell-reverse-shell", "HIGH"), ("shell-sensitive-exfil", "HIGH")}
+
+
+@pytest.mark.parametrize("filename", ["check.md", "check.dat", "check"])
+def test_inferred_shell_command_after_prose_still_blocks(tmp_path: Path, filename: str) -> None:
+    path = tmp_path / filename
+    path.write_bytes(b"# Bash documents the virtual path /dev/tcp/.\ntest -d /dev/tcp/\n")
+
+    result = scan_skill_dir(tmp_path)
+
+    assert result["scanner_errors"] == []
+    finding = _finding_by_rule(result["findings"], "shell-reverse-shell")
+    assert (finding["file"], finding["line"], finding["severity"]) == (filename, 2, "CRITICAL")
+    assert result["blocked"] is True
+
+
+def test_inferred_shell_critical_evidence_uses_operators_and_file_operands(tmp_path: Path) -> None:
+    (tmp_path / "redirect.dat").write_bytes(b"if false; then : </dev/tcp/; fi\n")
+    (tmp_path / "check.dat").write_bytes(b"test -f /etc/passwd && curl --version\n")
+    (tmp_path / "notes.txt").write_bytes(b"See /etc/passwd in the glossary.\ncurl --version\n")
+
+    result = scan_skill_dir(tmp_path)
+
+    assert result["scanner_errors"] == []
+    assert [(item["file"], item["rule_id"], item["severity"]) for item in result["findings"]] == [
+        ("check.dat", "shell-sensitive-exfil", "CRITICAL"),
+        ("notes.txt", "shell-sensitive-exfil", "HIGH"),
+        ("redirect.dat", "shell-reverse-shell", "CRITICAL"),
+    ]
+
+
 def test_shell_weak_reverse_shell_idioms_warn_not_block(tmp_path: Path) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
@@ -740,6 +781,86 @@ def test_zsh_script_without_shebang_is_scanned_as_shell(tmp_path: Path) -> None:
     finding = _finding_by_rule(result["findings"], "shell-reverse-shell")
     assert (finding["file"], finding["severity"]) == ("scripts/run.zsh", "CRITICAL")
     assert result["blocked"] is True
+
+
+@pytest.mark.parametrize("filename", ["helper.dat", "helper"])
+@pytest.mark.parametrize(
+    ("source", "rule_id", "severity"),
+    [
+        ('compile("1 + 1", "<fixture>", "exec")\n', "python-dynamic-exec", "CRITICAL"),
+        ('\ufeffcompile("1 + 1", "<fixture>", "exec")\n', "python-dynamic-exec", "CRITICAL"),
+        ('from os import environ\nlabel = "https://example.invalid/"\nvariables = environ\n', "python-env-dump-exfil", "CRITICAL"),
+        ("printenv DEERFLOW_TEST_MARKER\n", "shell-env-dump", "MEDIUM"),
+        ("MARKER=sample printenv DEERFLOW_TEST_MARKER\n", "shell-env-dump", "MEDIUM"),
+    ],
+)
+def test_native_analyzers_cover_text_without_script_names(tmp_path: Path, filename: str, source: str, rule_id: str, severity: str) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    data = skill_dir / "data"
+    data.mkdir()
+    (data / filename).write_text(source, encoding="utf-8", newline="\n")
+    (data / "labels.dat").write_bytes(b"red,green,blue\n")
+    (data / "notes.md").write_bytes(b"To display a single variable, use printenv DEERFLOW_TEST_MARKER.\n")
+    (data / "messages.py").write_bytes(b'note = "Use printenv for one named variable."\n')
+
+    result = scan_skill_dir(skill_dir)
+
+    assert result["scanner_errors"] == []
+    assert [(finding["file"], finding["rule_id"], finding["severity"]) for finding in result["findings"]] == [(f"data/{filename}", rule_id, severity)]
+    assert result["blocked"] == (severity == "CRITICAL")
+
+
+def test_inferred_languages_distinguish_data_from_shell_commands(tmp_path: Path) -> None:
+    (tmp_path / "labels.json").write_bytes(b'["/etc/passwd", "https://example.invalid/", true]\n')
+    (tmp_path / "notes.dat").write_bytes(b'note = "Bash documents /dev/tcp/ paths."\n')
+    (tmp_path / "check.dat").write_bytes(b"test -d /dev/tcp/\n")
+
+    result = scan_skill_dir(tmp_path)
+
+    assert result["scanner_errors"] == []
+    assert [(item["file"], item["rule_id"], item["severity"]) for item in result["findings"]] == [
+        ("check.dat", "shell-reverse-shell", "CRITICAL"),
+        ("notes.dat", "shell-reverse-shell", "HIGH"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "extra", "expected_rule"),
+    [
+        ("settings.toml", "", None),
+        ("settings.toml", "print(reference, help_url)", None),
+        ("helper.dat", "open('fixtures/etc/passwd').close()", "python-sensitive-path-read"),
+        ("helper.dat", "import requests\nrequests.head(help_url)", None),
+        ("helper.dat", "open('fixtures/etc/passwd').close()\nimport requests\nrequests.head(help_url)", "python-sensitive-exfil"),
+        ("helper.dat", "open('fixtures/etc/passwd').close()\nimport socket\ns = socket.socket()", "python-sensitive-path-read"),
+        ("helper.dat", "open('fixtures/etc/passwd').close()\nimport socket\ns = socket.socket()\ns.connect(('localhost', 0))", "python-sensitive-exfil"),
+        ("helper.dat", "open('README.md').close()\nimport requests\nrequests.head(help_url)", None),
+        ("helper.dat", "open(file='fixtures/etc/passwd', mode='x').close()\nimport requests\nrequests.head(help_url)", None),
+        ("helper.dat", "from pathlib import Path as P\nP('fixtures/etc/passwd').read_text()", "python-sensitive-path-read"),
+        ("settings.py", "", "python-sensitive-exfil"),
+    ],
+)
+def test_inferred_python_requires_io_for_sensitive_exfil(tmp_path: Path, filename: str, extra: str, expected_rule: str | None) -> None:
+    # Only parse these fixtures. The I/O expressions are never evaluated.
+    source = 'reference = "fixtures/etc/passwd"\nhelp_url = "https://docs.example.invalid/"\n' + extra
+    (tmp_path / filename).write_text(source, encoding="utf-8", newline="\n")
+
+    result = scan_skill_dir(tmp_path)
+
+    assert result["scanner_errors"] == []
+    assert [finding["rule_id"] for finding in result["findings"] if finding["rule_id"].startswith("python-sensitive-")] == ([expected_rule] if expected_rule else [])
+    assert result["blocked"] == (expected_rule == "python-sensitive-exfil")
+
+
+def test_inferred_python_analysis_reports_its_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("deerflow.skills.skillscan.orchestrator._MAX_INFERRED_PYTHON_CHARS", 32)
+    (tmp_path / "helper.dat").write_bytes(b"# sample\n" * 8 + b"printenv DEERFLOW_TEST_MARKER\n")
+
+    result = scan_skill_dir(tmp_path)
+
+    assert result["scanner_errors"] == []
+    assert {item["rule_id"] for item in result["findings"]} == {"package-python-analysis-limit", "shell-env-dump"}
 
 
 @pytest.mark.parametrize(
