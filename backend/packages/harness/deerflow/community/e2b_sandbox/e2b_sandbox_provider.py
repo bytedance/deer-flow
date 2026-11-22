@@ -389,7 +389,7 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("E2B sandbox ownership is process-local. Multi-worker gateways must configure sandbox.ownership.type: redis for safe reconciliation.")
 
         atexit.register(self._shutdown_at_exit)
-        self._register_signal_handlers()
+        self._register_or_defer_signal_handlers()
         self._start_maintenance_threads()
 
     def _load_config(self) -> dict[str, Any]:
