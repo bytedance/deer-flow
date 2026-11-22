@@ -83,6 +83,11 @@ export const extensionCatalog = [
     package: "deerflow-extension-skill-evolution",
     namespace: null,
   },
+  {
+    key: "runPostmortem",
+    package: "deerflow-extension-run-postmortem",
+    namespace: null,
+  },
   { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
   { key: "weknora", package: "deerflow-extension-weknora", namespace: null },
   { key: "example", package: "deerflow-extension-example", namespace: null },

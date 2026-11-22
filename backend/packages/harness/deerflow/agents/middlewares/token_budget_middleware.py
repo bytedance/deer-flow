@@ -57,7 +57,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
-from deerflow.agents.middlewares.model_response import last_ai_message
+from deerflow.agents.middlewares.model_response import is_empty_stop_response, last_ai_message
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.config.token_budget_config import TokenBudgetConfig
 
@@ -409,11 +409,12 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         return warnings or []
 
     def _restore_pending_warnings(self, runtime: Runtime, warnings: list[str]) -> None:
-        """Requeue warnings taken for a model call that raised.
+        """Requeue warnings taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the warning. It is not queued twice: ``_warned`` is already set.
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the warning. It is not queued twice:
+        ``_warned`` is already set.
         """
         if not warnings:
             return
@@ -504,12 +505,14 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         try:
             response = handler(self._inject_warnings(request, warnings))
             self._record_pending_model_call(request.runtime, response)
-            return response
         except BaseException as exc:
             self._discard_pending_model_call(request.runtime)
             if isinstance(exc, Exception):
                 self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     @override
     async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelCallResult:
@@ -517,9 +520,11 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         try:
             response = await handler(self._inject_warnings(request, warnings))
             self._record_pending_model_call(request.runtime, response)
-            return response
         except BaseException as exc:
             self._discard_pending_model_call(request.runtime)
             if isinstance(exc, Exception):
                 self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response

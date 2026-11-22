@@ -209,6 +209,22 @@ class TestGenerator:
         assert (await docs.get("doc-1", user_id="u1"))["summary"] is None
         assert generator.metrics()["failed"] == 1
 
+    async def test_ollama_done_reason_does_not_change_document_summary_policy(self, repos, text_file, monkeypatch):
+        sf, projects, docs = repos
+        project, _row = await _shelf_row(projects, docs)
+        _patch_source(monkeypatch, (text_file, None))
+        monkeypatch.setattr(summaries, "run_oneshot_llm_detailed", lambda **kwargs: _fake_model("A one-line summary", {"done_reason": "length"}))
+        generator = SummaryGenerator(session_factory=sf, paths=None, app_config=_app_config())
+        await generator.start()
+        try:
+            generator.enqueue(document_id="doc-1", project_id=project["id"], user_id="u1")
+            await _drain(generator)
+        finally:
+            await generator.stop()
+
+        assert (await docs.get("doc-1", user_id="u1"))["summary"] == "A one-line summary"
+        assert generator.metrics()["success"] == 1
+
     async def test_anthropic_style_stop_reason_also_detected(self, repos, text_file, monkeypatch):
         sf, projects, docs = repos
         await _shelf_row(projects, docs)

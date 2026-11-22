@@ -43,6 +43,16 @@ class SubagentExecutionCapacity:
         self._running = 0
         self._waiters: deque[asyncio.Future[None]] = deque()
 
+    @property
+    def queue_timeout_seconds(self) -> int:
+        """The queue bound this controller applies to waiting executions.
+
+        Exposed so a caller that injects its own controller (the SDK runtime
+        does not install a process-wide one) can size its wait budget from the
+        capacity it actually waits on instead of the startup snapshot.
+        """
+        return self._config.queue_timeout_seconds
+
     def snapshot(self) -> SubagentCapacitySnapshot:
         # snapshot() is read from non-loop threads (notably
         # configure_subagent_execution_capacity), while the loop thread mutates
@@ -198,3 +208,14 @@ def configured_subagent_max_running() -> int:
     """Return the startup snapshot without requiring an event loop."""
     with _state_lock:
         return _config.max_running
+
+
+def configured_subagent_queue_timeout_seconds() -> int:
+    """Return the queue bound without requiring an event loop.
+
+    Pollers live on the parent loop and must size their wait budget for the
+    queue stage, but reading it through ``get_subagent_execution_capacity()``
+    would bind or rebind the controller to the parent loop.
+    """
+    with _state_lock:
+        return _config.queue_timeout_seconds
