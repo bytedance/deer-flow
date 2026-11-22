@@ -680,6 +680,9 @@ class ScheduledTaskRunRepository:
                     status="launching",
                     lease_owner=lease_owner,
                     lease_expires_at=now + timedelta(seconds=lease_seconds),
+                    # attempt_count doubles as the launch-claim generation:
+                    # late bookkeeping passes it back so a reclaim cannot be
+                    # overwritten by an older attempt with the same owner.
                     attempt_count=ScheduledTaskRunRow.attempt_count + 1,
                 )
             )
@@ -696,15 +699,19 @@ class ScheduledTaskRunRepository:
         *,
         lease_owner: str,
         error: str | None = None,
+        expected_attempt_count: int | None = None,
     ) -> bool:
         async with self._sf() as session:
+            conditions = [
+                ScheduledTaskRunRow.id == run_record_id,
+                ScheduledTaskRunRow.status == "launching",
+                ScheduledTaskRunRow.lease_owner == lease_owner,
+            ]
+            if expected_attempt_count is not None:
+                conditions.append(ScheduledTaskRunRow.attempt_count == expected_attempt_count)
             result = await session.execute(
                 update(ScheduledTaskRunRow)
-                .where(
-                    ScheduledTaskRunRow.id == run_record_id,
-                    ScheduledTaskRunRow.status == "launching",
-                    ScheduledTaskRunRow.lease_owner == lease_owner,
-                )
+                .where(*conditions)
                 .values(
                     status="queued",
                     lease_owner=None,
@@ -812,12 +819,19 @@ class ScheduledTaskRunRepository:
         lease_owner: str,
         error: str,
         now: datetime,
+        expected_attempt_count: int | None = None,
     ) -> bool:
         """Fail a claimed launch and update its parent without a release gap."""
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             row = await session.get(ScheduledTaskRunRow, run_record_id, with_for_update=True)
             if row is None or row.task_id != task_id or row.status != "launching" or row.lease_owner != lease_owner:
+                await session.rollback()
+                return False
+            if expected_attempt_count is not None and int(row.attempt_count or 0) != expected_attempt_count:
+                # A newer claim generation owns this row. The caller's launch
+                # already lost the race; do not terminalize or release the
+                # fresh claim's lease.
                 await session.rollback()
                 return False
 
@@ -880,6 +894,33 @@ class ScheduledTaskRunRepository:
                 return False
             if row.status in TERMINAL_RUN_STATUSES:
                 if row.run_id is None:
+                    # A newer occurrence may already own the active slot when
+                    # this late launch returns. Reviving this terminal row in
+                    # that case would violate uq_scheduled_task_run_active and
+                    # abort the launch path; preserve the terminal outcome but
+                    # attach the durable run for completion and later fencing.
+                    newer_active = await session.scalar(
+                        select(ScheduledTaskRunRow.id)
+                        .where(
+                            ScheduledTaskRunRow.task_id == task_id,
+                            ScheduledTaskRunRow.id != run_record_id,
+                            ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                        )
+                        .limit(1)
+                    )
+                    if newer_active is not None:
+                        # The terminal occurrence never started; its durable
+                        # run row carries the real start. Backfilling
+                        # started_at here would place it after finished_at.
+                        row.run_id = run_id
+                        await session.commit()
+                        logger.warning(
+                            "Scheduled task-run %s launched durable run %s while occurrence %s holds the active slot; keeping the terminal status",
+                            run_record_id,
+                            run_id,
+                            newer_active,
+                        )
+                        return True
                     # Timeout/pause can terminalize a claim that recovery
                     # briefly returned to ``queued`` while Gateway admission
                     # was still completing.  A returned durable run is the

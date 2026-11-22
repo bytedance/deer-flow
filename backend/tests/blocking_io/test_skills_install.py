@@ -45,12 +45,14 @@ Drives the full install pipeline under the Blockbuster gate.
 """
 
 _SUPPORT_MD = "Reference notes scanned by the per-file security pass.\n"
+_CALCULATION = "total = 2 + 3\n"
 
 
 def _build_archive(archive: Path) -> None:
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("loop-skill/SKILL.md", _SKILL_MD)
         zf.writestr("loop-skill/references/usage.md", _SUPPORT_MD)
+        zf.writestr("loop-skill/data/calculation.dat", _CALCULATION)
 
 
 async def test_install_skill_archive_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
@@ -89,8 +91,10 @@ async def test_user_scoped_install_skill_archive_does_not_block_event_loop(tmp_p
 
     archive = tmp_path / "loop-skill.skill"
     await asyncio.to_thread(_build_archive, archive)
+    reviewed = []
 
     async def _allow_scan(content: str, *, executable: bool = False, location: str = "SKILL.md", app_config=None, static_findings=None):
+        reviewed.append((location, executable, content))
         return SimpleNamespace(decision="allow", reason="anchor stub")
 
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow_scan)
@@ -104,6 +108,7 @@ async def test_user_scoped_install_skill_archive_does_not_block_event_loop(tmp_p
     result = await storage.ainstall_skill_from_archive(archive)
 
     assert result["success"] is True
+    assert ("loop-skill/data/calculation.dat", True, _CALCULATION) in reviewed
     assert result["skill_name"] == "loop-skill"
     installed_md = tmp_path / "users" / "anchoruser" / "skills" / "custom" / "loop-skill" / "SKILL.md"
     assert await asyncio.to_thread(installed_md.is_file)

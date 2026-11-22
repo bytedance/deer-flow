@@ -1379,7 +1379,7 @@ class RunManager:
 
         hidden_sources: set[str] = set()
         for source, (_, status) in latest_attempt_by_source.items():
-            if status in {RunStatus.pending.value, RunStatus.running.value, RunStatus.success.value}:
+            if status in {RunStatus.pending.value, RunStatus.running.value, RunStatus.waiting_for_input.value, RunStatus.success.value}:
                 hidden_sources.add(source)
         return EditReplayVisibility(
             hidden_source_run_ids=hidden_sources,

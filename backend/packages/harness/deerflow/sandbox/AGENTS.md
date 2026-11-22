@@ -56,7 +56,8 @@ Windows. The portable string assertions do not replace it.
 
 - **Environment.** `build_sandbox_env()` removes inherited credential variables.
   Values from `sandbox.environment` and per-request secrets are added after the
-  scrub. Route every new subprocess launch through it.
+  scrub. Route every new subprocess launch through it. Channel-managed
+  credentials belong to the integration that uses them.
 - **Network approval** needs a human. Runs with no interactive responder
   (scheduled, webhook, autonomous, subagent) deny automatically. Never show an
   approval card that nobody can answer.
@@ -78,6 +79,14 @@ Windows. The portable string assertions do not replace it.
   because `splitlines()` also splits on other Unicode separators.
 - A failed or incomplete directory traversal is an error. Returning a partial
   listing makes the model believe that files do not exist.
+- Search roots decide what counts as noise. `search.ignore_rules_for()` hides
+  `*.log`, `logs/` and the other data-looking names everywhere except the user's
+  own files; a glob the caller spelled out wins over those defaults. The local
+  provider labels a root from its mount table, so a host path the tools resolved
+  from `/mnt/user-data/...` still counts as user data, and a skills mount or any
+  other root keeps the repository filter. In-flight `.upload-*.part` files stay
+  hidden in both root types. A file named as the search root is read at any size;
+  the 1 MB bound only skips files a directory walk discovers.
 - Same-path write serialization is scoped to `(sandbox.id, path)`. Two isolated
   sandboxes use the same virtual paths and must not contend.
 

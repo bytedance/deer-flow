@@ -28,7 +28,8 @@ from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, Syst
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, get_auth_disabled_user, is_auth_disabled
+from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
@@ -48,6 +49,7 @@ from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
 from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
@@ -92,7 +94,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -110,12 +112,12 @@ from deerflow.runtime.user_context import get_current_user, reset_current_user, 
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
-from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_STATUS_VALUES, SUBAGENT_STOP_REASON_VALUES, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -204,6 +206,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
             UNTRUSTED_INPUT_KEY,
+            # Only a share import marks history as someone else's; what a
+            # caller sends is its own and stays eligible for memory.
+            IMPORTED_HISTORY_KEY,
             "run_input_id",
             "run_input_source",
             "origin_task_id",
@@ -643,10 +648,12 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs"})
+#: Older checkpoints can contain loop detection's record of frequency-capped
+#: tools. Reserve its channel for server-owned state.
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY})
 
 #: The ``write_todos`` status contract the todo middleware renders.
-_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
+_TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
 
 
 def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, Any]] | None:
@@ -671,7 +678,7 @@ def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, An
             raise HTTPException(status_code=400, detail=f"{location}[{index}].content must be a string")
         status = entry.get("status", "pending")
         if not isinstance(status, str) or status not in _TODO_STATUSES:
-            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, or completed")
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, completed, blocked, or waiting")
         normalized.append({**entry, "content": content, "status": status})
     return normalized
 
@@ -771,6 +778,28 @@ def _normalize_external_tool_artifacts(value: Any, *, location: str) -> list[dic
     return normalized
 
 
+def _normalize_external_artifacts(value: Any, *, location: str) -> list[str] | None:
+    """Reject artifact lists the reducer cannot merge.
+
+    ``artifacts`` and ``tool_artifact_processed`` are checkpointed reducer
+    channels a caller may Overwrite. ``merge_artifacts`` concatenates the stored
+    list with the new one, so a caller-supplied non-list value fails the next
+    artifact-producing run with an unhandled ``TypeError``. The thread-state
+    route persists the value with ``Overwrite`` before any reducer sees it, so
+    without this boundary the thread stays broken across runs. Require the
+    declared ``list[str]`` shape; the reducer also tolerates an already-poisoned
+    checkpoint.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of strings")
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be a string")
+    return list(value)
+
+
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
     """Require usable goal text without rebuilding caller-supplied goal state."""
     if value is None:
@@ -786,6 +815,61 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
         if field in value and (type(value[field]) is not int or value[field] < 0):
             raise HTTPException(status_code=400, detail=f"{location}.{field} must be a non-negative integer")
     return {**{key: item for key, item in value.items() if key != "last_batch_wakeup_run_id"}, "objective": objective}
+
+
+#: Statuses the ledger reducer and renderer understand: the runtime's terminal
+#: values plus the in-progress marker a live delegation carries.
+_DELEGATION_STATUSES = frozenset({"in_progress", *SUBAGENT_STATUS_VALUES})
+
+
+def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject ledger entries the reducer and renderer cannot read.
+
+    ``delegations`` is a reducer channel a caller may Overwrite. ``merge_delegations``
+    keys on ``id`` and indexes ``status``, and the ledger renderer reads
+    ``description``/``subagent_type`` on every model call. A non-list value, a
+    non-object entry or a missing field raises while the state update merges —
+    failing the run with an unhandled ``TypeError``/``KeyError`` instead of a
+    400 at this boundary. On the thread-state route the bad shape would also be
+    persisted, so every later genuine ledger write would keep failing on it.
+
+    The id must be non-empty because it is the reducer's identity key (an empty
+    id can never be matched by the runtime's write-back), and the status must be
+    one the runtime produces so a caller cannot inject its own steering line into
+    the model-visible ledger. Optional fields the reducer and renderer read as
+    text are validated when present: an unhashable ``run_id`` breaks the
+    reducer's identity key, a non-string ``result_brief`` breaks the renderer's
+    length bound, and an unknown ``stop_reason`` renders guardrail-cap guidance
+    the runtime never stamped.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        _reject_overwrite_marker(value, location=location)
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of delegation objects")
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of delegation objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        for field in ("id", "description", "subagent_type"):
+            if not isinstance(entry.get(field), str):
+                raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string")
+        if not entry["id"]:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].id must be non-empty")
+        status = entry.get("status")
+        if not isinstance(status, str) or status not in _DELEGATION_STATUSES:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be one of {', '.join(sorted(_DELEGATION_STATUSES))}")
+        for field in ("run_id", "result_brief"):
+            optional_text = entry.get(field)
+            if optional_text is not None and not isinstance(optional_text, str):
+                raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string or null")
+        stop_reason = entry.get("stop_reason")
+        if stop_reason is not None and (not isinstance(stop_reason, str) or stop_reason not in SUBAGENT_STOP_REASON_VALUES):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].stop_reason must be one of {', '.join(SUBAGENT_STOP_REASON_VALUES)}")
+        normalized.append(dict(entry))
+    return normalized
 
 
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -822,8 +906,9 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
             stripped[channel] = None if normalized_todos is None else [_strip_external_metadata_from_message_like(item) for item in normalized_todos]
         elif channel == "messages" and value is not None:
             stripped[channel] = _normalize_input_messages(value, location="values.messages")
-        elif channel == "delegations" and isinstance(value, list):
-            stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
+        elif channel == "delegations":
+            normalized_delegations = _normalize_external_delegations(value, location="values.delegations")
+            stripped[channel] = None if normalized_delegations is None else [_strip_external_delegation_verdict(item) for item in normalized_delegations]
         elif channel == "skill_context":
             normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
             stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
@@ -837,6 +922,11 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
             # strip the generic list branch applied: a caller-crafted entry must
             # not smuggle server-owned message metadata into the checkpoint.
             stripped[channel] = None if normalized_tool_artifacts is None else [_strip_external_metadata_from_message_like(item) for item in normalized_tool_artifacts]
+        elif channel in ("artifacts", "tool_artifact_processed"):
+            # Entries are display paths, so the generic list branch's
+            # message-metadata strip is a no-op for them; the shape check
+            # replaces that pass rather than skipping a real sanitizer.
+            stripped[channel] = _normalize_external_artifacts(value, location=f"values.{channel}")
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
@@ -900,17 +990,21 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
         converted = _normalize_input_messages(messages, location="input.messages", trusted_internal=trusted_internal)
         result = {**raw_input, "messages": converted}
     if not trusted_internal:
-        delegations = result.get("delegations")
-        if isinstance(delegations, list):
-            cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
-            if cleaned != delegations:
-                result = {**result, "delegations": cleaned}
+        if "delegations" in result:
+            normalized_delegations = _normalize_external_delegations(result["delegations"], location="input.delegations")
+            result = {
+                **result,
+                "delegations": None if normalized_delegations is None else [_strip_external_delegation_verdict(entry) for entry in normalized_delegations],
+            }
         if "skill_context" in result:
             result = {**result, "skill_context": _normalize_external_skill_context(result["skill_context"], location="input.skill_context")}
         if "promoted" in result:
             result = {**result, "promoted": _normalize_external_promoted(result["promoted"], location="input.promoted")}
         if "tool_artifacts" in result:
             result = {**result, "tool_artifacts": _normalize_external_tool_artifacts(result["tool_artifacts"], location="input.tool_artifacts")}
+        for artifact_channel in ("artifacts", "tool_artifact_processed"):
+            if artifact_channel in result:
+                result = {**result, artifact_channel: _normalize_external_artifacts(result[artifact_channel], location=f"input.{artifact_channel}")}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
             normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
@@ -1153,6 +1247,9 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
             AGENT_AUTH_CONTEXT_KEY,
+            # Obsolete run field. Discard it even on internal requests.
+            "github_token",
+            MCP_BROWSER_USER_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
@@ -1164,14 +1261,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),
 # never into ``config['configurable']``. These are read by tools and
 # middlewares from ``runtime.context`` and have no reason to live in
-# ``configurable`` — and ``configurable`` is persisted in checkpoints, so
-# keeping secrets like ``github_token`` out of it avoids writing a
-# short-lived installation token into the checkpoint store.
+# ``configurable``, which is persisted in checkpoints.
 #
-#   ``github_token``         — App installation token minted by the GitHub
-#                              channel; the bash tool exposes it as
-#                              ``GH_TOKEN``/``GITHUB_TOKEN`` so ``gh`` and
-#                              ``git`` push as the bot, not the host user.
 #   ``disable_clarification`` — set for non-interactive channels (GitHub
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
@@ -1182,7 +1273,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 # (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
 # which reach the Gateway over the internally-authenticated request channel, so
 # they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"disable_clarification", "channel_name"})
 
 # Public run-only controls are accepted through body.context, not body.config.
 _MODEL_SELECTION_CONTEXT_KEYS = frozenset({"subagent_model_name", "model_selection_requested"})
@@ -1196,10 +1287,7 @@ _MODEL_SELECTION_CONTEXT_KEYS = frozenset({"subagent_model_name", "model_selecti
 # included — with "proceed without asking" instead of interrupting, and
 # ``SandboxMiddleware`` reads the two keys as the same non-interactive signal.
 # Accepting it from a client therefore reproduces the effect the
-# ``non_interactive`` gate exists to prevent. ``github_token`` is a live
-# credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
-# smuggled through ``body.config['configurable']`` would be written to the
-# checkpoint store.
+# ``non_interactive`` gate exists to prevent.
 _INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS
 
 
@@ -1246,12 +1334,8 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     is True; for non-internal callers those keys are dropped from client requests
     by :func:`strip_internal_context_keys`.
 
-    A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is likewise forwarded only when ``internal`` is True,
-    and then into ``config['context']`` only, never ``configurable``. These are
-    secrets / runtime flags read by tools and middlewares from ``runtime.context``;
-    keeping them out of ``configurable`` avoids persisting a short-lived token in the
-    checkpoint store.
+    Runtime-only flags such as ``disable_clarification`` are forwarded only for
+    internal requests and land exclusively in ``config['context']``.
 
     Client capability context is runtime-only: it is sanitized and copied into
     ``config['context']['client']`` but never into ``configurable``.
@@ -1310,7 +1394,7 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context[key] = value
     if "model_selection_requested" in context and (context.get("model_name") != context["model_selection_requested"] or not isinstance(runtime_context, dict) or runtime_context.get("model_name") != context["model_selection_requested"]):
         raise HTTPException(status_code=400, detail="model_selection_requested must match model_name in context.")
-    # Context-only keys (secrets / runtime flags) land in ``config['context']``
+    # Runtime-only flags land in ``config['context']``
     # only — never ``configurable`` (which is persisted in checkpoints) — and only
     # for internal callers, the sole legitimate producers.
     if internal:
@@ -2502,6 +2586,13 @@ async def start_run(
     if not await thread_access_allowed():
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    from app.gateway.coordination_workers import direct_worker_run, managed_task
+    from deerflow.persistence.coordination.workers import THREAD_PREFIX
+
+    if thread_id.startswith(THREAD_PREFIX) and not getattr(request.state, "coordination_execution_id", None):
+        if task_id := await managed_task(request, thread_id):
+            return await direct_worker_run(request, task_id, body, idempotency_key)
+
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
@@ -2696,6 +2787,16 @@ async def start_run(
             internal_owner_user=internal_owner_user,
             request_context=getattr(body, "context", None),
         )
+
+        if (
+            user is not None
+            and getattr(request.state, "auth_source", None) == AUTH_SOURCE_SESSION
+            and bool(getattr(request, "cookies", {}).get(ACCESS_TOKEN_COOKIE_NAME))
+            and origin is None
+            and admitted_origin == "interactive"
+            and body.multitask_strategy != "enqueue"
+        ):
+            run_ctx = replace(run_ctx, mcp_browser_user=str(user.id))
 
         if agent_config is not None and getattr(run_ctx.app_config, "mcp_agent_auth", None):
             from deerflow.mcp.agent_auth import McpAgentAuthorizationError, capture_agent_authority
@@ -2964,6 +3065,9 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
+                from app.gateway.share_fork import ensure_share_import_history_marked
+
+                await ensure_share_import_history_marked(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
                 # A strict caller may have observed the thread before a
                 # concurrent delete removed it while checkpoint preparation
                 # yielded. Recheck immediately before durable admission. The
