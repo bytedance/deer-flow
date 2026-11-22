@@ -3659,6 +3659,7 @@ export function useThreadStream({
       persistedMessages,
       visibleHistory,
       rejectPendingSend,
+      discardReleasedSend,
     ],
   );
 
