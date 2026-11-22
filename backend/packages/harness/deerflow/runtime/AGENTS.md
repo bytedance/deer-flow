@@ -42,6 +42,10 @@ make test-blocking-io
   mode rejects a `delta` checkpoint; it does not guess.
 - **Read and change state through `CheckpointStateAccessor`** with the thread's
   effective schema. It preserves mode gates, parentage and pending writes.
+- **A failed pre-run snapshot leaves no message-ID boundary.** When a
+  checkpointer exists but the pre-run capture fails, the first `values` frame
+  establishes a replay baseline; only later message IDs can decide this run's
+  LLM error fallback.
 - **Delta resume and rollback rewrite the current head.** They do not fork.
   Reject a missing tuple or pending sends before the first write.
 

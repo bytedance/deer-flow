@@ -210,13 +210,21 @@ OpenAI-compatible settings:
 Text-to-image calls use `POST {base_url}/images/generations`. Reference-image calls
 use multipart `POST {base_url}/images/edits`; a relay may support generation without
 supporting edits. Responses may contain base64 image data, a data URL, or a downloadable
-URL. Aspect ratios map to `1024x1024`, `1536x1024`, or `1024x1536` unless
+URL. Downloads require HTTPS on port 443 and a final 2xx response. The downloader
+accepts public IPv4 literals and checks DNS hostname syntax without resolving names.
+It revalidates the URL at every redirect.
+
+Aspect ratios map to `1024x1024`, `1536x1024`, or `1024x1536` unless
 `IMAGE_GENERATION_SIZE` is set. The output extension selects the API `output_format`:
 `.jpg`/`.jpeg` uses `jpeg`, `.webp` uses `webp`, and all other extensions use `png`.
 When `dall-e-2` or `dall-e-3` is configured instead, the request uses the model's
 supported dimensions and `response_format=b64_json`; DALL-E output files must use a
 `.png` extension. Reference-image editing with DALL-E models is not supported by this
 skill; use the default GPT Image model for edits.
+
+Gemini, MiniMax, and OpenAI-compatible generation requests follow up to five
+HTTP 307 or 308 redirects on the same scheme, host, and port. These redirects
+preserve the POST body, including reference images.
 
 MiniMax optional overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
 `MINIMAX_IMAGE_MODEL` (default `image-01`). Reference images are sent as the MiniMax

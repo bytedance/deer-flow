@@ -7,9 +7,10 @@ import json
 import yaml
 
 from deerflow.skills.frontmatter import _FRONTMATTER_RE, ALLOWED_FRONTMATTER_PROPERTIES
+from deerflow.skills.package_files import MAX_MODEL_FILE_BYTES
 from deerflow.skills.validation import validate_skill_frontmatter_text
 
-MAX_MAIN_BYTES = 128 * 1024
+MAX_MAIN_BYTES = MAX_MODEL_FILE_BYTES
 PARSER_VERSION = "skill-mutation-frontmatter-v1"
 
 
