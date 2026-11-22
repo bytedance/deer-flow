@@ -14,6 +14,7 @@ from starlette.datastructures import UploadFile
 
 from app.gateway.persistent_writes import run_drained_write
 from app.gateway.routers import uploads
+from app.gateway.upload_ingestion import prepare_published_uploads
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.uploads.companions import register_companion
@@ -131,7 +132,6 @@ def _publish_files(thread_id: str, user_id: str, targets: list[tuple[Path, str]]
                 if not os.path.samestat(source.lstat(), path.lstat()):
                     raise
             paths.append(path)
-        uploads._make_uploaded_paths_sandbox_readable(paths)
     except BaseException:
         uploads._cleanup_uploaded_paths(published)
         raise
@@ -164,15 +164,15 @@ async def publish_input_files(thread_id: str, user_id: str, staging_id: str, fil
         paths, published = await run_drained_write("Publish queued attachments", _publish_files, (), thread_id, user_id, targets)
         try:
             provider = await run_file_io(uploads.get_sandbox_provider)
-            if not uploads._uses_thread_data_mounts(provider):
+            if uploads._uses_thread_data_mounts(provider):
+                await prepare_published_uploads(paths)
+            else:
                 # Keep the ordinary upload endpoint's sandbox authorization.
                 lease = await uploads.try_acquire_sandbox_for_request(request, provider, thread_id, user_id=user_id, app_config=config, owner_prefix="gateway:queued-upload")
                 try:
-                    if not lease.denied:
-                        if lease.sandbox is None:
-                            raise RuntimeError("Failed to acquire sandbox for queued attachments")
-                        for path in paths:
-                            await run_file_io(uploads._sync_upload_to_sandbox, lease.sandbox, path, uploads.upload_virtual_path(path.name))
+                    if not lease.denied and lease.sandbox is None:
+                        raise RuntimeError("Failed to acquire sandbox for queued attachments")
+                    await prepare_published_uploads(paths, sandbox=None if lease.denied else lease.sandbox)
                 finally:
                     await lease.release()
         except BaseException:

@@ -84,10 +84,17 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_queued_upload_companion_stays_valid_after_staging_removal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mounted", [True, False])
+async def test_queued_upload_companion_stays_valid_after_staging_removal(tmp_path, monkeypatch, mounted):
     paths = Paths(tmp_path)
     monkeypatch.setattr("deerflow.config.paths._paths", paths)
-    monkeypatch.setattr(uploads, "get_sandbox_provider", _mounted_provider)
+    provider = _mounted_provider()
+    provider.uses_thread_data_mounts = mounted
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: provider)
+    sandbox = MagicMock()
+    release = AsyncMock()
+    acquire = AsyncMock(return_value=SimpleNamespace(sandbox=sandbox, denied=False, release=release))
+    monkeypatch.setattr(uploads, "try_acquire_sandbox_for_request", acquire)
     config = SimpleNamespace(uploads={"auto_convert_documents": True})
     thread_id, user_id = "thread-queue", "user-queue"
     destination = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
@@ -108,6 +115,15 @@ async def test_queued_upload_companion_stays_valid_after_staging_removal(tmp_pat
     assert companion is not None
     assert companion.read_text(encoding="utf-8") == "# Converted\n"
     assert list((paths.thread_dir(thread_id, user_id=user_id) / ".queued-uploads").iterdir()) == []
+    if mounted:
+        acquire.assert_not_awaited()
+        sandbox.update_file.assert_not_called()
+    else:
+        acquire.assert_awaited_once()
+        sandbox.update_file.assert_any_call(uploads.upload_virtual_path(original.name), b"%PDF queued upload")
+        sandbox.update_file.assert_any_call(uploads.upload_virtual_path(companion.name), b"# Converted\n")
+        assert sandbox.update_file.call_count == 2
+        release.assert_awaited_once()
 
 
 def test_upload_and_list_response_models_expose_size_as_int(tmp_path):
