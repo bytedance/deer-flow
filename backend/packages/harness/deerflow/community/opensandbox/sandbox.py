@@ -328,6 +328,12 @@ class OpenSandboxSandbox(Sandbox):
         resolved = self._resolve_path(path)
         self._file_op(lambda files: files.write_file(resolved, content, mode=644))
 
+    def _upload_skill_file(self, path: str, content: bytes, *, executable: bool) -> None:
+        resolved = self._resolve_path(path)
+        if resolved != path:
+            raise ValueError("OpenSandbox skill path contains a non-portable separator")
+        self._file_op(lambda files: files.write_file(resolved, content, mode=755 if executable else 644))
+
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         return self._download_file_bounded(path, max_bytes=download_limit(max_bytes, _MAX_DOWNLOAD_SIZE))
 
