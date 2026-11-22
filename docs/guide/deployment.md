@@ -312,6 +312,15 @@ supports queued attachments can accept them. Older Gateways handle queue items
 as plain text, so finish or remove items with attachments before rolling back.
 See [queued input](../../backend/docs/API.md#submit-an-input-while-a-web-run-is-active).
 
+### Redis checkpoint history cache upgrade
+
+The v2 cache rebuilds histories under a new default prefix. Deleting or pruning
+a thread also purges its v1 entries for the same database, including entries
+without expiry. If `database.checkpoint_cache.key_prefix` is set, stop all
+workers using that prefix, clear this deployment's Redis checkpoint history
+keys, and then start the upgraded workers. Custom prefixes keep the same name
+across cache versions.
+
 ## Option 2: Local Development
 
 If you prefer running services locally:

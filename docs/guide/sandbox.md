@@ -452,6 +452,10 @@ The `write_file` guidance reflects the active model's output token limit, includ
 
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. If local command startup fails after spawning a child, DeerFlow attempts to kill and reap that child before propagating the startup error. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
 
+On Windows, relative paths in local commands start in the thread workspace.
+PowerShell supports spaces and typographic apostrophes in the workspace path.
+The `cmd.exe` fallback supports workspace paths on a local or mapped drive.
+
 Docker AIO sandboxes default to their existing open egress behavior for
 compatibility. Operators can set `sandbox.network.mode` to `isolated` or
 `allowlist`; allowlist mode supports operator-defined domains and an interactive

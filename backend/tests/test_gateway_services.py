@@ -3130,16 +3130,6 @@ def test_merge_run_context_overrides_noop_for_empty_context():
 
 
 def test_merge_run_context_overrides_forwards_context_only_keys():
-    """``github_token`` and ``disable_clarification`` must reach ``config['context']``
-    (runtime context → ``runtime.context``) so the bash tool and ClarificationMiddleware
-    can read them. They must NOT be written to ``config['configurable']`` — that dict is
-    persisted in checkpoints, and ``github_token`` is a (short-lived) secret.
-
-    Regression for the GitHub channel: without this, the installation token minted by
-    ``ChannelManager._apply_channel_policy`` was silently dropped here, so ``gh``
-    fell back to the host's stored keyring creds and authored issues/PRs as the host
-    user instead of the App bot.
-    """
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
@@ -3153,8 +3143,7 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
         internal=True,
     )
 
-    # Forwarded into runtime context — what tools/middlewares read.
-    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert "github_token" not in config["context"]
     assert config["context"]["disable_clarification"] is True
     assert config["context"]["agent_name"] == "coding-llm-gateway"
 
@@ -3164,9 +3153,7 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
 
 
 def test_context_only_keys_are_internal_only():
-    """``github_token`` / ``disable_clarification`` are produced by the channel run
-    policies, which reach the Gateway over the internally-authenticated channel. A
-    non-internal caller must not be able to supply either through ``body.context``.
+    """Only internal callers can supply ``disable_clarification`` through ``body.context``.
 
     ``disable_clarification`` is not a milder cousin of ``non_interactive``:
     ``ClarificationMiddleware`` answers every clarification — ``risk_confirmation``
@@ -3195,16 +3182,13 @@ def test_context_only_keys_are_internal_only():
 
 
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
-    """A token already in ``config['context']`` must not be clobbered by one supplied
-    in ``body.context`` (defense in depth — ``setdefault`` keeps the contract explicit
-    even now that only internal callers reach this branch)."""
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
-    config["context"] = {"github_token": "pre-existing"}
-    merge_run_context_overrides(config, {"github_token": "later-supplied"}, internal=True)
+    config["context"] = {"disable_clarification": False}
+    merge_run_context_overrides(config, {"disable_clarification": True}, internal=True)
 
-    assert config["context"]["github_token"] == "pre-existing"
+    assert config["context"]["disable_clarification"] is False
 
 
 def test_context_does_not_override_existing_configurable():
@@ -5382,19 +5366,17 @@ def test_start_run_sequence_drops_context_only_keys_for_session_caller():
     assert "disable_clarification" not in config.get("configurable", {})
 
 
-def test_start_run_sequence_keeps_context_only_keys_for_internal_caller():
-    """The channel path (internal auth) must keep carrying the minted token and the
-    non-interactive flag, and neither may land in checkpoint-persisted ``configurable``."""
+def test_start_run_sequence_keeps_webhook_flags_and_discards_legacy_credentials():
     from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 
     request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL, system_role=INTERNAL_SYSTEM_ROLE)
     config = _assemble_authz_run_config(
-        {},
+        {"context": {"github_token": "legacy-context"}, "configurable": {"github_token": "legacy-configuration"}},
         request,
-        body_context={"github_token": "ghs_installation_token", "disable_clarification": True},
+        body_context={"github_token": "legacy-request", "disable_clarification": True},
     )
 
-    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert "github_token" not in config["context"]
     assert config["context"]["disable_clarification"] is True
     assert "github_token" not in config.get("configurable", {})
     assert "disable_clarification" not in config.get("configurable", {})

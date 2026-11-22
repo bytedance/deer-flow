@@ -1247,6 +1247,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
             AGENT_AUTH_CONTEXT_KEY,
+            # Obsolete run field. Discard it even on internal requests.
+            "github_token",
             MCP_BROWSER_USER_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
@@ -1259,14 +1261,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),
 # never into ``config['configurable']``. These are read by tools and
 # middlewares from ``runtime.context`` and have no reason to live in
-# ``configurable`` — and ``configurable`` is persisted in checkpoints, so
-# keeping secrets like ``github_token`` out of it avoids writing a
-# short-lived installation token into the checkpoint store.
+# ``configurable``, which is persisted in checkpoints.
 #
-#   ``github_token``         — App installation token minted by the GitHub
-#                              channel; the bash tool exposes it as
-#                              ``GH_TOKEN``/``GITHUB_TOKEN`` so ``gh`` and
-#                              ``git`` push as the bot, not the host user.
 #   ``disable_clarification`` — set for non-interactive channels (GitHub
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
@@ -1277,7 +1273,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 # (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
 # which reach the Gateway over the internally-authenticated request channel, so
 # they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"disable_clarification", "channel_name"})
 
 # Public run-only controls are accepted through body.context, not body.config.
 _MODEL_SELECTION_CONTEXT_KEYS = frozenset({"subagent_model_name", "model_selection_requested"})
@@ -1291,10 +1287,7 @@ _MODEL_SELECTION_CONTEXT_KEYS = frozenset({"subagent_model_name", "model_selecti
 # included — with "proceed without asking" instead of interrupting, and
 # ``SandboxMiddleware`` reads the two keys as the same non-interactive signal.
 # Accepting it from a client therefore reproduces the effect the
-# ``non_interactive`` gate exists to prevent. ``github_token`` is a live
-# credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
-# smuggled through ``body.config['configurable']`` would be written to the
-# checkpoint store.
+# ``non_interactive`` gate exists to prevent.
 _INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS
 
 
@@ -1341,12 +1334,8 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     is True; for non-internal callers those keys are dropped from client requests
     by :func:`strip_internal_context_keys`.
 
-    A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is likewise forwarded only when ``internal`` is True,
-    and then into ``config['context']`` only, never ``configurable``. These are
-    secrets / runtime flags read by tools and middlewares from ``runtime.context``;
-    keeping them out of ``configurable`` avoids persisting a short-lived token in the
-    checkpoint store.
+    Runtime-only flags such as ``disable_clarification`` are forwarded only for
+    internal requests and land exclusively in ``config['context']``.
 
     Client capability context is runtime-only: it is sanitized and copied into
     ``config['context']['client']`` but never into ``configurable``.
@@ -1405,7 +1394,7 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context[key] = value
     if "model_selection_requested" in context and (context.get("model_name") != context["model_selection_requested"] or not isinstance(runtime_context, dict) or runtime_context.get("model_name") != context["model_selection_requested"]):
         raise HTTPException(status_code=400, detail="model_selection_requested must match model_name in context.")
-    # Context-only keys (secrets / runtime flags) land in ``config['context']``
+    # Runtime-only flags land in ``config['context']``
     # only — never ``configurable`` (which is persisted in checkpoints) — and only
     # for internal callers, the sole legitimate producers.
     if internal:

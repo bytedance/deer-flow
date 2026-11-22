@@ -113,7 +113,8 @@ def _extract_text_from_rich_text(rich_text_list: list) -> str:
 
 
 _FENCED_CODE_BLOCK_RE = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+# Match complete backtick runs of equal length so shorter runs stay inside the code.
+_INLINE_CODE_RE = re.compile(r"(?<!`)(?P<delimiter>`+)(?!`)(?P<code>[^\n]+?)(?<!`)(?P=delimiter)(?!`)")
 _HORIZONTAL_RULE_RE = re.compile(r"^-{3,}$", re.MULTILINE)
 _TABLE_SEPARATOR_RE = re.compile(r"^\|[-:| ]+\|$", re.MULTILINE)
 
@@ -169,8 +170,15 @@ def _adapt_markdown_for_dingtalk(text: str) -> str:
         quoted_lines = "\n".join(f"> {line}" for line in code.split("\n"))
         return f"{prefix}{quoted_lines}\n"
 
+    def _inline_code_to_bold(match: re.Match) -> str:
+        code = match.group("code")
+        # CommonMark drops one padding space from each end of a nonblank span.
+        if code.startswith(" ") and code.endswith(" ") and code.strip(" "):
+            code = code[1:-1]
+        return f"**{code}**"
+
     text = _FENCED_CODE_BLOCK_RE.sub(_code_block_to_quote, text)
-    text = _INLINE_CODE_RE.sub(r"**\1**", text)
+    text = _INLINE_CODE_RE.sub(_inline_code_to_bold, text)
     text = _convert_markdown_table(text)
     text = _HORIZONTAL_RULE_RE.sub("───────────", text)
     return text
