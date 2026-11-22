@@ -150,8 +150,8 @@ the first populated variable among `DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL`,
 `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`, and `REDIS_URL` supplies it. Cluster mode
 requires an explicit seed URL from one of these sources and uses database 0.
 
-The synchronous cluster client discovers the slot map when the sandbox provider
-starts. Initialization fails if discovery fails. The Gateway needs connectivity
+In cluster mode, the Gateway initializes the sandbox provider on a worker
+thread before accepting requests. Startup fails if slot discovery fails. The Gateway needs connectivity
 to the addresses the cluster advertises. Lease reads use primaries and each
 lease transition runs atomically on the primary holding that sandbox's key.
 Restart the Gateway after changing the topology. Standalone Redis remains the

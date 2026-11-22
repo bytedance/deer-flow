@@ -654,6 +654,44 @@ def _gateway_lifespan_patches(startup_config, *, pool=None, browser_manager=None
     return patches
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redis_mode", ["cluster", "standalone"])
+async def test_lifespan_warms_cluster_sandbox_provider_off_loop(monkeypatch, redis_mode):
+    from app.gateway.app import lifespan
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+    from deerflow.sandbox import sandbox_provider
+
+    config = MagicMock()
+    config.log_level = "INFO"
+    config.memory.enabled = False
+    config.sandbox.ownership = SandboxOwnershipConfig(type="redis", redis_mode=redis_mode)
+    loop_thread = threading.get_ident()
+    construction_threads = []
+    provider = MagicMock()
+
+    def build_provider():
+        construction_threads.append(threading.get_ident())
+        return provider
+
+    monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", None)
+    monkeypatch.setattr(sandbox_provider, "get_app_config", lambda: config)
+    monkeypatch.setattr(sandbox_provider, "resolve_class", lambda *_: build_provider)
+    pool = MagicMock(close_all=AsyncMock())
+    with ExitStack() as stack:
+        for patcher in _gateway_lifespan_patches(config, pool=pool):
+            stack.enter_context(patcher)
+        async with lifespan(FastAPI()):
+            if redis_mode == "cluster":
+                assert sandbox_provider.get_initialized_sandbox_provider() is provider
+                assert sandbox_provider.get_sandbox_provider() is provider
+                assert len(construction_threads) == 1
+                assert construction_threads[0] != loop_thread
+            else:
+                assert sandbox_provider.get_initialized_sandbox_provider() is None
+
+    assert provider.shutdown.call_count == (1 if redis_mode == "cluster" else 0)
+
+
 def test_lifespan_closes_pooled_mcp_sessions_on_shutdown():
     """Pooled MCP sessions must be closed while the worker is still shutting down.
 
