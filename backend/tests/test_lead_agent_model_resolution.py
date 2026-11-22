@@ -512,10 +512,11 @@ def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypa
     assert captured["app_config"] is app_config
 
 
-def test_assemble_lead_agent_threads_skill_storage_to_build_middlewares(model_control_assembly, monkeypatch):
+def test_assemble_lead_agent_threads_skill_storage_to_build_middlewares(model_control_assembly, monkeypatch, tmp_path):
     """The public embedding entrypoint must preserve the injected storage through
     both assembly hops, not only in `build_middlewares`."""
     from deerflow.runtime import checkpoint_mode
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
     app_config, *_ = model_control_assembly
     captured: dict[str, object] = {}
@@ -528,7 +529,14 @@ def test_assemble_lead_agent_threads_skill_storage_to_build_middlewares(model_co
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
 
-    injected = SimpleNamespace()
+    app_config.skills.container_path = "/mnt/request-skills"
+    app_config.skills.deferred_discovery = True
+    skill_file = tmp_path / "public" / "request-only" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("---\nname: request-only\ndescription: Request-only skill\n---\n\nSkill body.\n", encoding="utf-8")
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: ExtensionsConfig())
+    injected = LocalSkillStorage(host_path=str(tmp_path), container_path=app_config.skills.container_path)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: kwargs["skill_storage"].load_skills(enabled_only=True))
     result = lead_agent_module.assemble_lead_agent(
         {"context": {"model_name": "default"}},
         app_config=app_config,
@@ -536,7 +544,26 @@ def test_assemble_lead_agent_threads_skill_storage_to_build_middlewares(model_co
     )
 
     assert captured["skill_storage"] is injected
-    assert result.graph is not None
+    describe = next(tool for tool in result.graph["tools"] if tool.name == "describe_skill")
+    result = describe.invoke({"args": {"name": "select:request-only"}, "name": "describe_skill", "type": "tool_call", "id": "describe-request"})
+    assert "/mnt/request-skills/public/request-only/SKILL.md" in result.update["messages"][0].content
+
+
+def test_assemble_lead_agent_rejects_mismatched_skill_mount(model_control_assembly, monkeypatch, tmp_path):
+    from deerflow.runtime import checkpoint_mode
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    app_config, *_ = model_control_assembly
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    storage = LocalSkillStorage(host_path=str(tmp_path), container_path="/mnt/request-skills")
+
+    with pytest.raises(ValueError, match=r"skills\.container_path"):
+        lead_agent_module.assemble_lead_agent(
+            {"context": {"model_name": "default"}},
+            app_config=app_config,
+            skill_storage=storage,
+        )
 
 
 def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_read(monkeypatch):

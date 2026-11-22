@@ -448,6 +448,7 @@ def _build_runtime_middlewares(
             lazy_init=lazy_init,
             available_skills=available_skills,
             owns_agent_skill_projection=owns_agent_skill_projection,
+            skill_storage=skill_storage,
         )
     )
 
@@ -646,6 +647,11 @@ def build_subagent_runtime_middlewares(
         from deerflow.config import get_app_config
 
         app_config = get_app_config()
+
+    if skill_storage is not None:
+        from deerflow.skills.storage.skill_storage import validate_injected_skill_storage
+
+        validate_injected_skill_storage(skill_storage, container_root=app_config.skills.container_path, user_id=user_id)
 
     from deerflow.extensions import get_agent_build_extensions
 

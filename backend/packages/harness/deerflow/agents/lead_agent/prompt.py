@@ -979,6 +979,8 @@ def get_skills_prompt_section(
         container_base_path = app_config.skills.container_path
         skill_evolution_enabled = app_config.skill_evolution.enabled
 
+    if skill_storage is not None:
+        container_base_path = skill_storage.get_container_root()
     skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─

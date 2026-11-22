@@ -71,15 +71,19 @@ def get_skill_projection_paths(storage: SkillStorage) -> SkillProjectionPaths:
     )
 
 
-def get_thread_skill_projection_paths(storage: SkillStorage, thread_id: str) -> SkillProjectionPaths:
+def get_thread_skill_projection_paths(storage: SkillStorage, thread_id: str, *, projection_user_id: str | None = None) -> SkillProjectionPaths:
     """Return stable category roots for one user's thread policy view."""
     from deerflow.config.paths import get_paths
 
-    paths = getattr(storage, "_paths", None) or get_paths()
-    user_id = getattr(storage, "user_id", None)
-    if user_id is None:
-        raise ValueError("Thread skill projections require user-scoped skill storage")
-    root = paths.thread_skills_view_dir(thread_id, user_id=user_id)
+    if projection_user_id is None:
+        projection_user_id = getattr(storage, "user_id", None)
+        if projection_user_id is None:
+            raise ValueError("Thread skill projections require user-scoped skill storage")
+        paths = getattr(storage, "_paths", None) or get_paths()
+    else:
+        # Providers find a request projection at the run user's thread path.
+        paths = get_paths()
+    root = paths.thread_skills_view_dir(thread_id, user_id=projection_user_id)
     return SkillProjectionPaths(
         public=root / SkillCategory.PUBLIC.value,
         custom=root / SkillCategory.CUSTOM.value,
@@ -517,8 +521,16 @@ def _thread_source_signature(
     """Sign every input that changes a thread's effective skill view."""
     digest = hashlib.sha256()
     digest.update(f"policy-version:{_THREAD_PROJECTION_POLICY_VERSION}\0".encode())
-    digest.update(f"public:{_source_signature(storage, 'public')}\0".encode())
-    digest.update(f"user:{_source_signature(storage, 'user')}\0".encode())
+    host_root = storage.get_skills_root_path()
+    digest.update(f"host-root:{host_root}\0".encode())
+    if getattr(storage, "user_id", None) is None:
+        # Local request catalogs keep every category under their own host root.
+        for category in SkillCategory:
+            _update_tree_digest(digest, host_root / category.value, category.value, follow_package_directory_symlinks=True)
+        digest.update(json.dumps(_extensions_state(), sort_keys=True, separators=(",", ":")).encode())
+    else:
+        digest.update(f"public:{_source_signature(storage, 'public')}\0".encode())
+        digest.update(f"user:{_source_signature(storage, 'user')}\0".encode())
     policy = None if allowed_skills is None else sorted(allowed_skills)
     digest.update(json.dumps(policy, separators=(",", ":"), ensure_ascii=True).encode())
     return digest.hexdigest()
@@ -703,30 +715,35 @@ def ensure_thread_skill_projection(
     storage: SkillStorage,
     thread_id: str,
     allowed_skills: set[str] | None,
+    *,
+    projection_user_id: str | None = None,
 ) -> SkillProjectionPaths | None:
     from deerflow.skills.mutations.guard import managed_global_read, managed_read
 
     # Global -> owner -> thread. No fresh-view fast path bypasses recovery.
     with managed_global_read(storage):
         with managed_read(storage):
-            return _ensure_thread_skill_projection(storage, thread_id, allowed_skills)
+            return _ensure_thread_skill_projection(storage, thread_id, allowed_skills, projection_user_id=projection_user_id)
 
 
 def _ensure_thread_skill_projection(
     storage: SkillStorage,
     thread_id: str,
     allowed_skills: set[str] | None,
+    *,
+    projection_user_id: str | None = None,
 ) -> SkillProjectionPaths | None:
     """Ensure the filesystem view for one run's effective Agent skill policy.
 
     ``None`` keeps the existing shared projection for threads that have never
     needed policy isolation. Once a thread has a scoped view, later unrestricted
     runs rebuild that same stable mount with all enabled skills so switching
-    agents cannot leave the thread accidentally restricted.
+    agents cannot leave the thread accidentally restricted. An explicit
+    projection owner selects the request catalog even without an allowlist.
     """
-    paths = get_thread_skill_projection_paths(storage, thread_id)
+    paths = get_thread_skill_projection_paths(storage, thread_id, projection_user_id=projection_user_id)
     scope_root = paths.public.parent
-    if allowed_skills is None and not scope_root.exists():
+    if projection_user_id is None and allowed_skills is None and not scope_root.exists():
         return None
 
     try:

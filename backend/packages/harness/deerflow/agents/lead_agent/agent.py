@@ -75,7 +75,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability
-from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.skills.storage.skill_storage import SkillStorage, validate_injected_skill_storage
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.tracing import build_tracing_callbacks
@@ -521,9 +521,9 @@ def build_middlewares(
             not; their narrow skill set must not replace the thread view.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         skill_storage: Optional storage instance for skill resolution. It is
-            shared by slash activation, skill-read canonicalization, and prompt
-            skill discovery; embedding hosts that manage request-scoped skill
-            storage can pass it instead of relying on the user-scoped default.
+            shared by slash activation, skill-read canonicalization and the
+            lead-owned sandbox projection. Its container root must match
+            ``app_config.skills.container_path``.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
         mcp_routing_middleware: Compatibility middleware for advisory MCP
@@ -565,8 +565,7 @@ def build_middlewares(
         # activation middleware enforces for slash commands).
         runtime_middleware_kwargs["skill_authorization"] = skill_authorization
     if skill_storage is not None:
-        # ToolErrorHandlingMiddleware canonicalizes skill-read paths through
-        # the same storage the activation middleware resolves slash skills from.
+        validate_injected_skill_storage(skill_storage, container_root=resolved_app_config.skills.container_path, user_id=user_id)
         runtime_middleware_kwargs["skill_storage"] = skill_storage
     if user_id is not None:
         # User-scoped fallback for hosts that do not inject a request-scoped
@@ -901,8 +900,9 @@ def assemble_lead_agent(
     graph-only LangGraph Server ABI declared in ``langgraph.json``.
 
     ``skill_storage`` lets an embedding host supply request-scoped skill
-    storage for slash activation, skill-read canonicalization, and prompt skill
-    discovery; omitting it keeps the user-scoped default.
+    storage for skill discovery, activation, skill reads and the lead-owned
+    sandbox projection. Use the configured sandbox skills mount as the storage's
+    container root. The sandbox provider must support thread skill projections.
     """
     runtime_config = _get_runtime_config(config)
     runtime_app_config = app_config or runtime_config.get("app_config")
@@ -1034,6 +1034,8 @@ def _assemble_lead_agent(
     from deerflow.runtime.user_context import resolve_config_user_id
 
     resolved_user_id = resolve_config_user_id(config)
+    if skill_storage is not None:
+        validate_injected_skill_storage(skill_storage, container_root=resolved_app_config.skills.container_path, user_id=resolved_user_id)
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
