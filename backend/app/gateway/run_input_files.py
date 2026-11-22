@@ -1,6 +1,7 @@
 """Keep queued attachments outside the sandbox until their run is admitted."""
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -18,11 +19,13 @@ from app.gateway.upload_ingestion import prepare_published_uploads
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.uploads.companions import register_companion
-from deerflow.uploads.manager import _MAX_FILENAME_BYTES, _fit_utf8_bytes, _split_stem_suffix, normalize_filename
+from deerflow.uploads.manager import normalize_filename
+from deerflow.utils.atomic_write import publish_bytes_atomically
 from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.host_paths import extended_length_path
 
 logger = logging.getLogger(__name__)
+QUEUED_UPLOADS_DIR = ".queued-uploads"
 
 
 class StagedInputFile(TypedDict):
@@ -31,8 +34,12 @@ class StagedInputFile(TypedDict):
     sha256: str
 
 
+def is_staging_id(staging_id: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{32}", staging_id))
+
+
 def _validate_staging_id(staging_id: str) -> None:
-    if not re.fullmatch(r"[0-9a-f]{32}", staging_id):
+    if not is_staging_id(staging_id):
         raise ValueError("Invalid queued upload identifier")
 
 
@@ -40,7 +47,7 @@ def _staging_dir(thread_id: str, user_id: str, staging_id: str) -> Path:
     _validate_staging_id(staging_id)
     # Sandbox mounts and the artifacts API are scoped to user-data; ordinary
     # thread deletion also removes this sibling directory.
-    return extended_length_path(get_paths().thread_dir(thread_id, user_id=user_id) / ".queued-uploads" / staging_id)
+    return extended_length_path(get_paths().thread_dir(thread_id, user_id=user_id) / QUEUED_UPLOADS_DIR / staging_id)
 
 
 def _staged_file(directory: Path, index: int, filename: str) -> Path:
@@ -101,67 +108,97 @@ async def discard_input_files(thread_id: str, user_id: str, staging_id: str) -> 
     await run_drained_write("Discard queued attachments", _discard_staging, (), directory)
 
 
-def input_file_metadata(staging_id: str, files: list[StagedInputFile]) -> list[dict]:
-    """Use stable names so admission and publication agree across retries."""
-    _validate_staging_id(staging_id)
-    metadata = []
-    for index, file in enumerate(files):
-        name = normalize_filename(file["filename"])
-        stem, suffix = _split_stem_suffix(name)
-        tag = f"_{staging_id}_{index}"
-        budget = _MAX_FILENAME_BYTES - len(tag)
-        suffix = _fit_utf8_bytes(suffix, budget - 1).rstrip(" .")
-        filename = f"{_fit_utf8_bytes(stem, budget - len(suffix.encode('utf-8')))}{tag}{suffix}"
-        metadata.append({"filename": filename, "original_filename": name, "size": file["size"], "path": uploads.upload_virtual_path(filename), "status": "uploaded"})
-    return metadata
-
-
-def _publish_files(thread_id: str, user_id: str, targets: list[tuple[Path, str]]) -> tuple[list[Path], list[Path]]:
-    uploads_dir = uploads.ensure_uploads_dir(thread_id, user_id=user_id)
-    paths = []
-    published = []
+def _is_staged_link(source: Path, target: Path) -> bool:
     try:
-        for source, filename in targets:
+        return os.path.samestat(source.lstat(), target.lstat())
+    except FileNotFoundError:
+        return False
+
+
+def _rollback_links(links: list[tuple[Path, Path]]) -> None:
+    for source, target in reversed(links):
+        try:
+            if _is_staged_link(source, target):
+                target.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not roll back queued attachment publication (%s)", type(exc).__name__)
+
+
+def _publish_files(
+    thread_id: str,
+    user_id: str,
+    directory: Path,
+    targets: list[tuple[Path, str]],
+    converted: dict[int, Path],
+) -> tuple[list[Path], list[tuple[Path, Path]], list[tuple[Path, Path]]]:
+    uploads_dir = uploads.ensure_uploads_dir(thread_id, user_id=user_id)
+    plan = directory / "destinations.json"
+    try:
+        destinations: dict[str, str] = json.loads(plan.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        destinations = {}
+    occupied = {entry.name.casefold(): entry for entry in uploads_dir.iterdir()}
+    seen = {entry.name for entry in occupied.values()} | set(destinations.values())
+    links: list[tuple[Path, Path]] = []
+
+    def link(source: Path, requested: str) -> Path:
+        filename = destinations.get(source.name)
+        if filename is None:
+            uploads._pure_destination(uploads_dir, requested)
+        elif (existing := occupied.get(filename.casefold())) is not None and existing.name != filename:
+            # A different spelling still counts as a collision on case-sensitive filesystems.
+            filename = None
+        while True:
+            if filename is None:
+                filename = uploads.claim_unique_filename(requested, seen)
+                destinations[source.name] = filename
+                # Persist the choice before making a sandbox-visible link so a
+                # pre-graph failure can retry with the same attachment names.
+                publish_bytes_atomically(plan, json.dumps(destinations).encode("utf-8"))
             try:
                 path = uploads._link_staged_no_overwrite(source, uploads_dir, filename, unlink_staged=False)
-                published.append(path)
             except FileExistsError:
                 path = uploads_dir / filename
-                # A retry can find its own published inode. Never reuse bytes
-                # from a different upload claiming the same name.
-                if not os.path.samestat(source.lstat(), path.lstat()):
-                    raise
-            paths.append(path)
+                if not _is_staged_link(source, path):
+                    filename = None
+                    continue
+            links.append((source, path))
+            return path
+
+    try:
+        # Claim user-supplied names first so a generated companion cannot
+        # displace an attachment such as report.md accompanying report.pdf.
+        paths = [link(source, filename) for source, filename in targets]
+        companions = [(paths[index], link(source, paths[index].with_suffix(".md").name)) for index, source in converted.items()]
     except BaseException:
-        uploads._cleanup_uploaded_paths(published)
+        _rollback_links(links)
         raise
-    return paths, published
+    return paths, companions, links
 
 
 async def publish_input_files(thread_id: str, user_id: str, staging_id: str, files: list[StagedInputFile], *, request: Request, config: AppConfig) -> list[dict]:
     """Publish only while the destination run owns the thread's run slot."""
     directory = await run_file_io(_staging_dir, thread_id, user_id, staging_id)
-    metadata = input_file_metadata(staging_id, files)
     targets: list[tuple[Path, str]] = []
-    companion_indices: list[tuple[int, int]] = []
+    converted: dict[int, Path] = {}
     convert = uploads._auto_convert_documents_enabled(config)
-    for index, file in enumerate(metadata):
-        source = _staged_file(directory, index, file["original_filename"])
+    for index, file in enumerate(files):
+        source = _staged_file(directory, index, file["filename"])
         targets.append((source, file["filename"]))
         if convert and source.suffix in uploads.CONVERTIBLE_EXTENSIONS:
             # Convert while the source is still private. The final staged
             # pathname is reserved for a fully written conversion.
             companion = directory / f"{index}.md"
             if not await run_file_io(companion.is_file):
-                converted = await uploads.convert_file_to_markdown(source, output_path=directory / f"{index}.md.part")
-                if converted is None:
+                output = await uploads.convert_file_to_markdown(source, output_path=directory / f"{index}.md.part")
+                if output is None:
                     continue
-                await run_file_io(os.replace, converted, companion)
-            companion_indices.append((len(targets) - 1, len(targets)))
-            targets.append((companion, Path(file["filename"]).with_suffix(".md").name))
+                await run_file_io(os.replace, output, companion)
+            converted[index] = companion
 
-    async def publish_and_sync() -> None:
-        paths, published = await run_drained_write("Publish queued attachments", _publish_files, (), thread_id, user_id, targets)
+    async def publish_and_sync() -> list[Path]:
+        originals, companions, links = await run_drained_write("Publish queued attachments", _publish_files, (), thread_id, user_id, directory, targets, converted)
+        paths = [target for _, target in links]
         try:
             provider = await run_file_io(uploads.get_sandbox_provider)
             if uploads._uses_thread_data_mounts(provider):
@@ -176,13 +213,17 @@ async def publish_input_files(thread_id: str, user_id: str, staging_id: str, fil
                 finally:
                     await lease.release()
         except BaseException:
-            await run_file_io(uploads._cleanup_uploaded_paths, published)
+            await run_file_io(_rollback_links, links)
             raise
-        await discard_input_files(thread_id, user_id, staging_id)
+        await run_file_io(_discard_staging, directory)
         # Unlinking the staged alias changes the inode's ctime. Record the
         # association afterward, once the upload has its final identity.
-        for original, companion in companion_indices:
-            await run_file_io(register_companion, paths[original], paths[companion])
+        for original, companion in companions:
+            try:
+                await run_file_io(register_companion, original, companion)
+            except Exception as exc:
+                logger.warning("Could not register queued attachment companion (%s)", type(exc).__name__)
+        return originals
 
-    await await_drained(publish_and_sync())
-    return metadata
+    paths = await await_drained(publish_and_sync())
+    return [{"filename": path.name, "original_filename": file["filename"], "size": file["size"], "path": uploads.upload_virtual_path(path.name), "status": "uploaded"} for file, path in zip(files, paths, strict=True)]

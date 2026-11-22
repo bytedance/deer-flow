@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+from dataclasses import dataclass
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -18,6 +19,14 @@ from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInput
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedAttachments:
+    source: RunInputs
+    input_id: str
+    attempt: int
+    stage: dict
 
 
 class RunInputRequest(BaseModel):
@@ -158,7 +167,7 @@ async def submit_run_input(
 
 
 def _input_receipt(item: dict, run_id: str) -> dict:
-    receipt = {key: value for key, value in item.items() if key != "attachment_stage"}
+    receipt = {key: value for key, value in item.items() if key not in ("attachment_stage", "attachment_attempt")}
     stage = item.get("attachment_stage")
     if stage is not None and item["status"] != "cancelled":
         receipt["files"] = [{"filename": file["filename"], "size": file["size"]} for file in stage["files"]]
@@ -288,18 +297,18 @@ async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=Fals
     message = {"role": "user", "content": entry["text"], "id": message_id}
     if scope is not None:
         message["additional_kwargs"] = {KNOWLEDGE_SCOPE_KEY: copy.deepcopy(scope)}
+    attempt = entry.get("attachment_attempt", 0)
     if stage := entry.get("attachment_stage"):
-        from app.gateway.run_input_files import input_file_metadata
-
-        message.setdefault("additional_kwargs", {})["files"] = input_file_metadata(stage["id"], stage["files"])
-        request.state.queued_input_attachments = stage
+        request.state.queued_input_attachments = QueuedAttachments(inputs, input_id, attempt, stage)
     if entry.get("source", "user") == "user":
         # This fact comes from the stored, authenticated input, not from text
         # or an arbitrary extension-supplied metadata flag.
         request.state.run_origin = None
     body = RunCreateRequest(assistant_id=await resolve_thread_assistant_id(request, thread_id, fail_closed=True), input={"messages": [message]}, context=context, config=config, on_disconnect="continue")
-    run = await create_run(thread_id, body, request, idempotency_key=f"run-input:{run_id}:{input_id}")
-    await inputs.dispatched(entry["id"], run.run_id)
+    # A new key is safe only when the earlier run failed before entering the graph.
+    key = f"run-input-retry:{run_id}:{attempt}:{input_id}" if attempt else f"run-input:{run_id}:{input_id}"
+    run = await create_run(thread_id, body, request, idempotency_key=key)
+    await inputs.dispatched(input_id, run.run_id, attempt=attempt)
     return AgentRun(thread_id, run.run_id, run.status, run.assistant_id, run.stop_reason)
 
 

@@ -98,8 +98,11 @@ async def test_queued_upload_companion_stays_valid_after_staging_removal(tmp_pat
     config = SimpleNamespace(uploads={"auto_convert_documents": True})
     thread_id, user_id = "thread-queue", "user-queue"
     destination = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
-    file = UploadFile(filename="report.pdf", file=BytesIO(b"%PDF queued upload"))
-    stage_id, files = await run_input_files.stage_input_files(thread_id, user_id, [file], config)
+    attachments = [
+        UploadFile(filename="report.pdf", file=BytesIO(b"%PDF queued upload")),
+        UploadFile(filename="report.md", file=BytesIO(b"# User's notes\n")),
+    ]
+    stage_id, files = await run_input_files.stage_input_files(thread_id, user_id, attachments, config)
 
     async def convert(source, output_path):
         assert source.suffix == ".pdf"
@@ -110,9 +113,12 @@ async def test_queued_upload_companion_stays_valid_after_staging_removal(tmp_pat
 
     monkeypatch.setattr(uploads, "convert_file_to_markdown", convert)
     metadata = await run_input_files.publish_input_files(thread_id, user_id, stage_id, files, request=MagicMock(), config=config)
+    assert [item["filename"] for item in metadata] == ["report.pdf", "report.md"]
     original = destination / metadata[0]["filename"]
+    assert (destination / "report.md").read_bytes() == b"# User's notes\n"
     companion = resolve_companion(original)
     assert companion is not None
+    assert companion.name == "report_1.md"
     assert companion.read_text(encoding="utf-8") == "# Converted\n"
     assert list((paths.thread_dir(thread_id, user_id=user_id) / ".queued-uploads").iterdir()) == []
     if mounted:
@@ -121,9 +127,43 @@ async def test_queued_upload_companion_stays_valid_after_staging_removal(tmp_pat
     else:
         acquire.assert_awaited_once()
         sandbox.update_file.assert_any_call(uploads.upload_virtual_path(original.name), b"%PDF queued upload")
+        sandbox.update_file.assert_any_call(uploads.upload_virtual_path("report.md"), b"# User's notes\n")
         sandbox.update_file.assert_any_call(uploads.upload_virtual_path(companion.name), b"# Converted\n")
-        assert sandbox.update_file.call_count == 2
+        assert sandbox.update_file.call_count == 3
         release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_queued_upload_retry_preserves_a_file_that_claimed_its_destination(tmp_path, monkeypatch):
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.config.paths._paths", paths)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", _mounted_provider)
+    config = SimpleNamespace()
+    thread_id, user_id = "thread-queue", "user-queue"
+    destination = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
+    file = UploadFile(filename="chart.png", file=BytesIO(b"queued image"))
+    stage_id, files = await run_input_files.stage_input_files(thread_id, user_id, [file], config)
+
+    async def fail_during_preparation(published_paths):
+        assert published_paths == [destination / "chart.png"]
+        published_paths[0].unlink()
+        published_paths[0].write_bytes(b"another upload")
+        raise OSError("temporary file preparation failure")
+
+    monkeypatch.setattr(run_input_files, "prepare_published_uploads", fail_during_preparation)
+
+    with pytest.raises(OSError, match="temporary file preparation failure"):
+        await run_input_files.publish_input_files(thread_id, user_id, stage_id, files, request=MagicMock(), config=config)
+
+    original = destination / "chart.png"
+    assert original.read_bytes() == b"another upload"
+    monkeypatch.setattr(run_input_files, "prepare_published_uploads", upload_ingestion.prepare_published_uploads)
+
+    metadata = await run_input_files.publish_input_files(thread_id, user_id, stage_id, files, request=MagicMock(), config=config)
+
+    assert metadata[0]["filename"] == "chart_1.png"
+    assert original.read_bytes() == b"another upload"
+    assert (destination / "chart_1.png").read_bytes() == b"queued image"
 
 
 def test_upload_and_list_response_models_expose_size_as_int(tmp_path):

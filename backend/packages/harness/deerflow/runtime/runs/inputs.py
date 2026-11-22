@@ -134,12 +134,28 @@ class RunInputs:
 
         await self._change(change)
 
-    async def dispatched(self, input_id: str, run_id: str) -> None:
+    async def dispatched(self, input_id: str, run_id: str, *, attempt: int = 0) -> None:
         def change(state, row):
             item = next(x for x in state["items"] if x["id"] == input_id)
+            # The worker can fail publication before admission returns its
+            # receipt. A late receipt must not hide the retryable item.
+            if item.get("attachment_attempt", 0) != attempt:
+                return
             if item.get("run_id") not in (None, run_id):
                 raise InputConflict("Queued input already belongs to another Run")
             item.update(status="applied", run_id=run_id)
+
+        await self._change(change)
+
+    async def publication_failed(self, input_id: str, run_id: str, *, attempt: int) -> None:
+        def change(state, row):
+            item = next(x for x in state["items"] if x["id"] == input_id)
+            if not item.get("attachment_stage") or item["status"] not in ("dispatching", "applied"):
+                return
+            if item.get("attachment_attempt", 0) != attempt or item.get("run_id") not in (None, run_id):
+                return
+            item.pop("run_id", None)
+            item.update(status="not_applied", attachment_attempt=attempt + 1)
 
         await self._change(change)
 
