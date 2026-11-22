@@ -50,6 +50,22 @@ changing its configuration. Other memory backends do not consume these
 DeerMem-specific fields. Existing external memory templates remain the mechanism
 for complete template replacement; this feature adds no editing endpoint or UI.
 
+## DeepSeek cache accounting
+
+Models configured with `langchain_deepseek:ChatDeepSeek` or
+`deerflow.models.patched_deepseek:PatchedChatDeepSeek` retain DeepSeek's native
+`usage.prompt_cache_hit_tokens` as `input_token_details.cache_read` when the
+standard `prompt_tokens_details.cached_tokens` field is absent or null. An
+explicit standard count, including zero, takes precedence. Invalid native
+counts are ignored; they do not fail an otherwise successful response.
+
+This applies to synchronous, asynchronous and streaming calls. The existing
+lead-agent journal and subagent usage handoff retain that count for per-model
+cache-aware cost estimates. Cached tokens are a subset of input tokens, so
+normalization never adds them or `prompt_cache_miss_tokens` to the input total.
+Responses that already supply the standard field are unchanged. These are
+provider-reported usage estimates, not a measurement of money saved by DeerFlow.
+
 ## Model request admission
 
 For request-per-minute limits, opt into pacing on each relevant `models[]`
@@ -81,6 +97,15 @@ lead agents, subagents and auxiliary models using the standard LangChain
 BaseChatModel invoke/stream hooks. Restart the Gateway after changing,
 disabling or regrouping active policies; conflicting settings fail model
 construction instead of resetting a live budget.
+
+When Agent middleware receives HTTP 429 with a valid `Retry-After` (seconds or
+HTTP date) or `retry-after-ms` of up to 24 hours, new requests in that admission
+group also wait for the provider's cooldown, even if the failed call has no
+retries left. A shorter subsequent hint cannot shorten the pause. Already
+dispatched calls and independent groups are unaffected. Queue bounds, FIFO,
+cancellation and `max_wait_seconds` still apply, so a waiting call can time out
+before the cooldown ends. Missing or invalid hints and other statuses do not
+pause peers. Calls outside Agent middleware do not publish cooldown feedback.
 
 When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
 would bypass the admission hook. Claude and Codex also set their provider-internal
@@ -996,6 +1021,17 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+#### Hosted reader URLs
+
+GroundRoute, InfoQuest, Jina, Sofya, SpecStream, Tavily, Unbrowse and the
+official Exa API accept absolute HTTP(S) URLs for `web_fetch`. The tool checks
+the URL locally before contacting the reader.
+Malformed URLs, embedded user credentials, local hostnames such as `localhost`,
+known metadata hosts and non-public IP literals return a tool error.
+The reader receives an accepted URL exactly as supplied, including encoded paths
+and repeated query parameters such as `tag[]=api&tag[]=guides`. The reader
+resolves the hostname in its own network.
+
 #### Jina fetch retries
 
 Jina's `web_fetch` keeps one attempt by default. Configure retries on its existing
@@ -1391,7 +1427,7 @@ DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents

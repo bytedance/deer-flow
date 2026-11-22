@@ -129,7 +129,8 @@ def test_assembly_keeps_ordinary_and_unaffected_plugin_tools_on_collision(instal
     monkeypatch.setattr(assembly, "is_mcp_task_runtime_available", lambda: False)
     monkeypatch.setattr(assembly, "is_host_bash_allowed", lambda config: False)
     monkeypatch.setattr(assembly, "resolve_variable", lambda *args: ordinary)
-    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: SimpleNamespace(get_enabled_mcp_servers=lambda: {"test": {}}))
+    mcp_config = ExtensionsConfig.model_validate({"mcpServers": {"test": {"type": "http", "url": "https://example.com/mcp"}}})
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: mcp_config)
     monkeypatch.setattr("deerflow.mcp.cache.get_cached_mcp_tools", lambda: [ordinary])
     monkeypatch.setattr("deerflow.tools.builtins.invoke_acp_agent_tool.build_invoke_acp_agent_tool", lambda agents: ordinary)
 

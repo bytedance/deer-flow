@@ -6,6 +6,7 @@ Requests are evenly spaced; idle time never accumulates a burst allowance.
 """
 
 import asyncio
+import math
 import threading
 import time
 from collections import deque
@@ -53,6 +54,14 @@ class RequestAdmission(BaseRateLimiter):
             self._waiters.append(ticket)
             return False, ticket
 
+    def defer_for(self, seconds: float) -> None:
+        """Extend the shared dispatch schedule without revoking in-flight work."""
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("Admission cooldown must be finite and non-negative")
+        with self._lock:
+            # A later, shorter provider hint must not undo an existing pause.
+            self._next = max(self._next, monotonic() + seconds)
+
     def _remove(self, ticket: object) -> None:
         with self._lock:
             self._waiters.remove(ticket)
@@ -64,9 +73,9 @@ class RequestAdmission(BaseRateLimiter):
             raise AdmissionError("LLM admission timed out before dispatch; increase max_wait_seconds or reduce workload.")
         with self._lock:
             until_next = self._next - now
-        # Track short admission intervals rather than imposing a 20/s ceiling.
+        # Cap each sleep at 50 ms and shorten it for an approaching dispatch or deadline.
         # Non-head waiters still yield when the schedule is already due.
-        return min(0.05, self._interval, until_next if until_next > 0 else self._interval, remaining)
+        return min(0.05, until_next if until_next > 0 else self._interval, remaining)
 
     def acquire(self, *, blocking: bool = True) -> bool:
         acquired, ticket = self._try_or_enqueue(blocking=blocking)

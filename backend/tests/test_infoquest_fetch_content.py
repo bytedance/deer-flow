@@ -50,6 +50,24 @@ def responses(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_fetch_tool_screens_target_before_post(responses, monkeypatch, caplog):
+    queued, requests = responses
+    queued.append(httpx.Response(200, json={"content": _HTML}))
+    monkeypatch.setattr("socket.getaddrinfo", lambda *args, **kwargs: pytest.fail("Hosted fetch must leave DNS to the provider"))
+    caplog.set_level(logging.DEBUG, logger="deerflow.community.infoquest")
+
+    result = await tools.web_fetch_tool.ainvoke({"url": "https://infoquest-test-marker.localhost/article"})
+    assert requests == []
+    assert result.startswith("Error:")
+    assert "infoquest-test-marker" not in result
+    assert "infoquest-test-marker" not in caplog.text
+
+    url = "https://reader.example.com/articles/a%2Fb?tag[]=a%20b&view=full&tag[]=c%26d"
+    assert "Example article content." in await tools.web_fetch_tool.ainvoke({"url": url})
+    assert [json.loads(request.content)["url"] for request in requests] == [url]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("field", ["reader_result", "content"])
 @pytest.mark.parametrize("value", [None, False, 0, [], {}, ["provider-payload"], {"text": "provider-payload"}])
 async def test_fetch_tool_contains_non_text_content(responses, caplog, field, value):
