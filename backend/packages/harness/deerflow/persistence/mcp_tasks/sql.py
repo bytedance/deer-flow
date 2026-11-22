@@ -221,6 +221,13 @@ class McpTaskRepository:
             value = value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
 
+    async def _lock_control_task_row(self, session: AsyncSession, task_id: str) -> bool:
+        """Lock a PostgreSQL task row before evaluating its lease clock."""
+        if session.get_bind().dialect.name != "postgresql":
+            return True
+        locked_id = await session.scalar(select(McpTaskRow.id).where(McpTaskRow.id == task_id).with_for_update())
+        return locked_id is not None
+
     @staticmethod
     def _row_to_dict(row: McpTaskRow, *, include_internal: bool = False) -> dict[str, Any]:
         data = row.to_dict()
@@ -420,6 +427,8 @@ class McpTaskRepository:
         if phase not in ("poll", "cancel"):
             raise ValueError("Unknown MCP control claim phase")
         async with self._sf() as session:
+            if not await self._lock_control_task_row(session, task_id):
+                return False
             expires_at = self._lease_expiry(session, now, lease_seconds)
             result = await session.execute(
                 update(McpTaskRow)
@@ -457,6 +466,11 @@ class McpTaskRepository:
         polled_at: datetime,
     ) -> bool:
         async with self._sf() as session:
+            if not await self._lock_control_task_row(session, task_id):
+                return False
+            # The row lock is acquired before the database-clock predicate below,
+            # so time spent waiting for another writer cannot make an expired
+            # control lease appear live.
             # Atomic fence: a poll result from an older generation must not
             # overwrite a claim a newer generation reclaimed after lease expiry.
             values: dict[str, Any] = {
@@ -683,6 +697,8 @@ class McpTaskRepository:
         if status not in _TERMINAL_STATUS_VALUES:
             raise ValueError("A cancellation response must report a terminal task status")
         async with self._sf() as session:
+            if not await self._lock_control_task_row(session, task_id):
+                return False
             update_result = await session.execute(
                 update(McpTaskRow)
                 .where(
