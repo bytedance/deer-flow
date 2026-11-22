@@ -17,11 +17,16 @@ def snapshot(*, run_id: str = "r1", owner: str = "alice", status: str = "success
 
 
 class FakeEvidence:
-    def __init__(self, *, runs: tuple[RunStatusView, ...] = (), snapshots: dict[str, CompletedRunSnapshot] | None = None) -> None:
+    def __init__(self, *, runs: tuple[RunStatusView, ...] = (), snapshots: dict[str, CompletedRunSnapshot] | None = None, run_pages: dict[str | None, RunPage] | None = None) -> None:
         self.runs = runs
+        self.run_pages = run_pages
+        self.run_calls: list[str | None] = []
         self.snapshots = snapshots or {"r1": snapshot()}
 
     async def list_changed_runs(self, *, cursor: str | None = None, limit: int = 200) -> RunPage:
+        self.run_calls.append(cursor)
+        if self.run_pages is not None:
+            return self.run_pages.get(cursor, RunPage(items=(), next_cursor=None, has_more=False))
         return RunPage(items=self.runs, next_cursor=None, has_more=False)
 
     async def get_snapshot(self, *, thread_id: str, run_id: str, limits: EvidenceLimits = EvidenceLimits()) -> CompletedRunSnapshot:
@@ -89,7 +94,7 @@ async def test_latest_run_skips_runs_the_caller_does_not_own():
 
     result = await actions_by_name(actions)["latest"]({"thread_id": "t1"}, user("alice"))
 
-    assert result == {"run": {"run_id": "new", "status": "error", "updated_at": ""}}
+    assert result == {"run": {"run_id": "new", "status": "error", "updated_at": ""}, "complete": True, "scanned": 4}
 
 
 async def test_latest_run_answers_none_when_the_thread_has_no_owned_run():
@@ -99,7 +104,7 @@ async def test_latest_run_answers_none_when_the_thread_has_no_owned_run():
     )
     _, actions = await service_with(evidence)
 
-    assert await actions_by_name(actions)["latest"]({"thread_id": "t1"}, user("alice")) == {"run": None}
+    assert await actions_by_name(actions)["latest"]({"thread_id": "t1"}, user("alice")) == {"run": None, "complete": True, "scanned": 1}
 
 
 @pytest.mark.parametrize(
@@ -118,3 +123,38 @@ async def test_invalid_action_payloads_are_refused(payload: dict):
 
     with pytest.raises(ValueError):
         await actions_by_name(actions)["report"](payload, user("alice"))
+
+
+async def test_latest_run_follows_the_feed_to_its_end():
+    evidence = FakeEvidence(
+        run_pages={
+            None: RunPage(items=(RunStatusView(thread_id="t1", run_id="old", status="success"),), next_cursor="c2", has_more=True),
+            "c2": RunPage(items=(RunStatusView(thread_id="t1", run_id="new", status="error"),), next_cursor=None, has_more=False),
+        },
+        snapshots={"old": snapshot(run_id="old"), "new": snapshot(run_id="new", status="error")},
+    )
+    _, actions = await service_with(evidence)
+
+    result = await actions_by_name(actions)["latest"]({"thread_id": "t1"}, user("alice"))
+
+    assert result == {"run": {"run_id": "new", "status": "error", "updated_at": ""}, "complete": True, "scanned": 2}
+    assert evidence.run_calls == [None, "c2"]
+
+
+async def test_an_unscanned_feed_never_reports_an_older_run_as_latest():
+    # The feed is ordered across every thread in the grant, so a run beyond the
+    # scan bound may be newer than anything this thread showed.
+    evidence = FakeEvidence(
+        run_pages={
+            None: RunPage(items=(RunStatusView(thread_id="t1", run_id="old", status="success"),), next_cursor="c2", has_more=True),
+            "c2": RunPage(items=(RunStatusView(thread_id="t2", run_id="other", status="success"),), next_cursor="c3", has_more=True),
+            "c3": RunPage(items=(RunStatusView(thread_id="t2", run_id="other-2", status="success"),), next_cursor="c4", has_more=True),
+        },
+        snapshots={"old": snapshot(run_id="old")},
+    )
+    _, actions = await service_with(evidence)
+
+    result = await actions_by_name(actions)["latest"]({"thread_id": "t1"}, user("alice"))
+
+    assert result == {"run": None, "complete": False, "scanned": 3}
+    assert evidence.run_calls == [None, "c2", "c3"]

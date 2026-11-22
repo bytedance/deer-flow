@@ -21,6 +21,10 @@ const WORDS = {
     notFound: "No run of yours was found for that thread and run ID.",
     noRun: "This thread has no runs you own.",
     latestFound: "Latest run",
+    scanIncomplete: (scanned) =>
+      `Scanned ${scanned} run records without reaching the end; the newest run could not be confirmed. Enter the run ID manually.`,
+    showing: (shown, total) => `Showing ${shown} of ${total} events`,
+    showMore: (count) => `Show ${count} more events`,
     verdict: "Verdict",
     anomalies: "Anomalies",
     none: "None detected in the retained evidence.",
@@ -31,7 +35,6 @@ const WORDS = {
     downloaded: "Report downloaded.",
     failed: "Could not build the report. Check the IDs and try again.",
     truncated: "(truncated)",
-    more: "events not shown; raise Max events to read further.",
     messages: "Messages",
     toolFailures: "Tool failures",
     subagents: "Subagents",
@@ -59,6 +62,10 @@ const WORDS = {
     notFound: "没有找到属于你的这次运行。",
     noRun: "该会话下没有属于你的运行。",
     latestFound: "最新运行",
+    scanIncomplete: (scanned) =>
+      `只扫描了 ${scanned} 条运行记录，未到末尾，无法确认最新一次；请手动填写运行 ID。`,
+    showing: (shown, total) => `已显示 ${shown} / ${total} 条事件`,
+    showMore: (count) => `再显示 ${count} 条`,
     verdict: "结论",
     anomalies: "异常",
     none: "在保留的证据中未发现异常。",
@@ -69,7 +76,6 @@ const WORDS = {
     downloaded: "报告已下载。",
     failed: "无法生成报告，请检查 ID 后重试。",
     truncated: "（已截断）",
-    more: "条事件未显示，可调大“最多事件数”继续读取。",
     messages: "消息",
     toolFailures: "工具失败",
     subagents: "子代理",
@@ -138,6 +144,12 @@ export function mount(root, context) {
   const t = zh ? WORDS.zh : WORDS.en;
   let disposed = false;
   let pending = null;
+  let timelineEntries = [];
+  let renderedRows = 0;
+  let timelineBody = null;
+  let timelineFooter = null;
+  let showMoreButton = null;
+  const TIMELINE_CHUNK = 400;
 
   const alive = () => !disposed && !context.signal.aborted;
 
@@ -249,6 +261,31 @@ export function mount(root, context) {
   const card = (term, value) =>
     el("dl", { class: "pm-card" }, [el("dt", { text: term }), el("dd", { text: value })]);
 
+  const renderTimelineChunk = () => {
+    if (!timelineBody) return;
+    const next = timelineEntries.slice(renderedRows, renderedRows + TIMELINE_CHUNK);
+    for (const entry of next) {
+      timelineBody.append(
+        el("tr", {}, [
+          el("td", { class: "pm-seq", text: String(entry.seq ?? "") }),
+          el("td", { class: "pm-type" }, [
+            el("span", { class: "pm-code", text: entry.event_type || "" }),
+          ]),
+          el("td", {
+            text: `${entry.summary || ""}${entry.truncated ? ` ${t.truncated}` : ""}`,
+          }),
+        ]),
+      );
+    }
+    renderedRows += next.length;
+    const remaining = timelineEntries.length - renderedRows;
+    timelineFooter.textContent = t.showing(renderedRows, timelineEntries.length);
+    showMoreButton.hidden = remaining <= 0;
+    if (remaining > 0) {
+      showMoreButton.textContent = t.showMore(Math.min(TIMELINE_CHUNK, remaining));
+    }
+  };
+
   const renderReport = (data) => {
     report.hidden = false;
     verdict.textContent = data.verdict || "";
@@ -296,36 +333,27 @@ export function mount(root, context) {
         text: `${t.events}: ${data.events_read ?? 0}/${data.events_total ?? 0}`,
       }),
     );
-    const entries = Array.isArray(data.timeline) ? data.timeline : [];
-    const shown = entries.slice(0, 400);
-    const head = el("tr", {}, [
-      el("th", { text: t.seq }),
-      el("th", { text: t.event }),
-      el("th", { text: t.summary }),
-    ]);
-    const body = el("tbody", {}, []);
-    for (const entry of shown) {
-      body.append(
+    timelineEntries = Array.isArray(data.timeline) ? data.timeline : [];
+    renderedRows = 0;
+    timelineBody = el("tbody");
+    timelineFooter = el("p", { class: "pm-status" });
+    showMoreButton = el("button", {
+      type: "button",
+      text: t.showMore(TIMELINE_CHUNK),
+    });
+    showMoreButton.addEventListener("click", () => renderTimelineChunk());
+    timeline.replaceChildren(
+      el("table", {}, [
         el("tr", {}, [
-          el("td", { class: "pm-seq", text: String(entry.seq ?? "") }),
-          el("td", { class: "pm-type" }, [
-            el("span", { class: "pm-code", text: entry.event_type || "" }),
-          ]),
-          el("td", {
-            text: `${entry.summary || ""}${entry.truncated ? ` ${t.truncated}` : ""}`,
-          }),
+          el("th", { text: t.seq }),
+          el("th", { text: t.event }),
+          el("th", { text: t.summary }),
         ]),
-      );
-    }
-    timeline.replaceChildren(el("table", {}, [head, body]));
-    if (entries.length > shown.length) {
-      timeline.append(
-        el("p", {
-          class: "pm-status",
-          text: `${entries.length - shown.length} ${t.more}`,
-        }),
-      );
-    }
+        timelineBody,
+      ]),
+      el("div", { class: "pm-actions" }, [showMoreButton, timelineFooter]),
+    );
+    renderTimelineChunk();
     caveats.replaceChildren(
       ...(Array.isArray(data.caveats) ? data.caveats : []).map((item) =>
         el("li", { text: item }),
@@ -336,6 +364,8 @@ export function mount(root, context) {
   const clearReport = () => {
     report.hidden = true;
     pending = null;
+    timelineEntries = [];
+    renderedRows = 0;
     setBusy(false);
   };
 
@@ -381,7 +411,12 @@ export function mount(root, context) {
     try {
       const data = await context.callBackend("latest", { thread_id: threadId });
       if (!alive()) return;
-      const run = data && data.run;
+      if (!data || data.complete === false) {
+        runInput.value = "";
+        setStatus(t.scanIncomplete(data && data.scanned ? data.scanned : 0));
+        return;
+      }
+      const run = data.run;
       if (!run) {
         setStatus(t.noRun);
         return;

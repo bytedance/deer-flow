@@ -78,8 +78,14 @@ class PostmortemService:
         snapshot = await evidence.get_snapshot(thread_id=thread_id, run_id=run_id, limits=limits)
         return build_postmortem(snapshot, await self._read_events(evidence, snapshot, limits), max_events=max_events)
 
-    async def latest_run(self, *, thread_id: str, user_id: str, candidate_limit: int = 20) -> dict[str, Any] | None:
-        """Newest run this caller owns on the thread, from the changed-run feed.
+    async def latest_run(self, *, thread_id: str, user_id: str, candidate_limit: int = 20, page_limit: int = 3) -> dict[str, Any]:
+        """Latest run this caller owns on the thread, from the changed-run feed.
+
+        The feed is ordered by change sequence across *every* thread in the
+        evidence grant, not by run recency, so a bounded scan cannot prove a run
+        is the newest. Only a scan that reached the end of the feed may answer a
+        run; an incomplete scan answers ``complete: false`` so the caller can ask
+        for a run ID instead of being shown an older run as "latest".
 
         ``list_changed_runs`` is allowlist-scoped for the plugin, not for the
         caller, so each candidate's snapshot is checked against the caller before
@@ -87,20 +93,26 @@ class PostmortemService:
         """
         evidence = self._require_evidence()
         matched: list[Any] = []
+        scanned = 0
         cursor: str | None = None
         seen: set[str] = set()
-        for _ in range(3):
+        complete = False
+        for _ in range(page_limit):
             page = await evidence.list_changed_runs(cursor=cursor, limit=200)
+            scanned += len(page.items)
             matched.extend(item for item in page.items if item.thread_id == thread_id)
             if not page.has_more or page.next_cursor is None or page.next_cursor in seen:
+                complete = True
                 break
             seen.add(page.next_cursor)
             cursor = page.next_cursor
+        if not complete:
+            return {"run": None, "complete": False, "scanned": scanned}
         for item in reversed(matched[-candidate_limit:]):
             snapshot = await evidence.get_snapshot(thread_id=item.thread_id, run_id=item.run_id, limits=EvidenceLimits(max_events=1))
             if snapshot.owner_id == user_id:
-                return {"run_id": item.run_id, "status": item.status, "updated_at": item.updated_at}
-        return None
+                return {"run": {"run_id": item.run_id, "status": item.status, "updated_at": item.updated_at}, "complete": True, "scanned": scanned}
+        return {"run": None, "complete": True, "scanned": scanned}
 
     async def _read_events(self, evidence: CompletedRunEvidenceReader, snapshot: CompletedRunSnapshot, limits: EvidenceLimits) -> list[CompletedRunEvent]:
         """Follow the event cursor until the snapshot ends or the cap is met."""
@@ -228,7 +240,7 @@ def build_actions(service: PostmortemService) -> tuple[BackendAction, ...]:
 
     async def latest(payload: Mapping[str, Any], context: ActionContext) -> dict[str, Any]:
         thread_id = _text_field(payload, "thread_id")
-        return {"run": await service.latest_run(thread_id=thread_id, user_id=context.principal.user_id)}
+        return await service.latest_run(thread_id=thread_id, user_id=context.principal.user_id)
 
     async def report(payload: Mapping[str, Any], context: ActionContext) -> dict[str, Any]:
         postmortem = await _owned_report(service, context.principal, payload)

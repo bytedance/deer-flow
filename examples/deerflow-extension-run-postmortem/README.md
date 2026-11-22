@@ -48,8 +48,11 @@ The same plugin adds a **Run postmortem** page (sidebar entry, localized en/zh)
 with the same data. When the host supplies the current thread id to the surface,
 the page prefills it; hosts that mount pages without thread context leave the
 field empty, so it stays editable. The page can load the latest run the caller
-owns on that thread, renders the verdict, anomalies, activity and a scrollable
-timeline, and downloads the Markdown report. It reaches the host only
+owns on that thread **when the changed-run feed can be read to its end**; a
+bounded scan that stops early says so and asks for a run ID instead of
+presenting an older run as latest. It renders the verdict, anomalies, activity
+and a timeline that reveals further events on demand, and downloads the
+Markdown report. It reaches the host only
 through three declared actions — `latest`, `report`, `markdown` — so the page
 holds no credentials and no network code of its own. A run the caller does not
 own answers `{"not_found": true}` rather than an error, and the action route's
