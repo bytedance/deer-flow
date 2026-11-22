@@ -11,6 +11,7 @@ sandbox application's unified access domain (routing to each instance via
 from __future__ import annotations
 
 import atexit
+import datetime
 import io
 import logging
 import math
@@ -24,7 +25,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -54,7 +55,11 @@ from .client import (
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_VEFAAS_REGION,
     VeFaaSClient,
+    VeFaaSPrecacheTicket,
+    VeFaaSSandboxNotFoundError,
     VeFaaSSandboxRecord,
+    VeFaaSSnapshotNotFoundError,
+    VeFaaSSnapshotRecord,
     validate_endpoint_url,
 )
 
@@ -72,6 +77,14 @@ MIN_MEMORY_MB = 512
 MAX_MEMORY_MB = 131072
 DEFAULT_READY_TIMEOUT = 60.0
 DEFAULT_COMMAND_TIMEOUT = 600.0
+DEFAULT_SNAPSHOT_TYPE = "disk"
+VALID_SNAPSHOT_TYPES = frozenset({"disk", "full"})
+MIN_SNAPSHOT_RETENTION_DAYS = 1
+MAX_SNAPSHOT_RETENTION_DAYS = 365
+DEFAULT_SNAPSHOT_TIMEOUT = 120.0
+DEFAULT_MAX_SNAPSHOTS_PER_SANDBOX = 3
+MAX_SNAPSHOTS_PER_SANDBOX_LIMIT = 100
+DEFAULT_PRECACHE_TIMEOUT = 300.0
 DEFAULT_SANDBOX_ACCESS_HEADER = "Authorization"
 INSTANCE_ROUTING_HEADER = "X-Faas-Instance-Name"
 USER_DATA_ROOT = "/mnt/user-data"
@@ -139,9 +152,20 @@ VEFAAS_EXTRA_CONFIG_KEYS = frozenset(
         "allow_insecure_http",
         "tos_mount",
         "metadata",
+        "snapshot_id",
+        "pause_on_idle",
+        "auto_pause",
+        "snapshot_on_idle",
+        "snapshot_type",
+        "snapshot_retention_days",
+        "snapshot_timeout",
+        "max_snapshots_per_sandbox",
+        "precache_images",
+        "precache_on_startup",
     }
 )
 _TOS_MOUNT_KEYS = frozenset({"enabled", "bucket", "prefix", "local_mount_path", "read_only", "endpoint"})
+_DISCOVER_TRANSITION_STATUSES = frozenset({"pausing", "resuming", "snapshotting"})
 
 
 class _VeFaaSShutdownIncompleteError(RuntimeError):
@@ -219,6 +243,20 @@ def _sanitize_tos_prefix(raw_prefix: str) -> str:
     return "/".join(parts)
 
 
+def _snapshot_sort_key(record: VeFaaSSnapshotRecord) -> tuple[int, float, str, str]:
+    """Order snapshots newest-first by UTC creation timestamp with deterministic ID tie-break."""
+    raw = record.created_at.strip()
+    if raw:
+        try:
+            parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.UTC)
+            return (1, parsed.timestamp(), raw, record.id)
+        except ValueError:
+            return (0, 0.0, raw, record.id)
+    return (0, 0.0, "", record.id)
+
+
 class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], SandboxProvider):
     """Manage BytePlus veFaaS Cloud Sandbox instances reusing :class:`AioSandbox`."""
 
@@ -254,6 +292,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         self._idle_checker_thread: threading.Thread | None = None
         self._renewal_stop = threading.Event()
         self._renewal_thread: threading.Thread | None = None
+        self._precache_stop = threading.Event()
+        self._precache_thread: threading.Thread | None = None
         self._shutdown_called = False
         self._shutdown_complete = False
         self._accepting = True
@@ -275,6 +315,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         self._register_signal_handlers()
         self._start_idle_checker()
         self._start_renewal_thread()
+        self._start_precache_thread()
 
     # ── Config ───────────────────────────────────────────────────────────
 
@@ -307,6 +348,34 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         if not isinstance(value, bool):
             raise ValueError(f"sandbox.{name} must be true or false")
         return value
+
+    @staticmethod
+    def _validate_snapshot_type(value: Any, *, default: str = DEFAULT_SNAPSHOT_TYPE) -> str:
+        if value is None:
+            return default
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"sandbox.snapshot_type must be one of: {', '.join(sorted(VALID_SNAPSHOT_TYPES))}")
+        normalized = value.strip().lower()
+        if normalized not in VALID_SNAPSHOT_TYPES:
+            raise ValueError(f"sandbox.snapshot_type must be one of: {', '.join(sorted(VALID_SNAPSHOT_TYPES))}")
+        return normalized
+
+    @staticmethod
+    def _validate_precache_images(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+            raise ValueError("sandbox.precache_images must be a list of non-empty image URLs")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("sandbox.precache_images must contain only non-empty strings")
+            url = item.strip()
+            if url not in seen:
+                seen.add(url)
+                cleaned.append(url)
+        return cleaned
 
     def _load_config(self) -> dict[str, Any]:
         app_config = get_app_config()
@@ -371,6 +440,36 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
 
         tos_mount_cfg = self._parse_tos_mount(opt("tos_mount"), allow_insecure_http=allow_insecure_http)
 
+        raw_snapshot_id = opt("snapshot_id")
+        if raw_snapshot_id is None:
+            snapshot_id = None
+        elif isinstance(raw_snapshot_id, str) and raw_snapshot_id.strip():
+            snapshot_id = raw_snapshot_id.strip()
+        else:
+            raise ValueError("sandbox.snapshot_id must be a non-empty string")
+
+        pause_on_idle = self._bool_option("pause_on_idle", opt("pause_on_idle"), default=False)
+        auto_pause = self._bool_option("auto_pause", opt("auto_pause"), default=False)
+        snapshot_on_idle = self._bool_option("snapshot_on_idle", opt("snapshot_on_idle"), default=False)
+        snapshot_type = self._validate_snapshot_type(opt("snapshot_type"))
+        snapshot_retention_days = self._bounded_int(
+            "snapshot_retention_days",
+            opt("snapshot_retention_days"),
+            minimum=MIN_SNAPSHOT_RETENTION_DAYS,
+            maximum=MAX_SNAPSHOT_RETENTION_DAYS,
+        )
+        snapshot_timeout = self._positive_float("snapshot_timeout", opt("snapshot_timeout"), DEFAULT_SNAPSHOT_TIMEOUT)
+        max_snapshots_per_sandbox = self._bounded_int(
+            "max_snapshots_per_sandbox",
+            opt("max_snapshots_per_sandbox"),
+            minimum=1,
+            maximum=MAX_SNAPSHOTS_PER_SANDBOX_LIMIT,
+            default=DEFAULT_MAX_SNAPSHOTS_PER_SANDBOX,
+        )
+        assert max_snapshots_per_sandbox is not None
+        precache_images = self._validate_precache_images(opt("precache_images"))
+        precache_on_startup = self._bool_option("precache_on_startup", opt("precache_on_startup"), default=False)
+
         environment = dict(getattr(sandbox_config, "environment", None) or {})
         _validate_extra_env(environment)
 
@@ -402,6 +501,16 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             "port": getattr(sandbox_config, "port", None),
             "tos_mount": tos_mount_cfg,
             "metadata": dict(raw_metadata),
+            "snapshot_id": snapshot_id,
+            "pause_on_idle": pause_on_idle,
+            "auto_pause": auto_pause,
+            "snapshot_on_idle": snapshot_on_idle,
+            "snapshot_type": snapshot_type,
+            "snapshot_retention_days": snapshot_retention_days,
+            "snapshot_timeout": snapshot_timeout,
+            "max_snapshots_per_sandbox": max_snapshots_per_sandbox,
+            "precache_images": precache_images,
+            "precache_on_startup": precache_on_startup,
             "environment": environment,
             "skills_container_path": _validate_skills_root(app_config.skills.container_path),
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
@@ -591,16 +700,36 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             with self._lock:
                 self._acquires -= 1
 
+    @staticmethod
+    def _is_sandbox_dirty(sandbox: AioSandbox) -> bool:
+        # Read pending session creates before requires_container_recycle so a
+        # pending -> ambiguous transition cannot slip into warm reuse, pause, or snapshot.
+        return getattr(sandbox, "has_pending_session_creates", False) is True or getattr(sandbox, "requires_container_recycle", False) is True
+
     def _cleanup_idle_resources(self, idle_timeout: float) -> None:
         self._retry_pending_destroys()
         self._reap_expired_warm(idle_timeout)
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: _TrackedVeFaaSSandbox, *, reason: str) -> bool:
-        return self._destroy_tracked(
+        def still_reapable(sid: str = sandbox_id, expected: _TrackedVeFaaSSandbox = entry) -> bool:
+            return self._warm_pool.get(sid, (None, 0.0))[0] is expected and sid not in self._sandboxes and sid not in self._acquire_inflight
+
+        is_dirty = self._is_sandbox_dirty(entry.sandbox)
+        want_pause = bool(self._config["pause_on_idle"]) and not is_dirty
+        want_snapshot = bool(self._config["snapshot_on_idle"]) and not is_dirty
+        if not want_pause and not want_snapshot:
+            return self._destroy_tracked(
+                entry,
+                reason=f"warm_pool:{reason}",
+                still_reapable=still_reapable,
+                pop_warm=True,
+            )
+        return self._retire_warm_entry(
             entry,
             reason=f"warm_pool:{reason}",
-            still_reapable=lambda sid=sandbox_id, expected=entry: self._warm_pool.get(sid, (None, 0.0))[0] is expected and sid not in self._sandboxes and sid not in self._acquire_inflight,
-            pop_warm=True,
+            still_reapable=still_reapable,
+            pause=want_pause,
+            snapshot=want_snapshot,
         )
 
     def _evict_oldest_warm(self) -> str | None:
@@ -647,6 +776,51 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             thread.join(timeout=5)
             if thread.is_alive():
                 raise RuntimeError("veFaaS ownership renewal thread is still running after stop timeout")
+
+    def _resolve_precache_urls(self, image_urls: Sequence[str] | None = None) -> list[str]:
+        if image_urls is not None:
+            return self._validate_precache_images(image_urls)
+        configured = list(self._config["precache_images"])
+        if configured:
+            return configured
+        image = self._config.get("image")
+        if isinstance(image, str) and image.strip():
+            return [image.strip()]
+        return []
+
+    def _start_precache_thread(self) -> None:
+        if not self._config["precache_on_startup"]:
+            return
+        urls = self._resolve_precache_urls()
+        if not urls:
+            logger.debug("Skipping veFaaS startup image precache: no precache_images or image configured")
+            return
+        self._precache_stop.clear()
+        self._precache_thread = threading.Thread(
+            target=self._run_startup_precache,
+            args=(urls,),
+            name="vefaas-sandbox-image-precache",
+            daemon=True,
+        )
+        self._precache_thread.start()
+
+    def _stop_precache_thread(self) -> None:
+        self._precache_stop.set()
+        thread = self._precache_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise RuntimeError("veFaaS image precache thread is still running after stop timeout")
+
+    def _run_startup_precache(self, image_urls: list[str]) -> None:
+        with self._lock:
+            if self._precache_stop.is_set() or self._shutdown_called:
+                return
+        try:
+            ticket_id = self._get_client().precache_sandbox_images(image_urls)
+            logger.info("Submitted veFaaS startup image precache ticket %s for %d image(s)", ticket_id, len(image_urls))
+        except Exception as exc:
+            logger.warning("veFaaS startup image precache failed: %s", self._redact(exc))
 
     def _renewal_loop(self) -> None:
         interval = self._ownership_config.renewal_interval_seconds
@@ -948,6 +1122,220 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
 
         self._write_init_marker(sandbox, sandbox_id)
 
+    def _release_ownership_best_effort(self, sandbox_id: str, *, context: str) -> None:
+        try:
+            self._ownership.release(sandbox_id)
+        except OwnershipBackendError as rel_exc:
+            logger.warning("Failed to release ownership (%s) for veFaaS sandbox %s: %s", context, sandbox_id, rel_exc)
+
+    def _adopt_running_sandbox(
+        self,
+        sandbox_id: str,
+        remote_id: str,
+        *,
+        function_id: str,
+        thread_id: str,
+        user_id: str | None,
+        ownership_claimed: bool = False,
+        refresh_timeout: bool = True,
+    ) -> _TrackedVeFaaSSandbox | None:
+        """Verify initialization state, claim/take ownership, and adopt a running instance."""
+        sandbox = self._build_aio_sandbox(sandbox_id, remote_id)
+        adopt_deadline = time.monotonic() + min(self._config["ready_timeout"], _ADOPT_INIT_WAIT_SECONDS)
+        adopted = False
+        while True:
+            with self._remote_init_lock(remote_id):
+                try:
+                    init_state = self._probe_init_marker(sandbox, sandbox_id)
+                except Exception as exc:
+                    logger.warning("Failed to verify initialization state for veFaaS sandbox %s (remote=%s): %s", sandbox_id, remote_id, self._redact(exc))
+                    if ownership_claimed:
+                        self._release_ownership_best_effort(sandbox_id, context="failed probe")
+                    break
+                if init_state == "invalid":
+                    logger.warning("Refusing to adopt veFaaS sandbox %s (remote=%s): invalid or mismatched initialization marker", sandbox_id, remote_id)
+                    if ownership_claimed:
+                        self._release_ownership_best_effort(sandbox_id, context="invalid marker")
+                    break
+                if init_state == "initialized":
+                    if not ownership_claimed:
+                        try:
+                            taken = self._ownership.take(sandbox_id)
+                        except OwnershipBackendError:
+                            sandbox.close()
+                            raise
+                        if not taken:
+                            sandbox.close()
+                            raise RuntimeError(f"veFaaS sandbox {sandbox_id} is being destroyed by a peer")
+                    adopted = True
+                    break
+
+                # Marker is missing: only an exclusive claim (never a takeover from a live
+                # peer) may initialize this remote instance, preventing a second worker from
+                # restoring older host files over a peer's live workspace.
+                if ownership_claimed:
+                    claimed = True
+                else:
+                    try:
+                        claimed = self._ownership.claim(sandbox_id)
+                    except OwnershipBackendError:
+                        sandbox.close()
+                        raise
+                if claimed:
+                    if not ownership_claimed:
+                        try:
+                            init_state = self._probe_init_marker(sandbox, sandbox_id)
+                        except Exception as exc:
+                            logger.warning("Failed to re-verify initialization state for veFaaS sandbox %s (remote=%s): %s", sandbox_id, remote_id, self._redact(exc))
+                            self._release_ownership_best_effort(sandbox_id, context="failed re-probe")
+                            break
+                        if init_state == "invalid":
+                            logger.warning("Refusing to adopt veFaaS sandbox %s (remote=%s): invalid or mismatched initialization marker", sandbox_id, remote_id)
+                            self._release_ownership_best_effort(sandbox_id, context="invalid marker after claim")
+                            break
+                    if init_state == "missing":
+                        logger.info("Completing DeerFlow initialization before adopting veFaaS sandbox %s (remote=%s)", sandbox_id, remote_id)
+                        try:
+                            self._initialize_remote_sandbox(
+                                sandbox,
+                                sandbox_id=sandbox_id,
+                                thread_id=thread_id,
+                                user_id=user_id,
+                            )
+                        except Exception:
+                            sandbox.close()
+                            self._rollback_remote_sandbox(sandbox_id, remote_id, release_ownership=True)
+                            raise
+                    adopted = True
+                    break
+
+            # Outside _remote_init_lock: another live worker holds ownership while this
+            # sandbox is still uninitialized. Wait briefly for it to publish the marker
+            # or drop ownership instead of stealing and restoring over live files.
+            remaining = adopt_deadline - time.monotonic()
+            if remaining <= 0:
+                sandbox.close()
+                raise RuntimeError(f"Timed out waiting for peer to initialize veFaaS sandbox {sandbox_id} (remote={remote_id})")
+            time.sleep(min(_ADOPT_INIT_POLL_INTERVAL_SECONDS, remaining))
+
+        if not adopted:
+            sandbox.close()
+            return None
+        if refresh_timeout:
+            try:
+                self._get_client().set_sandbox_timeout(
+                    function_id,
+                    remote_id,
+                    timeout_minutes=self._config["timeout_minutes"],
+                )
+            except Exception as exc:
+                logger.warning("Failed to refresh timeout on discovered veFaaS sandbox %s: %s", remote_id, exc)
+        logger.info("Adopted existing veFaaS sandbox %s (remote=%s)", sandbox_id, remote_id)
+        return _TrackedVeFaaSSandbox(
+            sandbox_id=sandbox_id,
+            remote_sandbox_id=remote_id,
+            sandbox=sandbox,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+
+    def _wait_for_transition_settled(self, function_id: str, remote_sandbox_id: str, *, deadline: float) -> VeFaaSSandboxRecord | None:
+        """Wait for a Pausing/Resuming/Snapshotting sandbox to reach Running, Paused, or absent."""
+        client = self._get_client()
+        while True:
+            record = client.describe_sandbox(function_id, remote_sandbox_id)
+            if record is None or record.is_terminal_failure:
+                return None
+            if record.is_running or record.is_paused:
+                return record
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Timed out waiting for veFaaS sandbox {remote_sandbox_id} to leave {record.status!r} state")
+            time.sleep(min(_POLL_STATUS_INTERVAL_SECONDS, remaining))
+
+    def _resume_and_adopt_paused_sandbox(
+        self,
+        sandbox_id: str,
+        remote_id: str,
+        *,
+        function_id: str,
+        thread_id: str,
+        user_id: str | None,
+    ) -> _TrackedVeFaaSSandbox | None:
+        """Resume a paused veFaaS sandbox under exclusive ownership and adopt it."""
+        client = self._get_client()
+        resume_deadline = time.monotonic() + self._config["ready_timeout"]
+
+        while True:
+            already_running = False
+            with self._remote_init_lock(remote_id):
+                current = client.describe_sandbox(function_id, remote_id)
+                if current is None or current.is_terminal_failure:
+                    return None
+                if current.is_running:
+                    already_running = True
+                elif current.is_paused:
+                    claimed = self._ownership.claim(sandbox_id)
+                    if claimed:
+                        lease_held = True
+                        try:
+                            refreshed = client.describe_sandbox(function_id, remote_id)
+                            if refreshed is None or refreshed.is_terminal_failure:
+                                return None
+                            resumed_by_us = False
+                            if refreshed.is_paused:
+                                try:
+                                    client.resume_sandbox(
+                                        function_id,
+                                        remote_id,
+                                        timeout_minutes=self._config["timeout_minutes"],
+                                    )
+                                    resumed_by_us = True
+                                except VeFaaSSandboxNotFoundError:
+                                    return None
+                            self._wait_for_remote_running(function_id, remote_id, deadline=resume_deadline)
+                            url, headers = self._resolve_data_plane(remote_id)
+                            remaining = max(1, int(math.ceil(resume_deadline - time.monotonic())))
+                            if not wait_for_sandbox_ready(url, timeout=remaining, headers=headers):
+                                raise TimeoutError(f"Resumed veFaaS sandbox {remote_id} did not become HTTP-ready within {self._config['ready_timeout']}s")
+                            # Hand ownership lifecycle to _adopt_running_sandbox from this point on.
+                            lease_held = False
+                            tracked = self._adopt_running_sandbox(
+                                sandbox_id,
+                                remote_id,
+                                function_id=function_id,
+                                thread_id=thread_id,
+                                user_id=user_id,
+                                ownership_claimed=True,
+                                refresh_timeout=not resumed_by_us,
+                            )
+                            if tracked is not None:
+                                logger.info("Resumed paused veFaaS sandbox %s (remote=%s)", sandbox_id, remote_id)
+                            return tracked
+                        finally:
+                            if lease_held:
+                                self._release_ownership_best_effort(sandbox_id, context="failed resume")
+
+            if already_running:
+                url, headers = self._resolve_data_plane(remote_id)
+                remaining = max(1, int(math.ceil(resume_deadline - time.monotonic())))
+                if not wait_for_sandbox_ready(url, timeout=remaining, headers=headers):
+                    raise TimeoutError(f"veFaaS sandbox {remote_id} did not become HTTP-ready within {self._config['ready_timeout']}s")
+                return self._adopt_running_sandbox(
+                    sandbox_id,
+                    remote_id,
+                    function_id=function_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    ownership_claimed=False,
+                    refresh_timeout=True,
+                )
+
+            remaining = resume_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Timed out waiting to resume veFaaS sandbox {sandbox_id} (remote={remote_id})")
+            time.sleep(min(_ADOPT_INIT_POLL_INTERVAL_SECONDS, remaining))
+
     def _discover_existing_sandbox(
         self,
         sandbox_id: str,
@@ -965,108 +1353,61 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         with self._lock:
             quarantined = set(self._quarantined_remote_ids.get(sandbox_id, set()))
 
+        running: list[VeFaaSSandboxRecord] = []
+        paused: list[VeFaaSSandboxRecord] = []
+        transitioning: list[VeFaaSSandboxRecord] = []
         for record in records:
-            if record.id in quarantined or not record.is_running:
+            if record.id in quarantined or record.is_terminal_failure:
                 continue
             if any(record.metadata.get(k) != v for k, v in expected_metadata.items()):
                 continue
-            url, headers = self._resolve_data_plane(record.id)
+            if record.is_running:
+                running.append(record)
+            elif record.is_paused:
+                paused.append(record)
+            elif record.status.strip().lower() in _DISCOVER_TRANSITION_STATUSES:
+                transitioning.append(record)
+
+        for record in running + paused + transitioning:
+            candidate = record
+            if candidate.status.strip().lower() in _DISCOVER_TRANSITION_STATUSES:
+                settled = self._wait_for_transition_settled(
+                    function_id,
+                    candidate.id,
+                    deadline=time.monotonic() + self._config["ready_timeout"],
+                )
+                if settled is None:
+                    continue
+                candidate = settled
+
+            if candidate.is_paused:
+                resumed = self._resume_and_adopt_paused_sandbox(
+                    sandbox_id,
+                    candidate.id,
+                    function_id=function_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+                if resumed is not None:
+                    return resumed
+                continue
+
+            if not candidate.is_running:
+                continue
+            url, headers = self._resolve_data_plane(candidate.id)
             if not wait_for_sandbox_ready(url, timeout=5, headers=headers):
                 continue
-            sandbox = self._build_aio_sandbox(sandbox_id, record.id)
-            adopt_deadline = time.monotonic() + min(self._config["ready_timeout"], _ADOPT_INIT_WAIT_SECONDS)
-            adopted = False
-            while True:
-                with self._remote_init_lock(record.id):
-                    try:
-                        init_state = self._probe_init_marker(sandbox, sandbox_id)
-                    except Exception as exc:
-                        logger.warning("Failed to verify initialization state for veFaaS sandbox %s (remote=%s): %s", sandbox_id, record.id, self._redact(exc))
-                        break
-                    if init_state == "invalid":
-                        logger.warning("Refusing to adopt veFaaS sandbox %s (remote=%s): invalid or mismatched initialization marker", sandbox_id, record.id)
-                        break
-                    if init_state == "initialized":
-                        try:
-                            taken = self._ownership.take(sandbox_id)
-                        except OwnershipBackendError:
-                            sandbox.close()
-                            raise
-                        if not taken:
-                            sandbox.close()
-                            raise RuntimeError(f"veFaaS sandbox {sandbox_id} is being destroyed by a peer")
-                        adopted = True
-                        break
-
-                    # Marker is missing: only an exclusive claim (never a takeover from a live
-                    # peer) may initialize this remote instance, preventing a second worker from
-                    # restoring older host files over a peer's live workspace.
-                    try:
-                        claimed = self._ownership.claim(sandbox_id)
-                    except OwnershipBackendError:
-                        sandbox.close()
-                        raise
-                    if claimed:
-                        try:
-                            init_state = self._probe_init_marker(sandbox, sandbox_id)
-                        except Exception as exc:
-                            logger.warning("Failed to re-verify initialization state for veFaaS sandbox %s (remote=%s): %s", sandbox_id, record.id, self._redact(exc))
-                            try:
-                                self._ownership.release(sandbox_id)
-                            except OwnershipBackendError as rel_exc:
-                                logger.warning("Failed to release ownership after failed probe on veFaaS sandbox %s: %s", sandbox_id, rel_exc)
-                            break
-                        if init_state == "invalid":
-                            logger.warning("Refusing to adopt veFaaS sandbox %s (remote=%s): invalid or mismatched initialization marker", sandbox_id, record.id)
-                            try:
-                                self._ownership.release(sandbox_id)
-                            except OwnershipBackendError as rel_exc:
-                                logger.warning("Failed to release ownership after refusing invalid veFaaS sandbox %s: %s", sandbox_id, rel_exc)
-                            break
-                        if init_state == "missing":
-                            logger.info("Completing DeerFlow initialization before adopting veFaaS sandbox %s (remote=%s)", sandbox_id, record.id)
-                            try:
-                                self._initialize_remote_sandbox(
-                                    sandbox,
-                                    sandbox_id=sandbox_id,
-                                    thread_id=thread_id,
-                                    user_id=user_id,
-                                )
-                            except Exception:
-                                sandbox.close()
-                                self._rollback_remote_sandbox(sandbox_id, record.id, release_ownership=True)
-                                raise
-                        adopted = True
-                        break
-
-                # Outside _remote_init_lock: another live worker holds ownership while this
-                # sandbox is still uninitialized. Wait briefly for it to publish the marker
-                # or drop ownership instead of stealing and restoring over live files.
-                remaining = adopt_deadline - time.monotonic()
-                if remaining <= 0:
-                    sandbox.close()
-                    raise RuntimeError(f"Timed out waiting for peer to initialize veFaaS sandbox {sandbox_id} (remote={record.id})")
-                time.sleep(min(_ADOPT_INIT_POLL_INTERVAL_SECONDS, remaining))
-
-            if not adopted:
-                sandbox.close()
-                continue
-            try:
-                client.set_sandbox_timeout(
-                    function_id,
-                    record.id,
-                    timeout_minutes=self._config["timeout_minutes"],
-                )
-            except Exception as exc:
-                logger.warning("Failed to refresh timeout on discovered veFaaS sandbox %s: %s", record.id, exc)
-            logger.info("Adopted existing veFaaS sandbox %s (remote=%s)", sandbox_id, record.id)
-            return _TrackedVeFaaSSandbox(
-                sandbox_id=sandbox_id,
-                remote_sandbox_id=record.id,
-                sandbox=sandbox,
+            adopted = self._adopt_running_sandbox(
+                sandbox_id,
+                candidate.id,
+                function_id=function_id,
                 thread_id=thread_id,
                 user_id=user_id,
+                ownership_claimed=False,
+                refresh_timeout=True,
             )
+            if adopted is not None:
+                return adopted
         return None
 
     def _wait_for_remote_running(self, function_id: str, remote_sandbox_id: str, *, deadline: float) -> VeFaaSSandboxRecord:
@@ -1088,6 +1429,21 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 raise TimeoutError(f"Timed out waiting for veFaaS sandbox {remote_sandbox_id} to reach Running state")
             time.sleep(min(_POLL_STATUS_INTERVAL_SECONDS, remaining))
 
+    def _scoped_metadata(self, sandbox_id: str) -> dict[str, str]:
+        metadata = dict(self._config["metadata"])
+        metadata[META_KEY_PROVIDER] = META_VAL_PROVIDER
+        metadata[META_KEY_SANDBOX_ID] = sandbox_id
+        return metadata
+
+    def _find_latest_ready_snapshot(self, function_id: str, sandbox_id: str) -> str | None:
+        """Return the newest Ready snapshot strictly matching ``sandbox_id``'s scope metadata."""
+        snapshots = self._get_client().list_sandbox_snapshots(function_id)
+        matching = [snap for snap in snapshots if snap.is_ready and snap.metadata.get(META_KEY_PROVIDER) == META_VAL_PROVIDER and snap.metadata.get(META_KEY_SANDBOX_ID) == sandbox_id]
+        if not matching:
+            return None
+        matching.sort(key=_snapshot_sort_key, reverse=True)
+        return matching[0].id
+
     def _create_new_sandbox(
         self,
         sandbox_id: str,
@@ -1102,9 +1458,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
         client = self._get_client()
-        metadata = dict(self._config["metadata"])
-        metadata[META_KEY_PROVIDER] = META_VAL_PROVIDER
-        metadata[META_KEY_SANDBOX_ID] = sandbox_id
+        metadata = self._scoped_metadata(sandbox_id)
 
         image_info: dict[str, Any] | None = None
         if self._config["image"] or self._config["port"]:
@@ -1115,17 +1469,51 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 image_info["Port"] = self._config["port"]
 
         tos_mount_config = self._build_tos_mount_config(sandbox_id)
-        remote_sandbox_id = client.create_sandbox(
-            function_id,
-            cpu_milli=self._config["cpu_milli"],
-            memory_mb=self._config["memory_mb"],
-            timeout_minutes=self._config["timeout_minutes"],
-            metadata=metadata,
-            envs=self._config["environment"] or None,
-            instance_image_info=image_info,
-            instance_tos_mount_config=tos_mount_config,
-            session_id=sandbox_id,
-        )
+        auto_pause_config: dict[str, Any] | None = None
+        if self._config["auto_pause"]:
+            auto_pause_config = {
+                "Enable": True,
+                "SnapshotType": self._config["snapshot_type"],
+            }
+
+        resolved_snapshot_id: str | None = None
+        using_thread_snapshot = False
+        if thread_id is not None and self._config["snapshot_on_idle"]:
+            resolved_snapshot_id = self._find_latest_ready_snapshot(function_id, sandbox_id)
+            using_thread_snapshot = resolved_snapshot_id is not None
+        if resolved_snapshot_id is None:
+            resolved_snapshot_id = self._config["snapshot_id"]
+
+        create_kwargs: dict[str, Any] = {
+            "cpu_milli": self._config["cpu_milli"],
+            "memory_mb": self._config["memory_mb"],
+            "timeout_minutes": self._config["timeout_minutes"],
+            "metadata": metadata,
+            "envs": self._config["environment"] or None,
+            "instance_image_info": image_info,
+            "instance_tos_mount_config": tos_mount_config,
+            "session_id": sandbox_id,
+            "auto_pause_config": auto_pause_config,
+        }
+        try:
+            remote_sandbox_id = client.create_sandbox(
+                function_id,
+                snapshot_id=resolved_snapshot_id,
+                **create_kwargs,
+            )
+        except VeFaaSSnapshotNotFoundError:
+            if not using_thread_snapshot:
+                raise
+            logger.warning(
+                "Auto-discovered veFaaS snapshot %s for %s disappeared before CreateSandbox; falling back to base snapshot/image",
+                resolved_snapshot_id,
+                sandbox_id,
+            )
+            remote_sandbox_id = client.create_sandbox(
+                function_id,
+                snapshot_id=self._config["snapshot_id"],
+                **create_kwargs,
+            )
 
         sandbox: AioSandbox | None = None
         ownership_taken = False
@@ -1253,6 +1641,230 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         if record is None:
             return True
         return record.is_terminal_failure
+
+    def _confirm_remote_paused(
+        self,
+        function_id: str,
+        remote_sandbox_id: str,
+        *,
+        deadline: float,
+    ) -> Literal["paused", "absent", "failed"]:
+        """Poll ``DescribeSandbox`` until the instance confirms Paused, absent, or failed."""
+        client = self._get_client()
+        while True:
+            record = client.describe_sandbox(function_id, remote_sandbox_id)
+            if record is None or record.is_terminal_failure:
+                return "absent"
+            if record.is_paused:
+                return "paused"
+            status_lower = record.status.strip().lower()
+            if status_lower != "pausing" and not record.pending:
+                return "failed"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "failed"
+            time.sleep(min(_POLL_STATUS_INTERVAL_SECONDS, remaining))
+
+    def _wait_for_snapshot_ready(
+        self,
+        function_id: str,
+        snapshot_id: str,
+        *,
+        deadline: float,
+    ) -> VeFaaSSnapshotRecord:
+        """Poll ``DescribeSandboxSnapshot`` until the snapshot is Ready or terminates."""
+        client = self._get_client()
+        while True:
+            record = client.describe_sandbox_snapshot(function_id, snapshot_id)
+            if record is None:
+                raise RuntimeError(f"veFaaS snapshot {snapshot_id} disappeared before becoming ready")
+            if record.is_ready:
+                return record
+            if record.is_terminal_failure:
+                raise RuntimeError(f"veFaaS snapshot {snapshot_id} entered terminal state {record.status!r}")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Timed out waiting for veFaaS snapshot {snapshot_id} to become Ready")
+            time.sleep(min(_POLL_STATUS_INTERVAL_SECONDS, remaining))
+
+    def _prune_old_snapshots(self, function_id: str, sandbox_id: str, *, keep: int) -> None:
+        """Best-effort pruning of older ready snapshots belonging strictly to ``sandbox_id``."""
+        if keep <= 0:
+            return
+        client = self._get_client()
+        try:
+            snapshots = client.list_sandbox_snapshots(function_id)
+        except Exception as exc:
+            logger.warning("Failed to list veFaaS snapshots for pruning %s: %s", sandbox_id, self._redact(exc))
+            return
+        matching = [snap for snap in snapshots if snap.is_ready and snap.metadata.get(META_KEY_PROVIDER) == META_VAL_PROVIDER and snap.metadata.get(META_KEY_SANDBOX_ID) == sandbox_id]
+        if len(matching) <= keep:
+            return
+        matching.sort(key=_snapshot_sort_key, reverse=True)
+        for stale in matching[keep:]:
+            try:
+                client.delete_sandbox_snapshot(function_id, stale.id)
+            except Exception as exc:
+                logger.warning("Failed to prune old veFaaS snapshot %s for %s: %s", stale.id, sandbox_id, self._redact(exc))
+
+    def _snapshot_before_destroy(
+        self,
+        function_id: str,
+        *,
+        sandbox_id: str,
+        remote_id: str,
+        reason: str,
+    ) -> None:
+        """Best-effort scoped snapshot before destroying an idle sandbox."""
+        client = self._get_client()
+        try:
+            snapshot_id = client.create_sandbox_snapshot(
+                function_id,
+                remote_id,
+                snapshot_type=self._config["snapshot_type"],
+                retention_days=self._config["snapshot_retention_days"],
+                metadata=self._scoped_metadata(sandbox_id),
+            )
+            self._wait_for_snapshot_ready(
+                function_id,
+                snapshot_id,
+                deadline=time.monotonic() + self._config["snapshot_timeout"],
+            )
+            logger.info("Captured idle snapshot %s for veFaaS sandbox %s (remote=%s, %s)", snapshot_id, sandbox_id, remote_id, reason)
+            self._prune_old_snapshots(
+                function_id,
+                sandbox_id,
+                keep=self._config["max_snapshots_per_sandbox"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to capture idle snapshot for veFaaS sandbox %s (remote=%s, %s); continuing teardown: %s",
+                sandbox_id,
+                remote_id,
+                reason,
+                self._redact(exc),
+            )
+
+    def _retire_warm_entry(
+        self,
+        tracked: _TrackedVeFaaSSandbox,
+        *,
+        reason: str,
+        still_reapable: Callable[[], bool],
+        pause: bool,
+        snapshot: bool,
+    ) -> bool:
+        """Pause or snapshot-then-destroy an idle warm sandbox under full teardown fencing."""
+        remote_id = tracked.remote_sandbox_id
+        sandbox_id = tracked.sandbox_id
+        with self._lock:
+            if self._shutdown_called or not self._accepting:
+                shutdown_active = True
+            else:
+                shutdown_active = False
+                if sandbox_id in self._local_teardown or not still_reapable():
+                    return False
+                if remote_id in self._destroying_remote_ids:
+                    return False
+                self._local_teardown[sandbox_id] = self._local_teardown.get(sandbox_id, 0) + 1
+                self._destroying_remote_ids.add(remote_id)
+                self._pending_destroys[remote_id] = tracked
+        if shutdown_active:
+            return self._destroy_tracked(tracked, reason=reason, still_reapable=still_reapable, pop_warm=True)
+
+        tracked.sandbox.close()
+        confirmed = False
+        release_lease = False
+        needs_kill = True
+        try:
+            claimed = self._ownership.claim(sandbox_id, for_destroy=True)
+            if not claimed:
+                logger.info("Skipping remote retirement for veFaaS sandbox %s (%s): owned by a peer", sandbox_id, reason)
+                confirmed = True
+                needs_kill = False
+            else:
+                release_lease = True
+                function_id = self._config["function_id"]
+                client = self._get_client()
+                if pause:
+                    try:
+                        client.pause_sandbox(function_id, remote_id)
+                        pause_state = self._confirm_remote_paused(
+                            function_id,
+                            remote_id,
+                            deadline=time.monotonic() + self._config["ready_timeout"],
+                        )
+                        if pause_state in {"paused", "absent"}:
+                            confirmed = True
+                            needs_kill = False
+                            if pause_state == "paused":
+                                logger.info("Paused idle veFaaS sandbox %s (remote=%s, %s)", sandbox_id, remote_id, reason)
+                        else:
+                            logger.warning(
+                                "veFaaS sandbox %s (remote=%s) did not reach Paused state (%s); falling back to KillSandbox",
+                                sandbox_id,
+                                remote_id,
+                                reason,
+                            )
+                    except VeFaaSSandboxNotFoundError:
+                        confirmed = True
+                        needs_kill = False
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to pause idle veFaaS sandbox %s (remote=%s, %s); falling back to KillSandbox: %s",
+                            sandbox_id,
+                            remote_id,
+                            reason,
+                            self._redact(exc),
+                        )
+
+                if needs_kill and snapshot:
+                    self._snapshot_before_destroy(
+                        function_id,
+                        sandbox_id=sandbox_id,
+                        remote_id=remote_id,
+                        reason=reason,
+                    )
+
+                if needs_kill:
+                    client.kill_sandbox(function_id, remote_id)
+                    if self._confirm_remote_absent(function_id, remote_id):
+                        confirmed = True
+                    else:
+                        logger.warning(
+                            "veFaaS sandbox %s (remote=%s) still present after KillSandbox (%s); keeping quarantine fence",
+                            sandbox_id,
+                            remote_id,
+                            reason,
+                        )
+        except Exception as exc:
+            logger.warning("Failed to retire veFaaS sandbox %s (remote=%s, %s): %s", sandbox_id, remote_id, reason, self._redact(exc))
+        finally:
+            if confirmed and release_lease:
+                try:
+                    self._ownership.release(sandbox_id)
+                except OwnershipBackendError as exc:
+                    logger.warning("Failed to release ownership lease for retired veFaaS sandbox %s: %s", sandbox_id, exc)
+                    confirmed = False
+            with self._lock:
+                remaining_teardowns = self._local_teardown.get(sandbox_id, 1) - 1
+                if remaining_teardowns <= 0:
+                    self._local_teardown.pop(sandbox_id, None)
+                else:
+                    self._local_teardown[sandbox_id] = remaining_teardowns
+                if self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked:
+                    self._warm_pool.pop(sandbox_id, None)
+                self._destroying_remote_ids.discard(remote_id)
+                if confirmed:
+                    self._pending_destroys.pop(remote_id, None)
+                    bucket = self._quarantined_remote_ids.get(sandbox_id)
+                    if bucket is not None:
+                        bucket.discard(remote_id)
+                        if not bucket:
+                            self._quarantined_remote_ids.pop(sandbox_id, None)
+                else:
+                    self._quarantined_remote_ids.setdefault(sandbox_id, set()).add(remote_id)
+        return True
 
     def _drain_quarantine_for_scope(self, sandbox_id: str) -> None:
         with self._lock:
@@ -1525,6 +2137,124 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 raise RuntimeError(f"veFaaS sandbox {sandbox_id} does not match target identity ({user_id}, {thread_id})")
             self._upload_skills(tracked.sandbox, projection)
 
+    # ── Snapshots & image precaching ─────────────────────────────────────
+
+    def create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        snapshot_type: str | None = None,
+        retention_days: int | None = None,
+        wait: bool = True,
+        timeout: float | None = None,
+    ) -> VeFaaSSnapshotRecord:
+        """Create a scoped snapshot of a tracked (active or warm) veFaaS sandbox."""
+        resolved_type = self._validate_snapshot_type(snapshot_type, default=self._config["snapshot_type"])
+        resolved_retention = (
+            self._config["snapshot_retention_days"]
+            if retention_days is None
+            else self._bounded_int(
+                "snapshot_retention_days",
+                retention_days,
+                minimum=MIN_SNAPSHOT_RETENTION_DAYS,
+                maximum=MAX_SNAPSHOT_RETENTION_DAYS,
+            )
+        )
+        resolved_timeout = self._positive_float("snapshot_timeout", timeout, self._config["snapshot_timeout"])
+        function_id, _ = self._require_provisioning_settings()
+
+        with self._acquiring():
+            with self._acquire_serializer.hold(sandbox_id):
+                with self._lock:
+                    if sandbox_id in self._local_teardown:
+                        raise RuntimeError(f"veFaaS sandbox {sandbox_id} is currently being torn down")
+                    tracked = self._sandboxes.get(sandbox_id)
+                    if tracked is None:
+                        warm = self._warm_pool.get(sandbox_id)
+                        tracked = warm[0] if warm is not None else None
+                    if tracked is None:
+                        raise RuntimeError(f"veFaaS sandbox {sandbox_id} is not tracked by this provider")
+                    self._acquire_inflight[sandbox_id] = self._acquire_inflight.get(sandbox_id, 0) + 1
+                try:
+                    if self._is_sandbox_dirty(tracked.sandbox):
+                        raise RuntimeError(f"Refusing to snapshot corrupted veFaaS sandbox {sandbox_id}")
+                    metadata = self._scoped_metadata(sandbox_id)
+                    snapshot_id = self._get_client().create_sandbox_snapshot(
+                        function_id,
+                        tracked.remote_sandbox_id,
+                        snapshot_type=resolved_type,
+                        retention_days=resolved_retention,
+                        metadata=metadata,
+                    )
+                    if not wait:
+                        return VeFaaSSnapshotRecord(
+                            id=snapshot_id,
+                            sandbox_id=tracked.remote_sandbox_id,
+                            function_id=function_id,
+                            status="Creating",
+                            snapshot_type=resolved_type,
+                            retention_days=resolved_retention,
+                            metadata=metadata,
+                        )
+                    return self._wait_for_snapshot_ready(
+                        function_id,
+                        snapshot_id,
+                        deadline=time.monotonic() + resolved_timeout,
+                    )
+                finally:
+                    with self._lock:
+                        remaining = self._acquire_inflight.get(sandbox_id, 1) - 1
+                        if remaining <= 0:
+                            self._acquire_inflight.pop(sandbox_id, None)
+                        else:
+                            self._acquire_inflight[sandbox_id] = remaining
+
+    def list_snapshots(self, sandbox_id: str | None = None) -> list[VeFaaSSnapshotRecord]:
+        """List DeerFlow-scoped snapshots for this veFaaS function, newest first."""
+        function_id, _ = self._require_provisioning_settings()
+        with self._acquiring():
+            snapshots = self._get_client().list_sandbox_snapshots(function_id)
+        matching = [snap for snap in snapshots if snap.metadata.get(META_KEY_PROVIDER) == META_VAL_PROVIDER and (sandbox_id is None or snap.metadata.get(META_KEY_SANDBOX_ID) == sandbox_id)]
+        matching.sort(key=_snapshot_sort_key, reverse=True)
+        return matching
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete a veFaaS sandbox snapshot (idempotent when already absent)."""
+        if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+            raise ValueError("snapshot_id must be a non-empty string")
+        function_id, _ = self._require_provisioning_settings()
+        with self._acquiring():
+            self._get_client().delete_sandbox_snapshot(function_id, snapshot_id.strip())
+
+    def precache_images(
+        self,
+        image_urls: Sequence[str] | None = None,
+        *,
+        wait: bool = False,
+        timeout: float | None = None,
+    ) -> VeFaaSPrecacheTicket:
+        """Trigger veFaaS sandbox image precaching and optionally wait for completion."""
+        urls = self._resolve_precache_urls(image_urls)
+        if not urls:
+            raise ValueError("precache_images requires image_urls or configured sandbox.precache_images / sandbox.image")
+        resolved_timeout = self._positive_float("precache_timeout", timeout, DEFAULT_PRECACHE_TIMEOUT)
+        with self._acquiring():
+            client = self._get_client()
+            ticket_id = client.precache_sandbox_images(urls)
+            if not wait:
+                return VeFaaSPrecacheTicket(ticket_id=ticket_id, status="Pending")
+            deadline = time.monotonic() + resolved_timeout
+            while True:
+                ticket = client.get_sandbox_image_precache_ticket(ticket_id)
+                if ticket.is_succeeded:
+                    return ticket
+                if ticket.is_terminal_failure:
+                    raise RuntimeError(f"veFaaS image precache ticket {ticket_id} failed with status {ticket.status!r}")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Timed out waiting for veFaaS image precache ticket {ticket_id} to complete")
+                time.sleep(min(_POLL_STATUS_INTERVAL_SECONDS, remaining))
+
     # ── Release & bounded output mirroring ───────────────────────────────
 
     def release(self, sandbox_id: str) -> None:
@@ -1546,9 +2276,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             tracked = self._sandboxes.get(sandbox_id)
         if tracked is None:
             return
-        # Read pending session creates before requires_container_recycle so a
-        # pending -> ambiguous transition cannot slip into the warm pool.
-        needs_recycle = getattr(tracked.sandbox, "has_pending_session_creates", False) is True or getattr(tracked.sandbox, "requires_container_recycle", False) is True
+        needs_recycle = self._is_sandbox_dirty(tracked.sandbox)
         if not needs_recycle and not self._uses_tos_for_user_data() and tracked.thread_id and tracked.user_id:
             remote_id = tracked.remote_sandbox_id
             with self._lock:
@@ -1562,7 +2290,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             finally:
                 with self._lock:
                     self._mirroring_output_ids.remove(remote_id)
-            needs_recycle = getattr(tracked.sandbox, "has_pending_session_creates", False) is True or getattr(tracked.sandbox, "requires_container_recycle", False) is True
+            needs_recycle = self._is_sandbox_dirty(tracked.sandbox)
 
         with self._lock:
             if self._sandboxes.get(sandbox_id) is not tracked:
@@ -1677,6 +2405,10 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 threads_stopped = False
             try:
                 self._stop_renewal_thread()
+            except RuntimeError:
+                threads_stopped = False
+            try:
+                self._stop_precache_thread()
             except RuntimeError:
                 threads_stopped = False
 

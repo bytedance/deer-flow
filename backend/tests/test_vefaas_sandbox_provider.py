@@ -30,7 +30,11 @@ from deerflow.community.provider_credentials import REDACTION_MARKER
 from deerflow.community.vefaas_sandbox import (
     VeFaaSApiError,
     VeFaaSClient,
+    VeFaaSPrecacheTicket,
+    VeFaaSSandboxNotFoundError,
     VeFaaSSandboxProvider,
+    VeFaaSSnapshotNotFoundError,
+    VeFaaSSnapshotRecord,
     sign_v4_headers,
 )
 from deerflow.community.vefaas_sandbox import provider as provider_mod
@@ -105,12 +109,24 @@ class _FakeVeFaaSServer:
 
     def __init__(self) -> None:
         self.sandboxes: dict[str, dict[str, Any]] = {}
+        self.snapshots: dict[str, dict[str, Any]] = {}
+        self.precache_tickets: dict[str, dict[str, Any]] = {}
         self.requests: list[tuple[str, dict[str, Any], dict[str, str]]] = []
         self.next_seq = 1
+        self.next_snapshot_seq = 1
+        self.next_ticket_seq = 1
         self.kill_error: tuple[int, str, str] | None = None
         self.describe_after_kill_keeps_running = False
         self.describe_error: tuple[int, str, str] | None = None
         self.create_status_sequence: list[str] = ["Running"]
+        self.pause_error: tuple[int, str, str] | None = None
+        self.pause_status_sequence: list[str] = ["Paused"]
+        self.resume_error: tuple[int, str, str] | None = None
+        self.resume_status_sequence: list[str] = ["Running"]
+        self.snapshot_create_error: tuple[int, str, str] | None = None
+        self.snapshot_status_sequence: list[str] = ["Ready"]
+        self.precache_status_sequence: list[str] = ["Succeeded"]
+        self.validate_snapshot_on_create = False
         self.ignore_list_metadata_filter = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -125,6 +141,12 @@ class _FakeVeFaaSServer:
         self.requests.append((action, payload, dict(request.headers)))
 
         if action == "CreateSandbox":
+            snapshot_id = payload.get("SnapshotId")
+            if self.validate_snapshot_on_create and snapshot_id and snapshot_id not in self.snapshots:
+                return httpx.Response(
+                    404,
+                    json={"ResponseMetadata": {"RequestId": "req-create-snap-404", "Error": {"Code": "SnapshotNotFound", "Message": "snapshot not found"}}},
+                )
             remote_id = f"vefaas-sb-{self.next_seq}"
             self.next_seq += 1
             self.sandboxes[remote_id] = {
@@ -137,6 +159,8 @@ class _FakeVeFaaSServer:
                 "Envs": list(payload.get("Envs") or []),
                 "Timeout": payload.get("Timeout"),
                 "InstanceTosMountConfig": payload.get("InstanceTosMountConfig"),
+                "SnapshotId": snapshot_id,
+                "AutoPauseConfig": payload.get("AutoPauseConfig"),
             }
             return httpx.Response(
                 200,
@@ -160,18 +184,18 @@ class _FakeVeFaaSServer:
             queue = record.get("_status_queue")
             if queue:
                 record["Status"] = queue.pop(0)
+            result_body: dict[str, Any] = {
+                "Id": record["Id"],
+                "FunctionId": record["FunctionId"],
+                "Status": record["Status"],
+                "Pending": record["Pending"],
+                "MetadataList": [{"MetaKey": k, "MetaValue": v} for k, v in record["Metadata"].items()],
+            }
+            if record.get("PausedAt"):
+                result_body["PausedAt"] = record["PausedAt"]
             return httpx.Response(
                 200,
-                json={
-                    "ResponseMetadata": {"RequestId": "req-desc"},
-                    "Result": {
-                        "Id": record["Id"],
-                        "FunctionId": record["FunctionId"],
-                        "Status": record["Status"],
-                        "Pending": record["Pending"],
-                        "MetadataList": [{"MetaKey": k, "MetaValue": v} for k, v in record["Metadata"].items()],
-                    },
-                },
+                json={"ResponseMetadata": {"RequestId": "req-desc"}, "Result": result_body},
             )
 
         if action == "ListSandboxes":
@@ -181,15 +205,16 @@ class _FakeVeFaaSServer:
                 if record["FunctionId"] != payload["FunctionId"]:
                     continue
                 if self.ignore_list_metadata_filter or all(record["Metadata"].get(k) == v for k, v in wanted_meta.items()):
-                    items.append(
-                        {
-                            "Id": record["Id"],
-                            "FunctionId": record["FunctionId"],
-                            "Status": record["Status"],
-                            "Pending": record["Pending"],
-                            "Metadata": dict(record["Metadata"]),
-                        }
-                    )
+                    item: dict[str, Any] = {
+                        "Id": record["Id"],
+                        "FunctionId": record["FunctionId"],
+                        "Status": record["Status"],
+                        "Pending": record["Pending"],
+                        "Metadata": dict(record["Metadata"]),
+                    }
+                    if record.get("PausedAt"):
+                        item["PausedAt"] = record["PausedAt"]
+                    items.append(item)
             page_number = int(payload.get("PageNumber", 1))
             page_size = int(payload.get("PageSize", 50))
             start = (page_number - 1) * page_size
@@ -223,6 +248,170 @@ class _FakeVeFaaSServer:
             if not self.describe_after_kill_keeps_running:
                 self.sandboxes.pop(remote_id, None)
             return httpx.Response(200, json={"ResponseMetadata": {"RequestId": "req-kill"}, "Result": {}})
+
+        if action == "PauseSandbox":
+            if self.pause_error is not None:
+                code, err_code, err_msg = self.pause_error
+                return httpx.Response(
+                    code,
+                    json={"ResponseMetadata": {"RequestId": "req-pause-err", "Error": {"Code": err_code, "Message": err_msg}}},
+                )
+            remote_id = payload["SandboxId"]
+            record = self.sandboxes.get(remote_id)
+            if record is None:
+                return httpx.Response(
+                    404,
+                    json={"ResponseMetadata": {"RequestId": "req-pause-404", "Error": {"Code": "SandboxNotFound", "Message": "not found"}}},
+                )
+            record["Status"] = self.pause_status_sequence[0]
+            record["_status_queue"] = list(self.pause_status_sequence)
+            record["PausedAt"] = "2026-11-23T01:00:00Z"
+            return httpx.Response(200, json={"ResponseMetadata": {"RequestId": "req-pause"}, "Result": {}})
+
+        if action == "ResumeSandbox":
+            if self.resume_error is not None:
+                code, err_code, err_msg = self.resume_error
+                return httpx.Response(
+                    code,
+                    json={"ResponseMetadata": {"RequestId": "req-resume-err", "Error": {"Code": err_code, "Message": err_msg}}},
+                )
+            remote_id = payload["SandboxId"]
+            record = self.sandboxes.get(remote_id)
+            if record is None:
+                return httpx.Response(
+                    404,
+                    json={"ResponseMetadata": {"RequestId": "req-resume-404", "Error": {"Code": "SandboxNotFound", "Message": "not found"}}},
+                )
+            record["Status"] = self.resume_status_sequence[0]
+            record["_status_queue"] = list(self.resume_status_sequence)
+            if "Timeout" in payload:
+                record["Timeout"] = payload["Timeout"]
+            return httpx.Response(
+                200,
+                json={"ResponseMetadata": {"RequestId": "req-resume"}, "Result": {"Status": record["Status"]}},
+            )
+
+        if action == "CreateSandboxSnapshot":
+            if self.snapshot_create_error is not None:
+                code, err_code, err_msg = self.snapshot_create_error
+                return httpx.Response(
+                    code,
+                    json={"ResponseMetadata": {"RequestId": "req-snap-err", "Error": {"Code": err_code, "Message": err_msg}}},
+                )
+            remote_id = payload["SandboxId"]
+            if remote_id not in self.sandboxes:
+                return httpx.Response(
+                    404,
+                    json={"ResponseMetadata": {"RequestId": "req-snap-sb-404", "Error": {"Code": "SandboxNotFound", "Message": "not found"}}},
+                )
+            seq = self.next_snapshot_seq
+            self.next_snapshot_seq += 1
+            snap_id = f"snap-{seq}"
+            self.snapshots[snap_id] = {
+                "SnapshotId": snap_id,
+                "SandboxId": remote_id,
+                "FunctionId": payload["FunctionId"],
+                "Status": self.snapshot_status_sequence[0],
+                "_status_queue": list(self.snapshot_status_sequence),
+                "SnapshotType": payload.get("Type") or "disk",
+                "Source": "manual",
+                "CreatedAt": f"2026-11-23T01:{seq:02d}:00Z",
+                "RetentionDays": payload.get("RetentionDays"),
+                "Metadata": dict(payload.get("Metadata") or {}),
+            }
+            return httpx.Response(
+                200,
+                json={"ResponseMetadata": {"RequestId": "req-snap-create"}, "Result": {"SnapshotId": snap_id}},
+            )
+
+        if action == "DescribeSandboxSnapshot":
+            snap_id = payload["SnapshotId"]
+            snap = self.snapshots.get(snap_id)
+            if snap is None:
+                return httpx.Response(
+                    404,
+                    json={"ResponseMetadata": {"RequestId": "req-snap-404", "Error": {"Code": "SnapshotNotFound", "Message": "not found"}}},
+                )
+            queue = snap.get("_status_queue")
+            if queue:
+                snap["Status"] = queue.pop(0)
+            body = {k: v for k, v in snap.items() if not k.startswith("_")}
+            return httpx.Response(
+                200,
+                json={"ResponseMetadata": {"RequestId": "req-snap-desc"}, "Result": {"Snapshot": body}},
+            )
+
+        if action == "ListSandboxSnapshots":
+            wanted_sb = payload.get("SandboxId")
+            items = []
+            for snap in self.snapshots.values():
+                if snap["FunctionId"] != payload["FunctionId"]:
+                    continue
+                if wanted_sb and snap["SandboxId"] != wanted_sb:
+                    continue
+                items.append({k: v for k, v in snap.items() if not k.startswith("_")})
+            page_number = int(payload.get("PageNumber", 1))
+            page_size = int(payload.get("PageSize", 50))
+            start = (page_number - 1) * page_size
+            page_items = items[start : start + page_size]
+            return httpx.Response(
+                200,
+                json={"ResponseMetadata": {"RequestId": "req-snap-list"}, "Result": {"Snapshots": page_items, "Total": len(items)}},
+            )
+
+        if action == "DeleteSandboxSnapshot":
+            snap_id = payload["SnapshotId"]
+            if snap_id not in self.snapshots:
+                return httpx.Response(
+                    404,
+                    json={"ResponseMetadata": {"RequestId": "req-snap-del-404", "Error": {"Code": "SnapshotNotFound", "Message": "not found"}}},
+                )
+            self.snapshots.pop(snap_id, None)
+            return httpx.Response(
+                200,
+                json={"ResponseMetadata": {"RequestId": "req-snap-del"}, "Result": {"SnapshotId": snap_id}},
+            )
+
+        if action == "PrecacheSandboxImages":
+            seq = self.next_ticket_seq
+            self.next_ticket_seq += 1
+            ticket_id = f"ticket-{seq}"
+            self.precache_tickets[ticket_id] = {
+                "TicketId": ticket_id,
+                "ImageUrls": list(payload.get("ImageUrls") or []),
+                "Status": self.precache_status_sequence[0],
+                "_status_queue": list(self.precache_status_sequence),
+                "Duration": 12,
+                "Progress": {"Total": len(payload.get("ImageUrls") or []), "Completed": len(payload.get("ImageUrls") or [])},
+            }
+            return httpx.Response(
+                200,
+                json={"ResponseMetadata": {"RequestId": "req-precache"}, "Result": {"TicketId": ticket_id}},
+            )
+
+        if action == "GetSandboxImagePrecacheTicket":
+            ticket_id = payload["TicketId"]
+            ticket = self.precache_tickets.get(ticket_id)
+            if ticket is None:
+                return httpx.Response(
+                    404,
+                    json={"ResponseMetadata": {"RequestId": "req-ticket-404", "Error": {"Code": "TicketNotFound", "Message": "not found"}}},
+                )
+            queue = ticket.get("_status_queue")
+            if queue:
+                ticket["Status"] = queue.pop(0)
+            return httpx.Response(
+                200,
+                json={
+                    "ResponseMetadata": {"RequestId": "req-ticket"},
+                    "Result": {
+                        "TicketId": ticket["TicketId"],
+                        "Status": ticket["Status"],
+                        "Duration": ticket["Duration"],
+                        "Progress": dict(ticket["Progress"]),
+                    },
+                },
+            )
 
         return httpx.Response(400, json={"ResponseMetadata": {"Error": {"Code": "InvalidAction", "Message": action}}})
 
@@ -1649,3 +1838,886 @@ class TestVeFaaSSandboxProviderLifecycle:
             assert remote_files_d["uploads/report.txt"] == b"untouched"
         finally:
             provider_d.shutdown()
+
+
+# ── Phase 2: Snapshots, Pause/Resume & Image Precache ────────────────────
+
+
+class TestVeFaaSClientSnapshotsPausePrecache:
+    def _make_client(self, server: _FakeVeFaaSServer) -> VeFaaSClient:
+        return VeFaaSClient(
+            endpoint="https://vefaas.ap-southeast-1.byteplusapi.com",
+            region="ap-southeast-1",
+            access_key="AK-TEST-KEY",
+            secret_key="SK-TEST-SECRET",
+            httpx_client=httpx.Client(transport=httpx.MockTransport(server.handler)),
+        )
+
+    def test_create_sandbox_passes_snapshot_id_and_auto_pause_config(self) -> None:
+        server = _FakeVeFaaSServer()
+        client = self._make_client(server)
+        try:
+            remote_id = client.create_sandbox(
+                "fn-demo",
+                snapshot_id="snap-base-1",
+                auto_pause_config={"Enable": True, "SnapshotType": "full"},
+            )
+            assert remote_id == "vefaas-sb-1"
+            action, payload, _ = server.requests[-1]
+            assert action == "CreateSandbox"
+            assert payload["SnapshotId"] == "snap-base-1"
+            assert payload["AutoPauseConfig"] == {"Enable": True, "SnapshotType": "full"}
+
+            # When omitted, neither field is serialized.
+            client.create_sandbox("fn-demo")
+            _, plain_payload, _ = server.requests[-1]
+            assert "SnapshotId" not in plain_payload
+            assert "AutoPauseConfig" not in plain_payload
+        finally:
+            client.close()
+
+    def test_pause_and_resume_sandbox_payloads_and_status_helpers(self) -> None:
+        server = _FakeVeFaaSServer()
+        server.pause_status_sequence = ["Pausing", "Paused"]
+        server.resume_status_sequence = ["Resuming", "Running"]
+        client = self._make_client(server)
+        try:
+            remote_id = client.create_sandbox("fn-demo")
+            client.pause_sandbox("fn-demo", remote_id)
+
+            first_desc = client.describe_sandbox("fn-demo", remote_id)
+            assert first_desc is not None
+            assert first_desc.is_transitioning and not first_desc.is_paused
+            assert first_desc.paused_at == "2026-11-23T01:00:00Z"
+
+            second_desc = client.describe_sandbox("fn-demo", remote_id)
+            assert second_desc is not None
+            assert second_desc.is_paused and not second_desc.is_running and not second_desc.is_terminal_failure
+
+            resume_status = client.resume_sandbox(
+                "fn-demo",
+                remote_id,
+                snapshot_id="snap-99",
+                timeout_minutes=90,
+                async_resume=True,
+            )
+            assert resume_status == "Resuming"
+            action, payload, _ = server.requests[-1]
+            assert action == "ResumeSandbox"
+            assert payload == {
+                "FunctionId": "fn-demo",
+                "SandboxId": remote_id,
+                "SnapshotId": "snap-99",
+                "Timeout": 90,
+                "TimeoutUnit": "minute",
+                "Async": True,
+            }
+
+            with pytest.raises(VeFaaSSandboxNotFoundError):
+                client.pause_sandbox("fn-demo", "vefaas-missing")
+        finally:
+            client.close()
+
+    def test_snapshot_crud_pagination_idempotency_and_fail_closed(self) -> None:
+        server = _FakeVeFaaSServer()
+        client = self._make_client(server)
+        try:
+            remote_id = client.create_sandbox("fn-demo")
+            created_ids = [
+                client.create_sandbox_snapshot(
+                    "fn-demo",
+                    remote_id,
+                    snapshot_type="disk",
+                    retention_days=7,
+                    metadata={"k": f"v{i}"},
+                )
+                for i in range(5)
+            ]
+            assert len(created_ids) == 5
+            create_reqs = [payload for action, payload, _ in server.requests if action == "CreateSandboxSnapshot"]
+            assert create_reqs[0] == {
+                "FunctionId": "fn-demo",
+                "SandboxId": remote_id,
+                "Type": "disk",
+                "RetentionDays": 7,
+                "Metadata": {"k": "v0"},
+            }
+
+            snap = client.describe_sandbox_snapshot("fn-demo", created_ids[0])
+            assert isinstance(snap, VeFaaSSnapshotRecord)
+            assert snap.id == created_ids[0]
+            assert snap.is_ready
+            assert snap.retention_days == 7
+            assert snap.metadata == {"k": "v0"}
+
+            # Authoritative SnapshotNotFound returns None.
+            assert client.describe_sandbox_snapshot("fn-demo", "snap-does-not-exist") is None
+
+            # Pagination fetches all 5 across 3 pages.
+            listed = client.list_sandbox_snapshots("fn-demo", page_size=2)
+            assert [s.id for s in listed] == created_ids
+            list_calls = [payload for action, payload, _ in server.requests if action == "ListSandboxSnapshots"]
+            assert [c["PageNumber"] for c in list_calls] == [1, 2, 3]
+
+            # Delete is idempotent on SnapshotNotFound.
+            client.delete_sandbox_snapshot("fn-demo", created_ids[0])
+            client.delete_sandbox_snapshot("fn-demo", created_ids[0])
+            assert client.describe_sandbox_snapshot("fn-demo", created_ids[0]) is None
+        finally:
+            client.close()
+
+        # Fail closed on malformed DescribeSandboxSnapshot response (not SnapshotNotFound).
+        def malformed_handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ResponseMetadata": {"RequestId": "req-bad"}, "Result": {"Snapshot": {}}})
+
+        bad_client = VeFaaSClient(
+            endpoint="https://vefaas.ap-southeast-1.byteplusapi.com",
+            region="ap-southeast-1",
+            access_key="ak",
+            secret_key="sk",
+            httpx_client=httpx.Client(transport=httpx.MockTransport(malformed_handler)),
+        )
+        try:
+            with pytest.raises(VeFaaSApiError, match="valid snapshot record"):
+                bad_client.describe_sandbox_snapshot("fn-demo", "snap-1")
+        finally:
+            bad_client.close()
+
+        # Generic 404 with non-snapshot error code must raise VeFaaSApiError, not return None.
+        def generic_404_handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"ResponseMetadata": {"RequestId": "req-404", "Error": {"Code": "FunctionNotFound", "Message": "fn missing"}}},
+            )
+
+        err_client = VeFaaSClient(
+            endpoint="https://vefaas.ap-southeast-1.byteplusapi.com",
+            region="ap-southeast-1",
+            access_key="ak",
+            secret_key="sk",
+            httpx_client=httpx.Client(transport=httpx.MockTransport(generic_404_handler)),
+        )
+        try:
+            with pytest.raises(VeFaaSApiError) as exc_info:
+                err_client.describe_sandbox_snapshot("fn-missing", "snap-1")
+            assert not isinstance(exc_info.value, VeFaaSSnapshotNotFoundError)
+        finally:
+            err_client.close()
+
+    def test_precache_sandbox_images_and_ticket_parsing(self) -> None:
+        server = _FakeVeFaaSServer()
+        server.precache_status_sequence = ["Running", "Succeeded"]
+        client = self._make_client(server)
+        try:
+            with pytest.raises(ValueError, match="sequence"):
+                client.precache_sandbox_images("img:latest")  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="non-empty"):
+                client.precache_sandbox_images([])
+            with pytest.raises(ValueError, match="non-empty"):
+                client.precache_sandbox_images(["img:v1", "   "])
+
+            ticket_id = client.precache_sandbox_images([" img:v1 ", "img:v2", "img:v1"], client_token="tok-1")
+            assert ticket_id == "ticket-1"
+            action, payload, _ = server.requests[-1]
+            assert action == "PrecacheSandboxImages"
+            assert payload == {"ImageUrls": ["img:v1", "img:v2"], "ClientToken": "tok-1"}
+
+            t1 = client.get_sandbox_image_precache_ticket(ticket_id)
+            assert isinstance(t1, VeFaaSPrecacheTicket)
+            assert not t1.is_succeeded and not t1.is_terminal_failure
+            t2 = client.get_sandbox_image_precache_ticket(ticket_id)
+            assert t2.is_succeeded
+            assert t2.duration == 12
+        finally:
+            client.close()
+
+
+class TestVeFaaSPhase2ConfigValidation:
+    @pytest.mark.parametrize(
+        ("vefaas_override", "expected_error"),
+        [
+            ({"snapshot_id": "   "}, "snapshot_id"),
+            ({"snapshot_id": 123}, "snapshot_id"),
+            ({"snapshot_type": "memory"}, "snapshot_type"),
+            ({"snapshot_type": ""}, "snapshot_type"),
+            ({"snapshot_retention_days": 0}, "snapshot_retention_days"),
+            ({"snapshot_retention_days": 366}, "snapshot_retention_days"),
+            ({"snapshot_retention_days": True}, "snapshot_retention_days"),
+            ({"snapshot_timeout": 0}, "snapshot_timeout"),
+            ({"snapshot_timeout": True}, "snapshot_timeout"),
+            ({"max_snapshots_per_sandbox": 0}, "max_snapshots_per_sandbox"),
+            ({"max_snapshots_per_sandbox": 101}, "max_snapshots_per_sandbox"),
+            ({"pause_on_idle": "yes"}, "pause_on_idle"),
+            ({"auto_pause": 1}, "auto_pause"),
+            ({"snapshot_on_idle": "true"}, "snapshot_on_idle"),
+            ({"precache_on_startup": "false"}, "precache_on_startup"),
+            ({"precache_images": "cr.example.com/app:latest"}, "precache_images"),
+            ({"precache_images": ["cr.example.com/app:latest", ""]}, "precache_images"),
+        ],
+    )
+    def test_rejects_invalid_phase2_config_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        vefaas_override: dict[str, Any],
+        expected_error: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=expected_error):
+            _install_provider(monkeypatch, tmp_path, sandbox_overrides={"vefaas": vefaas_override})
+
+    def test_accepts_and_normalizes_valid_phase2_config(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            sandbox_overrides={
+                "vefaas": {
+                    "snapshot_id": " snap-base-01 ",
+                    "pause_on_idle": True,
+                    "auto_pause": True,
+                    "snapshot_on_idle": True,
+                    "snapshot_type": "FULL",
+                    "snapshot_retention_days": 14,
+                    "snapshot_timeout": 90,
+                    "max_snapshots_per_sandbox": 5,
+                    "precache_images": ["img:1", " img:2 ", "img:1"],
+                    "precache_on_startup": False,
+                }
+            },
+        )
+        try:
+            assert provider._config["snapshot_id"] == "snap-base-01"
+            assert provider._config["pause_on_idle"] is True
+            assert provider._config["auto_pause"] is True
+            assert provider._config["snapshot_on_idle"] is True
+            assert provider._config["snapshot_type"] == "full"
+            assert provider._config["snapshot_retention_days"] == 14
+            assert provider._config["snapshot_timeout"] == 90.0
+            assert provider._config["max_snapshots_per_sandbox"] == 5
+            assert provider._config["precache_images"] == ["img:1", "img:2"]
+            assert provider._config["precache_on_startup"] is False
+        finally:
+            provider.shutdown()
+
+
+class TestVeFaaSPauseResumeLifecycle:
+    def test_pause_on_idle_pauses_warm_sandbox_and_subsequent_acquire_resumes_preserving_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from deerflow.config.paths import get_paths
+
+        server = _FakeVeFaaSServer()
+        server.pause_status_sequence = ["Pausing", "Paused"]
+        server.resume_status_sequence = ["Resuming", "Running"]
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={"vefaas": {"pause_on_idle": True}},
+        )
+        # Share in-memory files across AioSandbox handles to simulate persisted sandbox disk.
+        persisted_files: dict[str, bytes] = {}
+
+        class _PersistingAio(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_files
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAio)
+        try:
+            sid = provider.acquire("t-pause", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            # Simulate live workspace file written during turn 1 + stale host copy.
+            persisted_files["live-state"] = b"turn-1-data"
+            uploads_dir = get_paths().sandbox_uploads_dir("t-pause", user_id="u1")
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            (uploads_dir / "stale.txt").write_text("should-not-overwrite", encoding="utf-8")
+
+            provider.release(sid)
+            tracked, _ = provider._warm_pool[sid]
+            provider._warm_pool[sid] = (tracked, time.monotonic() - 100.0)
+            provider._reap_expired_warm(1.0)
+
+            assert sid not in provider._warm_pool
+            assert tracked.sandbox.closed is True
+            assert provider._ownership.owner(sid) is None
+            assert server.sandboxes[remote_id]["Status"] == "Paused"
+            actions = [action for action, _, _ in server.requests]
+            assert "PauseSandbox" in actions
+            assert "KillSandbox" not in actions
+
+            # Turn 2: acquire discovers Paused sandbox, calls ResumeSandbox, preserves state.
+            tars_before_resume = {path for path in persisted_files if path.startswith("/tmp/deerflow-vefaas-")}
+            resumed_sid = provider.acquire("t-pause", user_id="u1")
+            assert resumed_sid == sid
+            resumed_tracked = provider._sandboxes[sid]
+            assert resumed_tracked.remote_sandbox_id == remote_id
+            assert server.sandboxes[remote_id]["Status"] == "Running"
+            resume_reqs = [payload for action, payload, _ in server.requests if action == "ResumeSandbox"]
+            assert len(resume_reqs) == 1
+            assert resume_reqs[0]["SandboxId"] == remote_id
+            assert resume_reqs[0]["Timeout"] == 60
+            assert resume_reqs[0]["TimeoutUnit"] == "minute"
+            # Must NOT re-create a new sandbox or re-upload stale host files on resume.
+            create_reqs = [payload for action, payload, _ in server.requests if action == "CreateSandbox"]
+            assert len(create_reqs) == 1
+            assert persisted_files["live-state"] == b"turn-1-data"
+            tars_after_resume = {path for path in persisted_files if path.startswith("/tmp/deerflow-vefaas-")}
+            assert tars_after_resume == tars_before_resume
+            assert provider_mod._BOOTSTRAP_COMMAND not in resumed_tracked.sandbox.commands
+        finally:
+            provider.shutdown()
+
+    def test_pause_on_idle_falls_back_to_kill_when_pause_fails_or_never_pauses(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case 1: PauseSandbox returns 403 -> falls back to KillSandbox.
+        server1 = _FakeVeFaaSServer()
+        server1.pause_error = (403, "UnsupportedOperation", "pause not enabled")
+        provider1, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "c1",
+            server=server1,
+            sandbox_overrides={"vefaas": {"pause_on_idle": True}},
+        )
+        try:
+            sid1 = provider1.acquire("t-pfail", user_id="u1")
+            remote_id1 = provider1._sandboxes[sid1].remote_sandbox_id
+            provider1.release(sid1)
+            entry1, _ = provider1._warm_pool[sid1]
+            provider1._warm_pool[sid1] = (entry1, time.monotonic() - 100.0)
+            provider1._reap_expired_warm(1.0)
+
+            assert remote_id1 not in server1.sandboxes
+            assert sid1 not in provider1._warm_pool
+            assert provider1._ownership.owner(sid1) is None
+            assert not provider1._pending_destroys
+            actions1 = [action for action, _, _ in server1.requests]
+            assert "PauseSandbox" in actions1 and "KillSandbox" in actions1
+        finally:
+            provider1.shutdown()
+
+        # Case 2: PauseSandbox accepted, but DescribeSandbox stays Running -> falls back to KillSandbox.
+        server2 = _FakeVeFaaSServer()
+        server2.pause_status_sequence = ["Running"]
+        provider2, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "c2",
+            server=server2,
+            sandbox_overrides={"vefaas": {"pause_on_idle": True}},
+        )
+        try:
+            sid2 = provider2.acquire("t-pstuck", user_id="u1")
+            remote_id2 = provider2._sandboxes[sid2].remote_sandbox_id
+            provider2.release(sid2)
+            entry2, _ = provider2._warm_pool[sid2]
+            provider2._warm_pool[sid2] = (entry2, time.monotonic() - 100.0)
+            provider2._reap_expired_warm(1.0)
+
+            assert remote_id2 not in server2.sandboxes
+            assert not provider2._pending_destroys
+        finally:
+            provider2.shutdown()
+
+    def test_dirty_or_peer_owned_sandbox_is_never_paused_or_snapshotted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case 1: dirty sandbox in warm pool -> killed directly, never paused or snapshotted.
+        server = _FakeVeFaaSServer()
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "dirty",
+            server=server,
+            sandbox_overrides={"vefaas": {"pause_on_idle": True, "snapshot_on_idle": True}},
+        )
+        try:
+            sid = provider.acquire("t-dirty", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            provider.release(sid)
+            entry, _ = provider._warm_pool[sid]
+            entry.sandbox.requires_container_recycle = True
+            provider._warm_pool[sid] = (entry, time.monotonic() - 100.0)
+            provider._reap_expired_warm(1.0)
+
+            assert remote_id not in server.sandboxes
+            actions = [action for action, _, _ in server.requests]
+            assert "PauseSandbox" not in actions
+            assert "CreateSandboxSnapshot" not in actions
+            assert "KillSandbox" in actions
+        finally:
+            provider.shutdown()
+
+        # Case 2: peer owns lease -> never paused, snapshotted, or killed.
+        server_peer = _FakeVeFaaSServer()
+        provider_peer, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "peer",
+            server=server_peer,
+            sandbox_overrides={"vefaas": {"pause_on_idle": True, "snapshot_on_idle": True}},
+        )
+        try:
+            sid_p = provider_peer.acquire("t-peer-own", user_id="u1")
+            remote_id_p = provider_peer._sandboxes[sid_p].remote_sandbox_id
+            provider_peer.release(sid_p)
+            entry_p, _ = provider_peer._warm_pool[sid_p]
+            provider_peer._warm_pool[sid_p] = (entry_p, time.monotonic() - 100.0)
+            monkeypatch.setattr(provider_peer._ownership, "claim", lambda _sid, *, for_destroy=False: False)
+            provider_peer._reap_expired_warm(1.0)
+
+            assert remote_id_p in server_peer.sandboxes
+            assert server_peer.sandboxes[remote_id_p]["Status"] == "Running"
+            actions_p = [action for action, _, _ in server_peer.requests]
+            assert "PauseSandbox" not in actions_p
+            assert "CreateSandboxSnapshot" not in actions_p
+            assert "KillSandbox" not in actions_p
+        finally:
+            provider_peer.shutdown()
+
+    def test_discover_waits_for_pausing_sandbox_and_handles_resume_races_and_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: ListSandboxes returns Pausing -> settles to Paused -> resumes without duplicate CreateSandbox.
+        server = _FakeVeFaaSServer()
+        sid = derive_sandbox_scope_token(user_id="u1", thread_id="t-pausing")
+        server.sandboxes["vefaas-pausing-1"] = {
+            "Id": "vefaas-pausing-1",
+            "FunctionId": "fn-demo-app",
+            "Status": "Pausing",
+            "_status_queue": ["Pausing", "Paused"],
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid,
+            },
+        }
+        provider, _, _ = _install_provider(monkeypatch, tmp_path / "case-a", server=server)
+
+        class _PreInitAio(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files[provider_mod._INIT_MARKER_PATH] = f"{sid}\n".encode()
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PreInitAio)
+        try:
+            acquired = provider.acquire("t-pausing", user_id="u1")
+            assert acquired == sid
+            assert provider._sandboxes[sid].remote_sandbox_id == "vefaas-pausing-1"
+            assert not any(action == "CreateSandbox" for action, _, _ in server.requests)
+            assert sum(1 for action, _, _ in server.requests if action == "ResumeSandbox") == 1
+        finally:
+            provider.shutdown()
+
+        # Case B: Concurrent resume by two providers -> only ONE ResumeSandbox issued.
+        server_b = _FakeVeFaaSServer()
+        sid_b = derive_sandbox_scope_token(user_id="u1", thread_id="t-conc-resume")
+        server_b.sandboxes["vefaas-paused-2"] = {
+            "Id": "vefaas-paused-2",
+            "FunctionId": "fn-demo-app",
+            "Status": "Paused",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_b,
+            },
+        }
+        p1, _, _ = _install_provider(monkeypatch, tmp_path / "case-b", server=server_b)
+        p2, _, _ = _install_provider(monkeypatch, tmp_path / "case-b", server=server_b)
+        # Share ownership store between p1 and p2 (distinct owner IDs).
+        p2._ownership = p1._ownership
+
+        class _PreInitAioB(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files[provider_mod._INIT_MARKER_PATH] = f"{sid_b}\n".encode()
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PreInitAioB)
+        errors_b: list[BaseException] = []
+        results_b: dict[str, str] = {}
+
+        def run_acquire(name: str, prov: VeFaaSSandboxProvider) -> None:
+            try:
+                results_b[name] = prov.acquire("t-conc-resume", user_id="u1")
+            except BaseException as exc:  # pragma: no cover
+                errors_b.append(exc)
+
+        try:
+            t1 = threading.Thread(target=run_acquire, args=("p1", p1))
+            t2 = threading.Thread(target=run_acquire, args=("p2", p2))
+            t1.start()
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+            assert not errors_b, f"Unexpected errors: {errors_b}"
+            assert results_b == {"p1": sid_b, "p2": sid_b}
+            assert sum(1 for action, _, _ in server_b.requests if action == "ResumeSandbox") == 1
+            assert not any(action == "CreateSandbox" for action, _, _ in server_b.requests)
+        finally:
+            p1.shutdown()
+            p2.shutdown()
+
+        # Case C: ResumeSandbox fails with 500 -> fail closed, release ownership, no duplicate CreateSandbox.
+        server_c = _FakeVeFaaSServer()
+        server_c.resume_error = (500, "InternalError", "backend busy")
+        sid_c = derive_sandbox_scope_token(user_id="u1", thread_id="t-resume-err")
+        server_c.sandboxes["vefaas-paused-3"] = {
+            "Id": "vefaas-paused-3",
+            "FunctionId": "fn-demo-app",
+            "Status": "Paused",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_c,
+            },
+        }
+        provider_c, _, _ = _install_provider(monkeypatch, tmp_path / "case-c", server=server_c)
+        try:
+            with pytest.raises(VeFaaSApiError, match="backend busy"):
+                provider_c.acquire("t-resume-err", user_id="u1")
+            assert provider_c._ownership.owner(sid_c) is None
+            assert not any(action == "CreateSandbox" for action, _, _ in server_c.requests)
+        finally:
+            provider_c.shutdown()
+
+        # Case D: Paused sandbox expires (SandboxNotFound) right when ResumeSandbox fires -> creates fresh sandbox.
+        server_d = _FakeVeFaaSServer()
+        sid_d = derive_sandbox_scope_token(user_id="u1", thread_id="t-resume-404")
+        server_d.sandboxes["vefaas-paused-4"] = {
+            "Id": "vefaas-paused-4",
+            "FunctionId": "fn-demo-app",
+            "Status": "Paused",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_d,
+            },
+        }
+        server_d.resume_error = (404, "SandboxNotFound", "expired while paused")
+        provider_d, _, _ = _install_provider(monkeypatch, tmp_path / "case-d", server=server_d)
+        try:
+            acquired_d = provider_d.acquire("t-resume-404", user_id="u1")
+            assert acquired_d == sid_d
+            assert sum(1 for action, _, _ in server_d.requests if action == "CreateSandbox") == 1
+        finally:
+            provider_d.shutdown()
+
+    def test_auto_pause_config_sent_on_create_sandbox(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={"vefaas": {"auto_pause": True, "snapshot_type": "full"}},
+        )
+        try:
+            provider.acquire("t-autopause", user_id="u1")
+            create_reqs = [payload for action, payload, _ in server.requests if action == "CreateSandbox"]
+            assert len(create_reqs) == 1
+            assert create_reqs[0]["AutoPauseConfig"] == {"Enable": True, "SnapshotType": "full"}
+        finally:
+            provider.shutdown()
+
+
+class TestVeFaaSSnapshotLifecycleAndIsolation:
+    def test_snapshot_on_idle_captures_prunes_destroys_and_restores_with_tenant_isolation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.snapshot_status_sequence = ["Creating", "Ready"]
+        sid_u1 = derive_sandbox_scope_token(user_id="u1", thread_id="t-snap")
+        sid_u2 = derive_sandbox_scope_token(user_id="u2", thread_id="t-snap")
+
+        # Pre-seed 2 older ready snapshots for u1 and 1 ready snapshot for u2.
+        server.snapshots["snap-u1-old-1"] = {
+            "SnapshotId": "snap-u1-old-1",
+            "SandboxId": "vefaas-old-1",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-22T00:01:00Z",
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_u1,
+            },
+        }
+        server.snapshots["snap-u1-old-2"] = {
+            "SnapshotId": "snap-u1-old-2",
+            "SandboxId": "vefaas-old-2",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-22T00:02:00Z",
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_u1,
+            },
+        }
+        server.snapshots["snap-u2-other"] = {
+            "SnapshotId": "snap-u2-other",
+            "SandboxId": "vefaas-u2-1",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-23T23:59:00Z",
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_u2,
+            },
+        }
+
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={
+                "vefaas": {
+                    "snapshot_on_idle": True,
+                    "snapshot_type": "disk",
+                    "snapshot_retention_days": 7,
+                    "max_snapshots_per_sandbox": 2,
+                }
+            },
+        )
+        try:
+            # First acquire for u1 restores newest ready u1 snapshot (snap-u1-old-2), NEVER u2's newer snapshot!
+            acquired_u1 = provider.acquire("t-snap", user_id="u1")
+            assert acquired_u1 == sid_u1
+            first_create = [payload for action, payload, _ in server.requests if action == "CreateSandbox"][0]
+            assert first_create["SnapshotId"] == "snap-u1-old-2"
+
+            # Release and expire warm pool -> creates new snapshot snap-1, prunes snap-u1-old-1, preserves u2's snapshot, kills sandbox.
+            remote_1 = provider._sandboxes[sid_u1].remote_sandbox_id
+            provider.release(sid_u1)
+            entry, _ = provider._warm_pool[sid_u1]
+            provider._warm_pool[sid_u1] = (entry, time.monotonic() - 100.0)
+            provider._reap_expired_warm(1.0)
+
+            assert remote_1 not in server.sandboxes
+            assert "snap-1" in server.snapshots
+            assert "snap-u1-old-2" in server.snapshots
+            assert "snap-u1-old-1" not in server.snapshots
+            assert "snap-u2-other" in server.snapshots
+            assert server.snapshots["snap-1"]["RetentionDays"] == 7
+            assert server.snapshots["snap-1"]["Metadata"][provider_mod.META_KEY_SANDBOX_ID] == sid_u1
+
+            # Next acquire for u1 boots from the newly captured snap-1.
+            provider.acquire("t-snap", user_id="u1")
+            creates = [payload for action, payload, _ in server.requests if action == "CreateSandbox"]
+            assert creates[-1]["SnapshotId"] == "snap-1"
+
+            # Acquire for u3 (no snapshots) creates without SnapshotId.
+            provider.acquire("t-snap", user_id="u3")
+            creates = [payload for action, payload, _ in server.requests if action == "CreateSandbox"]
+            assert "SnapshotId" not in creates[-1]
+        finally:
+            provider.shutdown()
+
+    def test_base_snapshot_and_expired_thread_snapshot_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.validate_snapshot_on_create = True
+        server.snapshots["snap-base"] = {
+            "SnapshotId": "snap-base",
+            "SandboxId": "template",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-20T00:00:00Z",
+            "Metadata": {},
+        }
+        sid = derive_sandbox_scope_token(user_id="u1", thread_id="t-snap-race")
+        server.snapshots["snap-ephemeral"] = {
+            "SnapshotId": "snap-ephemeral",
+            "SandboxId": "old",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-23T00:00:00Z",
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid,
+            },
+        }
+
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "fallback",
+            server=server,
+            sandbox_overrides={"vefaas": {"snapshot_id": "snap-base", "snapshot_on_idle": True}},
+        )
+        # Simulate snap-ephemeral expiring right between ListSandboxSnapshots and CreateSandbox.
+        orig_find = provider._find_latest_ready_snapshot
+
+        def find_then_expire(fn_id: str, sb_id: str) -> str | None:
+            found = orig_find(fn_id, sb_id)
+            if found == "snap-ephemeral":
+                server.snapshots.pop("snap-ephemeral", None)
+            return found
+
+        monkeypatch.setattr(provider, "_find_latest_ready_snapshot", find_then_expire)
+        try:
+            acquired = provider.acquire("t-snap-race", user_id="u1")
+            assert acquired == sid
+            creates = [payload for action, payload, _ in server.requests if action == "CreateSandbox"]
+            assert [c.get("SnapshotId") for c in creates] == ["snap-ephemeral", "snap-base"]
+        finally:
+            provider.shutdown()
+
+        # Operator-configured invalid base snapshot_id must fail closed.
+        server_bad = _FakeVeFaaSServer()
+        server_bad.validate_snapshot_on_create = True
+        provider_bad, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "bad-base",
+            server=server_bad,
+            sandbox_overrides={"vefaas": {"snapshot_id": "snap-nonexistent"}},
+        )
+        try:
+            with pytest.raises(VeFaaSSnapshotNotFoundError):
+                provider_bad.acquire("t-bad-base", user_id="u1")
+        finally:
+            provider_bad.shutdown()
+
+    def test_snapshot_failure_during_idle_reap_still_kills_sandbox(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.snapshot_create_error = (500, "SnapshotQuotaExceeded", "quota reached")
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={"vefaas": {"snapshot_on_idle": True}},
+        )
+        try:
+            sid = provider.acquire("t-snap-err", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            provider.release(sid)
+            entry, _ = provider._warm_pool[sid]
+            provider._warm_pool[sid] = (entry, time.monotonic() - 100.0)
+            provider._reap_expired_warm(1.0)
+
+            assert remote_id not in server.sandboxes
+            assert provider._ownership.owner(sid) is None
+            assert not provider._pending_destroys
+        finally:
+            provider.shutdown()
+
+    def test_public_snapshot_helpers_and_dirty_rejection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.snapshot_status_sequence = ["Creating", "Ready"]
+        provider, _, _ = _install_provider(monkeypatch, tmp_path, server=server)
+        try:
+            sid = provider.acquire("t-pub-snap", user_id="u1")
+            snap_ready = provider.create_snapshot(sid, snapshot_type="full", retention_days=10, wait=True)
+            assert snap_ready.is_ready
+            assert snap_ready.snapshot_type == "full"
+            assert snap_ready.retention_days == 10
+
+            snap_async = provider.create_snapshot(sid, wait=False)
+            assert snap_async.status == "Creating"
+
+            listed = provider.list_snapshots(sid)
+            assert {s.id for s in listed} == {snap_ready.id, snap_async.id}
+
+            provider.delete_snapshot(snap_ready.id)
+            assert [s.id for s in provider.list_snapshots(sid)] == [snap_async.id]
+
+            # Dirty sandbox must be rejected for snapshots.
+            provider._sandboxes[sid].sandbox.requires_container_recycle = True
+            with pytest.raises(RuntimeError, match="corrupted"):
+                provider.create_snapshot(sid)
+
+            with pytest.raises(RuntimeError, match="not tracked"):
+                provider.create_snapshot("unknown-sandbox")
+        finally:
+            provider.shutdown()
+
+
+class TestVeFaaSImagePrecache:
+    def test_precache_images_fire_and_forget_wait_and_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.precache_status_sequence = ["Running", "Succeeded"]
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={"vefaas": {"precache_images": ["cr.example.com/aio:v1"]}},
+        )
+        try:
+            pending_ticket = provider.precache_images(wait=False)
+            assert pending_ticket.ticket_id == "ticket-1"
+            assert pending_ticket.status == "Pending"
+            assert not any(action == "GetSandboxImagePrecacheTicket" for action, _, _ in server.requests)
+
+            done_ticket = provider.precache_images(wait=True)
+            assert done_ticket.is_succeeded
+            assert any(action == "GetSandboxImagePrecacheTicket" for action, _, _ in server.requests)
+
+            server.precache_status_sequence = ["Failed"]
+            with pytest.raises(RuntimeError, match="failed"):
+                provider.precache_images(["cr.example.com/aio:bad"], wait=True)
+        finally:
+            provider.shutdown()
+
+    def test_precache_on_startup_runs_in_background_and_joins_on_shutdown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        submitted = threading.Event()
+        orig_handler = server.handler
+
+        def tracking_handler(req: httpx.Request) -> httpx.Response:
+            resp = orig_handler(req)
+            if req.url.params.get("Action") == "PrecacheSandboxImages":
+                submitted.set()
+            return resp
+
+        server.handler = tracking_handler  # type: ignore[method-assign]
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={
+                "vefaas": {
+                    "precache_images": ["cr.example.com/aio:v1", "cr.example.com/aio:v2"],
+                    "precache_on_startup": True,
+                }
+            },
+        )
+        try:
+            assert submitted.wait(timeout=5)
+            precache_reqs = [payload for action, payload, _ in server.requests if action == "PrecacheSandboxImages"]
+            assert len(precache_reqs) == 1
+            assert precache_reqs[0]["ImageUrls"] == ["cr.example.com/aio:v1", "cr.example.com/aio:v2"]
+        finally:
+            provider.shutdown()
+        assert provider._precache_thread is not None
+        assert not provider._precache_thread.is_alive()

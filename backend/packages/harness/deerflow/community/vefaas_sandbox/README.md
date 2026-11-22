@@ -6,6 +6,7 @@ Runs each DeerFlow thread sandbox on **BytePlus Function Service (veFaaS) Cloud 
 - **Data plane**: Reuses DeerFlow's `AioSandbox` HTTP client via the Sandbox App's unified access domain (`X-Faas-Instance-Name: <SandboxId>`) or a `{sandbox_id}` URL template.
 - **Per-agent skills isolation**: Advertises `supports_agent_skill_isolation = True` and uploads bounded `tar.gz` skill projections into the remote sandbox.
 - **Persistent storage**: Supports optional scoped `InstanceTosMountConfig` mounts (bucket prefix derived from `derive_sandbox_scope_token(user_id, thread_id)`) or automatic output mirroring on release.
+- **Snapshots, pause/resume & image precache** (opt-in): Supports booting from a base `snapshot_id`, pausing idle sandboxes (`pause_on_idle` / `auto_pause`) with automatic `ResumeSandbox` discovery, creating/restoring thread-scoped snapshots on idle (`snapshot_on_idle`) with retention pruning, and asynchronous image precaching (`precache_images` / `precache_on_startup`).
 
 If shutdown overlaps an output mirror, it reports incomplete cleanup and keeps
 the sandbox available for the copy. Retry shutdown after release finishes.
@@ -25,6 +26,17 @@ sandbox:
     cpu_milli: 1000
     memory_mb: 2048
     timeout_minutes: 60
+    # Optional fast-resume, snapshot & image precache settings (all disabled by default)
+    # snapshot_id: snap-base-123
+    # pause_on_idle: false
+    # auto_pause: false
+    # snapshot_on_idle: false
+    # snapshot_type: disk              # disk | full
+    # snapshot_retention_days: 7       # 1..365
+    # max_snapshots_per_sandbox: 3     # 1..100
+    # precache_images:
+    #   - cr-ap-southeast-1.cr.bytepluses.com/namespace/all-in-one-sandbox:latest
+    # precache_on_startup: false
     tos_mount:
       enabled: false
       bucket: $BYTEPLUS_TOS_BUCKET

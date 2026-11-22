@@ -296,7 +296,11 @@ class SandboxConfig(BaseModel):
             ``access_key`` / ``secret_key`` / ``session_token`` (or ``*_env``),
             ``sandbox_access_token``, ``cpu_milli``, ``memory_mb``,
             ``timeout_minutes``, ``ready_timeout``, ``request_timeout``,
-            ``allow_insecure_http``, ``tos_mount``, and ``metadata``.
+            ``allow_insecure_http``, ``tos_mount``, ``metadata``,
+            ``snapshot_id``, ``pause_on_idle``, ``auto_pause``,
+            ``snapshot_on_idle``, ``snapshot_type``, ``snapshot_retention_days``,
+            ``snapshot_timeout``, ``max_snapshots_per_sandbox``,
+            ``precache_images``, and ``precache_on_startup``.
     """
 
     use: str = Field(

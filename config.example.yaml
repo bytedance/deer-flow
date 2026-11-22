@@ -2087,6 +2087,16 @@ sandbox:
 #     # memory_mb: 2048                                     # 512..131072
 #     # timeout_minutes: 60                                 # 3..1440
 #     # ready_timeout: 60                                   # seconds to wait for Running + HTTP readiness
+#     # snapshot_id: ""                                     # optional pre-baked base snapshot for new sandboxes
+#     # pause_on_idle: false                                # pause warm sandboxes on idle/eviction instead of killing
+#     # auto_pause: false                                   # pass AutoPauseConfig on CreateSandbox
+#     # snapshot_on_idle: false                             # snapshot clean idle sandboxes before kill & auto-restore
+#     # snapshot_type: disk                                 # disk | full
+#     # snapshot_retention_days: 7                          # 1..365 (optional)
+#     # snapshot_timeout: 120                               # seconds to wait for snapshot readiness
+#     # max_snapshots_per_sandbox: 3                        # ready snapshots retained per thread (1..100)
+#     # precache_images: []                                 # optional image URLs to precache via PrecacheSandboxImages
+#     # precache_on_startup: false                          # trigger background image precache on provider startup
 #     # tos_mount:                                          # optional per-thread scoped TOS mount
 #     #   enabled: false
 #     #   bucket: $BYTEPLUS_TOS_BUCKET
