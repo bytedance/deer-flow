@@ -94,7 +94,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY, SHARE_COPY_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -117,7 +117,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -650,7 +650,7 @@ def _normalize_input_messages(
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
 #: Older checkpoints can contain loop detection's record of frequency-capped
 #: tools. Reserve its channel for server-owned state.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY})
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY, IMPORTED_HISTORY_CHANNEL})
 
 #: The ``write_todos`` status contract the todo middleware renders.
 _TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
@@ -1246,7 +1246,6 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # at admission from threads_meta; a client-supplied value must
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
-            SHARE_COPY_CONTEXT_KEY,
             AGENT_AUTH_CONTEXT_KEY,
             # Obsolete run field. Discard it even on internal requests.
             "github_token",
@@ -2886,8 +2885,6 @@ async def start_run(
         )
         if project_context is not None:
             config["context"][PROJECT_CONTEXT_KEY] = project_context
-        # Set before admission by prepare_share_copy_run; None means unknown.
-        share_copy: bool | None = None
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
@@ -2988,12 +2985,6 @@ async def start_run(
                             "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
                             sanitize_log_param(thread_id),
                         )
-            from app.gateway.share_fork import resolve_share_copy
-
-            # Admission's read can fail where the metadata record above
-            # succeeded; the flag must not depend on that one read.
-            if resolve_share_copy(share_copy, metadata_record, thread_id):
-                config["context"][SHARE_COPY_CONTEXT_KEY] = True
             from app.gateway.scheduled_task_access import prepare_scheduler_capability
 
             human_text = ""
@@ -3074,9 +3065,9 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
-                from app.gateway.share_fork import prepare_share_copy_run
+                from app.gateway.share_fork import ensure_share_import_history_marked
 
-                share_copy = await prepare_share_copy_run(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
+                await ensure_share_import_history_marked(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
                 # A strict caller may have observed the thread before a
                 # concurrent delete removed it while checkpoint preparation
                 # yielded. Recheck immediately before durable admission. The

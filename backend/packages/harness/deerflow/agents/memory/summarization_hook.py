@@ -27,7 +27,7 @@ def memory_flush_hook(event: SummarizationEvent, pii_redaction_config: PiiRedact
     if not get_memory_config().enabled or not event.thread_id:
         return
 
-    messages = own_messages_for_memory(list(event.messages_to_summarize), getattr(event.runtime, "context", None))
+    messages = own_messages_for_memory(list(event.messages_to_summarize), event.imported_history)
     if not messages:
         return
     user_id = resolve_runtime_user_id(event.runtime)

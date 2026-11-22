@@ -73,32 +73,32 @@ def test_own_conversation_is_queued_without_the_imported_history_mark(monkeypatc
     assert not any(FOLLOWS_IMPORTED_HISTORY_KEY in message.additional_kwargs for message in manager.add.call_args.args[1])
 
 
-def test_share_copy_flag_in_run_context_marks_capture_after_compaction(monkeypatch):
-    from deerflow.runtime.context_keys import SHARE_COPY_CONTEXT_KEY
+def test_share_copy_channel_marks_capture_after_compaction(monkeypatch):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 
     manager = MagicMock()
     monkeypatch.setattr(memory_middleware_module, "get_memory_manager", lambda: manager)
     middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
 
-    # Compaction removed the copied turns; only the Gateway's flag says this is a copy.
-    middleware.after_agent({"messages": _imported_then_own()[2:]}, Runtime(context={"thread_id": "copy", "user_id": "u", SHARE_COPY_CONTEXT_KEY: True}))
+    # Compaction removed the copied turns; only the state channel says this is a copy.
+    state = {"messages": _imported_then_own()[2:], IMPORTED_HISTORY_CHANNEL: "share"}
+    middleware.after_agent(state, Runtime(context={"thread_id": "copy", "user_id": "u"}))
 
     assert all(message.additional_kwargs[FOLLOWS_IMPORTED_HISTORY_KEY] is True for message in manager.add.call_args.args[1])
 
 
-def test_compaction_flush_marks_capture_from_the_share_copy_flag(monkeypatch):
+def test_compaction_flush_marks_capture_from_the_share_copy_channel(monkeypatch):
     import deerflow.agents.memory.summarization_hook as hook_module
     from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
-    from deerflow.runtime.context_keys import SHARE_COPY_CONTEXT_KEY
 
     manager = MagicMock()
     monkeypatch.setattr(hook_module, "get_memory_config", lambda: MemoryConfig(enabled=True))
     monkeypatch.setattr(hook_module, "get_memory_manager", lambda: manager)
     monkeypatch.setattr(hook_module, "resolve_runtime_user_id", lambda runtime: "importer")
 
-    # The batch holds only the visitor's turns; only the run context says this is a copy.
-    runtime = Runtime(context={"thread_id": "copy", SHARE_COPY_CONTEXT_KEY: True})
-    event = SummarizationEvent(messages_to_summarize=tuple(_imported_then_own()[2:]), preserved_messages=(), thread_id="copy", agent_name=None, runtime=runtime)
+    # The batch holds only the visitor's turns; only the event's channel value says this is a copy.
+    runtime = Runtime(context={"thread_id": "copy"})
+    event = SummarizationEvent(messages_to_summarize=tuple(_imported_then_own()[2:]), preserved_messages=(), thread_id="copy", agent_name=None, runtime=runtime, imported_history="share")
     hook_module.memory_flush_hook(event)
 
     assert all(message.additional_kwargs[FOLLOWS_IMPORTED_HISTORY_KEY] is True for message in manager.add_nowait.call_args.args[1])

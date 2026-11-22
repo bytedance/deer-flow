@@ -38,12 +38,16 @@ so memory extraction skips them, also when compaction removes them. New turns in
 the copy are remembered as in any other conversation. With the default DeerMem
 backend, extraction is also told that the conversation continues someone else's,
 so details an assistant reply repeats from the copy, such as the sharer's name or
-preferences, are not recorded as the visitor's. This holds after compaction too,
-because the Gateway flags the copy on every run and on manual compaction. When
-the Gateway cannot read the thread's metadata, it treats the thread as a copy for
-that run. Other memory backends receive
-the visitor's turns without that note. A copy made before this behavior existed
-has its copied messages marked before its next run.
+preferences, are not recorded as the visitor's. Other memory backends receive the
+visitor's turns without that note.
+
+The copy records its origin in server-owned thread state, so compaction, a branch
+of the copy and later runs keep it. A copy made before this behavior existed is
+updated before its next run, before a manual compaction and when it is branched.
+If a manual compaction cannot determine whether the thread is such a copy, it
+compacts without updating memory. A run that starts from a checkpoint written
+before that update, for example an edit of an earlier turn, can still pass the
+copied turns of such an older copy to memory.
 
 ## Deployment and limits
 

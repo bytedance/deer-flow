@@ -15,9 +15,10 @@ from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE, SHARE_COPY_CONTEXT_KEY
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
 from deerflow.runtime.goal import _call_checkpointer_method
 from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 
 logger = logging.getLogger(__name__)
 _AGENT_CONFIG_NOT_LOADED = object()
@@ -156,13 +157,12 @@ async def compact_thread_context(
     agent_name: str | None = None,
     model_name: str | None = None,
     app_config: AppConfig | None = None,
-    share_copy: bool = False,
+    memory_flush: bool = True,
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint.
 
-    ``share_copy`` is the caller's verdict that the thread is a copy of someone
-    else's conversation. The memory flush needs it, because no run admission
-    sets the flag for a manual compaction.
+    ``memory_flush=False`` compacts without handing the removed messages to
+    memory, for a caller that cannot tell which of them the user wrote.
     """
     # Off the event loop (see utils/AGENTS.md): reading the live config stats
     # and hashes config.yaml. The route passes no app_config.
@@ -222,7 +222,7 @@ async def compact_thread_context(
         app_config=resolved_app_config,
         keep=keep,
         run_model_name=run_model_name,
-        skip_memory_flush=not memory_enabled,
+        skip_memory_flush=not (memory_enabled and memory_flush),
     )
 
     channel_values = snapshot.values or {}
@@ -234,13 +234,12 @@ async def compact_thread_context(
         "messages": list(messages),
         "summary_text": channel_values.get("summary_text"),
         "task_history": channel_values.get("task_history"),
+        IMPORTED_HISTORY_CHANNEL: channel_values.get(IMPORTED_HISTORY_CHANNEL),
     }
 
     runtime_context = {"thread_id": thread_id, "user_id": user_id}
     if effective_agent_name:
         runtime_context["agent_name"] = effective_agent_name
-    if share_copy:
-        runtime_context[SHARE_COPY_CONTEXT_KEY] = True
     runtime = SimpleNamespace(context=runtime_context)
     try:
         # ``raise_on_failure`` is independent of ``force``: a manual caller always wants

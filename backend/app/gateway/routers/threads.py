@@ -58,7 +58,7 @@ from app.gateway.services import (
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
-from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY, is_share_copy_thread
+from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY, branch_share_provenance, mark_imported, prepare_share_copy_compaction
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
@@ -103,6 +103,7 @@ from deerflow.runtime.serialization import serialize_lc_object
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.companions import register_companion, resolve_companion
 from deerflow.utils.file_io import await_drained, run_file_io
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -1180,6 +1181,9 @@ async def _branch_thread_with_reservation(
         snapshot,
         target_human_id,
     )
+    # A copy imported before share provenance moved into state has nothing for
+    # the branch to inherit, so the branch gets it from the source's import.
+    imported_ids = await branch_share_provenance(request, source_metadata, snapshot.values, source_accessor, source_config)
 
     # Workspace files are not checkpointed, so they only reflect the *current* thread
     # state. Cloning them onto a branch from an older turn would leak files created
@@ -1244,10 +1248,14 @@ async def _branch_thread_with_reservation(
         for key, value in source_values.items():
             if key in _BRANCH_EXCLUDED_CHANNELS:
                 continue
+            if key == "messages" and isinstance(value, list) and imported_ids is not None:
+                value = mark_imported(value, imported_ids)
             if key in branch_reducer_fields:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:
                 values[key] = value
+        if imported_ids is not None:
+            values[IMPORTED_HISTORY_CHANNEL] = "share"
         if replaces is not None:
             # The head write lands on the replay base, so goal state the head
             # lacks (write_thread_goal pops goal and goal_outcome) would keep
@@ -1799,11 +1807,11 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     keep = body.keep.to_tuple() if body.keep is not None else None
-    # The memory flush needs share provenance, which run admission does not set
-    # here. A deployment without a thread store cannot hold share copies.
-    share_copy = await is_share_copy_thread(getattr(request.app.state, "thread_store", None), thread_id, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            # Migrate an older share copy under this reservation before its
+            # copied turns can reach the memory flush.
+            memory_flush = await prepare_share_copy_compaction(request, thread_id, accessor, read_config, as_node="manual_compaction", metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
             result = await compact_thread_context(
                 accessor,
                 thread_id,
@@ -1812,7 +1820,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
                 model_name=body.model_name,
-                share_copy=share_copy,
+                memory_flush=memory_flush,
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None

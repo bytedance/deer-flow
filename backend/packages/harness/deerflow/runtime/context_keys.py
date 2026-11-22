@@ -21,11 +21,6 @@ DEFAULT_AGENT_NAME_METADATA_VALUE: Final[str] = "__default__"
 PROJECT_CONTEXT_KEY: Final[str] = "__deerflow_project_context"
 AGENT_AUTH_CONTEXT_KEY: Final[str] = "__deerflow_mcp_agent_authority"
 
-# Server-owned flag the Gateway sets at admission when the thread is a copy of
-# someone else's shared conversation. Memory capture needs it after compaction
-# has removed the copied messages, whose own marks no longer tell.
-SHARE_COPY_CONTEXT_KEY: Final[str] = "__deerflow_share_copy"
-
 
 def checkpoint_agent_binding_metadata(metadata: object) -> dict[str, str]:
     """Copy a checkpoint's server-authored agent binding for a state rewrite.
