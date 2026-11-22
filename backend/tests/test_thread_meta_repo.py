@@ -170,6 +170,7 @@ class TestThreadMetaRepository:
     @pytest.mark.anyio
     async def test_update_status_never_writes_a_row_that_moved_to_another_owner(self, repo, tmp_path):
         import sqlite3
+        from contextlib import closing
 
         from sqlalchemy import event
 
@@ -182,7 +183,7 @@ class TestThreadMetaRepository:
             # Another writer moves the thread just before the status write runs.
             if not moved and statement.lstrip().upper().startswith("UPDATE THREADS_META"):
                 moved.append(True)
-                with sqlite3.connect(tmp_path / "test.db") as other:
+                with closing(sqlite3.connect(tmp_path / "test.db")) as other, other:
                     other.execute("UPDATE threads_meta SET user_id = 'bob' WHERE thread_id = 't1'")
 
         sync_engine = get_engine().sync_engine
