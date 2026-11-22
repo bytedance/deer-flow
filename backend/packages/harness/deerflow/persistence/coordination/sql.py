@@ -139,17 +139,29 @@ class CoordinationTaskRepository:
                 raise TaskConflict("Request ID was already used with different task data")
             return _snapshot(existing)
 
+    @staticmethod
+    async def _matching_input(session: AsyncSession, task_id: str, request_id: str, content: str) -> dict | None:
+        existing = await session.scalar(select(CoordinationInputRow).filter_by(task_id=task_id, request_id=request_id))
+        if existing is None:
+            return None
+        if existing.content != content:
+            raise TaskConflict("Request ID was already used with different input")
+        return _snapshot(existing)
+
+    async def replay_input(self, owner_id: str, task_id: str, *, request_id: str, content: str) -> dict | None:
+        """Return the owner's accepted receipt, including for a closed task."""
+        async with self._sessions() as session:
+            await self._lookup(session, owner_id, task_id)
+            return await self._matching_input(session, task_id, request_id, content)
+
     async def append_input(self, owner_id: str, task_id: str, *, request_id: str, content: str) -> dict:
         _request_id(request_id)
         if not content.strip():
             raise ValueError("Task input is required")
         async with self._write() as session:
             task = await self._lock_tree(session, owner_id, task_id)
-            existing = await session.scalar(select(CoordinationInputRow).filter_by(task_id=task_id, request_id=request_id))
-            if existing is not None:
-                if existing.content != content:
-                    raise TaskConflict("Request ID was already used with different input")
-                return _snapshot(existing)
+            if (receipt := await self._matching_input(session, task_id, request_id, content)) is not None:
+                return receipt
             if task.status not in _OPEN:
                 raise TaskConflict("Task is closed to new input")
             task.latest_input_seq += 1

@@ -2,7 +2,7 @@
 
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -917,6 +917,52 @@ async def test_managed_worker_routes_followups_and_retains_the_producing_runs_fi
         assert (await client.get(artifact["url"])).raise_for_status().content == content
     with pytest.raises(TaskNotFound):
         await state.coordination_workers.repo.read_artifact("another-user", task_id, artifacts[0]["id"])
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_replays_accepted_inputs_after_grant_expires(worker_gateway, monkeypatch):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    tasks = "/api/coordination/tasks"
+    first = (await client.post(tasks, json={"request_id": "receipt-replay", "objective": "wait"})).raise_for_status().json()
+    task_id, thread_id, run_id = first["task"]["id"], first["assignment"]["thread_id"], first["execution"]["run_id"]
+    inputs = [
+        (f"{tasks}/{task_id}/inputs", "content", {"request_id": "follow-up", "content": "Task follow-up"}),
+        (f"/api/threads/{thread_id}/runs/{run_id}/inputs", "text", {"request_id": "follow-up", "mode": "queue", "text": "Run follow-up"}),
+    ]
+    await asyncio.wait_for(entered.wait(), 10)
+    try:
+        receipts = [(await client.post(path, json=payload)).raise_for_status().json() for path, _, payload in inputs]
+    finally:
+        state.release_worker.set()
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    workers = state.coordination_workers
+    grant = await workers.repo.grant(owner, task_id)
+    monkeypatch.setattr("deerflow.persistence.coordination.workers.time", lambda: grant["expires_at"] + 1)
+    wake = Mock(side_effect=AssertionError("receipt replay must not wake a Worker"))
+    monkeypatch.setattr(workers, "watch", wake)
+
+    for (path, text_field, payload), receipt in zip(inputs, receipts, strict=True):
+        assert (await client.post(path, json=payload)).raise_for_status().json() == receipt
+        assert (await client.post(path, json={**payload, text_field: "changed"})).status_code == 409
+        assert (await client.post(path, json={**payload, "request_id": "new"})).status_code == 403
+    wake.assert_not_called()
+    assert (await client.get(f"{tasks}/{task_id}")).raise_for_status().json() == finished
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_replays_legacy_task_input_without_grant(worker_gateway):
+    from hashlib import sha256
+
+    client, _, state, _, owner = worker_gateway
+    repo = state.coordination_workers.repo
+    task = await repo.create(owner, request_id="old-task", objective="Review")
+    payload = {"request_id": "old-input", "content": "Check the report"}
+    receipt = await repo.append_input(owner, task["id"], request_id="input:" + sha256(b"old-input").hexdigest(), content=payload["content"])
+    url = f"/api/coordination/tasks/{task['id']}/inputs"
+    assert (await client.post(url, json=payload)).raise_for_status().json() == receipt
+    assert (await client.post(url, json={**payload, "request_id": "new"})).status_code == 403
 
 
 @pytest.mark.asyncio

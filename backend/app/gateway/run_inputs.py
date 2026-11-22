@@ -56,9 +56,7 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
         if body.mode != "queue":
             raise HTTPException(409, "Use queue mode to update a managed worker")
         try:
-            runs, grant_id = await service.authority(owner, task_id)
-            item = await service.repo.append_input(owner, task_id, request_id=f"run-input:{run_id}:{body.request_id}", content=body.text)
-            service.watch(runs, owner, task_id, grant_id)
+            item = await service.submit_input(owner, task_id, request_id=f"run-input:{run_id}:{body.request_id}", content=body.text)
             return _worker_input_receipt(item, run_id, body.request_id)
         except (TaskConflict, TaskNotFound, AgentRunError) as exc:
             raise worker_error(exc) from exc

@@ -115,6 +115,15 @@ class CoordinationWorkers:
         await self.repo.set_grant(owner, task_id, self._new_grant(runs.capture_authority()))
         return await self.view(owner, task_id)
 
+    async def submit_input(self, owner, task_id, *, request_id, content):
+        receipt = await self.repo.replay_input(owner, task_id, request_id=request_id, content=content)
+        if receipt is not None:
+            return receipt
+        runs, grant_id = await self.authority(owner, task_id)
+        receipt = await self.repo.append_input(owner, task_id, request_id=request_id, content=content)
+        self.watch(runs, owner, task_id, grant_id)
+        return receipt
+
     async def view(self, owner, task_id):
         view = await self.repo.view(owner, task_id)
         required = False

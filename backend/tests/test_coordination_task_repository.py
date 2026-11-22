@@ -81,6 +81,9 @@ async def test_concurrent_replay_and_owner_isolation(repo):
         other = group.create_task(repo.append_input("alice", task_id, request_id="two", content="Check logs"))
     (sequence,) = {job.result()["sequence"] for job in repeats}
     assert {sequence, other.result()["sequence"]} == {1, 2}
+    assert await repo.replay_input("alice", task_id, request_id="one", content="Check storage") == repeats[0].result()
+    with pytest.raises(TaskNotFound):
+        await repo.replay_input("bob", task_id, request_id="one", content="Check storage")
     assert [item["sequence"] for item in await repo.list_inputs("alice", task_id, after=1)] == [2]
     assert await repo.list_inputs("bob", task_id) == []
     with pytest.raises(TaskConflict, match="different input"):

@@ -66,10 +66,7 @@ async def get_worker_task(task_id: str, request: Request):
 async def add_worker_input(task_id: str, body: WorkerInput, request: Request):
     service, owner, _runs = worker_context(request)
     try:
-        runs, grant_id = await service.authority(owner, task_id)
-        item = await service.repo.append_input(owner, task_id, request_id="input:" + sha256(body.request_id.encode()).hexdigest(), content=body.content)
-        service.watch(runs, owner, task_id, grant_id)
-        return item
+        return await service.submit_input(owner, task_id, request_id="input:" + sha256(body.request_id.encode()).hexdigest(), content=body.content)
     except (TaskNotFound, TaskConflict, AgentRunError) as exc:
         raise worker_error(exc) from exc
 

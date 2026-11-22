@@ -47,9 +47,12 @@ The response includes the task, its assignment (agent and thread), and the
 latest execution. Replaying the request reuses the worker. Read the same
 view with `GET /api/coordination/tasks/{task_id}`. Add a follow-up with
 `POST /api/coordination/tasks/{task_id}/inputs` and a JSON object containing
-`request_id` and `content`. A text message sent to the worker thread uses
-the same queue. Streaming and wait callers observe the run that consumes
-their message. An interrupted graph requires an explicit resume command.
+`request_id` and `content`. The owner can replay an accepted input with the same
+ID and content to get its original receipt after task closure or grant expiry.
+This applies to the task input and managed Run input endpoints. New inputs need
+a valid Worker grant. A text message sent to the worker thread uses the same
+queue. Streaming and wait callers observe the run that consumes their message.
+An interrupted graph requires an explicit resume command.
 
 The task owner can poll `GET /api/coordination/tasks/{task_id}/inputs`
 to read the inbox in sequence order. Pass the last seen `sequence` as
