@@ -880,7 +880,7 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
-沙箱的执行环境取决于配置。本地模式直接在宿主机上运行沙箱代码，Docker 模式在隔离的容器中运行，Kubernetes 模式通过 provisioner 服务在 Pod 中运行。Agent 可以在沙箱中访问 skills、workspace、uploads、outputs，读写和编辑文件，执行 Bash 命令和代码，也可以查看图片。各模式的配置方式见[沙箱指南](docs/guide/sandbox.md#sandbox-mode)。
+沙箱的执行环境取决于配置。本地模式直接在宿主机上运行沙箱代码，Docker 模式在隔离的容器中运行，Kubernetes 模式通过 provisioner 服务在 Pod 中运行。Agent 可以在沙箱中访问 skills、workspace、uploads、outputs，读写和编辑文件，也可以查看图片。所选沙箱提供 shell 时，Agent 可以执行 Bash 命令并运行代码。本地模式默认禁用宿主机 Bash（`sandbox.allow_host_bash: false`）。各模式的配置方式见[沙箱指南](docs/guide/sandbox.md#sandbox-mode)。
 
 这就是“带工具的聊天机器人”和“真正有执行环境的 agent”之间的差别。
 
