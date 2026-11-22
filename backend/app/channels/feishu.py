@@ -161,7 +161,8 @@ _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 # A markdown image marker, rewritten for the card so Feishu never sees one.
 _MARKDOWN_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]*)[^)]*\)")
 _FENCED_CODE = re.compile(r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[ \t]*$")
-_INLINE_CODE_SPAN = re.compile(r"`[^`\n]*`")
+# Both delimiters are complete backtick runs of the same length.
+_INLINE_CODE_SPAN = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?!`)")
 # A fence a streamed snapshot cut open: what follows its opener is still code.
 _UNCLOSED_FENCE = re.compile(r"(?m)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*$")
 

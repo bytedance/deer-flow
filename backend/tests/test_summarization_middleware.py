@@ -13,9 +13,11 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, Syst
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableBinding
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.constants import TAG_NOSTREAM
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
+from deerflow.agents.assembly_descriptor import describe_middleware
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware, is_dynamic_context_reminder
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent, SummaryGenerationError, create_summarization_middleware
@@ -888,6 +890,151 @@ def _blank_model(*, text: str = "   \n\t ") -> MagicMock:
     model.invoke.return_value = SimpleNamespace(text=text)
     model.ainvoke = AsyncMock(return_value=SimpleNamespace(text=text))
     return model
+
+
+class _CompactionSummaryModel(_StaticChatModel):
+    responses: list[AIMessage] = Field(default_factory=list)
+    prompts: list[str] = Field(default_factory=list)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.prompts.append("\n".join(message.text for message in messages))
+        response = self.responses.pop(0) if self.responses else AIMessage(content=self.text)
+        return ChatResult(generations=[ChatGeneration(message=response)])
+
+
+def _compaction_with_response_models(primary, fallback, *, trim_tokens=None, before_summarization=None):
+    return DeerFlowSummarizationMiddleware(
+        model=primary,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=lambda messages: sum(len(message.text) for message in messages),
+        trim_tokens_to_summarize=trim_tokens,
+        summary_prompt="{messages}",
+        configured_model_name="primary",
+        run_model_name="fallback",
+        anchor_model_name="primary",
+        prebuilt_models={"fallback": fallback},
+        before_summarization=before_summarization,
+    )
+
+
+def _long_compaction_state():
+    messages = _messages()
+    messages[0].content = " ".join(f"fact_{index:03d}: distinct evidence" for index in range(24))
+    return {"messages": messages, "summary_text": "S"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"finish_reason": "length"},
+        {"stop_reason": "max_tokens"},
+        {"finish_reason": "MAX_TOKENS"},
+        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+        {"done_reason": "length"},
+    ],
+    ids=["openai-chat", "anthropic", "gemini", "openai-responses", "ollama"],
+)
+async def test_length_capped_middle_chunk_uses_fallback_before_next_carry(asynchronous, metadata):
+    primary = _CompactionSummaryModel(responses=[AIMessage(content="PRIMARY_ONE"), AIMessage(content="PARTIAL", response_metadata=metadata)])
+    fallback = _CompactionSummaryModel(text="FALLBACK_TWO")
+    middleware = _compaction_with_response_models(primary, fallback, trim_tokens=96)
+    state = _long_compaction_state()
+
+    update = await middleware.abefore_model(state, _runtime()) if asynchronous else middleware.before_model(state, _runtime())
+
+    assert update is not None
+    assert fallback.prompts == [primary.prompts[1]]
+    assert "<existing_summary>\nPRIMARY_ONE\n</existing_summary>" in primary.prompts[1]
+    assert "<existing_summary>\nFALLBACK_TWO\n</existing_summary>" in primary.prompts[2]
+
+
+def test_compaction_release_policy_lists_supported_length_detectors():
+    middleware = _compaction_with_response_models(_CompactionSummaryModel(), _CompactionSummaryModel())
+    descriptor = describe_middleware(middleware)
+
+    assert descriptor.policy_parameters["summary_length_detectors"] == [
+        "openai_compatible_length",
+        "anthropic_max_tokens",
+        "gemini_max_tokens",
+        "openai_responses_length",
+        "ollama_length",
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("done_reason", ["length", "stop"])
+async def test_ollama_summary_compaction_checkpoint(asynchronous, done_reason):
+    summary = AIMessage(content="Ollama summary", response_metadata={"done_reason": done_reason})
+    primary = _CompactionSummaryModel(responses=[summary])
+    fallback = _CompactionSummaryModel(responses=[summary.model_copy(deep=True)])
+    middleware = _compaction_with_response_models(primary, fallback)
+    graph = create_agent(_StaticChatModel(text="new answer"), middleware=[middleware], state_schema=ThreadState, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "ollama-compaction"}}
+    messages = _messages()
+    for index, message in enumerate(messages):
+        message.id = f"message-{index}"
+    state = {"messages": messages, "summary_text": "S"}
+
+    if asynchronous:
+        await graph.ainvoke(state, config)
+        snapshot = await graph.aget_state(config)
+    else:
+        graph.invoke(state, config)
+        snapshot = graph.get_state(config)
+
+    persisted_messages = snapshot.values["messages"]
+    assert persisted_messages[-1].content == "new answer"
+    assert len(primary.prompts) == 1
+    if done_reason == "length":
+        assert persisted_messages[:2] == messages[:2]
+        assert snapshot.values["summary_text"] == "S"
+        assert fallback.prompts == primary.prompts
+    else:
+        assert {message.id for message in persisted_messages}.isdisjoint(message.id for message in messages[:2])
+        assert snapshot.values["summary_text"] == "Ollama summary"
+        assert fallback.prompts == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_length_capped_final_chunk_preserves_history_and_retries(asynchronous):
+    state = _long_compaction_state()
+    control = _CompactionSummaryModel(text="S")
+    control_middleware = _compaction_with_response_models(control, _CompactionSummaryModel(), trim_tokens=96)
+    control_result = await control_middleware.abefore_model(state, _runtime()) if asynchronous else control_middleware.before_model(state, _runtime())
+    assert control_result is not None
+    chunk_count = len(control.prompts)
+    assert chunk_count > 1
+
+    capped = AIMessage(content="S", response_metadata={"finish_reason": "length"})
+    primary = _CompactionSummaryModel(responses=[AIMessage(content="S") for _ in range(chunk_count - 1)] + [capped, capped.model_copy(), AIMessage(content="COMPLETE")])
+    fallback = _CompactionSummaryModel(responses=[capped.model_copy(), capped.model_copy()])
+    hook = mock.Mock()
+    middleware = _compaction_with_response_models(primary, fallback, trim_tokens=96, before_summarization=[hook])
+    original_messages = list(state["messages"])
+
+    result = await middleware.abefore_model(state, _runtime()) if asynchronous else middleware.before_model(state, _runtime())
+    assert result is None
+    assert state["messages"] == original_messages
+    assert state["summary_text"] == "S"
+    hook.assert_not_called()
+
+    with pytest.raises(SummaryGenerationError):
+        if asynchronous:
+            await middleware.acompact_state(state, _runtime(), force=True, raise_on_failure=True)
+        else:
+            middleware.compact_state(state, _runtime(), force=True, raise_on_failure=True)
+    hook.assert_not_called()
+
+    result = await middleware.abefore_model(state, _runtime()) if asynchronous else middleware.before_model(state, _runtime())
+    assert result is not None and result["summary_text"] == "COMPLETE"
+    assert len(primary.prompts) == chunk_count + 2
+    assert len(fallback.prompts) == 2
+    hook.assert_called_once()
 
 
 def test_null_model_summarizes_with_the_run_model(monkeypatch: pytest.MonkeyPatch) -> None:
