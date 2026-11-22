@@ -2,6 +2,11 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 export interface FeaturesResponse {
+  voice_input?: {
+    enabled: boolean;
+    max_audio_bytes: number;
+    max_duration_seconds: number;
+  };
   run_inputs?: boolean;
   tool_approval?: {
     enabled: boolean;
@@ -86,8 +91,10 @@ export interface SubagentBatchesCapability {
   maxRunning: number;
 }
 
-export async function fetchFeatures(): Promise<FeaturesResponse> {
-  const res = await fetch(`${getBackendBaseURL()}/api/features`);
+export async function fetchFeatures(
+  signal?: AbortSignal,
+): Promise<FeaturesResponse> {
+  const res = await fetch(`${getBackendBaseURL()}/api/features`, { signal });
   if (!res.ok) {
     throw new Error(`Failed to load features: ${res.statusText}`);
   }

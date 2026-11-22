@@ -357,7 +357,30 @@ The Web UI composer supports `@` references at the cursor or through the `@` but
 
 After picking an inline reference, typing continues immediately after it. Moving the cursor keeps the position you chose, including when editing text beside a reference.
 
-The Web UI composer also supports browser-based voice dictation when the browser exposes the Web Speech API. The microphone button transcribes speech into the local draft only; DeerFlow receives only the transcribed text, while audio handling is delegated to the browser or operating system speech-recognition service according to that environment's policy. Users can review or edit the text before sending. Dictation keeps words separated when browsers trim transcript segments, preserves Chinese and Japanese joins, and attaches leading punctuation and percent signs without adding spaces.
+The Web UI composer supports optional voice input. The microphone appears beside Send only when the operator configures `voice_input` in `config.yaml`. Omitting the section or setting it to `null` hides the microphone and disables its shortcut. It is independent of chat models and does not need a built-in speech model or a browser speech-recognition service.
+
+```yaml
+voice_input:
+  base_url: https://speech.example.com/v1
+  model: your-transcription-model
+  api_key: $VOICE_INPUT_API_KEY # Omit for an endpoint without authentication.
+  # language: zh              # Optional ISO-639-1 hint; otherwise auto-detect.
+  max_audio_bytes: 10485760
+  max_duration_seconds: 120
+  timeout_seconds: 60
+```
+
+The service must support an OpenAI-compatible multipart `POST /audio/transcriptions` with `model`, `file`, and `response_format=json`, returning `{ "text": "..." }`. Choose a model that accepts the browser's format: WebM/Opus, MP4, or Ogg/Opus. `base_url` is the API prefix, not the full transcription URL. Credentials are resolved on the server using the same `$ENV_VAR` configuration mechanism as other model services. The feature response contains only availability and recording limits. The authenticated Gateway forwards audio to this service; it does not persist the recording or create a conversation message. Audio handling at the configured service follows that service's policy.
+
+Use HTTPS (or localhost), allow microphone access, then click the microphone or press `Ctrl+M` while the composer has focus. Click again, press `Ctrl+M`, or press `Enter` in the editor to finish. Recording also ends at the configured duration. The audio is uploaded when recording finishes; the completed transcript is appended to the draft for review, editing, or **Polish input** before sending. Sending and polishing wait during recording and transcription. Cancel (`Esc` or the status bar's cancel button) keeps the existing draft. Typing or switching conversations cancels pending recording/transcription, releases the microphone, and ignores late results. Cancelling after upload cannot recall audio already received by the service. Errors preserve the draft and allow retry.
+
+The configured microphone appears beside Send; recording adds a status bar with a cancel action:
+
+![Configured voice input beside Send](assets/voice-input/entry.png)
+
+![Recording status and cancel action](assets/voice-input/recording.png)
+
+The Gateway requires `runs:create`, accepts only supported audio MIME types, enforces `max_audio_bytes` even without `Content-Length`, and bounds upload/provider request time. The transcription service must return uncompressed JSON of at most 1 MiB. `max_duration_seconds` limits browser recording; the server enforces bytes rather than decoding audio duration. Set limits to match the chosen service. Removing the configuration disables new transcription requests immediately; refreshed feature discovery hides the UI.
 
 The Web UI displays a localized AI-generated-content disclaimer below the composer in both standard and custom-agent conversations, reminding users to verify important
 information.
