@@ -126,6 +126,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         user_id: str | None = None,
         slash_source_owner_token: str,
         skill_authorization: ResolvedSkillAuthorization | None = None,
+        skill_storage: SkillStorage | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(slash_source_owner_token, str) or not slash_source_owner_token:
@@ -135,6 +136,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         self._user_id = user_id
         self._slash_source_owner_token = slash_source_owner_token
         self._skill_authorization = skill_authorization
+        self._skill_storage = skill_storage
 
     def _activation_allowed(self, skill_name: str, *, activation_decisions: ActivationDecisions | None = None) -> bool:
         """Action-scoped ``skill:activate`` check for explicit slash activation.
@@ -272,6 +274,8 @@ class SkillActivationMiddleware(AgentMiddleware):
         }
 
     def _storage(self) -> SkillStorage:
+        if self._skill_storage is not None:
+            return self._skill_storage
         if self._user_id is not None:
             return get_or_new_user_skill_storage(self._user_id, app_config=self._app_config)
         if self._app_config is not None:
