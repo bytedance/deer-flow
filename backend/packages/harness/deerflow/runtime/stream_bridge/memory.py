@@ -124,6 +124,8 @@ class MemoryStreamBridge(StreamBridge):
     # -- StreamBridge API ------------------------------------------------------
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
+        if self._closing:
+            raise RuntimeError("Stream bridge is closing")
         data = deepcopy(data)
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
@@ -142,6 +144,8 @@ class MemoryStreamBridge(StreamBridge):
             stream.condition.notify_all()
 
     async def publish_end(self, run_id: str) -> None:
+        if self._closing:
+            raise RuntimeError("Stream bridge is closing")
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
             if self._closing:
