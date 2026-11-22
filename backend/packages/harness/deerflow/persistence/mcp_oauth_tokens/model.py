@@ -1,6 +1,6 @@
 """ORM model for MCP OAuth tokens shared by every Gateway instance (``mcp_oauth_tokens``).
 
-One row per OAuth connection that uses the ``refresh_token`` grant, keyed by
+One row per OAuth connection with persisted credentials, keyed by
 ``(scope, owner_user_id, server_key)``:
 
 - ``scope='deployment'``: ``owner_user_id`` is ``''`` and ``server_key`` the
@@ -10,6 +10,8 @@ One row per OAuth connection that uses the ``refresh_token`` grant, keyed by
 - ``scope='personal'``: ``owner_user_id`` is the owner and ``server_key`` the
   ``personal_<hash>`` runtime name (``deerflow.mcp.user_config``), so a
   personal connection never shares a row with a same-named deployment one.
+- ``scope='delegated'``: one browser grant per user and deployment server.
+  Its grant epoch changes on connect/disconnect and fences late writes.
 
 The row holds only what the token endpoint returned -- the access token, its
 expiry and the latest (possibly rotated) refresh token -- as
@@ -32,12 +34,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import BigInteger, Double, PrimaryKeyConstraint, String, Text
+from sqlalchemy import BigInteger, Double, Index, PrimaryKeyConstraint, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
 
-#: ``'deployment'`` or ``'personal'``; plain text so a new scope needs no migration.
+#: ``'deployment'``, ``'personal'`` or ``'delegated'``.
 MCP_OAUTH_TOKEN_SCOPE_LENGTH = 16
 MCP_OAUTH_TOKEN_OWNER_LENGTH = 64
 #: Deployment server names are operator-chosen; personal runtime names are 41 characters.
@@ -63,6 +65,8 @@ class McpOAuthTokenRow(Base):
     refresh_lease_until: Mapped[float | None] = mapped_column(Double, nullable=True)
     rotated_at: Mapped[float | None] = mapped_column(Double, nullable=True)
     updated_at: Mapped[float] = mapped_column(Double, nullable=False)
+    grant_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    grant_context: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (PrimaryKeyConstraint("scope", "owner_user_id", "server_key", name="pk_mcp_oauth_tokens"),)
 
@@ -78,3 +82,33 @@ class StoredMcpOAuthToken:
     access_expires_at: float | None
     refresh_token_enc: str | None
     version: int
+    grant_epoch: int | None
+    grant_context: str | None
+
+
+class McpOAuthAttemptRow(Base):
+    """Short-lived browser authorization, stored until one callback claims it."""
+
+    __tablename__ = "mcp_oauth_attempts"
+
+    owner_user_id: Mapped[str] = mapped_column(String(MCP_OAUTH_TOKEN_OWNER_LENGTH), primary_key=True)
+    server_key: Mapped[str] = mapped_column(String(MCP_OAUTH_TOKEN_SERVER_KEY_LENGTH), primary_key=True)
+    state_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    browser_digest: Mapped[str] = mapped_column(String(64))
+    config_fingerprint: Mapped[str] = mapped_column(String(MCP_OAUTH_TOKEN_FINGERPRINT_LENGTH))
+    grant_epoch: Mapped[int] = mapped_column(BigInteger)
+    grant_context: Mapped[str] = mapped_column(Text)
+    verifier_enc: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[float] = mapped_column(Double)
+
+    __table_args__ = (Index("ix_mcp_oauth_attempts_expires_at", "expires_at"),)
+
+
+@dataclass(frozen=True)
+class StoredMcpOAuthAttempt:
+    owner_user_id: str
+    server_key: str
+    config_fingerprint: str
+    grant_epoch: int
+    grant_context: str
+    verifier_enc: str

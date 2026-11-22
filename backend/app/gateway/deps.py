@@ -337,6 +337,8 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     if extensions is not None:
         # deerflow.mcp.oauth_store keeps rotating refresh tokens in the database.
         for name, server in extensions.get_enabled_mcp_servers().items():
+            if server.uses_browser_oauth:
+                consumers.append(f"mcpServers.{name}.user_oauth.enabled=true")
             oauth = server.oauth
             if oauth is not None and oauth.enabled and oauth.grant_type == "refresh_token":
                 consumers.append(f"mcpServers.{name}.oauth.enabled=true")
@@ -963,10 +965,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         stack.callback(reset_login_throttle_store)
 
         if sf is not None:
+            from app.gateway.coordination_workers import CoordinationWorkers
+            from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
             from deerflow.persistence.run import RunRepository
 
+            app.state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(sf))
+            stack.push_async_callback(app.state.coordination_workers.close)
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
             from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
@@ -975,6 +981,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
+            app.state.coordination_workers = None
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
             # Memory backend has no durable PAT store, so Bearer credentials

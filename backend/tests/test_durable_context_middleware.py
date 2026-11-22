@@ -1685,6 +1685,75 @@ def test_artifact_projection_coexists_with_task_notes_and_summary():
     assert "Previously generated a report." in blocks[0]
 
 
+def test_durable_emission_does_not_rekey_captured_tool_messages():
+    """The durable update must not re-key an existing ToolMessage.
+
+    The occurrence key and generated handles include the message id, so a
+    re-keyed result reads as a new occurrence on the next capture. Duplicate
+    handles are minted and the originals trim out under the entry cap, after
+    which the handles the model already saw stop resolving.
+    """
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+
+    from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.config.tool_artifact_config import ToolArtifactConfig
+
+    paths = [f"/x/f{i}.pdf" for i in range(10)]
+
+    @tool(response_format="content_and_artifact")
+    def make_files() -> tuple[str, dict]:
+        """Make ten files."""
+        return "made", {"structured_content": {"files": paths}}
+
+    @tool
+    def noop() -> str:
+        """Do nothing."""
+        return "ok"
+
+    saver = InMemorySaver()
+    model = FakeToolCallingModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "make_files", "args": {}, "id": "call-1", "type": "tool_call"}]),
+            AIMessage(content="made them"),
+            AIMessage(content="", tool_calls=[{"name": "noop", "args": {}, "id": "call-2", "type": "tool_call"}]),
+            AIMessage(content="done"),
+        ]
+    )
+    graph = create_agent(
+        model=model,
+        tools=[make_files, noop],
+        middleware=[ArtifactCaptureMiddleware(ToolArtifactConfig(max_entries=10)), DurableContextMiddleware()],
+        state_schema=ThreadState,
+        checkpointer=saver,
+    )
+    config = {"configurable": {"thread_id": "review-thread"}}
+    first = graph.invoke({"messages": [HumanMessage(content="make")]}, config, context={"thread_id": "review-thread"})
+    handles = [entry["handle"] for entry in first["tool_artifacts"]]
+    assert len(handles) == 10
+
+    second = graph.invoke({"messages": [HumanMessage(content="noop")]}, config, context={"thread_id": "review-thread"})
+    assert [entry["handle"] for entry in second["tool_artifacts"]] == handles
+    tool_ids = [message.id for message in second["messages"] if isinstance(message, ToolMessage)]
+    assert not any(message_id and message_id.endswith("__durable") for message_id in tool_ids)
+
+    @tool
+    def read_file(path: str) -> str:
+        """Read a file back."""
+        return path
+
+    resolver = ArtifactResolutionMiddleware()
+    for entry in second["tool_artifacts"]:
+        request = ToolCallRequest(
+            tool_call={"name": "read_file", "args": {"path": entry["handle"]}, "id": "read", "type": "tool_call"},
+            tool=read_file,
+            state=second,
+            runtime=SimpleNamespace(context={"thread_id": "review-thread"}),
+        )
+        resolved = resolver.wrap_tool_call(request, lambda r: ToolMessage(content=r.tool_call["args"]["path"], tool_call_id="read"))
+        assert resolved.content == entry["real_ref"]
+
+
 def _request_view(messages):
     """Comparable view of what a model call actually received."""
     return [(str(getattr(message, "type", "")), str(message.content)) for message in messages]

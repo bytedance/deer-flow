@@ -220,16 +220,32 @@ async def test_successful_renewal_invalidates_the_earlier_deadline_guard():
 
 
 @pytest.mark.anyio
-async def test_expiry_fences_even_while_atomic_ack_holds_the_manager_lock():
-    from deerflow.runtime.runs.store.memory import MemoryRunStore
+async def test_expiry_fences_even_while_atomic_ack_holds_the_manager_lock(monkeypatch):
+    from deerflow.runtime.runs import manager as manager_module
+    from deerflow.runtime.runs.store import memory as memory_store
+    from deerflow.utils import time as time_utils
 
-    store = MemoryRunStore()
+    wall_start = datetime.now(UTC)
+    elapsed = timedelta()
+    loop = asyncio.get_running_loop()
+    real_loop_time = loop.time
+
+    class LeaseClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instant = wall_start + elapsed
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(manager_module, "datetime", LeaseClock)
+    monkeypatch.setattr(memory_store, "datetime", LeaseClock)
+    monkeypatch.setattr(time_utils, "datetime", LeaseClock)
+    monkeypatch.setattr(loop, "time", lambda: real_loop_time() + elapsed.total_seconds())
+
+    store = memory_store.MemoryRunStore()
     manager = manager_for(store)
     old = await manager.create_or_reject("thread")
+    expiry = datetime.fromisoformat(old.lease_expires_at)
     original_atomic, original_renew = store.create_thread_operation_atomic, store.renew_lease
-    expiry = (datetime.now(UTC) + timedelta(milliseconds=100)).isoformat()
-    old.lease_expires_at = expiry
-    store._runs[old.run_id]["lease_expires_at"] = expiry
     renewing, allow_renew, committed, release_ack = (asyncio.Event() for _ in range(4))
 
     async def held_renew(*args, **kwargs):
@@ -248,14 +264,26 @@ async def test_expiry_fences_even_while_atomic_ack_holds_the_manager_lock():
     admission = None
     try:
         await asyncio.wait_for(renewing.wait(), 1)
+        # The replacement starts with a later lease than the run it interrupts.
+        elapsed = timedelta(seconds=2)
         admission = asyncio.create_task(manager.create_or_reject("thread", multitask_strategy="rollback"))
         await asyncio.wait_for(committed.wait(), 1)
-        allow_renew.set()
-        done, _ = await asyncio.wait({renewal}, timeout=0.3)
-        assert renewal in done, "expiry fencing waited behind the atomic Store await under the manager lock"
-        assert old.ownership_lost
+        assert not old.ownership_lost
+
+        # Keep the manager lock busy and the committed admission ACK paused.
+        await asyncio.wait_for(manager._lock.acquire(), 1)
+        try:
+            elapsed = expiry - wall_start + timedelta(seconds=1)
+            allow_renew.set()
+            done, _ = await asyncio.wait({renewal}, timeout=1)
+            assert renewal in done, "expiry fencing waited behind the manager lock"
+            await renewal
+            assert old.ownership_lost
+        finally:
+            manager._lock.release()
         release_ack.set()
-        await asyncio.wait_for(admission, 1)
+        replacement = await asyncio.wait_for(admission, 1)
+        assert datetime.fromisoformat(replacement.lease_expires_at) > LeaseClock.now(UTC)
         assert old.ownership_lost
         assert not manager._has_terminal_ack(old)
         assert not manager._terminal_attempts
@@ -264,6 +292,8 @@ async def test_expiry_fences_even_while_atomic_ack_holds_the_manager_lock():
         release_ack.set()
         await asyncio.gather(renewal, *([admission] if admission else []), return_exceptions=True)
         await manager.stop_heartbeat(timeout=0.1)
+        for handle in manager._lease_deadlines.values():
+            handle.cancel()
 
 
 @pytest.mark.anyio

@@ -24,7 +24,7 @@ from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
 
@@ -285,6 +285,11 @@ class ResolvedPath(NamedTuple):
 _POWERSHELL_QUOTE_TRANSLATION = str.maketrans("\u2018\u2019\u201c\u201d", "''\"\"")
 
 
+def escape_powershell_single_quoted(value: str) -> str:
+    """Escape text inside a PowerShell single-quoted string."""
+    return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, value)
+
+
 def escape_powershell_path(match: re.Match[str], path: str) -> str:
     """Keep mapped paths literal in the caller's quote context, preserving wildcards."""
     quote = None
@@ -330,7 +335,7 @@ def escape_powershell_path(match: re.Match[str], path: str) -> str:
     if closing_quote:
         path = path[:-1]
     if quote == "'":
-        return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, path) + closing_quote
+        return escape_powershell_single_quoted(path) + closing_quote
     characters = r'[`$"\u201c\u201d]' if quote is not None else r"[ \t`$'\";&,()@{}#\u2018\u2019\u201c\u201d]"
     return re.sub(characters, lambda char: "`" + char.group(), path) + closing_quote
 
@@ -872,7 +877,9 @@ class LocalSandbox(Sandbox):
         command: str,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
-    ) -> str:
+        *,
+        cwd: str | None = None,
+    ) -> CommandOutput:
         # Validate ``env`` keys against the POSIX env-var rule. Defense in
         # depth: ``subprocess.run(env=...)`` does not go through a shell so a
         # metachar in a key here would not actually inject — but the public
@@ -883,6 +890,8 @@ class LocalSandbox(Sandbox):
         _validate_extra_env(env)
         # Resolve container paths in command before execution
         shell = self._get_shell()
+        if cwd is not None and (os.name != "nt" or not self._is_cmd_shell(shell)):
+            raise ValueError("A process working directory is only supported for the cmd.exe fallback")
         resolved_command = self._resolve_paths_in_command(command, shell=shell)
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
@@ -904,6 +913,12 @@ class LocalSandbox(Sandbox):
                 args = [shell, "-NoProfile", "-Command", utf8_preamble + resolved_command]
             elif self._is_cmd_shell(shell):
                 args = [shell, "/c", resolved_command]
+                if cwd is not None:
+                    if ntpath.splitdrive(cwd)[0].startswith(("\\\\", "//")):
+                        raise ValueError("cmd.exe requires a workspace on a local or mapped drive")
+                    # /d disables AutoRun (which could change cwd). /s strips
+                    # the outer quotes and preserves the command's own quotes.
+                    args = f'{subprocess.list2cmdline([shell])} /d /s /c "{resolved_command}"'
             else:
                 args = [shell, "-c", resolved_command]
                 if self._is_msys_shell(shell):
@@ -965,6 +980,7 @@ class LocalSandbox(Sandbox):
                     timeout,
                     sandbox_env,
                     encoding=self._get_cmd_output_encoding(),
+                    cwd=cwd,
                 )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
@@ -987,16 +1003,17 @@ class LocalSandbox(Sandbox):
 
         final_output = output if output else "(no output)"
         # Reverse resolve local paths back to container paths in output
-        return self._reverse_resolve_paths_in_output(final_output)
+        return CommandOutput(self._reverse_resolve_paths_in_output(final_output), 124 if timed_out else returncode)
 
     @staticmethod
     def _run_windows_command(
-        args: list[str],
+        args: list[str] | str,
         timeout: float,
         env: dict[str, str] | None = None,
         *,
         encoding: str | None = None,
         fallback_encoding: str | None = None,
+        cwd: str | None = None,
     ) -> tuple[str, str, int, bool]:
         """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
@@ -1012,6 +1029,7 @@ class LocalSandbox(Sandbox):
                 stderr=stderr_write_fd,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 env=env,
+                cwd=cwd,
             )
         except BaseException:
             # Include interruptions during and after Popen; the read ends have

@@ -64,9 +64,15 @@ That is why the whole policy is performance-only and safe to differ per worker.
 | `thread_id` is left readable | Ops can identify a thread's keys without recomputing the digest |
 | The remaining components are hashed with NUL separators | A namespace containing `:` cannot produce an ambiguous key |
 | Thread purge stem | `{key_prefix}:{thread_id}:` — a prefix match, never per-key invalidation |
-| Default prefix | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`, with `CACHE_FORMAT_VERSION = 1` |
+| Default prefix | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`, with `CACHE_FORMAT_VERSION = 2` |
 | `database.checkpoint_cache.key_prefix` | Replaces the whole derived prefix |
 | Database identity | Credential-free: postgres `host:port/database:schema`, the sqlite path, else `memory`. Rotating credentials does not change the namespace, so a credential rotation cannot cold-start the cache and orphan keys until TTL. Two deployments sharing one redis get different prefixes by default. |
+
+### Upgrading the Redis history cache from v1 to v2
+
+With the default prefix, upgraded workers rebuild histories in v2. Thread deletion and pruning also purge that thread's v1 entries for the same database, even if `ttl_seconds: 0` disables expiry.
+
+If you set `database.checkpoint_cache.key_prefix`, stop all workers using that prefix and clear its Redis checkpoint history keys before starting upgraded workers. The custom prefix stays the same across versions, so it can still return histories in the old write order until you clear it. On a shared Redis instance, delete only this deployment's checkpoint history keys.
 
 ## Compose instead of walk
 
@@ -148,9 +154,9 @@ Every redis failure is performance-only. The source of truth has already been up
 | --- | --- | --- |
 | `mget` fails | `checkpoint history cache mget failed; treating as all-miss: %s` | Every requested key counts as a miss; histories are recomposed |
 | Write fails | `checkpoint history cache write failed; skipping: %s` | The write is skipped; the next read simply recomputes |
-| Thread purge fails | `checkpoint history cache thread purge failed; residual entries expire via TTL: %s` | The source delete already happened; residual copies expire via `ttl_seconds`; this path never raises |
+| Thread purge fails | `checkpoint history cache thread purge failed; cached entries may remain: %s` | The source delete already happened. Residual keys expire only if they have a TTL |
 
-The TTL is a leak safety net, not a correctness mechanism, because entries are immutable and no read depends on them. `ttl_seconds: 0` opts out of expiry entirely, so orphaned keys then rely on the redis `maxmemory` policy alone. A failed purge is the only way a deleted thread's history lingers, and only until the TTL.
+The TTL is a leak safety net, not a correctness mechanism, because entries are immutable and no read depends on them. `ttl_seconds: 0` opts out of expiry entirely, so orphaned keys then rely on the redis `maxmemory` policy alone. A failed purge is the only way a deleted thread's history lingers; residual keys expire at the configured TTL, or remain operator-managed when `ttl_seconds: 0`.
 
 ## Stats
 

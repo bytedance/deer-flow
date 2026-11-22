@@ -33,6 +33,12 @@ source's agent, project, sandbox, uploads, tool calls or credentials. Tool resul
 are imported as historical assistant text. The copied conversation remains
 usable after the source link is revoked.
 
+The copied messages are context for the model, not something the visitor said,
+so memory extraction skips them, also when compaction removes them. New turns in
+the copy are remembered as in any other conversation, including assistant replies
+that repeat copied content. A copy made before this behavior existed has its
+copied messages marked before its next run.
+
 ## Deployment and limits
 
 Sharing requires SQLite or PostgreSQL persistence. The Gateway's startup
@@ -62,7 +68,7 @@ All paths below are relative to `/api`.
 | `DELETE /threads/{id}/shares/{share_id}` | Owner with `threads:write`; revokes access and removes stored snapshot bytes. |
 | `GET /shares/{token}` | Anonymous capability read; returns visible messages, artifact manifest, checkpoint and sequence. |
 | `GET`, `HEAD /shares/{token}/artifacts/{path}` | Reads only a copied manifest entry. Supports byte ranges and `?download=true`. |
-| `POST /shares/{token}/fork` | Signed-in visitor with `threads:write`; body contains a UUID `request_id`. Returns the new `thread_id`. Retrying the same request reuses a completed import. |
+| `POST /shares/{token}/fork` | Signed-in visitor with `threads:write`; body contains a UUID `request_id`. Returns the new `thread_id`. Retrying the same request reuses a completed import. Importing a share that carries artifacts requires a POSIX host; other hosts answer `422` before creating any state. |
 
 Creation captures the latest idle root checkpoint and its persisted visible
 history under exclusive thread admission. `checkpoint_id`, when supplied, is

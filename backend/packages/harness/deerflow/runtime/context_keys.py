@@ -3,6 +3,8 @@
 from collections.abc import Mapping
 from typing import Final
 
+MCP_BROWSER_USER_CONTEXT_KEY: Final[str] = "__deerflow_mcp_browser_user"
+
 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: Final[str] = "__deerflow_pre_run_message_ids"
 
 # Server-authored checkpoint metadata that binds materialized state to the

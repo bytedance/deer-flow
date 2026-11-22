@@ -835,12 +835,63 @@ material already retained by those systems. Restarting or upgrading DeerFlow doe
 not rotate credentials or perform historical cleanup; operators must complete
 both actions explicitly.
 
+### Browser authorization for deployment MCP
+
+An operator can opt a Streamable HTTP server into per-user browser authorization
+by setting its `user_oauth` block in `extensions_config.json`. Register the
+exact public Gateway callback URL `/api/mcp/user-oauth/callback` with the
+provider before enabling the server. Configure access logs to omit the query
+string for this callback, which carries the one-time code and state.
+
+```json
+{
+  "mcpServers": {
+    "tickets": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "user_oauth": {
+        "issuer": "https://identity.example.com",
+        "client_id": "deerflow",
+        "client_secret": "$TICKETS_OAUTH_CLIENT_SECRET",
+        "redirect_uri": "https://deerflow.example.com/api/mcp/user-oauth/callback",
+        "scope": "tickets:read"
+      }
+    }
+  }
+}
+```
+
+Omit `client_secret` for a registered public client. The authorization server
+must support authorization code with S256 PKCE and publish MCP resource and
+authorization server metadata. Discovered authorization and token endpoints
+must share the configured issuer origin. For explicitly trusted private MCP or
+issuer addresses, set `allow_private_addresses: true` in `user_oauth`; both
+origins still require HTTPS. Local browser callbacks may use loopback HTTP.
+
+Sign in and open **Capability Center → Tools & integrations → My MCP connections** to connect
+or disconnect your account. Browsing and invoking the tools uses your upstream
+permissions. An existing conversation picks up the connection on the next
+run. Disconnect takes effect before the next dispatch, including in existing
+runs on another Gateway. A request already accepted by the remote server
+may finish. If an operator disables the server or removes its browser authorization
+configuration, you can still disconnect your saved grant in My MCP connections.
+Foreground lead-agent chat supports these connections. Subagents,
+scheduled runs, IM, and other background runs use their existing credential modes.
+
+This mode requires SQLite or PostgreSQL and the existing credentials key.
+Multiple Gateway hosts need shared PostgreSQL and the same credentials key.
+A server using browser authorization has a single authorization source: omit
+`agent_auth`, `user_auth`, deployment `oauth`, any static or per-request
+`Authorization` header, and durable MCP task toolsets for that server. Increase
+`grant_revision` when deliberately invalidating grants, including if an old
+issuer or server configuration is restored.
+
 ## Tool Discovery Cache
 
-MCP tool discovery is cached per server. The cache is keyed by server name and
-holds, for each server, the discovered tools together with a canonical snapshot
-of that server's configuration, the normalized global interceptor chain and the
-pooled stdio session binding they were discovered against.
+Deployment servers that do not require a browser grant use a shared discovery
+cache keyed by server name. Entries contain the tools, server configuration
+snapshot, normalized interceptor chain, and any pooled stdio session binding.
+Browser-authorized tools are discovered for the signed-in user within each run.
 
 - **Reuse.** On every (re)initialization, a server's cached tools are reused only
   when its configuration snapshot and global interceptor chain are unchanged

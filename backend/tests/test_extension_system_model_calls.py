@@ -342,7 +342,7 @@ async def test_title_middleware_uses_build_bound_snapshot_and_live_task_store(mo
         ]
     }
 
-    result = await middleware.aafter_model(
+    result = await middleware.aafter_agent(
         state,
         Runtime(context={EXTENSION_TASK_STORE_KEY: store}),
     )

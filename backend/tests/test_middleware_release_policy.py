@@ -326,6 +326,26 @@ def test_todo_hard_stop_policy_changes_assembly_identity(monkeypatch):
     assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
 
 
+def test_todo_completion_reminder_template_changes_assembly_identity(monkeypatch):
+    """Model-visible reminder text belongs in the assembly fingerprint.
+
+    The template is hashed with an empty item list, so per-run todo content
+    stays out while a wording change still changes the descriptor.
+    """
+    from deerflow_extension_api import canonical_hash
+
+    from deerflow.agents.middlewares import todo_middleware
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    baseline_params = TodoMiddleware().release_policy_parameters()
+    assert baseline_params["completion_reminder_template_hash"] == canonical_hash(todo_middleware._format_completion_reminder([]))
+    baseline = _middleware_fingerprint(TodoMiddleware())
+
+    monkeypatch.setattr(todo_middleware, "_format_completion_reminder", lambda _todos: "<system_reminder>changed</system_reminder>")
+
+    assert _middleware_fingerprint(TodoMiddleware()) != baseline
+
+
 def test_safety_text_only_stop_policy_changes_assembly_identity(monkeypatch):
     current = _make_safety_finish_reason_middleware()
     previous = _make_safety_finish_reason_middleware()
