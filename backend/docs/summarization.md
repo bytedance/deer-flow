@@ -53,6 +53,10 @@ durable or distributed cost budget. Callers without a thread ID keep only the
 per-pass limit. Other generation failures retain their existing retry behavior.
 Configured/run-model fallback may make two candidate attempts per chunk, and SDK
 retries are separate. This bounds middleware steps, not a monetary bill or deadline.
+If the provider reports an output token limit, including native Ollama's
+`done_reason: length`, the chunk's partial response is discarded and the run-model
+fallback is tried when available. If no candidate produces a complete summary,
+compaction preserves the active history.
 For legitimate histories beyond this limit, increase the existing per-call budget
 within the model's capacity or compact earlier. There is no new configuration.
 Impossibly small budgets that cannot fit a nonempty marked carry or source fail

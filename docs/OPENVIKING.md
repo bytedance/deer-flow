@@ -34,9 +34,12 @@ server-side. DeerFlow supports two isolation modes on top of `api_key` mode:
 - **Single-user mode** (`owner_user_id` + `api_key_env`): binds one DeerFlow
   user identity to one OpenViking USER API key. Use `owner_user_id: default`
   when DeerFlow authentication is disabled, or that user's DeerFlow ID in an
-  authenticated single-user deployment. Any request for another DeerFlow user is
+  authenticated single-user deployment. A request for another DeerFlow user is
   rejected before OpenViking is contacted, preventing one USER key from silently
-  sharing memory across users.
+  sharing memory across users. The failure policies below decide what that
+  rejection does to the turn: with `write: log_and_drop` the other user's write
+  is logged as refused, without message content, and dropped, and the run still
+  completes.
 - **Multi-user / multi-tenant isolation mode** (`user_credentials` and/or
   `credential_provider` / `host_hooks["credential_provider"]`, plus optional
   `tenant_id` and `client_pool`): resolves a distinct OpenViking USER API key
@@ -59,9 +62,10 @@ arbitrary HTTP headers from `ovcli.conf`.
 Before enabling this backend, remove legacy `OPENVIKING_ACCOUNT` and
 `OPENVIKING_USER` values from DeerFlow's repository-root `.env` and service
 environment, and remove `account` and `user` defaults from
-`~/.openviking/ovcli.conf`. In multi-user mode, do not rely on a shared
-ambient `OPENVIKING_API_KEY`; per-user keys are never resolved from an ambient
-fallback.
+`~/.openviking/ovcli.conf`. Those settings belong to trusted-mode configurations
+and are outside this adapter's supported setup. In multi-user mode, do not rely
+on a shared ambient `OPENVIKING_API_KEY`; per-user keys are never resolved from
+an ambient fallback.
 
 Existing trusted-mode configurations are not migrated automatically. Configure
 the OpenViking server in `api_key` mode, replace `auth_mode`, `account`, and the
@@ -334,8 +338,11 @@ boundary; peers separate memory scopes within that user.
   whitespace-only `user_id` values, leading/trailing whitespace or control
   characters (`\0`) on runtime `user_id` values, unmapped users, revoked users
   (`None` from `credential_provider`), invalid/blank keys, and provider errors
-  all fail closed (`MemoryManagerError`, or `MemoryReadError` on read paths when
-  `failure_policy.read: raise`) before any OpenViking HTTP call is made.
+  are all rejected before any OpenViking HTTP call is made or local cursor file
+  is written: read paths raise `MemoryManagerError` (or `MemoryReadError` when
+  `failure_policy.read: raise`), and write paths follow `failure_policy.write`
+  (`log_and_drop` logs the refusal without message content or secrets and drops
+  the write; `raise` propagates `MemoryManagerError`).
 - **No fallback to shared or ambient credentials**: DeerFlow never falls back
   to another user's key, a default key, ambient `OPENVIKING_API_KEY`, or
   `ovcli.conf` headers.

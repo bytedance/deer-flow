@@ -452,8 +452,17 @@ class OpenVikingMemoryManager(MemoryManager):
         try:
             if not thread_id:
                 raise ValueError("OpenViking memory write requires thread_id")
-            resolved_user, credential, peer_id = self._resolve_scope(user_id, agent_name)
-            entry = self._acquire_client(resolved_user, credential)
+            try:
+                resolved_user, credential, peer_id = self._resolve_scope(user_id, agent_name)
+                entry = self._acquire_client(resolved_user, credential)
+            except MemoryManagerError as exc:
+                # Scope/credential checks have already refused the write before
+                # any remote call; the write policy decides whether that refusal
+                # also fails a turn whose answer was already generated.
+                if self._config.write_failure_policy == "raise":
+                    raise
+                logger.error("%s Dropping the memory write (thread=%s).", exc, thread_id)
+                return
             session_id = _session_id(
                 resolved_user,
                 peer_id,

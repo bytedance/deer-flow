@@ -7,6 +7,7 @@ import gc
 import hashlib
 import importlib
 import json
+import logging
 import socket
 import sys
 import threading
@@ -282,6 +283,55 @@ def test_memory_admission_redacts_call_views_before_openviking_recorder(tmp_path
         manager.close()
 
 
+@pytest.mark.parametrize("write_policy", ["log_and_drop", "raise"])
+@pytest.mark.parametrize("entry", ["after-agent", "async-after-agent", "compaction"])
+def test_another_owner_write_is_refused_and_follows_the_write_policy(tmp_path, monkeypatch, official_integration, caplog, write_policy: str, entry: str) -> None:
+    import asyncio
+
+    from langgraph.runtime import Runtime
+
+    from deerflow.agents.memory import summarization_hook
+    from deerflow.agents.middlewares import memory_middleware
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+    from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
+    from deerflow.config.memory_config import MemoryConfig
+
+    messages = [HumanMessage("remember short replies"), AIMessage("noted")]
+    manager = _manager(tmp_path, monkeypatch, failure_policy={"write": write_policy})
+    monkeypatch.setattr(memory_middleware, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(memory_middleware, "resolve_runtime_user_id", lambda runtime: "bob")
+    monkeypatch.setattr(summarization_hook, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(summarization_hook, "get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr(summarization_hook, "resolve_runtime_user_id", lambda runtime: "bob")
+    runtime = Runtime(context={"thread_id": "thread-1", "user_id": "bob"})
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
+
+    def write() -> None:
+        if entry == "after-agent":
+            middleware.after_agent({"messages": messages}, runtime)
+        elif entry == "async-after-agent":
+            asyncio.run(middleware.aafter_agent({"messages": messages}, runtime))
+        else:
+            event = SummarizationEvent(messages_to_summarize=tuple(messages), preserved_messages=(), thread_id="thread-1", agent_name=None, runtime=runtime)
+            summarization_hook.memory_flush_hook(event)
+
+    try:
+        with caplog.at_level(logging.ERROR, logger=OpenVikingMemoryManager.__module__):
+            if write_policy == "raise":
+                with pytest.raises(MemoryManagerError, match="owner_user_id"):
+                    write()
+            else:
+                write()
+        assert manager._recorder.calls == []
+        assert manager._recorder.flushes == []
+        assert not list((tmp_path / "openviking").rglob("*.json"))
+        if write_policy == "log_and_drop":
+            assert any("'bob'" in record.getMessage() and "Dropping the memory write" in record.getMessage() for record in caplog.records)
+            assert "remember short replies" not in caplog.text
+    finally:
+        manager.close()
+
+
 @contextmanager
 def _use_actor_peer(peer_id: str | None):
     token = _ACTOR_PEER.set(peer_id)
@@ -506,8 +556,8 @@ def test_user_key_connection_uses_owner_key_without_ambient_authorization(
         assert len(requests) == before
         with pytest.raises(MemoryReadError, match="owner_user_id"):
             manager.search("private data", user_id="another-owner")
-        with pytest.raises(MemoryManagerError, match="owner_user_id"):
-            manager.add("thread-1", messages, user_id="another-owner")
+        # The default write policy drops the refused write instead of raising.
+        manager.add("thread-1", messages, user_id="another-owner")
         assert len(requests) == before
     finally:
         manager.close()
@@ -758,19 +808,19 @@ def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
     official_integration: None,
 ) -> None:
     manager = _manager(tmp_path, monkeypatch)
+    strict = _manager(tmp_path / "strict", monkeypatch, failure_policy={"write": "raise"})
+    write = {"thread_id": "thread-1", "messages": [HumanMessage("private", id="h1")], "user_id": "bob", "agent_name": "research"}
 
     with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
         manager.get_context("bob", agent_name="research")
+    # The default write policy drops the refused write; `raise` propagates it.
+    assert manager.add(**write) is None
     with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
-        manager.add(
-            "thread-1",
-            [HumanMessage("private", id="h1")],
-            user_id="bob",
-            agent_name="research",
-        )
+        strict.add(**write)
 
     assert manager._retriever.calls == []
     assert manager._recorder.calls == []
+    assert strict._recorder.calls == []
 
 
 def test_manager_records_only_unseen_suffix(
@@ -1605,11 +1655,14 @@ def test_multi_user_warm_honors_startup_policy(
         unreachable_warn.close()
 
 
+@pytest.mark.parametrize("write_policy", ["log_and_drop", "raise"])
 @pytest.mark.parametrize("read_policy", ["fail_open", "raise"])
 @pytest.mark.parametrize("bad_user", [None, "", "   ", "unmapped-user"])
 def test_multi_user_fail_closed_for_missing_blank_and_unmapped_user(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    write_policy: str,
     read_policy: str,
     bad_user: str | None,
 ) -> None:
@@ -1617,13 +1670,19 @@ def test_multi_user_fail_closed_for_missing_blank_and_unmapped_user(
     manager = OpenVikingMemoryManager.from_config(
         _multi_user_backend_config(
             tmp_path,
-            failure_policy={"read": read_policy},
+            failure_policy={"read": read_policy, "write": write_policy},
             user_credentials={"alice": {"api_key": "alice-secret"}},
         )
     )
     try:
-        with pytest.raises(MemoryManagerError):
-            manager.add("thread-1", [HumanMessage("secret", id="h1")], user_id=bad_user)
+        with caplog.at_level(logging.ERROR, logger=OpenVikingMemoryManager.__module__):
+            if write_policy == "raise":
+                with pytest.raises(MemoryManagerError):
+                    manager.add("thread-1", [HumanMessage("secret", id="h1")], user_id=bad_user)
+            else:
+                assert manager.add("thread-1", [HumanMessage("secret", id="h1")], user_id=bad_user) is None
+                assert any("Dropping the memory write" in record.getMessage() for record in caplog.records)
+                assert "secret" not in caplog.text
 
         expected_read_exc = MemoryReadError if read_policy == "raise" else MemoryManagerError
         with pytest.raises(expected_read_exc) as ctx_exc:
@@ -1636,6 +1695,7 @@ def test_multi_user_fail_closed_for_missing_blank_and_unmapped_user(
             assert isinstance(search_exc.value.__cause__, MemoryManagerError)
         assert recorders == []
         assert retrievers == []
+        assert not list((tmp_path / "openviking").rglob("*.json"))
     finally:
         manager.close()
 
@@ -1668,7 +1728,7 @@ def test_multi_user_fail_closed_on_malformed_or_illegal_provider_output(
         return bad_return
 
     manager = OpenVikingMemoryManager.from_config(
-        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise"}),
+        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise", "write": "raise"}),
         credential_provider=bad_provider,
     )
     try:
@@ -1690,6 +1750,7 @@ def test_multi_user_fail_closed_on_malformed_or_illegal_provider_output(
 def test_multi_user_fail_closed_when_provider_raises_never_leaks_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     recorders, _ = _track_official_integration(monkeypatch)
     invoked = False
@@ -1700,7 +1761,11 @@ def test_multi_user_fail_closed_when_provider_raises_never_leaks_secret(
         raise RuntimeError(f"vault failure for {user_id}: sk-vault-secret-999")
 
     manager = OpenVikingMemoryManager.from_config(
-        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise"}),
+        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise", "write": "raise"}),
+        credential_provider=failing_provider,
+    )
+    drop_manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path / "drop", failure_policy={"read": "raise", "write": "log_and_drop"}),
         credential_provider=failing_provider,
     )
     try:
@@ -1710,12 +1775,19 @@ def test_multi_user_fail_closed_when_provider_raises_never_leaks_secret(
         assert "sk-vault-secret-999" not in str(add_exc.value)
         assert add_exc.value.__cause__ is None
 
+        with caplog.at_level(logging.ERROR, logger=OpenVikingMemoryManager.__module__):
+            assert drop_manager.add("thread-1", [HumanMessage("top-secret-msg", id="h1")], user_id="alice") is None
+        assert "sk-vault-secret-999" not in caplog.text
+        assert "top-secret-msg" not in caplog.text
+        assert any("RuntimeError" in record.getMessage() and "Dropping the memory write" in record.getMessage() for record in caplog.records)
+
         with pytest.raises(MemoryReadError, match="RuntimeError") as read_exc:
             manager.search("prefs", user_id="alice")
         assert "sk-vault-secret-999" not in str(read_exc.value)
         assert recorders == []
     finally:
         manager.close()
+        drop_manager.close()
 
 
 def test_dynamic_credential_provider_class_callable_and_hook_paths(
@@ -1853,7 +1925,7 @@ def test_dynamic_provider_key_rotation_revocation_and_cross_identity_rejection(
             return keys.get(user_id)
 
     manager = OpenVikingMemoryManager.from_config(
-        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise"}),
+        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise", "write": "raise"}),
         credential_provider=_DynamicProvider(),
     )
     try:
@@ -2384,7 +2456,7 @@ def test_multi_user_rejects_untrimmed_or_control_char_runtime_user_id(
         return f"key-{uid.strip()}"
 
     manager = OpenVikingMemoryManager.from_config(
-        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise"}),
+        _multi_user_backend_config(tmp_path, failure_policy={"read": "raise", "write": "raise"}),
         credential_provider=provider,
     )
     try:
@@ -2416,7 +2488,7 @@ def test_hybrid_mode_rejects_dynamic_reuse_of_uncached_or_evicted_static_key(
     manager = OpenVikingMemoryManager.from_config(
         _multi_user_backend_config(
             tmp_path,
-            failure_policy={"read": "raise"},
+            failure_policy={"read": "raise", "write": "raise"},
             client_pool={"max_clients": 1},
             user_credentials={"alice": {"api_key": "alice-static-secret", "tenant_id": "acme"}},
         ),
