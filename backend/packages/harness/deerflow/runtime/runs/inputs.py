@@ -150,12 +150,22 @@ class RunInputs:
     async def publication_failed(self, input_id: str, run_id: str, *, attempt: int) -> None:
         def change(state, row):
             item = next(x for x in state["items"] if x["id"] == input_id)
-            if not item.get("attachment_stage") or item["status"] not in ("dispatching", "applied"):
+            stage = item.get("attachment_stage")
+            if not stage or stage.get("published") is True or item["status"] not in ("dispatching", "applied"):
                 return
             if item.get("attachment_attempt", 0) != attempt or item.get("run_id") not in (None, run_id):
                 return
             item.pop("run_id", None)
             item.update(status="not_applied", attachment_attempt=attempt + 1)
+
+        await self._change(change)
+
+    async def publication_succeeded(self, input_id: str, run_id: str, *, attempt: int) -> None:
+        def change(state, row):
+            item = next(x for x in state["items"] if x["id"] == input_id)
+            stage = item.get("attachment_stage")
+            if stage and item["status"] in ("dispatching", "applied") and item.get("attachment_attempt", 0) == attempt and item.get("run_id") in (None, run_id):
+                stage["published"] = True
 
         await self._change(change)
 

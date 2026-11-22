@@ -284,6 +284,8 @@ If publication fails before the Agent receives the message, the same input
 can be removed or retried without another upload. Retrying after a lost
 dispatch receipt still reuses the accepted run. On startup, the Gateway
 cleans up abandoned staging directories older than 24 hours.
+Remote sandboxes without thread-data mounts need Python 3 to publish queued
+attachments and reconcile partial transfers.
 
 #### Create Run
 

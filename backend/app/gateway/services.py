@@ -3048,13 +3048,21 @@ async def start_run(
             if queued_attachments is not None:
                 from app.gateway.run_input_files import publish_input_files
 
+                async def record_attachment_publication():
+                    try:
+                        await queued_attachments.source.publication_succeeded(queued_attachments.input_id, record.run_id, attempt=queued_attachments.attempt)
+                    except Exception:
+                        # Files are already published. A receipt write failure must
+                        # not requeue the message or prevent ordinary stage cleanup.
+                        logger.warning("Could not record queued attachment publication for run %s", record.run_id, exc_info=True)
+
                 async def publish_queued_attachments():
                     # Only the admitted worker may expose this input's files to the thread.
                     message = _current_human_message(graph_input)
                     assert message is not None
                     stage = queued_attachments.stage
                     try:
-                        files = await publish_input_files(thread_id, record.user_id, stage["id"], stage["files"], request=request, config=app_config)
+                        files = await publish_input_files(thread_id, record.user_id, stage["id"], stage["files"], request=request, config=app_config, on_published=record_attachment_publication)
                     except Exception as exc:
                         # This run cannot reach the graph. Restore the input before
                         # the worker reports it as finished and the queue stops polling.

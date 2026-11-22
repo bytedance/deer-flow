@@ -963,6 +963,59 @@ async def test_queued_attachments_are_delivered_in_order_and_cancelled_bytes_are
 
 
 @pytest.mark.asyncio
+async def test_startup_sweep_removes_published_queue_stage_after_delete_failure(worker_gateway, monkeypatch):
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from app.gateway import run_input_files
+    from app.gateway.run_input_cleanup import cleanup_abandoned_queued_uploads
+    from deerflow.config.paths import get_paths
+
+    client, runs, state, entered, owner = worker_gateway
+    paths = get_paths()
+    thread = await runs.create_thread(thread_id="queue-published-stage")
+    screenshot = _png("blue")
+    staging_root = paths.thread_dir(thread, user_id=owner) / ".queued-uploads"
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    remove = run_input_files.shutil.rmtree
+    failed_deletions = []
+
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        (await _submit_screenshot(client, inputs_url, "attachment", "read screenshot", screenshot)).raise_for_status()
+        (stage,) = staging_root.iterdir()
+
+        def fail_stage_removal(directory, *args, **kwargs):
+            if os.path.basename(directory) == stage.name:
+                failed_deletions.append(directory)
+                raise PermissionError("temporary staging deletion failure")
+            return remove(directory, *args, **kwargs)
+
+        with monkeypatch.context() as publish_patch:
+            publish_patch.setattr(run_input_files.shutil, "rmtree", fail_stage_removal)
+            state.release_worker.set()
+            source = await state.run_manager.get(initial.run_id, user_id=owner)
+            await asyncio.wait_for(asyncio.shield(source.task), 5)
+    finally:
+        state.release_worker.set()
+
+    assert len(failed_deletions) == 1
+    (receipt,) = (await client.get(f"/api/threads/{thread}/inputs")).raise_for_status().json()["items"]
+    assert receipt["status"] == "applied"
+    assert receipt["files"] == [{"filename": "screenshot.png", "size": len(screenshot)}]
+    upload = paths.sandbox_uploads_dir(thread, user_id=owner) / "screenshot.png"
+    assert upload.read_bytes() == screenshot
+    upload.unlink()
+    assert (stage / "0").read_bytes() == screenshot
+    old = (datetime.now(UTC) - timedelta(days=7)).timestamp()
+    os.utime(stage, (old, old))
+
+    assert await cleanup_abandoned_queued_uploads(state.run_store, paths) == 1
+    assert not stage.exists()
+
+
+@pytest.mark.asyncio
 async def test_attachment_only_queue_retry_reconciles_a_lost_dispatch_receipt(worker_gateway, monkeypatch):
     import asyncio
 

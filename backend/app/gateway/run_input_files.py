@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TypedDict
 from uuid import uuid4
@@ -19,7 +21,7 @@ from app.gateway.upload_ingestion import prepare_published_uploads
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.uploads.companions import register_companion
-from deerflow.uploads.manager import normalize_filename
+from deerflow.uploads.manager import UPLOAD_STAGING_PREFIX, UPLOAD_STAGING_SUFFIX, normalize_filename
 from deerflow.utils.atomic_write import publish_bytes_atomically
 from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.host_paths import extended_length_path
@@ -176,7 +178,101 @@ def _publish_files(
     return paths, companions, links
 
 
-async def publish_input_files(thread_id: str, user_id: str, staging_id: str, files: list[StagedInputFile], *, request: Request, config: AppConfig) -> list[dict]:
+_REMOTE_UPLOAD_TRANSACTION = """
+import json, os, stat, sys
+from pathlib import Path
+
+action, directory, prefix, suffix, names = json.loads(sys.argv[1])
+directory = Path(directory)
+files = [
+    [directory / name, *(directory / f"{prefix}-{index}{kind}{suffix}" for kind in ("", "-next", "-old"))]
+    for index, name in enumerate(names)
+]
+
+def info(path):
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+def same_file(first, second):
+    return first is not None and second is not None and os.path.samestat(first, second)
+
+def rollback():
+    # Only touch destinations that still contain this batch's staged inode.
+    for target, staged, _, backup in reversed(files):
+        if same_file(info(staged), info(target)):
+            if info(backup) is None:
+                target.unlink(missing_ok=True)
+            else:
+                os.replace(backup, target)
+
+if action == 'promote':
+    try:
+        for target, staged, candidate, backup in files:
+            previous = info(target)
+            if same_file(info(staged), previous):
+                continue  # The transport may have retried an acknowledged move.
+            if previous is not None:
+                if stat.S_ISDIR(previous.st_mode):
+                    raise IsADirectoryError(target)
+                if info(backup) is None:
+                    os.link(target, backup, follow_symlinks=False)
+            if info(candidate) is None:
+                os.link(staged, candidate, follow_symlinks=False)
+            os.replace(candidate, target)
+    except BaseException:
+        rollback()
+        raise
+elif action in ('rollback', 'discard'):
+    if action == 'rollback':
+        rollback()
+    for _, staged, candidate, backup in files:
+        for path in (staged, candidate, backup):
+            path.unlink(missing_ok=True)
+print(prefix)
+"""
+
+
+def _publish_remote_uploads(sandbox, paths: list[Path]) -> None:
+    """Transfer private files before publishing their names in a remote sandbox."""
+    prefix = f"{UPLOAD_STAGING_PREFIX}{uuid4().hex}"
+    root = getattr(sandbox, "artifact_root", None)
+    directory = f"{root.rstrip('/')}/uploads" if isinstance(root, str) and root else uploads.upload_virtual_path("").rstrip("/")
+
+    def checked_command(action: str) -> None:
+        payload = json.dumps([action, directory, prefix, UPLOAD_STAGING_SUFFIX, [path.name for path in paths]])
+        output = sandbox.execute_command(f"python3 -I -c {shlex.quote(_REMOTE_UPLOAD_TRANSACTION)} {shlex.quote(payload)}", timeout=30)
+        if output.strip() != prefix or getattr(output, "exit_code", 0) != 0:
+            if action == "probe":
+                raise OSError("Remote sandbox does not support queued upload publication with Python 3")
+            raise OSError("Remote queued upload reconciliation was not acknowledged")
+
+    checked_command("probe")
+    action = "discard"
+    try:
+        for index, path in enumerate(paths):
+            staged_name = f"{prefix}-{index}{UPLOAD_STAGING_SUFFIX}"
+            uploads._sync_upload_to_sandbox(sandbox, path, uploads.upload_virtual_path(staged_name))
+        action = "rollback"
+        checked_command("promote")
+    except BaseException:
+        for retry in (False, True):
+            try:
+                checked_command(action)
+                break
+            except Exception:
+                if retry:
+                    logger.exception("Failed to reconcile remote queued upload before releasing the sandbox")
+        raise
+    else:
+        try:
+            checked_command("discard")
+        except Exception:
+            logger.exception("Failed to remove temporary remote queued upload files")
+
+
+async def publish_input_files(thread_id: str, user_id: str, staging_id: str, files: list[StagedInputFile], *, request: Request, config: AppConfig, on_published: Callable[[], Awaitable[None]] | None = None) -> list[dict]:
     """Publish only while the destination run owns the thread's run slot."""
     directory = await run_file_io(_staging_dir, thread_id, user_id, staging_id)
     targets: list[tuple[Path, str]] = []
@@ -197,24 +293,32 @@ async def publish_input_files(thread_id: str, user_id: str, staging_id: str, fil
             converted[index] = companion
 
     async def publish_and_sync() -> list[Path]:
-        originals, companions, links = await run_drained_write("Publish queued attachments", _publish_files, (), thread_id, user_id, directory, targets, converted)
-        paths = [target for _, target in links]
+        links = []
+        lease = None
         try:
             provider = await run_file_io(uploads.get_sandbox_provider)
-            if uploads._uses_thread_data_mounts(provider):
-                await prepare_published_uploads(paths)
-            else:
+            if not uploads._uses_thread_data_mounts(provider):
                 # Keep the ordinary upload endpoint's sandbox authorization.
+                # Fresh remote sandboxes can mirror uploads during acquisition.
                 lease = await uploads.try_acquire_sandbox_for_request(request, provider, thread_id, user_id=user_id, app_config=config, owner_prefix="gateway:queued-upload")
-                try:
-                    if not lease.denied and lease.sandbox is None:
-                        raise RuntimeError("Failed to acquire sandbox for queued attachments")
-                    await prepare_published_uploads(paths, sandbox=None if lease.denied else lease.sandbox)
-                finally:
-                    await lease.release()
+                if not lease.denied and lease.sandbox is None:
+                    raise RuntimeError("Failed to acquire sandbox for queued attachments")
+            originals, companions, links = await run_drained_write("Publish queued attachments", _publish_files, (), thread_id, user_id, directory, targets, converted)
+            paths = [target for _, target in links]
+            await prepare_published_uploads(paths)
+            if lease is not None and not lease.denied:
+                await run_file_io(_publish_remote_uploads, lease.sandbox, paths)
         except BaseException:
             await run_file_io(_rollback_links, links)
             raise
+        finally:
+            if lease is not None:
+                try:
+                    await lease.release()
+                except Exception:
+                    logger.exception("Failed to release the queued attachment sandbox lease")
+        if on_published is not None:
+            await on_published()
         await run_file_io(_discard_staging, directory)
         # Unlinking the staged alias changes the inode's ctime. Record the
         # association afterward, once the upload has its final identity.

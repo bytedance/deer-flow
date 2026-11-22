@@ -107,6 +107,8 @@ async def test_startup_sweep_keeps_inflight_and_retryable_queued_uploads(input_s
     inputs = RunInputs(input_store, "run", USER_ID, "worker")
     await inputs.reopen()
     await inputs.submit("retry", "Retry this upload", "queue", attachment_stage={"id": retryable.name, "files": []})
+    admitted = stage("thread", "9" * 32)
+    await inputs.submit("admitted", "Still awaiting publication", "queue", attachment_stage={"id": admitted.name, "files": []})
     cancelled = stage("thread", "f" * 32)
     await inputs.submit("cancel", "Remove this upload", "queue", attachment_stage={"id": cancelled.name, "files": []})
     remove_stage = Mock(side_effect=PermissionError("temporary staging deletion failure"))
@@ -115,8 +117,10 @@ async def test_startup_sweep_keeps_inflight_and_retryable_queued_uploads(input_s
         await _cancel_input(inputs, "thread", USER_ID, "cancel")
     remove_stage.assert_called_once()
     assert cancelled.is_dir()
-    assert (await inputs.read())["items"][1]["status"] == "cancelled"
+    assert (await inputs.read())["items"][-1]["status"] == "cancelled"
     assert await input_store.update_status("run", "error", stop_reason="error")
+    await inputs.claim("admitted", retry=True)
+    await inputs.dispatched("admitted", "admitted-run")
     # The cleanup must see the old receipt even beyond the API history limit.
     for index in range(11):
         run_id = f"later-{index}"
@@ -143,7 +147,7 @@ async def test_startup_sweep_keeps_inflight_and_retryable_queued_uploads(input_s
     assert not orphan.exists()
     assert not different_owner.exists()
     assert not cancelled.exists()
-    for kept in (retryable, inflight, fresh, other_path, alias):
+    for kept in (admitted, retryable, inflight, fresh, other_path, alias):
         assert (kept / "0").read_bytes() == b"staged bytes"
 
 
@@ -281,8 +285,17 @@ async def test_attachment_publication_failure_ignores_a_late_dispatch_receipt(in
     retry = await inputs.claim("q", retry=True)
     assert retry["attachment_attempt"] == 1
     await inputs.dispatched("q", "next-run", attempt=1)
+    await inputs.publication_succeeded("q", "failed-run", attempt=0)
     await inputs.publication_failed("q", "failed-run", attempt=0)
-    assert (await inputs.claim("q", retry=True))["run_id"] == "next-run"
+    retry = await inputs.claim("q", retry=True)
+    assert retry["run_id"] == "next-run"
+    assert "published" not in retry["attachment_stage"]
+
+    await inputs.publication_succeeded("q", "next-run", attempt=1)
+    await inputs.publication_failed("q", "next-run", attempt=1)
+    retry = await inputs.claim("q", retry=True)
+    assert retry["run_id"] == "next-run"
+    assert retry["attachment_stage"]["published"] is True
 
 
 @pytest.mark.asyncio
