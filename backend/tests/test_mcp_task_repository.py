@@ -2804,7 +2804,6 @@ async def test_control_lease_clock_uses_database_time_not_worker_clock(tmp_path,
         )
     assert applied is False
 
-    stored = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     stored = await repo.get(
         task_id,
         user_id="user-1",
