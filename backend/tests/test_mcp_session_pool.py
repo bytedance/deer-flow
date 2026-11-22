@@ -3238,11 +3238,7 @@ async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
             # Wait for the cleanup waiter itself to finish before checking owner
             # tracking; otherwise its own reaper could satisfy a set-nonempty check.
             cleanup_waiter = next(
-                (
-                    task
-                    for task in tracked_teardown_targets
-                    if task.get_name() == "mcp-disconnect-cleanup:srv"
-                ),
+                (task for task in tracked_teardown_targets if task.get_name() == "mcp-disconnect-cleanup:srv"),
                 None,
             )
             assert cleanup_waiter is not None
