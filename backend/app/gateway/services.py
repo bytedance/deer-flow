@@ -28,7 +28,8 @@ from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, Syst
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, get_auth_disabled_user, is_auth_disabled
+from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
@@ -93,7 +94,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -116,7 +117,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
             UNTRUSTED_INPUT_KEY,
+            # Only a share import marks history as someone else's; what a
+            # caller sends is its own and stays eligible for memory.
+            IMPORTED_HISTORY_KEY,
             "run_input_id",
             "run_input_source",
             "origin_task_id",
@@ -774,6 +778,28 @@ def _normalize_external_tool_artifacts(value: Any, *, location: str) -> list[dic
     return normalized
 
 
+def _normalize_external_artifacts(value: Any, *, location: str) -> list[str] | None:
+    """Reject artifact lists the reducer cannot merge.
+
+    ``artifacts`` and ``tool_artifact_processed`` are checkpointed reducer
+    channels a caller may Overwrite. ``merge_artifacts`` concatenates the stored
+    list with the new one, so a caller-supplied non-list value fails the next
+    artifact-producing run with an unhandled ``TypeError``. The thread-state
+    route persists the value with ``Overwrite`` before any reducer sees it, so
+    without this boundary the thread stays broken across runs. Require the
+    declared ``list[str]`` shape; the reducer also tolerates an already-poisoned
+    checkpoint.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of strings")
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be a string")
+    return list(value)
+
+
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
     """Require usable goal text without rebuilding caller-supplied goal state."""
     if value is None:
@@ -896,6 +922,11 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
             # strip the generic list branch applied: a caller-crafted entry must
             # not smuggle server-owned message metadata into the checkpoint.
             stripped[channel] = None if normalized_tool_artifacts is None else [_strip_external_metadata_from_message_like(item) for item in normalized_tool_artifacts]
+        elif channel in ("artifacts", "tool_artifact_processed"):
+            # Entries are display paths, so the generic list branch's
+            # message-metadata strip is a no-op for them; the shape check
+            # replaces that pass rather than skipping a real sanitizer.
+            stripped[channel] = _normalize_external_artifacts(value, location=f"values.{channel}")
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
@@ -971,6 +1002,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             result = {**result, "promoted": _normalize_external_promoted(result["promoted"], location="input.promoted")}
         if "tool_artifacts" in result:
             result = {**result, "tool_artifacts": _normalize_external_tool_artifacts(result["tool_artifacts"], location="input.tool_artifacts")}
+        for artifact_channel in ("artifacts", "tool_artifact_processed"):
+            if artifact_channel in result:
+                result = {**result, artifact_channel: _normalize_external_artifacts(result[artifact_channel], location=f"input.{artifact_channel}")}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
             normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
@@ -1213,6 +1247,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
             AGENT_AUTH_CONTEXT_KEY,
+            MCP_BROWSER_USER_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
@@ -2562,6 +2597,13 @@ async def start_run(
     if not await thread_access_allowed():
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    from app.gateway.coordination_workers import direct_worker_run, managed_task
+    from deerflow.persistence.coordination.workers import THREAD_PREFIX
+
+    if thread_id.startswith(THREAD_PREFIX) and not getattr(request.state, "coordination_execution_id", None):
+        if task_id := await managed_task(request, thread_id):
+            return await direct_worker_run(request, task_id, body, idempotency_key)
+
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
@@ -2756,6 +2798,16 @@ async def start_run(
             internal_owner_user=internal_owner_user,
             request_context=getattr(body, "context", None),
         )
+
+        if (
+            user is not None
+            and getattr(request.state, "auth_source", None) == AUTH_SOURCE_SESSION
+            and bool(getattr(request, "cookies", {}).get(ACCESS_TOKEN_COOKIE_NAME))
+            and origin is None
+            and admitted_origin == "interactive"
+            and body.multitask_strategy != "enqueue"
+        ):
+            run_ctx = replace(run_ctx, mcp_browser_user=str(user.id))
 
         if agent_config is not None and getattr(run_ctx.app_config, "mcp_agent_auth", None):
             from deerflow.mcp.agent_auth import McpAgentAuthorizationError, capture_agent_authority
@@ -3024,6 +3076,9 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
+                from app.gateway.share_fork import ensure_share_import_history_marked
+
+                await ensure_share_import_history_marked(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
                 # A strict caller may have observed the thread before a
                 # concurrent delete removed it while checkpoint preparation
                 # yielded. Recheck immediately before durable admission. The

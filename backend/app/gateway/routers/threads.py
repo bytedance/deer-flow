@@ -57,6 +57,7 @@ from app.gateway.services import (
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
+from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
@@ -127,7 +128,8 @@ def _optional_run_event_store(request: Request) -> Any:
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+# The share-import keys decide whether run admission rewrites a copy's history.
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY})
 # Checkpoint metadata the server writes and later reads back as trusted:
 # LangGraph's lineage keys and delta counters (``step`` drives the next turn,
 # ``parents`` the history walk, and ``counters_since_delta_snapshot`` is read
@@ -662,7 +664,15 @@ class ThreadHistoryRequest(BaseModel):
     """Request body for checkpoint history."""
 
     limit: int = Field(default=10, ge=1, le=100, description="Maximum entries")
-    before: str | None = Field(default=None, description="Cursor for pagination")
+    before: str | None = Field(
+        default=None,
+        description=(
+            "Inclusive checkpoint ID cursor. The page starts with the cursor checkpoint if it still exists, "
+            "followed by older checkpoints up to `limit` entries. If retention removed the cursor, the page starts "
+            "with the first surviving older checkpoint, if any. When continuing, skip the first entry only if "
+            "its `checkpoint_id` equals `before`."
+        ),
+    )
 
 
 class ThreadBranchRequest(BaseModel):
@@ -2130,8 +2140,9 @@ async def get_thread_history(
 
     Only the latest (first) checkpoint carries the ``messages`` key to
     avoid duplicating the complete conversation across every entry. It also
-    carries an active ``goal`` and an achieved ``goal_outcome``, because
-    ``useStream`` rebuilds thread values from this head after every run.
+    carries the persisted ``todos`` list, an active ``goal`` and an achieved
+    ``goal_outcome``, because ``useStream`` rebuilds thread values from this
+    head after every run.
     """
     checkpointer = get_checkpointer(request)
     try:
@@ -2163,6 +2174,8 @@ async def get_thread_history(
                 values["thread_data"] = thread_data
 
             if is_latest_checkpoint:
+                if isinstance(todos := materialized_values.get("todos"), list):
+                    values["todos"] = [todo for todo in todos if isinstance(todo, dict) and isinstance(todo.get("content"), str)]
                 if is_active_goal(goal := materialized_values.get("goal")):
                     values["goal"] = goal
                 outcome = materialized_values.get(GOAL_OUTCOME_CHANNEL)

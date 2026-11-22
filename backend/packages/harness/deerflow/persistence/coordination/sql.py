@@ -176,20 +176,23 @@ class CoordinationTaskRepository:
         async with self._write() as session:
             task = await self._lock_tree(session, owner_id, task_id)
             _check_revision(task, expected_revision)
-            if task.status != TaskStatus.QUEUED:
-                raise TaskConflict("Only a queued task can start")
-            if task.parent_id is not None:
-                parent = await self._lookup(session, owner_id, task.parent_id)
-                if parent.status != TaskStatus.RUNNING:
-                    raise TaskConflict("Parent task has not started")
-            if task.depends_on:
-                query = select(CoordinationTaskRow.id).filter_by(owner_id=owner_id, status=TaskStatus.SUCCEEDED)
-                ready = set((await session.scalars(query.where(CoordinationTaskRow.id.in_(task.depends_on)))).all())
-                if ready != set(task.depends_on):
-                    raise TaskConflict("Task dependencies have not succeeded")
-            task.status = TaskStatus.RUNNING
-            _touch(task)
+            await self._start_locked(session, task)
             return _snapshot(task)
+
+    async def _start_locked(self, session: AsyncSession, task: CoordinationTaskRow) -> None:
+        if task.status != TaskStatus.QUEUED:
+            raise TaskConflict("Only a queued task can start")
+        if task.parent_id is not None:
+            parent = await self._lookup(session, task.owner_id, task.parent_id)
+            if parent.status != TaskStatus.RUNNING:
+                raise TaskConflict("Parent task has not started")
+        if task.depends_on:
+            query = select(CoordinationTaskRow.id).filter_by(owner_id=task.owner_id, status=TaskStatus.SUCCEEDED)
+            ready = set((await session.scalars(query.where(CoordinationTaskRow.id.in_(task.depends_on)))).all())
+            if ready != set(task.depends_on):
+                raise TaskConflict("Task dependencies have not succeeded")
+        task.status = TaskStatus.RUNNING
+        _touch(task)
 
     async def finish(
         self,
@@ -211,14 +214,17 @@ class CoordinationTaskRepository:
             _check_revision(task, expected_revision)
             if task.latest_input_seq != covered_input_seq:
                 raise TaskConflict("Result does not cover the current task inputs")
-            children = (await session.scalars(select(CoordinationTaskRow.status).filter_by(parent_id=task_id, owner_id=owner_id))).all()
-            accepted = {TaskStatus.SUCCEEDED} if outcome == TaskStatus.SUCCEEDED else {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}
-            if any(status not in accepted for status in children):
-                raise TaskConflict("Child tasks have not settled for this outcome")
-            task.status = outcome
-            task.result_ref = result_ref
-            _touch(task)
+            await self._finish_locked(session, task, outcome, result_ref)
             return _snapshot(task)
+
+    async def _finish_locked(self, session: AsyncSession, task: CoordinationTaskRow, outcome: TaskStatus, result_ref: str) -> None:
+        children = (await session.scalars(select(CoordinationTaskRow.status).filter_by(parent_id=task.id, owner_id=task.owner_id))).all()
+        accepted = {TaskStatus.SUCCEEDED} if outcome == TaskStatus.SUCCEEDED else {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        if any(status not in accepted for status in children):
+            raise TaskConflict("Child tasks have not settled for this outcome")
+        task.status = outcome
+        task.result_ref = result_ref
+        _touch(task)
 
     async def _subtree(self, session: AsyncSession, task: CoordinationTaskRow) -> list[CoordinationTaskRow]:
         rows = (await session.scalars(select(CoordinationTaskRow).filter_by(owner_id=task.owner_id, root_id=task.root_id))).all()
@@ -255,8 +261,20 @@ class CoordinationTaskRepository:
             task = await self._lock_tree(session, owner_id, task_id)
             if task.status not in (TaskStatus.CANCELLING, TaskStatus.CANCELLED) or task.execution_epoch != execution_epoch:
                 raise TaskConflict("Cancellation no longer matches the task")
-            for row in await self._subtree(session, task):
+            rows = await self._subtree(session, task)
+            await self._confirm_stopped(session, rows)
+            for row in rows:
                 if row.status == TaskStatus.CANCELLING:
                     row.status = TaskStatus.CANCELLED
                     _touch(row)
             return _snapshot(task)
+
+    async def _confirm_stopped(self, session, rows):
+        """Close active execution records in the same transaction as their tasks."""
+        from sqlalchemy import update
+
+        from deerflow.persistence.coordination.model import CoordinationExecutionRow
+
+        ids = [row.id for row in rows if row.status == TaskStatus.CANCELLING]
+        if ids:
+            await session.execute(update(CoordinationExecutionRow).where(CoordinationExecutionRow.task_id.in_(ids), CoordinationExecutionRow.status.in_(("admitting", "running", "waiting_for_input"))).values(status="cancelled"))
