@@ -33,6 +33,10 @@ make test-blocking-io
   sees the result that error handling produced.
 - **Progress tracking fences late results and hint retries by live graph entry**,
   also within one run; unrelated model-only entries do not evict active fences.
+- **A model retry runs the inner wraps again.** LLM error handling retries a call
+  that raised and a call that returned an empty stop response
+  (`model_response.is_empty_stop_response`). A wrap that takes a queued hint for
+  one call puts it back in both cases, or the retry goes out without it.
 
 ## Rules for a middleware that changes messages
 
@@ -74,6 +78,10 @@ make test-blocking-io
   subagent work is evidence, not acceptance.
 - **Status comes from metadata.** Do not infer a delegation, todo or tool status
   from reply text.
+- **A tool-call id is unique only within one response.** Some providers number
+  every response's calls from `call_0`, so a delegation is identified by its run,
+  its call id and the AIMessage that issued it. Pairing by call id alone merges
+  separate delegations and lets the per-run cap under-count.
 
 ## Compaction
 

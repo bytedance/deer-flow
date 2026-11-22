@@ -42,6 +42,12 @@ from app.gateway.checkpoint_lineage import (
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
+from app.gateway.checkpoint_mode_errors import (
+    CHECKPOINT_MODE_ERRORS as _CHECKPOINT_MODE_ERRORS,
+)
+from app.gateway.checkpoint_mode_errors import (
+    checkpoint_mode_http_error as _checkpoint_mode_http_error,
+)
 from app.gateway.context_usage import build_context_usage
 from app.gateway.conversation_reader import (
     default_history_hidden_run_ids as _default_history_hidden_run_ids,
@@ -78,6 +84,7 @@ from deerflow.runtime.goal import is_active_goal
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
@@ -731,8 +738,8 @@ async def _find_target_run_id(
     if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
-            message_id,
-            thread_id,
+            sanitize_log_param(message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
@@ -745,7 +752,10 @@ async def _find_base_checkpoint_before_human(
     *,
     head_checkpoint: Any | None = None,
 ) -> Any:
-    accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    try:
+        accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     if head_checkpoint is not None:
         try:
             return await find_checkpoint_before_message(
@@ -779,6 +789,8 @@ async def _find_base_checkpoint_before_human(
             versions, parent_versions = await resolve_stamp_candidate_versions(accessor, item, parent, version_cache)
             if not _is_duration_only_checkpoint(item, history_index, versions=versions, parent_versions=parent_versions):
                 checkpoints.append(item)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
@@ -795,8 +807,8 @@ async def _find_base_checkpoint_before_human(
     if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not locate target user message %s in recent checkpoint history for thread %s (limit=%s)",
-            human_message_id,
-            thread_id,
+            sanitize_log_param(human_message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(
@@ -869,9 +881,14 @@ async def _find_interrupted_target_run_id(
 
 
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
-    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
+        accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
         latest_checkpoint = await accessor.aget(latest_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
@@ -961,9 +978,14 @@ async def _prepare_edit_regenerate_payload(
     if not normalized_text:
         raise HTTPException(status_code=409, detail="Edited message cannot be empty")
 
-    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
+        accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
         latest_checkpoint = await accessor.aget(latest_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for edit replay thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
@@ -1881,7 +1903,10 @@ async def create_run_artifact_archive(
 
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
     effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()
-    app_config = await safe_app_config_async()
+    try:
+        app_config = await safe_app_config_async()
+    except SandboxAuthorizationError as exc:
+        raise HTTPException(status_code=503, detail="Artifact archive is temporarily unavailable") from exc
     custom_tool_output_dir = getattr(getattr(app_config, "tool_output", None), "storage_subdir", None)
     extra_reserved_dir_names = {custom_tool_output_dir} if isinstance(custom_tool_output_dir, str) else set()
     paths = get_paths()

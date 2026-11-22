@@ -30,6 +30,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 from pydantic import PrivateAttr
 
+from deerflow.models.credential_loader import OAUTH_ANTHROPIC_BETAS
 from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,6 @@ class ClaudeChatModel(ChatAnthropic):
         from pydantic import SecretStr
 
         from deerflow.models.credential_loader import (
-            OAUTH_ANTHROPIC_BETAS,
             is_oauth_token,
             load_claude_code_credential,
         )
@@ -159,6 +159,7 @@ class ClaudeChatModel(ChatAnthropic):
 
         if self._is_oauth:
             self._apply_oauth_billing(payload)
+            self._apply_oauth_betas(payload)
 
         if self.enable_prompt_caching:
             self._apply_prompt_caching(payload)
@@ -209,6 +210,43 @@ class ClaudeChatModel(ChatAnthropic):
                     "session_id": session_id,
                 }
             )
+
+    @staticmethod
+    def _apply_oauth_betas(payload: dict) -> None:
+        """Keep the OAuth betas in a request that sends its own ``betas``.
+
+        ``model_post_init`` puts the OAuth betas in the client's default
+        ``anthropic-beta`` header, but the SDK sends a request's ``betas`` as
+        that header instead of the default. A request carries ``betas`` when
+        they are configured or passed per call, and langchain-anthropic adds
+        them for server tools, MCP servers and task budgets. Without
+        ``oauth-2025-04-20`` Anthropic rejects the Bearer token, so the OAuth
+        betas go first in any such list, including an empty one. Requests
+        without ``betas`` or a beta header keep the default header.
+
+        An ``anthropic-beta`` in the request's ``extra_headers`` replaces both
+        the default and the ``betas`` header, so it gets the same merge.
+
+        The list and the headers are rebuilt rather than changed in place: the
+        payload's ``betas`` can be ``self.betas`` itself, and its
+        ``extra_headers`` can be the dict in ``self.model_kwargs``.
+        """
+        oauth_betas = OAUTH_ANTHROPIC_BETAS.split(",")
+
+        def with_oauth_betas(betas: Any) -> list:
+            return [*oauth_betas, *(beta for beta in betas if beta not in oauth_betas)]
+
+        betas = payload.get("betas")
+        if betas is not None:
+            payload["betas"] = with_oauth_betas(betas)
+
+        extra_headers = payload.get("extra_headers")
+        if isinstance(extra_headers, dict):
+            headers = dict(extra_headers)
+            for key, value in extra_headers.items():
+                if key.lower() == "anthropic-beta" and isinstance(value, str):
+                    headers[key] = ",".join(with_oauth_betas(beta.strip() for beta in value.split(",") if beta.strip()))
+            payload["extra_headers"] = headers
 
     def _apply_prompt_caching(self, payload: dict) -> None:
         """Apply ephemeral cache_control to system, recent messages, and last tool definition.

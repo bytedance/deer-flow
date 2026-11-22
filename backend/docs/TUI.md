@@ -39,6 +39,9 @@ a bare flag (`deerflow summarize this repo --print`) are the message, as with
 both sides of the flag are rejected with exit 2, since their order cannot be
 recovered. `--print` and `--json` cannot be combined; pick one output mode.
 
+If the program reading a `--print` pipe closes it before the answer is written,
+DeerFlow exits quietly with status `1`.
+
 If no TTY is available and no headless flag is given, `deerflow` prints guidance
 instead of hanging.
 
@@ -132,7 +135,8 @@ Press `Ctrl+C` again to quit at once; the unfinished step is then not saved.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
-`/goal clear` to clear it.
+`/goal clear` to clear it. `/goal from-chat` is an IM entry point for now; the
+TUI reports that it is not supported and points to `/goal <condition>`.
 
 ## Architecture
 

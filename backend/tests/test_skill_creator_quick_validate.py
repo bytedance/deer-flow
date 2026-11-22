@@ -72,7 +72,10 @@ def test_package_skill_reports_invalid_utf8_without_traceback(tmp_path: Path, mo
     output_dir = tmp_path / "dist"
 
     assert packager.package_skill(skill_dir, output_dir) is None
-    assert "Validation failed: SKILL.md is not valid UTF-8" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "Validation failed: SKILL.md is not valid UTF-8" in captured.err
+    assert "Validation failed" not in captured.out
+    assert "Traceback" not in captured.err
     assert not list(tmp_path.rglob("*.skill"))
 
 

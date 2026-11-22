@@ -35,7 +35,9 @@ describe("fetchAgentsApiEnabled", () => {
       jsonResponse(200, { agents_api: { enabled: true } }),
     );
     await expect(fetchAgentsApiEnabled()).resolves.toBe(true);
-    expect(mockedFetch).toHaveBeenCalledWith("/api/features");
+    expect(mockedFetch).toHaveBeenCalledWith("/api/features", {
+      signal: undefined,
+    });
   });
 
   test("returns false when backend reports agents_api disabled", async () => {
@@ -60,7 +62,9 @@ describe("fetchBrowserControlEnabled", () => {
       }),
     );
     await expect(fetchBrowserControlEnabled()).resolves.toBe(true);
-    expect(mockedFetch).toHaveBeenCalledWith("/api/features");
+    expect(mockedFetch).toHaveBeenCalledWith("/api/features", {
+      signal: undefined,
+    });
   });
 
   test("returns false when browser_control is disabled or omitted", async () => {
@@ -93,7 +97,9 @@ describe("fetchMcpTasksEnabled", () => {
       }),
     );
     await expect(fetchMcpTasksEnabled()).resolves.toBe(true);
-    expect(mockedFetch).toHaveBeenCalledWith("/api/features");
+    expect(mockedFetch).toHaveBeenCalledWith("/api/features", {
+      signal: undefined,
+    });
   });
 
   test("returns false when mcp_tasks is disabled or omitted", async () => {

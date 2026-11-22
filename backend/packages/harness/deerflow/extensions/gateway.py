@@ -581,6 +581,7 @@ async def start_services(
     run_evidence_reader: Any | None = None,
     host_capabilities: dict[str, tuple[Any | None, Any | None]] | None = None,
     attempted_services: list[tuple[str, Any]] | None = None,
+    agent_runs_restore: Any | None = None,
 ) -> list[Diagnostic]:
     """Start extension services in registration order, failing open per item."""
     diagnostics: list[Diagnostic] = []
@@ -592,6 +593,7 @@ async def start_services(
         policy=project_host_policy(app_config),
         session_factory=session_factory,
         run_evidence_reader=run_evidence_reader,
+        agent_runs_restore=agent_runs_restore,
     )
     source_deps = {}
     for entry in extensions.services:

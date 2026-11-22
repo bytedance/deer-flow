@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -27,7 +28,7 @@ from langgraph.store.memory import InMemoryStore
 
 from app.gateway import context_usage
 from app.gateway import services as gateway_services
-from app.gateway.routers import threads
+from app.gateway.routers import thread_runs, threads
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -319,3 +320,79 @@ def test_mutation_accessor_fails_closed_when_thread_metadata_lookup_fails(monkey
         )
 
     resolve_factory.assert_not_called()
+
+
+def test_full_mode_run_prepare_routes_reject_delta_thread_with_409(_stub_app_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The regenerate-prepare routes must surface the mode mismatch as 409.
+
+    They read the same thread state as the threads router, so a full-mode
+    process opening a delta thread must produce the same actionable 409 rather
+    than a generic 500 that hides the mode flip.
+    """
+    app = make_authed_test_app()
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    app.state.store = store
+    app.state.checkpointer = checkpointer
+    app.state.thread_store.get = AsyncMock(return_value=None)
+    app.state.checkpoint_channel_mode = "full"
+    app.state.run_event_store = SimpleNamespace()
+    app.state.run_manager = RunManager(store=MemoryRunStore())
+    app.include_router(threads.router)
+    app.include_router(thread_runs.router)
+
+    full_graph = _build_reply_graph("full", checkpointer)
+    monkeypatch.setattr(
+        gateway_services,
+        "resolve_agent_factory",
+        lambda assistant_id=None: lambda config: full_graph,
+    )
+
+    delta_graph = _build_reply_graph("delta", checkpointer)
+    config: dict[str, Any] = {"configurable": {"thread_id": _THREAD_ID}}
+    inject_checkpoint_mode(config, "delta")
+    asyncio.run(delta_graph.ainvoke({"messages": [HumanMessage(content="question", id="h0")]}, config))
+
+    with TestClient(app) as client:
+        regenerate = client.post(
+            f"/api/threads/{_THREAD_ID}/runs/regenerate/prepare",
+            json={"message_id": "a0"},
+        )
+        assert regenerate.status_code == 409, regenerate.text
+        assert "requires delta mode" in regenerate.json()["detail"]
+        assert _THREAD_ID in regenerate.json()["detail"]
+
+        edit_regenerate = client.post(
+            f"/api/threads/{_THREAD_ID}/runs/edit-regenerate/prepare",
+            json={"human_message_id": "h0", "replacement_text": "edited"},
+        )
+        assert edit_regenerate.status_code == 409, edit_regenerate.text
+        assert "requires delta mode" in edit_regenerate.json()["detail"]
+        assert _THREAD_ID in edit_regenerate.json()["detail"]
+
+
+def test_run_prepare_propagates_accessor_http_errors(_stub_app_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route-level errors from the accessor keep their status and detail.
+
+    Configuration loading raises a typed HTTP error; the generic checkpoint-read
+    handler must not turn it into a misleading 500.
+    """
+    app = make_authed_test_app()
+    app.state.thread_store.get = AsyncMock(return_value=None)
+    app.state.run_manager = RunManager(store=MemoryRunStore())
+    app.state.checkpoint_channel_mode = "full"
+    app.state.run_event_store = SimpleNamespace()
+    app.include_router(thread_runs.router)
+
+    async def raise_unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise HTTPException(status_code=503, detail="Configuration not available")
+
+    monkeypatch.setattr(thread_runs, "build_thread_checkpoint_state_accessor", raise_unavailable)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/threads/{_THREAD_ID}/runs/regenerate/prepare",
+            json={"message_id": "a0"},
+        )
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == "Configuration not available"

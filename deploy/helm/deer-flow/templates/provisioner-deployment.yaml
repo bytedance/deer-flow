@@ -11,7 +11,7 @@ spec:
   replicas: {{ .Values.provisioner.replicas }}
   {{- with .Values.provisioner.strategy }}
   strategy:
-    {{- toYaml . | nindent 4 }}
+    {{- include "deer-flow.strategy" . | nindent 4 }}
   {{- end }}
   selector:
     matchLabels:

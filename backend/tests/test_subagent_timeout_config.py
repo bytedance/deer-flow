@@ -19,7 +19,6 @@ from deerflow.config.subagents_config import (
     get_subagents_app_config,
     load_subagents_config_from_dict,
 )
-from deerflow.subagents.config import SubagentConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -619,37 +618,36 @@ class TestRegistryListSubagents:
 
 
 class TestPollingTimeoutCalculation:
-    """Verify the formula (timeout_seconds + 60) // 5 is correct for various inputs."""
+    """Verify the main-wait budget also covers the queue wait before admission.
+
+    The execution timeout starts at admission, and the capacity controller
+    bounds queue wait separately; the poller must allow for both stages or it
+    reports ``polling_timed_out`` for an execution that is still queued.
+    """
 
     @pytest.mark.parametrize(
         "timeout_seconds, expected_max_polls",
         [
-            (900, 192),  # default 15 min → (900+60)//5 = 192
-            (300, 72),  # 5 min → (300+60)//5 = 72
-            (1800, 372),  # 30 min → (1800+60)//5 = 372
-            (60, 24),  # 1 min → (60+60)//5 = 24
-            (1, 12),  # minimum → (1+60)//5 = 12
+            (900, 252),  # (300+900+60)//5 = 252
+            (300, 132),  # (300+300+60)//5 = 132
+            (1800, 432),  # (300+1800+60)//5 = 432
+            (60, 84),  # (300+60+60)//5 = 84
+            (1, 72),  # minimum → (300+1+60)//5 = 72
         ],
     )
-    def test_polling_timeout_formula(self, timeout_seconds: int, expected_max_polls: int):
-        dummy_config = SubagentConfig(
-            name="test",
-            description="test",
-            system_prompt="test",
-            timeout_seconds=timeout_seconds,
-        )
-        max_poll_count = (dummy_config.timeout_seconds + 60) // 5
-        assert max_poll_count == expected_max_polls
+    def test_polling_timeout_formula(self, timeout_seconds: int, expected_max_polls: int, monkeypatch):
+        import importlib
 
-    def test_polling_timeout_exceeds_execution_timeout(self):
-        """Safety-net polling window must always be longer than the execution timeout."""
+        task_tool = importlib.import_module("deerflow.tools.builtins.task_tool")
+        monkeypatch.setattr(task_tool, "configured_subagent_queue_timeout_seconds", lambda: 300)
+        assert task_tool._main_wait_poll_budget(timeout_seconds) == expected_max_polls
+
+    def test_polling_timeout_exceeds_execution_and_queue_timeout(self, monkeypatch):
+        """The safety-net window must outlast queue wait plus execution time."""
+        import importlib
+
+        task_tool = importlib.import_module("deerflow.tools.builtins.task_tool")
+        monkeypatch.setattr(task_tool, "configured_subagent_queue_timeout_seconds", lambda: 300)
         for timeout_seconds in [60, 300, 900, 1800]:
-            dummy_config = SubagentConfig(
-                name="test",
-                description="test",
-                system_prompt="test",
-                timeout_seconds=timeout_seconds,
-            )
-            max_poll_count = (dummy_config.timeout_seconds + 60) // 5
-            polling_window_seconds = max_poll_count * 5
-            assert polling_window_seconds > timeout_seconds
+            polling_window_seconds = task_tool._main_wait_poll_budget(timeout_seconds) * 5
+            assert polling_window_seconds > 300 + timeout_seconds

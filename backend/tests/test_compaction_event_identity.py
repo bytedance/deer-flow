@@ -14,7 +14,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from deerflow_extension_api import EXTENSION_TASK_STORE_KEY, CompactionEvent, ExtensionData, TaskInfo
+from deerflow_extension_api import (
+    EXTENSION_TASK_STORE_KEY,
+    CompactionEvent,
+    ExtensionData,
+    TaskInfo,
+    canonical_hash,
+)
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -284,3 +290,28 @@ class TestManualCompaction:
         assert store.scope_id == "detached"
         assert store.get(TaskInfo) is None
         assert _identity(event) == (None, None, None)
+
+
+class TestCompactionSourceHashing:
+    """Consolidated from test_context_compaction_observation.py."""
+
+    def test_source_hashes_are_computed_on_content_directly_not_a_stringified_copy(self):
+        """Hashing ``str(message.content)`` would defeat ``canonical_hash`` key-order normalization
+        for multimodal (``list[dict]``) content."""
+        a = HumanMessage(content=[{"type": "text", "text": "hi"}, {"b": 1, "a": 2}])
+        b = HumanMessage(content=[{"type": "text", "text": "hi"}, {"a": 2, "b": 1}])
+
+        middleware = _middleware(_extensions(_CompactionRecorder()))
+        hashes = middleware._freeze_compaction_sources([a, b])
+
+        assert hashes[0] == hashes[1]
+        assert hashes[0] == canonical_hash(a.content)
+        assert str(a.content) != str(b.content)
+
+    def test_the_sources_are_not_hashed_when_nothing_observes(self):
+        from dataclasses import replace
+
+        from deerflow.extensions import get_agent_build_extensions
+
+        unobserved = replace(get_agent_build_extensions(), context_compaction_observers=())
+        assert _middleware(unobserved)._freeze_compaction_sources(_messages()) == ()
