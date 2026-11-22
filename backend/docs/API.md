@@ -1067,6 +1067,25 @@ write, the Gateway resolves environment variables in a copy and validates the
 same expanded document the runtime will load while persisting the original raw
 placeholders.
 
+#### Runtime MCP Agent Grants
+
+Owners and approved definition digests of `mcp_agent_auth` bindings declared
+with `grants: runtime` (admin only; PATs are not accepted). Changes apply to
+the next run and call without a restart. See
+[Per-agent credentials](MCP_SERVER.md#runtime-grants).
+
+```http
+GET    /api/mcp/agent-auth
+GET    /api/mcp/agent-auth/{binding}
+GET    /api/mcp/agent-auth/{binding}/definition-digest?owner={user_id}
+PUT    /api/mcp/agent-auth/{binding}/grants
+DELETE /api/mcp/agent-auth/{binding}/grants
+```
+
+```json
+{"owners": ["<user id>"], "definition_digests": ["<64-character SHA-256 digest>"]}
+```
+
 #### Reset MCP Tools Cache
 
 Publish a shared cache generation, then clear cached MCP tools and persistent

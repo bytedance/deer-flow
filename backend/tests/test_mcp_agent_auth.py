@@ -6,19 +6,30 @@ import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
+import sqlalchemy as sa
+from alembic import command
+from fastapi import HTTPException
 from langchain_core.tools import ToolException
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 from langgraph.runtime import Runtime
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import create_async_engine
 from support.mcp_agent_auth import agent_auth_env as agent_auth_env
 from support.mcp_agent_auth import agent_mcp_transport as agent_mcp_transport
 
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.app_config import AppConfig, pop_current_app_config, push_current_app_config, reset_app_config, set_app_config
 from deerflow.config.extensions_config import McpServerConfig
+from deerflow.config.mcp_agent_auth_config import McpAgentCredentialBinding, McpAgentGrant
+from deerflow.persistence import bootstrap
+from deerflow.persistence.base import Base
+from deerflow.persistence.mcp_agent_grants import McpAgentGrantRow, make_mcp_agent_grant_store
+from deerflow.persistence.mcp_agent_grants.file import FileMcpAgentGrantStore
+from deerflow.persistence.mcp_agent_grants.sql import SqlMcpAgentGrantStore
 
 
 @pytest.mark.parametrize(
@@ -619,3 +630,319 @@ async def test_delegation_inherits_parent_identity_including_durable_recovery(ag
             await restarted.stop()
         reset_extensions_config()
         await close_engine()
+
+
+# --- runtime grants (grants: runtime) -------------------------------------------
+
+
+@pytest.fixture
+def runtime_env(agent_auth_env):
+    """The shared agent_auth fixture, with its binding switched to runtime grants."""
+    from deerflow.mcp.agent_auth import agent_definition_digest
+
+    data = agent_auth_env.config.model_dump()
+    binding = data["mcp_agent_auth"]["research-tickets"]
+    binding.update(grants="runtime", owners=[], definition_digests=[])
+    config = AppConfig.model_validate(data)
+    set_app_config(config)
+    store = make_mcp_agent_grant_store(config)
+    digest = agent_definition_digest(agent_auth_env.agent, agent_auth_env.soul)
+    return SimpleNamespace(**{**vars(agent_auth_env), "config": config, "store": store, "digest": digest})
+
+
+def _grant(owners=("alice",), digests=()):
+    return McpAgentGrant(owners=list(owners), definition_digests=list(digests))
+
+
+@pytest.mark.parametrize("updates", [{"owners": ["alice"]}, {"definition_digests": ["a" * 64]}])
+def test_runtime_bindings_take_no_grants_from_config(agent_auth_env, updates):
+    binding = agent_auth_env.config.mcp_agent_auth["research-tickets"].model_dump()
+    binding.update(grants="runtime", owners=[], definition_digests=[])
+    McpAgentCredentialBinding.model_validate(binding)
+    with pytest.raises(ValidationError, match="admin API"):
+        McpAgentCredentialBinding.model_validate({**binding, **updates})
+
+
+@pytest.mark.parametrize("grant", [{"owners": ["*"], "definition_digests": []}, {"owners": ["a", "a"], "definition_digests": []}, {"owners": [], "definition_digests": ["unreviewed"]}, {"owners": []}])
+def test_invalid_runtime_grants_are_rejected(grant):
+    with pytest.raises(ValidationError):
+        McpAgentGrant.model_validate(grant)
+
+
+def test_runtime_binding_without_a_grant_admits_nobody(runtime_env):
+    from deerflow.mcp.agent_auth import capture_agent_authority
+
+    assert capture_agent_authority(runtime_env.config, user_id="alice", agent_config=runtime_env.agent) is None
+
+
+def test_runtime_grant_applies_to_the_next_admission(runtime_env):
+    from deerflow.mcp.agent_auth import McpAgentAuthorizationError, capture_agent_authority
+
+    env = runtime_env
+    env.store.put("research-tickets", _grant(digests=["0" * 64]))
+    with pytest.raises(McpAgentAuthorizationError, match="not approved"):
+        capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
+    env.store.put("research-tickets", _grant(digests=["0" * 64, env.digest]))
+    authority = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
+    assert [ref.binding for ref in authority.references] == ["research-tickets"]
+    assert capture_agent_authority(env.config, user_id="bob", agent_config=env.agent) is None
+    assert capture_agent_authority(env.config, user_id="alice", agent_config=AgentConfig(name="other")) is None
+
+
+@pytest.mark.asyncio
+async def test_removing_a_runtime_owner_denies_the_next_call_with_a_cached_token(runtime_env, monkeypatch):
+    from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, build_agent_auth_interceptor, capture_agent_authority
+
+    env = runtime_env
+    env.store.put("research-tickets", _grant(owners=["alice", "bob"], digests=[env.digest]))
+    authority = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
+    runtime = Runtime(context={"user_id": "alice", AGENT_AUTH_CONTEXT_KEY: authority})
+    interceptor = build_agent_auth_interceptor(env.config.extensions)
+    token_requests, calls = [], []
+
+    def token_response(request):
+        token_requests.append(request)
+        return httpx.Response(200, json={"access_token": "agent-access-token", "expires_in": 3600})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(token_response), **kwargs))
+
+    async def handler(request):
+        calls.append(request)
+        return "ok"
+
+    request = MCPToolCallRequest(name="search", args={}, server_name="tickets", runtime=runtime)
+    assert await interceptor(request, handler) == "ok"
+    # Approving a new digest leaves admitted runs alone.
+    env.store.put("research-tickets", _grant(owners=["alice", "bob"], digests=["0" * 64]))
+    assert await interceptor(request, handler) == "ok"
+    env.store.put("research-tickets", _grant(owners=["bob"], digests=[env.digest]))
+    with pytest.raises(ToolException, match="revoked"):
+        await interceptor(request, handler)
+    env.store.delete("research-tickets")
+    with pytest.raises(ToolException, match="revoked"):
+        await interceptor(request, handler)
+    assert len(calls) == 2 and len(token_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_grant_store_fails_closed(runtime_env, monkeypatch):
+    from deerflow.mcp import agent_auth
+    from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, McpAgentAuthorizationError, build_agent_auth_interceptor, capture_agent_authority
+
+    env = runtime_env
+    env.store.put("research-tickets", _grant(digests=[env.digest]))
+    authority = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
+
+    class Broken:
+        def get(self, binding_id):
+            raise OSError("database is down")
+
+    monkeypatch.setattr("deerflow.persistence.mcp_agent_grants.make_mcp_agent_grant_store", lambda config: Broken())
+    with pytest.raises(McpAgentAuthorizationError, match="unavailable"):
+        capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
+
+    async def handler(request):
+        pytest.fail("A call reached the MCP transport without a readable grant")
+
+    monkeypatch.setattr(agent_auth, "_token_manager", lambda *args: pytest.fail("token requested without a grant"))
+    runtime = Runtime(context={"user_id": "alice", AGENT_AUTH_CONTEXT_KEY: authority})
+    with pytest.raises(ToolException, match="unavailable"):
+        await build_agent_auth_interceptor(env.config.extensions)(MCPToolCallRequest(name="search", args={}, server_name="tickets", runtime=runtime), handler)
+
+
+def test_overlapping_runtime_grants_fail_admission(runtime_env):
+    from deerflow.mcp.agent_auth import McpAgentAuthorizationError, capture_agent_authority
+
+    env = runtime_env
+    data = env.config.model_dump()
+    data["mcp_agent_auth"]["second-grant"] = data["mcp_agent_auth"]["research-tickets"]
+    config = AppConfig.model_validate(data)
+    for binding_id in ("research-tickets", "second-grant"):
+        env.store.put(binding_id, _grant(digests=[env.digest]))
+    with pytest.raises(McpAgentAuthorizationError, match="overlap"):
+        capture_agent_authority(config, user_id="alice", agent_config=env.agent)
+
+
+# --- stores ------------------------------------------------------------------
+
+
+@pytest.fixture(params=["file", "sqlite"])
+def store(request, tmp_path, monkeypatch):
+    if request.param == "file":
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr("deerflow.config.paths._paths", None)
+        yield FileMcpAgentGrantStore()
+        return
+    store = SqlMcpAgentGrantStore(f"sqlite:///{tmp_path}/grants.db")
+    engine = store._Session.kw["bind"]
+    try:
+        Base.metadata.create_all(engine, tables=[McpAgentGrantRow.__table__])
+        yield store
+    finally:
+        engine.dispose()
+
+
+def test_store_replaces_lists_and_deletes(store):
+    assert store.get("b1") is None and store.list() == {}
+    store.put("b1", _grant(owners=["alice"], digests=["a" * 64]))
+    store.put("b1", _grant(owners=["bob"], digests=["b" * 64]))
+    store.put("b0", _grant(owners=[]))
+    assert store.get("b1") == _grant(owners=["bob"], digests=["b" * 64])
+    assert list(store.list()) == ["b0", "b1"]
+    assert store.delete("b1") is True
+    assert store.delete("b1") is False
+    assert store.get("b1") is None
+
+
+def test_file_store_never_applies_a_grant_to_another_binding(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    store = FileMcpAgentGrantStore()
+    store.put("Tickets", _grant())
+    # Simulate a case-insensitive filesystem resolving "tickets" to the same file.
+    (tmp_path / "mcp-agent-grants" / "tickets.json").write_text((tmp_path / "mcp-agent-grants" / "Tickets.json").read_text())
+    assert store.get("tickets") is None
+    assert store.delete("tickets") is False
+    with pytest.raises(ValueError, match="differs only in case"):
+        store.put("tickets", _grant())
+    with pytest.raises(ValueError):
+        store.put("CON", _grant())
+    assert json.loads((tmp_path / "mcp-agent-grants" / "Tickets.json").read_text())["binding"] == "Tickets"
+
+
+@pytest.mark.asyncio
+async def test_migration_creates_and_drops_the_table(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
+    cfg = bootstrap._get_alembic_config(engine, postgres_schema="")
+
+    async def tables():
+        async with engine.connect() as conn:
+            return await conn.run_sync(lambda sync: set(sa.inspect(sync).get_table_names()))
+
+    try:
+        await asyncio.to_thread(command.upgrade, cfg, "0060_coordination_run_settings")
+        assert "mcp_agent_grants" not in await tables()
+        await asyncio.to_thread(command.upgrade, cfg, "0061_mcp_agent_grants")
+        assert "mcp_agent_grants" in await tables()
+        await asyncio.to_thread(command.downgrade, cfg, "0060_coordination_run_settings")
+        assert "mcp_agent_grants" not in await tables()
+    finally:
+        await engine.dispose()
+
+
+# --- admin API ---------------------------------------------------------------
+
+
+def _request(role: str):
+    return SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role=role)))
+
+
+@pytest.fixture
+def api_env(runtime_env, monkeypatch):
+    from app.gateway.routers import mcp_agent_auth as router
+
+    async def drained(action, func, expected_errors=(), /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(router, "run_drained_write", drained)
+    data = runtime_env.config.model_dump()
+    data["mcp_agent_auth"]["config-grant"] = {**data["mcp_agent_auth"]["research-tickets"], "agent": "other-bot", "grants": "config", "owners": ["carol"], "definition_digests": ["c" * 64]}
+    config = AppConfig.model_validate(data)
+    set_app_config(config)
+    return SimpleNamespace(router=router, env=runtime_env, config=config)
+
+
+@pytest.mark.asyncio
+async def test_admin_api_requires_an_admin(api_env):
+    router = api_env.router
+    for call in (
+        router.list_bindings(_request("user")),
+        router.get_binding("research-tickets", _request("user")),
+        router.put_grant("research-tickets", _grant(), _request("user")),
+        router.delete_grant("research-tickets", _request("user")),
+        router.definition_digest("research-tickets", _request("user"), owner="alice"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await call
+        assert exc.value.status_code == 403
+    assert api_env.env.store.get("research-tickets") is None
+
+
+@pytest.mark.asyncio
+async def test_admin_api_maintains_runtime_grants(api_env):
+    router, env = api_env.router, api_env.env
+    admin = _request("admin")
+    listed = (await router.list_bindings(admin)).model_dump()["bindings"]
+    assert [(b["binding"], b["grants"], b["owners"]) for b in listed] == [("config-grant", "config", ["carol"]), ("research-tickets", "runtime", [])]
+    assert all("oauth" not in b and "client_secret" not in json.dumps(b) for b in listed)
+
+    digest = await router.definition_digest("research-tickets", admin, owner="alice")
+    assert digest.definition_digest == env.digest
+    response = await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[digest.definition_digest]), admin)
+    assert response.owners == ["alice"] and response.definition_digests == [env.digest]
+    assert (await router.get_binding("research-tickets", admin)).owners == ["alice"]
+
+    from deerflow.mcp.agent_auth import capture_agent_authority
+
+    assert capture_agent_authority(api_env.config, user_id="alice", agent_config=env.agent) is not None
+    assert (await router.delete_grant("research-tickets", admin)).status_code == 204
+    assert capture_agent_authority(api_env.config, user_id="alice", agent_config=env.agent) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call", "status"),
+    [
+        (lambda r, admin: r.put_grant("config-grant", _grant(), admin), 409),
+        (lambda r, admin: r.delete_grant("config-grant", admin), 409),
+        (lambda r, admin: r.put_grant("missing", _grant(), admin), 404),
+        (lambda r, admin: r.get_binding("missing", admin), 404),
+        (lambda r, admin: r.delete_grant("research-tickets", admin), 404),
+        (lambda r, admin: r.definition_digest("research-tickets", admin, owner="bob"), 404),
+    ],
+)
+async def test_admin_api_refuses_what_it_does_not_own(api_env, call, status):
+    with pytest.raises(HTTPException) as exc:
+        await call(api_env.router, _request("admin"))
+    assert exc.value.status_code == status
+    assert api_env.config.mcp_agent_auth["config-grant"].owners == ["carol"]
+
+
+@pytest.mark.asyncio
+async def test_admin_api_rejects_owners_granted_by_another_binding(api_env):
+    router, env = api_env.router, api_env.env
+    data = api_env.config.model_dump()
+    data["mcp_agent_auth"]["research-tickets-2"] = {**data["mcp_agent_auth"]["research-tickets"]}
+    data["mcp_agent_auth"]["config-grant"]["agent"] = env.agent.name
+    set_app_config(AppConfig.model_validate(data))
+    admin = _request("admin")
+    await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[env.digest]), admin)
+    for binding_id, owners in (("research-tickets-2", ["bob", "alice"]), ("research-tickets", ["carol"])):
+        with pytest.raises(HTTPException) as exc:
+            await router.put_grant(binding_id, _grant(owners=owners), admin)
+        assert exc.value.status_code == 409 and "overlap" in exc.value.detail
+    await router.put_grant("research-tickets-2", _grant(owners=["bob"]), admin)
+
+
+def test_admin_api_routes_validate_over_http(api_env):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(api_env.router.router)
+
+    @app.middleware("http")
+    async def as_admin(request, call_next):
+        request.state.user = SimpleNamespace(system_role="admin")
+        return await call_next(request)
+
+    client = TestClient(app)
+    digest = api_env.env.digest
+    assert client.put("/api/mcp/agent-auth/research-tickets/grants", json={"owners": ["alice"], "definition_digests": [digest]}).status_code == 200
+    assert client.get("/api/mcp/agent-auth/research-tickets").json()["owners"] == ["alice"]
+    assert client.put("/api/mcp/agent-auth/research-tickets/grants", json={"owners": ["*"], "definition_digests": []}).status_code == 422
+    assert client.put("/api/mcp/agent-auth/research-tickets/grants", json={"owners": [], "definition_digests": [], "extra": 1}).status_code == 422
+    assert client.get("/api/mcp/agent-auth/-bad").status_code == 422
+    assert client.get("/api/mcp/agent-auth/research-tickets/definition-digest", params={"owner": "alice"}).json()["definition_digest"] == digest
+    assert client.delete("/api/mcp/agent-auth/research-tickets/grants").status_code == 204

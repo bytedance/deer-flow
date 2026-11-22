@@ -66,6 +66,27 @@ def agent_definition_digest(config: AgentConfig, soul: str | None) -> str:
     return canonical_hash({"version": 1, "config": config.model_dump(mode="json"), "soul": soul or ""})
 
 
+def binding_grant(app_config: Any, binding_id: str, binding: McpAgentCredentialBinding) -> tuple[frozenset[str], frozenset[str]]:
+    """Return the owners and approved digests in force for one binding.
+
+    ``grants: runtime`` bindings read the administrator's grant from the
+    database (or file store) on each call, so a change applies without a
+    restart. A binding without a stored grant admits nobody.
+    """
+    if binding.grants == "config":
+        return frozenset(binding.owners), frozenset(binding.definition_digests)
+    from deerflow.persistence.mcp_agent_grants import make_mcp_agent_grant_store
+
+    try:
+        grant = make_mcp_agent_grant_store(app_config).get(binding_id)
+    except Exception:
+        logger.warning("MCP agent grant store unavailable for binding=%s", binding_id, exc_info=True)
+        raise ToolException("MCP agent credential policy is unavailable") from None
+    if grant is None:
+        return frozenset(), frozenset()
+    return frozenset(grant.owners), frozenset(grant.definition_digests)
+
+
 def _credential_digest(binding: McpAgentCredentialBinding) -> str:
     # Rotating a secret preserves the account. Replacing the endpoint, client,
     # scope or other request settings requires a new admission.
@@ -95,15 +116,25 @@ def capture_agent_authority(app_config: Any, *, user_id: str, agent_config: Agen
     matches = []
     for binding_id, binding in app_config.mcp_agent_auth.items():
         server = app_config.extensions.mcp_servers.get(binding.server)
-        if binding.enabled and binding.agent == agent_config.name and user_id in binding.owners and server is not None and server.enabled and server.agent_auth:
-            matches.append((binding_id, binding))
+        if not (binding.enabled and binding.agent == agent_config.name and server is not None and server.enabled and server.agent_auth):
+            continue
+        try:
+            owners, digests = binding_grant(app_config, binding_id, binding)
+        except ToolException as exc:
+            raise McpAgentAuthorizationError(str(exc)) from None
+        if user_id in owners:
+            matches.append((binding_id, binding, digests))
     if not matches:
         return None
+    if len({binding.server for _, binding, _ in matches}) != len(matches):
+        # Config validation rejects overlaps, and the admin API rejects them on
+        # write; two concurrent runtime writes could still race. Fail closed.
+        raise McpAgentAuthorizationError(f"MCP agent bindings overlap for agent '{agent_config.name}'")
     soul = load_agent_soul(agent_config.name, user_id=user_id) or ""
     digest = agent_definition_digest(agent_config, soul)
     references = []
-    for binding_id, binding in matches:
-        if digest not in binding.definition_digests:
+    for binding_id, binding, digests in matches:
+        if digest not in digests:
             raise McpAgentAuthorizationError(f"Agent definition is not approved for MCP binding '{binding_id}'")
         references.append(
             AgentCredentialReference(
@@ -169,7 +200,7 @@ def _current_binding(reference: AgentCredentialReference, user_id: str) -> McpAg
     if (
         binding is None
         or not binding.enabled
-        or user_id not in binding.owners
+        or user_id not in binding_grant(config, reference.binding, binding)[0]
         or binding.server != reference.server
         or binding.agent != reference.agent
         or server is None
