@@ -61,12 +61,11 @@ make test-blocking-io
 ## Results
 
 - **Never put base64 payloads in text.** Unsupported content (inline audio) raises
-  a recoverable tool error, and the stdio conversion reports an error result with
-  no text block by content shape, never the payload. sse/http tools keep
-  `langchain-mcp-adapters`' conversion, which still stringifies that fallback;
-  `ToolErrorHandlingMiddleware` redacts inline `base64` fields and `data:`
-  payloads from tool error messages before truncation, so neither the
-  model-visible message nor the checkpoint carries the bytes.
+  a recoverable tool error. Stdio reports errors without text by content shape.
+- **HTTP/SSE tool errors.** The guard checks the final `CallToolResult` after
+  custom interceptors and before adapter conversion. With no nonblank text, it
+  reports the number of non-text blocks. `ToolErrorHandlingMiddleware` also
+  redacts inline `base64` fields and `data:` payloads before truncating errors.
 - **`ResourceLink` items do not become URL-sourced `file` blocks.** Chat
   Completions serialization rejects them, and a checkpointed block would break
   every later turn of the thread.

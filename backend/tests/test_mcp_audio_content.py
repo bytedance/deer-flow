@@ -205,10 +205,27 @@ def _non_text_error_content(kind, data):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport,prefix", [("http", True), ("http", False), ("sse", True), ("sse", False)])
-@pytest.mark.parametrize("kind", ["image", "blob", "audio", "link", "empty"])
-async def test_network_mcp_error_payload_never_reaches_agent_messages(network_mcp_tools, transport, prefix, kind, caplog):
+@pytest.mark.parametrize(
+    "kind,blank_blocks",
+    [
+        pytest.param("image", [], id="image"),
+        pytest.param("blob", [], id="blob"),
+        pytest.param("audio", [], id="audio"),
+        pytest.param("link", [], id="link"),
+        pytest.param("empty", [], id="empty"),
+        pytest.param("image", [TextContent(type="text", text="")], id="image-with-empty-text"),
+        pytest.param(
+            "image",
+            [EmbeddedResource(type="resource", resource=TextResourceContents(uri="file:///error.txt", text=" \n\t"))],
+            id="image-with-blank-resource",
+        ),
+        pytest.param("empty", [TextContent(type="text", text=" \n")], id="blank-text-only"),
+    ],
+)
+async def test_network_mcp_error_payload_never_reaches_agent_messages(network_mcp_tools, transport, prefix, kind, blank_blocks, caplog):
     data = base64.b64encode(b"offline binary payload " * 5000).decode("ascii")
-    result = CallToolResult(content=_non_text_error_content(kind, data), isError=True, structuredContent={"blob": data})
+    non_text_blocks = _non_text_error_content(kind, data)
+    result = CallToolResult(content=[*blank_blocks, *non_text_blocks], isError=True, structuredContent={"blob": data})
     model_inputs = []
 
     class CaptureModelInputs(BaseCallbackHandler):
@@ -230,7 +247,7 @@ async def test_network_mcp_error_payload_never_reaches_agent_messages(network_mc
     for message in [*state["messages"], *model_inputs[-1]]:
         assert data[:80] not in message.model_dump_json()
     assert data[:80] not in caplog.text
-    assert f"{len(result.content)} non-text content block" in tool_message.content
+    assert f"{len(non_text_blocks)} non-text content block" in tool_message.content
     assert len(tool_message.content) < 500
     assert state["messages"][-1].content == "done"
 

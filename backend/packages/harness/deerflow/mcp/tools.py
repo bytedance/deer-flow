@@ -1162,12 +1162,11 @@ async def _handle_network_tool_error(request: Any, handler: Any) -> Any:
             text_parts.append(item.text)
         elif isinstance(item, EmbeddedResource) and isinstance(item.resource, TextResourceContents):
             text_parts.append(item.resource.text)
-    if text_parts:
-        error = "\n".join(text_parts)
-    else:
+    error = "\n".join(text_parts)
+    if not error.strip():
         # Error results can contain images, audio, blobs or data-URI links.
         # Neither their payloads nor structuredContent belong in error text.
-        count = len(result.content)
+        count = len(result.content) - len(text_parts)
         error = f"MCP tool returned an error with {count} non-text content block{'s' if count != 1 else ''}."
     raise ToolException(error)
 

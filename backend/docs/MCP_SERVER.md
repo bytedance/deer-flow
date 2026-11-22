@@ -284,8 +284,9 @@ never returns the matching MCP response cannot stall the task poller. Other
 ## Tool Error Results
 
 For ordinary `http` and `sse` tools, a result with `isError: true` becomes a
-recoverable tool error using its text blocks and embedded text resources. If
-there is no text, the error reports the number of non-text content blocks.
+recoverable tool error using its text blocks and embedded text resources. If the
+result has no nonblank text, the error reports the number of non-text content
+blocks. Empty and whitespace-only text blocks do not contribute to that count.
 Binary payloads, data-URI links and `structuredContent` are never stringified
 into the error message. Successful multimodal results and structured artifacts
 keep their normal conversion.
