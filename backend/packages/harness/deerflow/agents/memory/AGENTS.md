@@ -84,7 +84,8 @@ client or the real storage, because the payload shape is the contract.
   with values redacted. Programming errors still propagate.
 - **Do not deduplicate by text.** Honcho capture is incremental by stable source
   ID. Two messages with the same text and different IDs are both stored.
-- **Reject another owner before any remote call.**
+- **Reject another owner before any remote call.** The failure policy still
+  decides the turn: a refused write under `log_and_drop` must not fail the run.
 - **Shutdown drains active work** before it closes a client.
 
 ## Injection
