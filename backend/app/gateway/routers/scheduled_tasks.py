@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import AwareDatetime, BaseModel, Field
 
 from app.channels.capabilities import supports_proactive_group_notifications
@@ -21,8 +22,11 @@ from app.gateway.deps import (
     get_scheduled_task_run_repo,
     get_scheduled_task_service,
     get_thread_store,
+    get_user_repository,
     is_scheduler_running,
+    require_admin_user,
 )
+from app.gateway.routers.auth import require_session_source
 from app.gateway.scheduled_task_errors import active_occurrence_error, active_occurrence_message, repository_error, scheduler_error
 from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_create, validate_scheduled_task_update
 from app.scheduler.service import TASK_CHANGED_ERROR
@@ -37,11 +41,10 @@ from deerflow.scheduler.schedules import (
     normalize_cron_expression,
     validate_timezone,
 )
+from deerflow.trace_context import get_current_trace_id
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
 
@@ -55,6 +58,68 @@ def _authentication_required() -> HTTPException:
 
 def _task_not_found() -> HTTPException:
     return scheduler_error(404, "task_not_found", "Scheduled task not found")
+
+
+async def _audit_owner_selection(request: Request) -> AsyncIterator[None]:
+    if "owner_user_id" not in request.query_params:
+        yield
+        return
+
+    endpoint = request.scope["endpoint"]
+    status = None
+    try:
+        # An unsupported selector on a mutation must never silently act on the caller's own task.
+        if endpoint not in (list_scheduled_tasks, get_scheduled_task, pause_scheduled_task):
+            raise scheduler_error(422, "invalid_request", "This operation does not accept owner_user_id")
+        yield
+        status = 200
+    except HTTPException as exc:
+        status = exc.status_code
+        raise
+    finally:
+        logger.info(
+            "Scheduled task owner selection action=%s actor=%s owner=%s task=%r status=%s pause_committed=%s trace=%r",
+            endpoint.__name__,
+            getattr(getattr(request.state, "user", None), "id", None),
+            getattr(request.state, "scheduled_task_owner_id", None),
+            request.path_params.get("task_id", "")[:128],
+            status or "incomplete",
+            getattr(request.state, "scheduled_task_pause_committed", False),
+            get_current_trace_id(),
+        )
+
+
+router = APIRouter(prefix="/api", tags=["scheduled-tasks"], dependencies=[Depends(_audit_owner_selection)])
+
+
+async def _task_owner_id(request: Request, owner_user_id: str | None) -> str | None:
+    if owner_user_id is None:
+        user = await get_optional_user_from_request(request)
+        return str(user.id) if user is not None else None
+
+    require_session_source(request)
+    await require_admin_user(request, detail="Selecting a scheduled task owner requires an administrator")
+    if len(request.query_params.getlist("owner_user_id")) != 1:
+        raise scheduler_error(422, "invalid_request", "Provide exactly one owner_user_id")
+    try:
+        owner_id = str(uuid.UUID(owner_user_id))
+    except ValueError:
+        raise scheduler_error(422, "invalid_request", "owner_user_id must be a user UUID") from None
+
+    request.state.scheduled_task_owner_id = owner_id
+    try:
+        owner = await get_user_repository().get_user_by_id(owner_id)
+    except Exception:
+        logger.exception("Scheduled task owner lookup failed")
+        raise scheduler_error(503, "scheduler_unavailable", "User lookup is unavailable") from None
+    if owner is None:
+        raise _task_not_found()
+    return owner_id
+
+
+def _admin_task_summary(task: dict[str, Any], active_status: str | None) -> dict[str, Any]:
+    # Allowlist fields so new owner-private task data cannot enter the management response.
+    return {"id": task["id"], "title": task["title"], "status": task["status"], "next_run_at": task.get("next_run_at"), "active_run_status": active_status}
 
 
 async def resolve_scheduled_task_assistant_id(raw: str | None, *, user_id: str) -> str:
@@ -106,7 +171,9 @@ async def _with_run_state(repo, tasks: list[dict[str, Any]]) -> list[dict[str, A
     return [{**task, "automatic_runs_used": used.get(task["id"], 0), "active_run_status": active.get(task["id"])} for task in tasks]
 
 
-async def _task_response(repo, task: dict[str, Any]) -> dict[str, Any]:
+async def _task_response(repo, task: dict[str, Any], *, summary: bool = False) -> dict[str, Any]:
+    if summary:
+        return _admin_task_summary(task, await repo.get_active_run_status(task["id"]))
     used = await repo.automatic_runs_used_for([task["id"]])
     return {**task, "automatic_runs_used": used.get(task["id"], 0), "active_run_status": await repo.get_active_run_status(task["id"])}
 
@@ -244,12 +311,17 @@ async def preview_cron_schedule(request: Request, body: CronPreviewRequest):
 
 @router.get("/scheduled-tasks")
 @require_permission("threads", "read")
-async def list_scheduled_tasks(request: Request):
+async def list_scheduled_tasks(request: Request, owner_user_id: str | None = None):
+    """List personal tasks, or task summaries for the owner selected by an administrator."""
+    owner_id = await _task_owner_id(request, owner_user_id)
     repo = get_scheduled_task_repo(request)
-    user = await get_optional_user_from_request(request)
-    if user is None:
+    if owner_id is None:
         return []
-    return await _with_run_state(repo, await repo.list_by_user(str(user.id)))
+    tasks = await repo.list_by_user(owner_id)
+    if owner_user_id is not None:
+        active = await repo.active_run_status_for([task["id"] for task in tasks])
+        return [_admin_task_summary(task, active.get(task["id"])) for task in tasks]
+    return await _with_run_state(repo, tasks)
 
 
 @router.post("/scheduled-tasks")
@@ -293,15 +365,16 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
 
 @router.get("/scheduled-tasks/{task_id}")
 @require_permission("threads", "read")
-async def get_scheduled_task(task_id: str, request: Request):
+async def get_scheduled_task(task_id: str, request: Request, owner_user_id: str | None = None):
+    """Get a personal task, or its management summary when an administrator selects its owner."""
+    owner_id = await _task_owner_id(request, owner_user_id)
     repo = get_scheduled_task_repo(request)
-    user = await get_optional_user_from_request(request)
-    if user is None:
+    if owner_id is None:
         raise _authentication_required()
-    task = await repo.get(task_id, user_id=str(user.id))
+    task = await repo.get(task_id, user_id=owner_id)
     if task is None:
         raise _task_not_found()
-    return await _task_response(repo, task)
+    return await _task_response(repo, task, summary=owner_user_id is not None)
 
 
 @router.patch("/scheduled-tasks/{task_id}")
@@ -357,12 +430,13 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
 
 @router.post("/scheduled-tasks/{task_id}/pause")
 @require_permission("threads", "write")
-async def pause_scheduled_task(task_id: str, request: Request):
+async def pause_scheduled_task(task_id: str, request: Request, owner_user_id: str | None = None):
+    """Pause a personal task, or pause it on behalf of its explicitly selected owner."""
+    owner_id = await _task_owner_id(request, owner_user_id)
     repo = get_scheduled_task_repo(request)
-    user = await get_optional_user_from_request(request)
-    if user is None:
+    if owner_id is None:
         raise _authentication_required()
-    existing = await repo.get(task_id, user_id=str(user.id))
+    existing = await repo.get(task_id, user_id=owner_id)
     if existing is None:
         raise _task_not_found()
     if existing.get("status") == "running":
@@ -370,7 +444,7 @@ async def pause_scheduled_task(task_id: str, request: Request):
     try:
         result = await repo.pause_with_queue_cancellation(
             task_id,
-            user_id=str(user.id),
+            user_id=owner_id,
             error=RUN_ERROR_PAUSED_WHILE_QUEUED,
             now=datetime.now(UTC),
         )
@@ -382,10 +456,12 @@ async def pause_scheduled_task(task_id: str, request: Request):
         raise scheduler_error(409, "task_running", "Scheduled task is already launching or running; retry after the active execution finishes")
     if result == "finished":
         raise scheduler_error(409, "task_finished", "Scheduled task has finished; resume it to run again")
-    paused = await repo.get(task_id, user_id=str(user.id))
+    if owner_user_id is not None:
+        request.state.scheduled_task_pause_committed = True
+    paused = await repo.get(task_id, user_id=owner_id)
     if paused is None:
         raise _task_not_found()
-    return await _task_response(repo, paused)
+    return await _task_response(repo, paused, summary=owner_user_id is not None)
 
 
 @router.post("/scheduled-tasks/{task_id}/resume")
