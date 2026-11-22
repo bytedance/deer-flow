@@ -920,6 +920,30 @@ async def test_managed_worker_routes_followups_and_retains_the_producing_runs_fi
 
 
 @pytest.mark.asyncio
+async def test_managed_worker_create_retry_returns_task_after_grant_expires(worker_gateway, monkeypatch):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    url = "/api/coordination/tasks"
+    body = {"request_id": "create-replay", "objective": "wait"}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    task_id = first["task"]["id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    try:
+        grant = await state.coordination_workers.repo.grant(owner, task_id)
+        monkeypatch.setattr("deerflow.persistence.coordination.workers.time", lambda: grant["expires_at"] + 1)
+        detail = (await client.get(f"{url}/{task_id}")).raise_for_status().json()
+        replay = (await client.post(url, json=body)).raise_for_status().json()
+        assert replay == detail
+        assert replay["authorization_required"] is True
+        assert replay["execution"]["run_id"] == first["execution"]["run_id"]
+        assert (await client.post(url, json={**body, "objective": "changed"})).status_code == 409
+        assert (await client.post(url, json={**body, "assistant_id": "different"})).status_code == 409
+    finally:
+        state.release_worker.set()
+
+
+@pytest.mark.asyncio
 async def test_managed_worker_replays_accepted_inputs_after_grant_expires(worker_gateway, monkeypatch):
     import asyncio
 
@@ -1116,6 +1140,8 @@ async def test_managed_worker_admission_waits_for_restored_authorization(worker_
     assert view["task"]["status"] == "running"
     assert view["execution"]["status"] == "admitting"
     assert view["authorization_required"] is True
+    retry = await client.post("/api/coordination/tasks", json={"request_id": "pending-admission", "objective": "continue"})
+    assert retry.status_code == 403
     await service.recover_once()
     assert (owner, task_id) not in service._drivers
 

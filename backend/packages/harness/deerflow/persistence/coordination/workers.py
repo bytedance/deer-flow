@@ -124,6 +124,10 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
         return select(Execution).filter_by(task_id=task_id).order_by(Execution.turn.desc()).limit(1)
 
     @staticmethod
+    def _latest_assignment(task_id):
+        return select(Assignment).filter_by(task_id=task_id).order_by(Assignment.epoch.desc()).limit(1)
+
+    @staticmethod
     async def _artifact_refs(session, task_id, *, execution_id=None, limit=None, offset=0):
         query = (
             select(Artifact.id, Artifact.path, Artifact.sha256, Artifact.size, Execution.run_id, Execution.turn)
@@ -150,7 +154,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
     async def view(self, owner, task_id):
         async with self._sessions() as session:
             task = await self._lookup(session, owner, task_id)
-            assignment = await session.scalar(select(Assignment).filter_by(task_id=task_id).order_by(Assignment.epoch.desc()).limit(1))
+            assignment = await session.scalar(self._latest_assignment(task_id))
             execution = await session.scalar(self._latest(task_id))
             result = None
             if execution is not None:
@@ -185,12 +189,16 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             return artifact.path, artifact.content
 
     async def prepare(self, owner, task_id, assistant_id=None, *, initial_grant=None):
-        """Freeze a bounded turn before admission. Duplicate drivers get the same turn."""
+        """Freeze a turn for dispatch or observation. Only dispatch supplies an assistant ID."""
         async with self._write() as session:
             task = await self._lock_tree(session, owner, task_id)
             worker = await session.get(Assignment, (task_id, task.execution_epoch))
-            if worker is not None and assistant_id is not None and worker.assistant_id != assistant_id:
-                raise TaskConflict("Task already has a different worker")
+            if assistant_id is not None:
+                assigned = worker
+                if assigned is None and task.execution_epoch:
+                    assigned = await session.scalar(self._latest_assignment(task_id))
+                if assigned is not None and assigned.assistant_id != assistant_id:
+                    raise TaskConflict("Task already has a different worker")
             if task.status == TaskStatus.QUEUED:
                 await self._start_locked(session, task)
             if task.status != TaskStatus.RUNNING:
@@ -203,6 +211,11 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                 if initial_grant is not None and await session.get(Grant, task_id) is None:
                     session.add(Grant(task_id=task_id, **initial_grant))
                 await session.flush()
+            elif assistant_id is not None:
+                # A create retry returns the saved task even if a later turn is awaiting admission.
+                admitted = select(Execution.run_id).where(Execution.task_id == task_id, Execution.run_id.is_not(None)).limit(1)
+                if await session.scalar(admitted) is not None:
+                    return None
             execution = await session.scalar(self._latest(task_id))
             if execution is None or (execution.status == "superseded" and execution.covered_seq < task.latest_input_seq):
                 previous = execution.covered_seq if execution else 0

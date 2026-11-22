@@ -44,8 +44,10 @@ Content-Type: application/json
 ```
 
 The response includes the task, its assignment (agent and thread), and the
-latest execution. Replaying the request reuses the worker. Read the same
-view with `GET /api/coordination/tasks/{task_id}`. Add a follow-up with
+latest execution. After the task has admitted a Run, replaying the same create
+request returns the saved task view and its current `authorization_required`
+value, even if the Worker grant has expired. Read the same view with
+`GET /api/coordination/tasks/{task_id}`. Add a follow-up with
 `POST /api/coordination/tasks/{task_id}/inputs` and a JSON object containing
 `request_id` and `content`. The owner can replay an accepted input with the same
 ID and content to get its original receipt after task closure or grant expiry.

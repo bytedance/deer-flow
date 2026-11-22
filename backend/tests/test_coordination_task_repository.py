@@ -248,6 +248,8 @@ async def test_worker_admission_is_atomic_with_cancellation_and_replay(database)
         return_exceptions=True,
     )
     assert cancelled["status"] == TaskStatus.CANCELLING
+    with pytest.raises(TaskConflict, match="different worker"):
+        await workers.prepare("alice", task["id"], "other_agent")
     stopped = await workers.cancellations("alice", task["id"])
     (receipt,) = await workers.list_worker_inputs("alice", task["id"], after=0, limit=1)
     if isinstance(admitted, ConflictError):
@@ -289,3 +291,9 @@ async def test_worker_admission_rechecks_grant_generation_and_session_version(da
         await runs.create_thread_operation_atomic("stale-grant", **kwargs, metadata={RUN_GRANT_METADATA: "old"})
     await runs.create_thread_operation_atomic("authorized", **kwargs, metadata={RUN_GRANT_METADATA: "new"})
     assert (await workers.view("alice", task["id"]))["execution"]["run_id"] == "authorized"
+    await workers.append_input("alice", task["id"], request_id="input:next", content="Check the report")
+    await workers.settle("alice", task["id"], execution["id"], "authorized", "success", [])
+    _, followup, _ = await workers.prepare("alice", task["id"])
+    assert followup["turn"] == 2 and followup["run_id"] is None
+    assert await workers.prepare("alice", task["id"], "lead_agent") is None
+    assert (await workers.prepare("alice", task["id"]))[1] == followup
