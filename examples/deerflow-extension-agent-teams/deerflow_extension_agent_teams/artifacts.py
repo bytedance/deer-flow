@@ -207,6 +207,7 @@ class Artifacts:
         imports = []
         for ref in job.get("artifacts", []):
             entry, content = await self.db("artifact", owner, team["id"], ref["artifact_id"], ref["version"])
+            await self.ensure_available()
             result = await transfer(runs.import_artifact, thread_id=job["thread_id"], filename=job["id"][:12] + "-" + entry["filename"], content=content)
             if result.get("sha256") != hashlib.sha256(content).hexdigest() or result.get("size") != len(content) or not result.get("path", "").startswith("/mnt/user-data/uploads/"):
                 raise ValueError("Host did not confirm the imported artifact")

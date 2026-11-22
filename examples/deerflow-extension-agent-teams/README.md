@@ -35,6 +35,56 @@ the path require a Gateway restart. This SQLite example supports **one Gateway
 process per database**. A second service instance refuses to start against the
 same database; it cannot dispatch through its actions or middleware.
 
+### PostgreSQL storage
+
+For PostgreSQL, configure `storage_url` and an optional `storage_schema` (default
+`agent_teams`). Choose exactly one of `storage_path` and `storage_url`.
+
+```yaml
+plugins:
+  - use: deerflow_extension_agent_teams:install
+    enabled: true
+    config:
+      enabled: true
+      storage_url: $AGENT_TEAMS_DATABASE_URL
+      storage_schema: agent_teams
+```
+
+Set `AGENT_TEAMS_DATABASE_URL` to a PostgreSQL connection URL in the Gateway
+environment. The database role needs permission to create and own the configured
+schema, tables, indexes and trigger function. Choose a dedicated schema, using
+1–63 ASCII letters, digits or underscores, starting with a letter or underscore.
+The plugin stores team state and immutable file bytes in that schema.
+
+The PostgreSQL driver is provided by the backend's `postgres` extra. For a host
+using SQLite with this plugin on PostgreSQL, install the driver into the managed
+extension dependency group from `backend/` before restarting Gateway.
+
+```sh
+uv add --group extensions 'psycopg[binary]>=3.3.3,<4'
+```
+
+Independent package installations can select the plugin's `postgres` extra.
+Use a direct PostgreSQL connection or a session-pooling endpoint. The service
+holds a session advisory lock for one active Gateway per database/schema and
+serializes storage transactions on that same connection. This also makes owner
+team-count and file-byte quota checks atomic across concurrent team requests.
+Connections request five-second connect, SQL statement and lock timeouts.
+
+If storage ownership or connectivity is lost, the service becomes unavailable,
+drains its workers and requires a Gateway restart. After restoring connectivity,
+restart Gateway and use **Manage → Reconnect** to reconcile retained jobs through
+their persisted input and idempotency keys. An already admitted host run can
+finish while the team service is disconnected, so its result is reconciled on
+Reconnect. A second service can acquire ownership once PostgreSQL releases the
+previous session's lock.
+
+Include the plugin schema in database backups and restores. When the host and
+plugin share a database, one database snapshot covers both sets of records.
+Host runs and team state still commit in separate transactions, and Reconnect
+handles their intermediate states. SQLite and PostgreSQL each hold an independent
+team dataset.
+
 ## Use
 
 1. Create at least two Custom Agents in **Agents**. Members can delegate work to
@@ -276,8 +326,12 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   within the same team remain serialized, with a ten-second budget for ordinary
   job advancement. Each artifact import or capture pauses that budget and has
   its own 25-minute maximum for the bounded remote snapshot protocol (up to
-  43 chunks with 30-second command timeouts). Shutdown cancels and drains all workers before releasing the
-  database service lock.
+  43 chunks with 30-second command timeouts). Shutdown cancels and drains all
+  workers before releasing the database service lock. If the Gateway's
+  30-second service stop budget expires, it continues stopping other services.
+  Team cleanup continues in the background while the process remains alive,
+  retaining ownership until database work and workers drain. This budget does
+  not forcibly terminate a blocked synchronous database call.
 - Each conversation is serialized, including result receipts targeting a source
   shared across teams. The first unfinished job retains the conversation until
   it finishes or is cancelled. A busy host conversation stays queued without
@@ -339,6 +393,14 @@ From `backend/`:
 uv run pytest tests/test_agent_teams_plugin.py tests/test_extension_agent_runs.py tests/test_plugin_tools.py -q
 uv run ruff check ../examples/deerflow-extension-agent-teams
 uv run ruff format --check ../examples/deerflow-extension-agent-teams
+```
+
+PostgreSQL regressions use isolated schemas in an explicitly supplied disposable
+database. The role must be able to terminate its own backend sessions for the
+ownership-loss tests. Run from `backend/` with `TEST_POSTGRES_URI` set.
+
+```sh
+uv run --extra postgres pytest tests/test_agent_teams_postgres_store.py tests/test_agent_teams_postgres_flow.py tests/test_agent_teams_storage_config.py tests/test_agent_teams_storage_lifecycle.py -q
 ```
 
 The tests load the real extension and exercise owner isolation, directed requests,
