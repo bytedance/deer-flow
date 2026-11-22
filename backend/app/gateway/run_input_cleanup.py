@@ -1,4 +1,4 @@
-"""Reclaim old queue attachment stages that never acquired a durable receipt."""
+"""Reclaim old queue attachment stages left by incomplete submissions or removals."""
 
 import logging
 import os
@@ -91,7 +91,8 @@ async def cleanup_abandoned_queued_uploads(store: RunStore, paths: Paths) -> int
         if (owner_id.lower(), thread_id.lower()) in active_scopes:
             continue
         runs = await store.list_input_runs(thread_id, user_id=owner_id, limit=None, ignore_scope_case=True)
-        referenced = {(item.get("attachment_stage") or {}).get("id") for run in runs for item in (run.get("run_inputs") or {}).get("items", [])}
+        # Cancellation is durable even if removing the staged files fails.
+        referenced = {(item.get("attachment_stage") or {}).get("id") for run in runs for item in (run.get("run_inputs") or {}).get("items", []) if item.get("status") != "cancelled"}
         orphaned = [(path, info) for path, info in stages if path.name not in referenced]
         if orphaned:
             removed += await await_drained(run_file_io(_remove_stale_stages, orphaned, cutoff))

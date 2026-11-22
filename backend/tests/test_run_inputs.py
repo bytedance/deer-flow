@@ -4,6 +4,7 @@ import asyncio
 import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import pytest_asyncio
@@ -86,6 +87,8 @@ async def input_store(request, tmp_path):
 @pytest.mark.asyncio
 async def test_startup_sweep_keeps_inflight_and_retryable_queued_uploads(input_store, tmp_path, monkeypatch):
     from app.gateway import app as gateway_app
+    from app.gateway import run_input_files
+    from app.gateway.run_inputs import _cancel_input
     from deerflow.config import paths as paths_module
     from deerflow.config.paths import Paths
 
@@ -104,6 +107,15 @@ async def test_startup_sweep_keeps_inflight_and_retryable_queued_uploads(input_s
     inputs = RunInputs(input_store, "run", USER_ID, "worker")
     await inputs.reopen()
     await inputs.submit("retry", "Retry this upload", "queue", attachment_stage={"id": retryable.name, "files": []})
+    cancelled = stage("thread", "f" * 32)
+    await inputs.submit("cancel", "Remove this upload", "queue", attachment_stage={"id": cancelled.name, "files": []})
+    remove_stage = Mock(side_effect=PermissionError("temporary staging deletion failure"))
+    with monkeypatch.context() as cancel_patch:
+        cancel_patch.setattr(run_input_files.shutil, "rmtree", remove_stage)
+        await _cancel_input(inputs, "thread", USER_ID, "cancel")
+    remove_stage.assert_called_once()
+    assert cancelled.is_dir()
+    assert (await inputs.read())["items"][1]["status"] == "cancelled"
     assert await input_store.update_status("run", "error", stop_reason="error")
     # The cleanup must see the old receipt even beyond the API history limit.
     for index in range(11):
@@ -130,6 +142,7 @@ async def test_startup_sweep_keeps_inflight_and_retryable_queued_uploads(input_s
 
     assert not orphan.exists()
     assert not different_owner.exists()
+    assert not cancelled.exists()
     for kept in (retryable, inflight, fresh, other_path, alias):
         assert (kept / "0").read_bytes() == b"staged bytes"
 
