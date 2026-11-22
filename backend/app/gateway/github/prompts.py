@@ -9,12 +9,8 @@ Design notes:
   ("review this PR"), so the agent's SOUL.md gets to define behavior.
   The dispatcher appends one terse instruction at the end so a stock
   ``lead_agent`` SOUL still does something useful.
-* The channel layer is **log-only on the outbound path** — the agent's
-  final message goes to ``gateway.log`` and is NOT posted to GitHub.
-  If the agent wants to reply on the PR/issue, it must call ``gh`` (or
-  the equivalent REST API) **during** the run. We do not promise the
-  agent that "your final message will be posted." That used to be true;
-  it isn't any more.
+* The channel logs the final message. GitHub actions during the run use
+  GitHub tools configured for the agent.
 * We embed the comment body verbatim because that's the most useful
   signal — the agent needs to see what the human actually typed. We
   do not try to escape it; agents understand markdown.
@@ -51,10 +47,9 @@ def _pull_request_prompt(payload: dict[str, Any]) -> str:
         f"  Author: {author}\n"
         f"  URL: {url}\n\n"
         f"Description:\n{body or '(no description)'}\n\n"
-        f"Decide what action (if any) to take for this pull request and carry it out. "
-        f"Your final assistant message is for the run log only — it will NOT be "
-        f"posted to GitHub. If you want to reply on the PR, call `gh pr comment` "
-        f"(or `gh pr review`) yourself during the run."
+        "Decide what action (if any) to take in response to this event. "
+        "Your final assistant message goes to the run log. "
+        "Use a configured GitHub tool for actions that require repository access."
     )
 
 
@@ -91,10 +86,9 @@ def _issue_comment_prompt(payload: dict[str, Any]) -> str:
         f"  Author: {author}\n"
         f"  URL: {url}\n\n"
         f"  Body:\n{body or '(empty comment)'}\n\n"
-        f"Decide what action (if any) to take in response to this comment, in the context "
-        f"of the parent {target} above. Your final assistant message is for the run log "
-        f"only — it will NOT be posted to GitHub. If you want to reply, call "
-        f"`gh issue comment {number} --repo {repo} --body-file -` yourself during the run."
+        "Decide what action (if any) to take in response to this event. "
+        "Your final assistant message goes to the run log. "
+        "Use a configured GitHub tool for actions that require repository access."
     )
 
 
@@ -117,10 +111,9 @@ def _pr_review_comment_prompt(payload: dict[str, Any]) -> str:
         f"  File: {path}:{line}\n\n"
         f"  Diff context:\n```\n{diff_hunk}\n```\n\n"
         f"  Body:\n{body or '(empty comment)'}\n\n"
-        f"Decide what action (if any) to take in response to this review comment, in the "
-        f"context of the parent pull request above. Your final assistant message is for the "
-        f"run log only — it will NOT be posted to GitHub. If you want to reply, call "
-        f"`gh pr comment {number} --repo {repo} --body-file -` yourself during the run."
+        "Decide what action (if any) to take in response to this event. "
+        "Your final assistant message goes to the run log. "
+        "Use a configured GitHub tool for actions that require repository access."
     )
 
 
@@ -149,7 +142,7 @@ def _pr_review_prompt(payload: dict[str, Any]) -> str:
     # instruction never renders a broken `gh api` path.
     fetch_hint = ""
     if review_id is not None and number is not None:
-        fetch_hint = f"This review's inline comments are not included in this message. Before deciding what to do, fetch them with `gh api repos/{repo}/pulls/{number}/reviews/{review_id}/comments`.\n\n"
+        fetch_hint = f"This review's inline comments are not included in this message. Before deciding what to do, use a configured GitHub tool to fetch them from `repos/{repo}/pulls/{number}/reviews/{review_id}/comments`.\n\n"
     return (
         f"A pull request review was submitted on #{number} in {repo}.\n\n"
         f"{parent_block}\n"
@@ -158,12 +151,9 @@ def _pr_review_prompt(payload: dict[str, Any]) -> str:
         f"  State: {state}\n\n"
         f"  Body:\n{body or '(no review body)'}\n\n"
         f"{fetch_hint}"
-        f"Decide what action (if any) to take in response to this review, in the context "
-        f"of the parent pull request above. Your final assistant message is for the run "
-        f"log only — it will NOT be posted to GitHub. If you want to reply (or push a fix), "
-        f"call `gh pr comment {number} --repo {repo} --body-file -` (and the usual "
-        f"`git clone` / `gh pr checkout` / `git push` flow for code changes) yourself "
-        f"during the run."
+        "Decide what action (if any) to take in response to this event. "
+        "Your final assistant message goes to the run log. "
+        "Use a configured GitHub tool for actions that require repository access."
     )
 
 
@@ -182,11 +172,9 @@ def _issues_prompt(payload: dict[str, Any]) -> str:
         f"  Author: {author}\n"
         f"  URL: {url}\n\n"
         f"Description:\n{body or '(no description)'}\n\n"
-        f"Decide what action (if any) to take for this issue and carry it out. "
-        f"Your final assistant message is for the run log only — it will NOT be "
-        f"posted to GitHub. If you want to reply on the issue (or open a PR), call "
-        f"`gh issue comment {number} --repo {repo} --body-file -` / `gh pr create` "
-        f"yourself during the run."
+        "Decide what action (if any) to take in response to this event. "
+        "Your final assistant message goes to the run log. "
+        "Use a configured GitHub tool for actions that require repository access."
     )
 
 
