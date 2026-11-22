@@ -149,7 +149,9 @@ def build_multi_instance_config(
             # An explicit section stops ownership from inheriting the bridge's
             # Redis, so its endpoint must be rewritten; timing settings stay.
             ownership = dict(ownership) if isinstance(ownership, Mapping) else {}
-            previous = f"type {ownership.get('type', 'memory')!r}" + (f", {ownership['redis_url']}" if ownership.get("redis_url") else "")
+            previous = f"type {ownership.get('type', 'memory')!r}"
+            ownership.pop("redis_mode", None)
+            ownership.pop("redis_cluster_nodes", None)
             ownership.update(type="redis", redis_url=redis_url)
             sandbox["ownership"] = ownership
             notes.append(f"pointed sandbox.ownership at the harness Redis (was {previous})")

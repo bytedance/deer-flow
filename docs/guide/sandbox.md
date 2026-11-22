@@ -125,6 +125,39 @@ saved API error responses and avoids blocking later reads when the optional
 `tool_progress` guard is enabled. Actual read failures and output truncation
 still retain their error or partial-result status.
 
+## Redis Cluster for shared sandbox ownership
+
+Gateways sharing AIO containers or E2B VMs can store ownership leases in Redis
+Cluster. E2B uses the same connection settings for its deployment-wide capacity
+ledger. Configure the same cluster and key prefix on every Gateway.
+
+```yaml
+sandbox:
+  ownership:
+    type: redis
+    redis_mode: cluster
+    redis_url: $DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL
+    redis_cluster_nodes:
+      - redis-1:6379
+      - redis-2:6379
+```
+
+Set the seed URL to `redis://host:port/0` or `rediss://user:password@host:port/0`
+for TLS and ACL authentication. Percent-encode credentials in the URL. The
+extra discovery nodes are optional and share the URL's credentials and TLS
+settings. Use `[IPv6]:port` for an IPv6 node. When `redis_url` is omitted,
+the first populated variable among `DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL`,
+`DEER_FLOW_STREAM_BRIDGE_REDIS_URL`, and `REDIS_URL` supplies it. Cluster mode
+requires an explicit seed URL from one of these sources and uses database 0.
+
+The synchronous cluster client discovers the slot map when the sandbox provider
+starts. Initialization fails if discovery fails. The Gateway needs connectivity
+to the addresses the cluster advertises. Lease reads use primaries and each
+lease transition runs atomically on the primary holding that sandbox's key.
+Restart the Gateway after changing the topology. Standalone Redis remains the
+default for `type: redis` and connects lazily. Other Redis-backed components,
+including the stream bridge, have their own client configuration.
+
 ## Sandbox & File System
 
 AIO runs commands from independent subagents concurrently, including Lark CLI

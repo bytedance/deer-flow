@@ -376,10 +376,15 @@ class E2BSandboxProvider(SandboxProvider):
             self._ownership_config,
             owner_id=self._owner_id,
         )
-        self._deployment_capacity = make_e2b_capacity_store(
-            self._ownership_config,
-            hard_limit=self._capacity_limit(),
-        )
+        try:
+            self._deployment_capacity = make_e2b_capacity_store(
+                self._ownership_config,
+                hard_limit=self._capacity_limit(),
+            )
+        except Exception:
+            # Cluster discovery can fail after the lease client has already connected.
+            self._ownership.close()
+            raise
         if not self._ownership.supports_cross_process:
             logger.warning("E2B sandbox ownership is process-local. Multi-worker gateways must configure sandbox.ownership.type: redis for safe reconciliation.")
 
