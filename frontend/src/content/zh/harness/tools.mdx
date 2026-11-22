@@ -89,7 +89,7 @@ task(agent="general-purpose", task="...", context="...")
 | `grep`        | 搜索文件内容                                               |
 | `write_file`  | 向文件写入内容                                             |
 | `str_replace` | 替换文件中的字符串                                         |
-| `bash`        | 执行 Shell 命令（需要 `allow_host_bash: true` 或容器沙箱） |
+| `bash`        | 在隔离沙箱中执行 Shell 命令 |
 
 在 `config.yaml` 的 `tools:` 下配置：
 

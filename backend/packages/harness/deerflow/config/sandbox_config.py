@@ -192,8 +192,6 @@ class SandboxConfig(BaseModel):
 
     Common options:
         use: Class path of the sandbox provider (required)
-        allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
-            Dangerous and intended only for fully trusted local workflows.
 
     AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, and
     LocalSandboxProvider shared options:
@@ -248,7 +246,8 @@ class SandboxConfig(BaseModel):
     )
     allow_host_bash: bool = Field(
         default=False,
-        description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
+        deprecated=True,
+        description="Legacy setting accepted for compatibility. Bash requires an isolated sandbox provider.",
     )
     prewarm: bool = Field(
         default=False,

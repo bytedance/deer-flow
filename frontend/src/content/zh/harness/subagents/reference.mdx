@@ -39,7 +39,6 @@ description: 子 Agent 相关的配置键、请求上下文键、工具签名、
 | `tool_search.enabled` / `auto_promote_top_k` |                                        | 延迟加载 MCP 工具                                                     |
 | `token_usage.enabled`                      | true                                     | 卡片是否显示 token                                                    |
 | `agent_storage.backend`                    | `file`                                   | 设置页管理的子 Agent 存储位置，`file` 或 `db`                         |
-| `sandbox.allow_host_bash`                  | false                                    | 本地沙箱下 `bash` 子 Agent 是否可用                                   |
 | `sandbox.environment.MAX_SHELL_SESSIONS`   | 镜像默认 10                              | 须不小于 `subagent_runtime.max_running + 1`                           |
 | 环境变量 `DEER_FLOW_DATE_TIMEZONE`         | 服务器时区                               | `current_date` 提醒使用的 IANA 时区                                   |
 

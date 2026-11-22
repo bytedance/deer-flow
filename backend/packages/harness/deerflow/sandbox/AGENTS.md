@@ -69,6 +69,8 @@ Windows. The portable string assertions do not replace it.
 
 ## Tools
 
+- Agent shell commands require a separate execution provider. The local provider
+  serves workspace file operations.
 - Tool execution depends on operational arguments only. The `description`
   argument is a progress label and may be empty.
 - Local writes publish a new file revision atomically and keep symlink targets and
