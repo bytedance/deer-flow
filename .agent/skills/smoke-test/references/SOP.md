@@ -368,7 +368,7 @@ curl http://localhost:2026/health
 **Steps**:
 1. Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh`.
 2. The script auto-detects whether authentication (`DEER_FLOW_AUTH_DISABLED`) is enabled.
-3. When auth is on, finish setup before running the check. Set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing account with workspace access. The script signs in and uses a temporary cookie jar that it removes on exit.
+3. When auth is on, finish setup before running the check. Set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing test account with a local DeerFlow password and workspace access. The script signs in and uses a temporary cookie jar that it removes on exit.
 4. When auth is off, the script checks the routes anonymously.
 
 ---
@@ -430,7 +430,7 @@ curl http://localhost:2026/health
 **Steps**:
 1. Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh`.
 2. The script auto-detects whether authentication (`DEER_FLOW_AUTH_DISABLED`) is enabled.
-3. When auth is on, finish setup before running the check. Set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing account with workspace access. The script signs in and uses a temporary cookie jar that it removes on exit.
+3. When auth is on, finish setup before running the check. Set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing test account with a local DeerFlow password and workspace access. The script signs in and uses a temporary cookie jar that it removes on exit.
 4. When auth is off, the script checks the routes anonymously.
 
 ---

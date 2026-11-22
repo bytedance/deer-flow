@@ -136,7 +136,7 @@ smoke-test/
 The following warnings can appear during smoke testing and do not block a successful result:
 - Feishu/Lark SSL errors in Gateway logs (certificate verification failure) can be ignored if that channel is not enabled
 - Warnings in Gateway logs about missing methods in the custom checkpointer, such as `adelete_for_runs` or `aprune`, do not affect the core functionality
-- With authentication enabled, set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing test account with workspace access. The script signs in with that account and removes its temporary cookie jar on exit. With authentication disabled, it checks the routes anonymously.
+- With authentication enabled, set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing test account with a local DeerFlow password and workspace access. The script uses local sign-in and removes its temporary cookie jar on exit. With authentication disabled, it checks the routes anonymously.
 
 ## Key Tools
 
