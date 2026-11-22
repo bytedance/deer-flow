@@ -33,4 +33,10 @@ Registries and processed-occurrence ledgers are agent-local. `SubagentExecutor._
 
 ## Projection and async verification
 
+The model-facing projection skips stored rows with non-string handles, types,
+display names or tool names, so malformed presentation metadata cannot abort a
+turn. Usable rows keep their ordering and budget; skipped rows do not count as
+budget omissions. The raw checkpoint registry and resolution references remain
+unchanged.
+
 Registry projection retains the newest entries and reserves space for an explicit `N more artifact handles not shown` marker within its character budget. Omitted entries remain resolvable while retained in state; omission is different from expiration. `tests/blocking_io/test_artifact_middlewares.py` drives a real async capture → projection → resolution cycle and exercises unknown-handle errors and oversized structured payload rejection under `detect_blocking_io_strict`.
