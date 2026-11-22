@@ -11,6 +11,7 @@ import logging
 import socket
 import sys
 import threading
+import time
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -2341,6 +2342,87 @@ def test_multi_user_shutdown_flush_drains_inflight_and_closes_provider(
     assert close_calls == 1
     assert manager.shutdown_flush(1.0) is True
     assert close_calls == 1
+
+
+def test_shutdown_flush_drains_admitted_write_pending_credential_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorders, _ = _track_official_integration(monkeypatch)
+    resolve_started = threading.Event()
+    release_resolve = threading.Event()
+    provider_calls: list[str] = []
+    close_calls = 0
+
+    class _BlockingProvider:
+        def resolve(self, user_id: str) -> str:
+            provider_calls.append(user_id)
+            if user_id == "alice":
+                resolve_started.set()
+                assert release_resolve.wait(timeout=5.0)
+            return f"key-{user_id}"
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path),
+        credential_provider=_BlockingProvider(),
+    )
+
+    write_errors: list[BaseException] = []
+    flush_results: list[bool] = []
+
+    def _write_alice() -> None:
+        try:
+            manager.add(
+                "thread-1",
+                [HumanMessage("admitted before shutdown", id="h1")],
+                user_id="alice",
+            )
+        except BaseException as exc:  # pragma: no cover - diagnostic capture
+            write_errors.append(exc)
+
+    def _run_shutdown() -> None:
+        flush_results.append(manager.shutdown_flush(5.0))
+
+    writer = threading.Thread(target=_write_alice)
+    writer.start()
+    assert resolve_started.wait(timeout=5.0)
+
+    shutdown_thread = threading.Thread(target=_run_shutdown)
+    shutdown_thread.start()
+
+    deadline = time.monotonic() + 5.0
+    while not manager._closed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert manager._closed is True
+
+    manager.add(
+        "thread-2",
+        [HumanMessage("late", id="h2")],
+        user_id="bob",
+    )
+    assert provider_calls == ["alice"]
+
+    release_resolve.set()
+    writer.join(timeout=5.0)
+    shutdown_thread.join(timeout=5.0)
+
+    assert not writer.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert write_errors == []
+    assert flush_results == [True]
+    assert provider_calls == ["alice"]
+    assert len(recorders) == 1
+    assert len(recorders[0].calls) == 1
+    assert recorders[0].closed is True
+    assert len(manager._pool) == 0
+    assert close_calls == 1
+    cursor_path = manager._state_path(_session_id("alice", "deerflow", "thread-1"))
+    assert cursor_path.exists()
+    assert not manager._state_path(_session_id("bob", "deerflow", "thread-2")).exists()
 
 
 def test_gateway_memory_config_response_masks_multi_user_secrets() -> None:

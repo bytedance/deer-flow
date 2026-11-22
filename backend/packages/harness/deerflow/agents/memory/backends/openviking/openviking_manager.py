@@ -696,7 +696,7 @@ class OpenVikingMemoryManager(MemoryManager):
         key: _ClientPoolKey = (credential.tenant_id, user_id, credential.key_fingerprint)
         if self._config.isolation_mode == "single_user":
             with self._pool_lock:
-                if self._closed or self._resources_closed:
+                if self._resources_closed:
                     raise MemoryManagerError("OpenViking memory backend is closed")
                 entry = self._pool.get(key)
                 if entry is None or entry.retired or entry.closed:
@@ -713,7 +713,7 @@ class OpenVikingMemoryManager(MemoryManager):
         now = self._clock()
 
         with self._pool_lock:
-            if self._closed or self._resources_closed:
+            if self._resources_closed:
                 raise MemoryManagerError("OpenViking memory backend is closed")
             to_close.extend(self._evict_idle_ttl_locked(now))
             error = self._check_fingerprint_conflict_locked(user_id=user_id, credential=credential)
@@ -746,7 +746,7 @@ class OpenVikingMemoryManager(MemoryManager):
         now = self._clock()
 
         with self._pool_lock:
-            if self._closed or self._resources_closed:
+            if self._resources_closed:
                 discard_new = True
                 publish_error = MemoryManagerError("OpenViking memory backend is closed")
             else:
@@ -936,9 +936,9 @@ class OpenVikingMemoryManager(MemoryManager):
         with self._resource_lock:
             if self._resources_closed:
                 return
-            self._resources_closed = True
             to_close: list[_ScopedClientEntry] = []
             with self._pool_lock:
+                self._resources_closed = True
                 drained = list(self._pool.values())
                 self._pool.clear()
                 for entry in drained:
