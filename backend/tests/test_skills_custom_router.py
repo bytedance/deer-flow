@@ -4,6 +4,7 @@ import stat
 import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -804,6 +805,51 @@ def _patch_demo_custom_skill_config(monkeypatch, tmp_path: Path) -> SimpleNamesp
 
 def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path, *, user_factory=None) -> FastAPI:
     return _make_test_app(_patch_demo_custom_skill_config(monkeypatch, tmp_path), user_factory=user_factory)
+
+
+def test_custom_skill_put_completes_when_a_concurrent_get_holds_the_file(monkeypatch, tmp_path):
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+    skill_file = _user_custom_dir(tmp_path) / "demo-skill" / "SKILL.md"
+    url = "/api/skills/custom/demo-skill"
+    edited = _skill_content("demo-skill", "Edited during GET")
+    read_open = threading.Event()
+    replace_attempted = threading.Event()
+    original_open = Path.open
+    original_replace = Path.replace
+
+    def hold_first_content_read(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path == skill_file and kwargs.get("encoding") == "utf-8-sig" and not read_open.is_set():
+            read_open.set()
+            if not replace_attempted.wait(timeout=10):
+                handle.close()
+                raise TimeoutError("PUT never reached file replacement")
+        return handle
+
+    def replace_while_reading(source, target):
+        try:
+            return original_replace(source, target)
+        finally:
+            if target == skill_file:
+                replace_attempted.set()
+
+    monkeypatch.setattr(Path, "open", hold_first_content_read)
+    monkeypatch.setattr(Path, "replace", replace_while_reading)
+    monkeypatch.setattr(skills_router, "scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        pending_get = pool.submit(client.get, url)
+        try:
+            assert read_open.wait(timeout=10)
+            update = client.put(url, json={"content": edited})
+            assert update.status_code == 200, update.text
+            assert update.json()["content"] == edited
+        finally:
+            replace_attempted.set()
+        original = pending_get.result(timeout=10)
+        assert original.status_code == 200
+        assert original.json()["content"] == _skill_content("demo-skill")
+        assert client.get(url).json()["content"] == edited
 
 
 @pytest.mark.asyncio

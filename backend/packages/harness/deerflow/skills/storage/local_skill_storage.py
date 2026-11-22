@@ -8,6 +8,7 @@ import json
 import logging
 import shutil
 import tempfile
+import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,21 @@ def _publication_path_limit(root: Path) -> int:
 # Bound for the best-effort temp-dir cleanup so a stalled filesystem (e.g. NFS)
 # cannot hold back the install outcome propagating out of the finally block.
 _INSTALL_TMP_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+
+def _replace_custom_skill_file(temporary: Path, target: Path) -> None:
+    # Windows may report access denied (5) or a sharing violation (32)
+    # while a GET holds the old file open. Keep the atomic replace, and
+    # propagate persistent permission errors after a short, bounded retry.
+    for delay in (0.01, 0.02, 0.04, 0.08, 0.16):
+        try:
+            temporary.replace(target)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32):
+                raise
+            time.sleep(delay)
+    temporary.replace(target)
 
 
 class LocalSkillStorage(SkillStorage):
@@ -123,7 +139,7 @@ class LocalSkillStorage(SkillStorage):
                 with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
                     tmp_path = Path(tmp_file.name)
                     tmp_file.write(content)
-                tmp_path.replace(target)
+                _replace_custom_skill_file(tmp_path, target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
             finally:
                 if tmp_path is not None:
