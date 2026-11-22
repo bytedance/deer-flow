@@ -189,13 +189,17 @@ but its Service remains, create can safely provision the missing Pod.
 The Gateway also forwards the operator's `sandbox.environment` map, and the
 provisioner writes those entries to the sandbox container so image-level knobs
 such as `DISABLE_JUPYTER=true` or `DISABLE_CODE_SERVER=true` reach Kubernetes
-sandboxes the same way they reach local Docker ones. Entries named
-`AIO_BASH_MAX_SESSIONS`, `MAX_SHELL_SESSIONS` or `DEERFLOW_LARK_BROKER_URL` are
-ignored: the provisioner sets those from the dedicated request fields above, and
-one Pod keeps a single source per setting. A request may carry at most 32
-entries, keys must match `[A-Za-z_][A-Za-z0-9_]*` within 64 characters, and a
-value is limited to 1024 characters. Requests from older Gateways omit the map
-and produce the same Pods as before.
+sandboxes the same way they reach local Docker ones. A Gateway that provisions
+through this service leaves `AIO_BASH_MAX_SESSIONS`, `MAX_SHELL_SESSIONS` and
+`DEERFLOW_LARK_BROKER_URL` out of that map, because it already sends them
+through the dedicated fields above; the provisioner ignores those names in the
+map if another client sends them anyway, so one Pod keeps a single source per
+setting. All 32 entries a request may carry are therefore the operator's own,
+keys must match `[A-Za-z_][A-Za-z0-9_]*` within 64 characters, and a value is
+limited to 1024 characters. Values are written literally: a `$` is escaped so
+Kubernetes does not expand `$(NAME)` or collapse `$$` before the container reads
+the value. Requests from older Gateways omit the map and produce the same Pods
+as before.
 
 ### Custom sandbox image
 

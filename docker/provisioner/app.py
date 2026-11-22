@@ -84,7 +84,7 @@ LARK_CLI_BROKER_IMAGE = os.environ.get("LARK_CLI_BROKER_IMAGE", "")
 RESERVED_SANDBOX_ENVIRONMENT_KEYS = frozenset({"AIO_BASH_MAX_SESSIONS", "MAX_SHELL_SESSIONS", "DEERFLOW_LARK_BROKER_URL"})
 MAX_SANDBOX_ENVIRONMENT_ENTRIES = 32
 MAX_SANDBOX_ENVIRONMENT_VALUE_CHARS = 1024
-SANDBOX_ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+SANDBOX_ENVIRONMENT_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 # Machine-readable marker attached to lark provisioning-config conflict
 # responses (409/503) telling the Gateway to drop its cached broker
 # capability observation for this endpoint. Keep in sync with
@@ -589,7 +589,7 @@ class CreateSandboxRequest(BaseModel):
         if len(value) > MAX_SANDBOX_ENVIRONMENT_ENTRIES:
             raise ValueError(f"environment accepts at most {MAX_SANDBOX_ENVIRONMENT_ENTRIES} entries")
         for name, entry in value.items():
-            if not SANDBOX_ENVIRONMENT_KEY_PATTERN.match(name):
+            if not SANDBOX_ENVIRONMENT_KEY_PATTERN.fullmatch(name):
                 raise ValueError(f"environment key {name!r} must match [A-Za-z_][A-Za-z0-9_]* and be at most 64 characters")
             if "\x00" in entry:
                 raise ValueError(f"environment value for {name!r} contains a NUL byte")
@@ -1058,6 +1058,17 @@ def _build_lark_cli_broker_sidecars(
     ]
 
 
+def _pod_environment_value(value: str) -> str:
+    """Escape a container value so Kubernetes stores it literally.
+
+    Kubelet treats ``$(NAME)`` in a plain ``env.value`` as a reference to an
+    earlier variable and collapses ``$$`` to ``$``. Doubling every dollar sign
+    cancels both rewrites, so the container reads the value the operator wrote
+    instead of one the API server derived from it.
+    """
+    return value.replace("$", "$$")
+
+
 def _build_pod(
     sandbox_id: str,
     thread_id: str,
@@ -1078,25 +1089,25 @@ def _build_pod(
     )
     sandbox_env: list[k8s_client.V1EnvVar] = []
     if max_bash_sessions is not None:
-        sandbox_env.append(k8s_client.V1EnvVar(name="AIO_BASH_MAX_SESSIONS", value=str(max_bash_sessions)))
+        sandbox_env.append(k8s_client.V1EnvVar(name="AIO_BASH_MAX_SESSIONS", value=_pod_environment_value(str(max_bash_sessions))))
     if max_shell_sessions is not None:
         sandbox_env.append(
             k8s_client.V1EnvVar(
                 name="MAX_SHELL_SESSIONS",
-                value=str(max_shell_sessions),
+                value=_pod_environment_value(str(max_shell_sessions)),
             )
         )
     if _lark_cli_broker_enabled(provision_lark_cli_broker):
         sandbox_env.append(
             k8s_client.V1EnvVar(
                 name="DEERFLOW_LARK_BROKER_URL",
-                value=LARK_BROKER_URL,
+                value=_pod_environment_value(LARK_BROKER_URL),
             )
         )
     for name, value in sorted((environment or {}).items()):
         if name in RESERVED_SANDBOX_ENVIRONMENT_KEYS:
             continue
-        sandbox_env.append(k8s_client.V1EnvVar(name=name, value=value))
+        sandbox_env.append(k8s_client.V1EnvVar(name=name, value=_pod_environment_value(value)))
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),

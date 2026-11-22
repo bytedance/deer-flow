@@ -105,7 +105,7 @@ def test_provisioner_threads_shell_capacity_into_sandbox_pod(
 
 @pytest.mark.parametrize(
     "name",
-    ["DISABLE JUPYTER", "1DISABLE", "DISABLE-YUP", "D" * 65],
+    ["DISABLE JUPYTER", "1DISABLE", "DISABLE-YUP", "D" * 65, "DISABLE_JUPYTER\n"],
 )
 def test_provisioner_rejects_malformed_environment_keys(provisioner_module, name: str) -> None:
     from pydantic import ValidationError
@@ -125,6 +125,32 @@ def test_provisioner_rejects_unusable_environment_entries(provisioner_module) ->
     for environment in requests:
         with pytest.raises(ValidationError):
             provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-env", environment=environment)
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        ("example$$suffix", "example$$$$suffix"),
+        ("$(POD_NAME)", "$$(POD_NAME)"),
+        ("plain", "plain"),
+    ],
+)
+def test_provisioner_keeps_pod_environment_values_literal(monkeypatch, provisioner_module, written, expected) -> None:
+    """Kubelet expands $(NAME) and collapses $$, so every value is escaped before it is written."""
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-escape": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+
+    provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-escape",
+            thread_id="thread-1",
+            environment={"DISABLE_VNC": written},
+        )
+    )
+
+    pod = core.created_pod_specs["sandbox-escape"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["DISABLE_VNC"] == expected
 
 
 def test_provisioner_threads_operator_environment_into_sandbox_pod(

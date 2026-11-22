@@ -58,6 +58,11 @@ _RESERVED_SANDBOX_MOUNT_PATHS = (
 )
 
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
+# ``sandbox.environment`` keys the provider composes itself and forwards through
+# dedicated request fields. Sending them in the operator map as well would spend
+# the provisioner's entry budget on values it already owns, so the map trimmed
+# here leaves the published 32-entry limit entirely to the operator.
+_PROVISIONER_OWNED_ENVIRONMENT_KEYS = frozenset({"AIO_BASH_MAX_SESSIONS", "MAX_SHELL_SESSIONS", "DEERFLOW_LARK_BROKER_URL"})
 
 
 def _normalize_skills_container_path(container_path: str) -> str:
@@ -168,14 +173,16 @@ class RemoteSandboxBackend(SandboxBackend):
             max_bash_sessions: Bash capacity to provision and attest before admission.
             environment: Operator ``sandbox.environment`` forwarded to the
                 sandbox Pod so optional AIO services can be disabled per
-                deployment (for example ``DISABLE_JUPYTER``).
+                deployment (for example ``DISABLE_JUPYTER``). Keys the
+                provider sets from dedicated fields are dropped before the
+                request is sent.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
         self._max_shell_sessions = max_shell_sessions
         self._max_bash_sessions = max_bash_sessions
         self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
-        self._environment = dict(environment or {})
+        self._environment = {name: value for name, value in (environment or {}).items() if name not in _PROVISIONER_OWNED_ENVIRONMENT_KEYS}
 
     @property
     def provisioner_url(self) -> str:
