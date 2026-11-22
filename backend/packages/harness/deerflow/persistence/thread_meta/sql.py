@@ -295,13 +295,6 @@ class ThreadMetaRepository(ThreadMetaStore):
                 scanned += len(batch)
             return matches
 
-    async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
-        """Return True if the row exists and is owned (or filter bypassed)."""
-        if resolved_user_id is None:
-            return True  # explicit bypass
-        row = await session.get(ThreadMetaRow, thread_id)
-        return row is not None and row.user_id == resolved_user_id
-
     async def update_display_name(
         self,
         thread_id: str,
@@ -337,10 +330,14 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_status")
+        # The owner condition stays in the UPDATE itself. A separate ownership
+        # read leaves a window in which the row can move to another owner, and
+        # the write would then land on that owner's thread.
+        stmt = update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
-                return
-            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(status=status, updated_at=datetime.now(UTC)))
+            await session.execute(stmt.values(status=status, updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def update_metadata(
