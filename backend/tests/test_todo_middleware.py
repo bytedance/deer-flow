@@ -12,12 +12,16 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import ModelRequest
 from langchain.tools import tool
+from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_openai import ChatOpenAI
+from langchain_openai.chat_models.base import _convert_dict_to_message
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import (
     ModelLengthFinishReasonMiddleware,
 )
@@ -317,6 +321,246 @@ class TestToolCallIntentOrError:
         # to this sentinel.
         tool_related_fields = {name for name in AIMessage.model_fields if "tool" in name.lower() or ("function" in name.lower() and "call" in name.lower())}
         assert tool_related_fields <= {"tool_calls", "invalid_tool_calls"}
+
+
+class TestWriteTodosIdNormalization:
+    """Malformed write_todos ids must be addressable before the tool result exists.
+
+    The base TodoListMiddleware builds one error ToolMessage per parallel
+    write_todos call from ``tool_calls[*]["id"]``; the tool node does the same
+    for a single call. A missing or non-string id used to raise a pydantic
+    ValidationError, aborting a plan-mode run before the model could retry;
+    empty and repeated ids yield results the next request cannot address.
+    """
+
+    @staticmethod
+    def _state(calls: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"messages": [AIMessage(id="ai-1", content="", tool_calls=calls)]}
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    def test_parallel_missing_ids_are_normalized_before_the_base_hook(self, invoke_async):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": None, "args": {"todos": []}},
+                {"name": "write_todos", "id": "", "args": {"todos": []}},
+            ]
+        )
+        runtime = _make_runtime()
+
+        result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        ai, *errors = result["messages"]
+        assert ai.id == "ai-1"
+        ids = [call["id"] for call in ai.tool_calls]
+        assert all(isinstance(call_id, str) and call_id for call_id in ids)
+        assert len(set(ids)) == 2
+        assert [message.tool_call_id for message in errors] == ids
+        assert all(message.status == "error" for message in errors)
+
+    def test_single_missing_id_is_normalized_for_the_tool_node(self):
+        mw = TodoMiddleware()
+        state = self._state([{"name": "write_todos", "id": None, "args": {"todos": []}}])
+
+        result = mw.after_model(state, _make_runtime())
+
+        assert len(result["messages"]) == 1
+        call_id = result["messages"][0].tool_calls[0]["id"]
+        assert isinstance(call_id, str) and call_id
+
+    def test_duplicate_ids_are_made_unique(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ai, *errors = result["messages"]
+        assert ai.tool_calls[0]["id"] == "dup"
+        assert len({call["id"] for call in ai.tool_calls}) == 2
+        assert [message.tool_call_id for message in errors] == [call["id"] for call in ai.tool_calls]
+
+    def test_whitespace_only_ids_are_treated_as_missing(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": "  ", "args": {"todos": []}},
+                {"name": "write_todos", "id": None, "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ids = [call["id"] for call in result["messages"][0].tool_calls]
+        assert all(call_id.strip() for call_id in ids)
+        assert len(set(ids)) == 2
+
+    def test_synthetic_ids_avoid_other_tools_in_the_message(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": None, "args": {"todos": []}},
+                {"name": "echo", "id": "deerflow_write_todos_synthetic_0", "args": {}},
+                {"name": "write_todos", "id": None, "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ai = result["messages"][0]
+        ids = [call["id"] for call in ai.tool_calls]
+        assert ids[1] == "deerflow_write_todos_synthetic_0"
+        assert ids[0] != ids[1] and ids[2] != ids[1]
+        assert len(set(ids)) == 3
+
+    def test_id_shared_with_another_tool_is_relabelled(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "echo", "id": "dup", "args": {}},
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        ai = result["messages"][0]
+        ids = [call["id"] for call in ai.tool_calls]
+        assert ids[0] == "dup"
+        assert ids[1] != "dup"
+        assert ids[1].startswith("deerflow_write_todos_synthetic_")
+
+    def test_provider_tool_call_surfaces_are_relabelled_by_occurrence(self):
+        mw = TodoMiddleware()
+        content = [
+            {"type": "tool_use", "id": "dup", "name": "write_todos", "input": {}},
+            {"type": "tool_use", "id": "dup", "name": "write_todos", "input": {}},
+        ]
+        raw_calls = [
+            {"id": "dup", "type": "function", "function": {"name": "write_todos", "arguments": "{}"}},
+            {"id": "dup", "type": "function", "function": {"name": "write_todos", "arguments": "{}"}},
+        ]
+        message = AIMessage(
+            id="ai-2",
+            content=content,
+            tool_calls=[
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+                {"name": "write_todos", "id": "dup", "args": {"todos": []}},
+            ],
+            additional_kwargs={"tool_calls": raw_calls},
+        )
+
+        result = mw.after_model({"messages": [message]}, _make_runtime())
+
+        ai = result["messages"][0]
+        structured = [call["id"] for call in ai.tool_calls]
+        assert structured[0] == "dup"
+        assert structured[1] != "dup"
+        assert [block["id"] for block in ai.content if block["type"] == "tool_use"] == structured
+        assert [call["id"] for call in ai.additional_kwargs["tool_calls"]] == structured
+
+    @staticmethod
+    def _retry_messages(message: AIMessage) -> list[Any]:
+        model = _CapturingFakeMessagesListChatModel(responses=[message, AIMessage(content="Done.")])
+        graph = create_agent(model=model, tools=[], middleware=[DanglingToolCallMiddleware(), TodoMiddleware()])
+        graph.invoke({"messages": [HumanMessage(content="Write a plan.")]})
+        assert len(model.seen_messages) == 2
+        return model.seen_messages[1]
+
+    @pytest.mark.parametrize("use_previous_response_id", [False, True])
+    def test_openai_responses_retry_keeps_item_ids_and_pairs_calls_with_results(self, use_previous_response_id):
+        content = [{"type": "function_call", "id": item_id, "call_id": "call_dup", "name": "write_todos", "arguments": '{"todos":[]}'} for item_id in ("fc_first", "fc_second")]
+        message = AIMessage(
+            content=content,
+            response_metadata={"id": "resp_original", "model_provider": "openai"},
+            tool_calls=[{"name": "write_todos", "id": "call_dup", "args": {"todos": []}} for _ in content],
+        )
+
+        retry = self._retry_messages(message)
+        adapter = ChatOpenAI(model="gpt-5", api_key="test", use_responses_api=True, use_previous_response_id=use_previous_response_id)
+        payload = adapter._get_request_payload(retry)
+
+        assert "previous_response_id" not in payload
+        calls = [item for item in payload["input"] if item["type"] == "function_call"]
+        results = [item["call_id"] for item in payload["input"] if item["type"] == "function_call_output"]
+        assert [call["id"] for call in calls] == ["fc_first", "fc_second"]
+        assert [call["call_id"] for call in calls] == results == ["call_dup", "deerflow_write_todos_synthetic_1"]
+        assert [block["call_id"] for block in message.content] == ["call_dup", "call_dup"]
+
+    @pytest.mark.parametrize("id_fields", [{"id": None}, {}], ids=["null", "missing"])
+    def test_anthropic_retry_rewrites_idless_tool_use_blocks(self, id_fields):
+        todos = [{"todos": []}, {"todos": [{"content": "Plan", "status": "pending"}]}]
+        content = [
+            {"type": "tool_use", "id": "", "name": "write_todos", "input": todos[0]},
+            {"type": "tool_use", "name": "write_todos", "input": todos[1], **id_fields},
+        ]
+        message = AIMessage(
+            content=content,
+            tool_calls=[{"name": "write_todos", "id": call_id, "args": args} for call_id, args in zip(("", None), todos, strict=True)],
+        )
+
+        retry = self._retry_messages(message)
+        adapter = ChatAnthropic(model="claude-sonnet-4-5", api_key="test")
+        payload = adapter._get_request_payload(retry)
+
+        blocks = [block for item in payload["messages"] for block in item["content"] if isinstance(block, dict)]
+        calls = [block for block in blocks if block["type"] == "tool_use"]
+        results = [block["tool_use_id"] for block in blocks if block["type"] == "tool_result"]
+        assert [call["input"] for call in calls] == todos
+        assert [call["id"] for call in calls] == results == ["deerflow_write_todos_synthetic_0", "deerflow_write_todos_synthetic_1"]
+
+    @pytest.mark.parametrize(
+        ("invalid_name", "todo_id", "invalid_id"),
+        [
+            ("echo", "call_dup", "call_dup"),
+            ("write_todos", "call_dup", "call_dup"),
+            ("echo", None, "deerflow_write_todos_synthetic_0"),
+        ],
+    )
+    def test_chat_completions_retry_reserves_ids_of_invalid_calls(self, invalid_name, todo_id, invalid_id):
+        raw_calls = [
+            {"type": "function", "id": invalid_id, "function": {"name": invalid_name, "arguments": "{"}},
+            {"type": "function", "id": todo_id, "function": {"name": "write_todos", "arguments": '{"todos":[]}'}},
+        ]
+        message = _convert_dict_to_message({"role": "assistant", "content": None, "tool_calls": raw_calls})
+        assert isinstance(message, AIMessage)
+        assert [call["id"] for call in message.invalid_tool_calls] == [invalid_id]
+        # Some integrations keep the raw provider calls alongside the decoded calls.
+        message = message.model_copy(update={"additional_kwargs": {"tool_calls": raw_calls}})
+
+        retry = self._retry_messages(message)
+        adapter = ChatOpenAI(model="gpt-4o", api_key="test", use_responses_api=False)
+        payload = adapter._get_request_payload(retry)
+
+        calls = [call for item in payload["messages"] for call in item.get("tool_calls", [])]
+        results = [item["tool_call_id"] for item in payload["messages"] if item["role"] == "tool"]
+        repaired_id = "deerflow_write_todos_synthetic_0"
+        if invalid_id == repaired_id:
+            repaired_id += "_"
+        assert [call["id"] for call in calls] == [repaired_id, invalid_id]
+        assert set(results) == {repaired_id, invalid_id}
+        assert len(results) == 2
+        retry_raw_calls = next(item for item in retry if isinstance(item, AIMessage)).additional_kwargs["tool_calls"]
+        assert [call["id"] for call in retry_raw_calls] == [invalid_id, repaired_id]
+        assert [call["id"] for call in raw_calls] == [invalid_id, todo_id]
+
+    def test_well_formed_ids_are_left_to_the_base_hook(self):
+        mw = TodoMiddleware()
+        state = self._state(
+            [
+                {"name": "write_todos", "id": "a", "args": {"todos": []}},
+                {"name": "write_todos", "id": "b", "args": {"todos": []}},
+            ]
+        )
+
+        result = mw.after_model(state, _make_runtime())
+
+        assert all(message.tool_call_id in {"a", "b"} for message in result["messages"])
+        assert not any(hasattr(message, "tool_calls") for message in result["messages"])
 
 
 class TestAfterModel:

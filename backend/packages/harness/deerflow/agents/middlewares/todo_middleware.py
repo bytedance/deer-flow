@@ -22,6 +22,7 @@ suppress reminders in later Goal continuation turns of the same run.
 """
 
 import threading
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Literal, override
 
@@ -184,6 +185,113 @@ def _has_tool_call_intent_or_error(message: AIMessage) -> bool:
 
     response_metadata = getattr(message, "response_metadata", {}) or {}
     return response_metadata.get("finish_reason") in _TOOL_CALL_FINISH_REASONS
+
+
+_SYNTHETIC_WRITE_TODOS_ID_PREFIX = "deerflow_write_todos_synthetic_"
+
+
+def _usable_call_id(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _relabel_provider_tool_call_ids(
+    message: AIMessage,
+    calls: list[dict[str, Any]],
+    occurrence_plans: dict[str | None, list[str]],
+) -> AIMessage:
+    """Rename each todo occurrence in the original provider blocks and raw calls."""
+    invalid_arguments = {(_usable_call_id(call.get("id")), args) for call in message.invalid_tool_calls if isinstance(call, dict) and call.get("name") == "write_todos" and ((args := call.get("args")) is None or isinstance(args, str))}
+
+    def _rewrite(entries: list[Any], *, raw: bool) -> list[Any]:
+        pending = {call_id: deque(ids) for call_id, ids in occurrence_plans.items()}
+        rewritten: list[Any] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                rewritten.append(entry)
+                continue
+
+            details = entry
+            id_key = "id"
+            if raw:
+                function = entry.get("function")
+                if isinstance(function, dict):
+                    details = function
+            elif entry.get("type") == "function_call":
+                # Responses has a separate item id, even if the call id is missing.
+                if "call_id" in entry or "arguments" in entry:
+                    id_key = "call_id"
+            elif entry.get("type") not in ("tool_use", "tool_call", "tool_call_chunk"):
+                rewritten.append(entry)
+                continue
+
+            original = _usable_call_id(entry.get(id_key))
+            remaining = pending.get(original)
+            arguments = details.get("arguments", details.get("args", details.get("input")))
+            is_invalid = (arguments is None or isinstance(arguments, str)) and (original, arguments) in invalid_arguments
+            if details.get("name") == "write_todos" and remaining and not is_invalid:
+                new_id = remaining.popleft()
+                if new_id != entry.get(id_key):
+                    entry = {**entry, id_key: new_id}
+            rewritten.append(entry)
+        return rewritten
+
+    update: dict[str, Any] = {"tool_calls": calls}
+    additional_kwargs = message.additional_kwargs
+    raw_calls = additional_kwargs.get("tool_calls")
+    if isinstance(raw_calls, list):
+        update["additional_kwargs"] = {**additional_kwargs, "tool_calls": _rewrite(raw_calls, raw=True)}
+
+    if isinstance(message.content, list):
+        update["content"] = _rewrite(message.content, raw=False)
+
+    # A Responses continuation would replay the server's uncorrected call IDs.
+    response_id = message.response_metadata.get("id")
+    if isinstance(response_id, str) and response_id.startswith("resp_"):
+        update["response_metadata"] = {key: value for key, value in message.response_metadata.items() if key != "id"}
+
+    return message.model_copy(update=update)
+
+
+def _normalize_write_todos_ids(message: AIMessage) -> AIMessage | None:
+    """Return *message* with addressable ``write_todos`` call ids, or None.
+
+    The base ``TodoListMiddleware.after_model`` builds a ``ToolMessage`` per
+    parallel ``write_todos`` call from ``tool_calls[*]["id"]``, and the tool
+    node does the same for a single call. A missing or non-string id raises a
+    pydantic validation error there and aborts the run; an empty id is
+    accepted but cannot be matched to its result, and a repeated id makes the
+    results ambiguous. ``backend/AGENTS.md`` requires addressable call ids, so
+    give those calls synthetic ids and replace the message in place (same
+    message id, so the reducer substitutes it).
+
+    Reserve ids from other valid calls and invalid calls in the response.
+    DanglingToolCallMiddleware can produce results for invalid calls too.
+    """
+    calls = list(message.tool_calls or [])
+    todo_positions = [position for position, call in enumerate(calls) if call.get("name") == "write_todos"]
+    if not todo_positions:
+        return None
+
+    other_calls = [call for call in calls if call.get("name") != "write_todos"]
+    seen = {call_id for call in [*other_calls, *message.invalid_tool_calls] if isinstance(call, dict) and (call_id := _usable_call_id(call.get("id"))) is not None}
+    used = seen | {call_id for call in calls if (call_id := _usable_call_id(call.get("id"))) is not None}
+    changed = False
+    occurrence_plans: dict[str | None, list[str]] = defaultdict(list)
+    for position in todo_positions:
+        call = calls[position]
+        original = _usable_call_id(call.get("id"))
+        call_id = original
+        if call_id is None or call_id in seen:
+            call_id = f"{_SYNTHETIC_WRITE_TODOS_ID_PREFIX}{position}"
+            while call_id in used:
+                call_id += "_"
+            used.add(call_id)
+            calls[position] = {**call, "id": call_id}
+            changed = True
+        seen.add(call_id)
+        occurrence_plans[original].append(call_id)
+
+    return _relabel_provider_tool_call_ids(message, calls, occurrence_plans) if changed else None
 
 
 class TodoMiddleware(TodoListMiddleware):
@@ -446,10 +554,21 @@ class TodoMiddleware(TodoListMiddleware):
         if any(termination_metadata.get(marker) for marker in _COMPLETION_REMINDER_RESPONSE_STOP_MARKERS.values()):
             return None
 
-        # 1. Preserve base class logic (parallel write_todos detection).
-        base_result = super().after_model(state, runtime)
+        # 1. Preserve base class logic (parallel write_todos detection). Give
+        # malformed call ids synthetic ones first: the base builds ToolMessages
+        # from them, and the tool node does the same for a single call, so a
+        # missing or duplicated id would abort the run with a validation error.
+        normalized_ai = _normalize_write_todos_ids(last_ai) if last_ai is not None else None
+        base_state = state
+        if normalized_ai is not None:
+            base_state = {**state, "messages": [normalized_ai if item is last_ai else item for item in messages]}
+        base_result = super().after_model(base_state, runtime)
         if base_result is not None:
-            return base_result
+            if normalized_ai is None:
+                return base_result
+            return {**base_result, "messages": [normalized_ai, *(base_result.get("messages") or [])]}
+        if normalized_ai is not None:
+            return {"messages": [normalized_ai]}
 
         # 2. Only intervene when the agent wants to exit cleanly. Tool-call
         # intent or tool-call parse errors should be handled by the tool path
