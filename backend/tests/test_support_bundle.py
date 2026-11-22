@@ -21,6 +21,29 @@ def _isolate_runtime_paths(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _restore_harness_config_modules():
+    """Keep the harness config module identity intact across a fresh re-import.
+
+    Several cases drop `deerflow.config.app_config` from `sys.modules` so the
+    resolve step re-imports it and re-runs the dotenv load. `deerflow.config`
+    binds `get_app_config` to the original module object, so leaving the new
+    module (and the parent package attribute pointing at it) in place makes that
+    function read a stale singleton and fails later, unrelated tests such as
+    `tests/test_tool_result_meta.py`. Restore both slots once the case ends.
+    """
+    package = sys.modules.get("deerflow.config")
+    module = sys.modules.get("deerflow.config.app_config")
+    package_attr = getattr(package, "app_config", None) if package is not None else None
+    try:
+        yield
+    finally:
+        if module is not None:
+            sys.modules["deerflow.config.app_config"] = module
+        if package is not None and package_attr is not None:
+            package.app_config = package_attr
+
+
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
         return zf.read(name).decode("utf-8")
