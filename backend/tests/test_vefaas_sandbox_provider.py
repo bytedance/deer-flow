@@ -15,6 +15,7 @@ import subprocess
 import tarfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -60,10 +61,18 @@ class _FakeAioSandbox:
         self.remote_outputs: dict[str, bytes] = {}
         self.closed = False
         self.fail_upload_script = False
+        self.fail_bootstrap = False
+        self.bootstrap_output_override: str | None = None
         self.init_marker_override: str | None = None
 
     def execute_command(self, command: str) -> str:
         self.commands.append(command)
+        if command == provider_mod._BOOTSTRAP_COMMAND:
+            if self.bootstrap_output_override is not None:
+                return self.bootstrap_output_override
+            if self.fail_bootstrap:
+                return "mkdir: cannot create directory '/mnt/user-data/workspace': Permission denied\n"
+            return f"{provider_mod._BOOTSTRAP_OK_MARKER}\n"
         if "INIT_MARKER:" in command:
             if self.init_marker_override is not None:
                 return self.init_marker_override
@@ -1155,14 +1164,34 @@ class TestVeFaaSSandboxProviderLifecycle:
 
         # Pending destroy is already registered atomically under _lock, so shutdown() sees and kills it.
         assert "vefaas-sb-1" in provider._pending_destroys
+        claim_calls_before_resume: list[tuple[str, bool]] = []
+        orig_claim = provider._ownership.claim
+
+        def spy_claim(sid: str, *, for_destroy: bool = False) -> bool:
+            claim_calls_before_resume.append((sid, for_destroy))
+            return orig_claim(sid, for_destroy=for_destroy)
+
+        monkeypatch.setattr(provider._ownership, "claim", spy_claim)
         provider.shutdown()
         assert provider._shutdown_complete is True
-        assert any(a == "KillSandbox" and p["SandboxId"] == "vefaas-sb-1" for a, p, _ in server.requests)
+        assert sum(1 for a, p, _ in server.requests if a == "KillSandbox" and p["SandboxId"] == "vefaas-sb-1") == 1
         assert server.sandboxes == {}
+        assert provider._pending_destroys == {}
+        claims_during_shutdown = len(claim_calls_before_resume)
 
+        # Resume paused release after shutdown already completed the teardown and closed the client.
         release_destroy.set()
         releaser.join(timeout=5)
         assert not releaser.is_alive()
+
+        # Deferred release teardown must be a no-op once shutdown has already completed the registration.
+        assert provider._pending_destroys == {}
+        assert provider._quarantined_remote_ids == {}
+        assert len(claim_calls_before_resume) == claims_during_shutdown
+        assert sum(1 for a, p, _ in server.requests if a == "KillSandbox" and p["SandboxId"] == "vefaas-sb-1") == 1
+        assert provider._ownership.owner(sandbox_id) is None
+        provider.shutdown()
+        assert provider._pending_destroys == {}
 
     def test_adoption_verifies_initialization_and_restores_uploads_when_uninitialized(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         from deerflow.config.paths import get_paths
@@ -1265,3 +1294,310 @@ class TestVeFaaSSandboxProviderLifecycle:
             assert aio_c[1].request_headers[provider_mod.INSTANCE_ROUTING_HEADER] == "vefaas-sb-1"
         finally:
             provider_c.shutdown()
+
+    def test_bootstrap_failure_blocks_init_marker_and_rolls_back(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # Case A: fresh sandbox creation fails bootstrap (including PTY command-echo output without standalone marker).
+        provider_a, server_a, aio_a = _install_provider(monkeypatch, tmp_path / "fresh")
+        orig_ctor_a = provider_mod.AioSandbox
+
+        def fail_bootstrap_fresh(**kwargs: Any) -> Any:
+            inst = orig_ctor_a(**kwargs)
+            inst.bootstrap_output_override = f"{provider_mod._BOOTSTRAP_COMMAND}\nmkdir: Permission denied\n"
+            return inst
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", fail_bootstrap_fresh)
+        try:
+            with pytest.raises(RuntimeError, match="bootstrap failed"):
+                provider_a.acquire("t-boot-fresh", user_id="u1")
+            assert len(aio_a) == 1
+            assert provider_mod._INIT_MARKER_PATH not in aio_a[0].uploaded_files
+            assert any(a == "KillSandbox" for a, _, _ in server_a.requests)
+            assert server_a.sandboxes == {}
+        finally:
+            provider_a.shutdown()
+
+        # Case B: adoption of an uninitialized running sandbox fails bootstrap -> no marker, rolled back.
+        server_b = _FakeVeFaaSServer()
+        sid_b = derive_sandbox_scope_token(user_id="u1", thread_id="t-boot-adopt")
+        server_b.sandboxes["vefaas-uninit-boot"] = {
+            "Id": "vefaas-uninit-boot",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_b,
+            },
+        }
+        provider_b, _, aio_b = _install_provider(monkeypatch, tmp_path / "adopt", server=server_b)
+        orig_ctor_b = provider_mod.AioSandbox
+
+        def fail_bootstrap_adopt(**kwargs: Any) -> Any:
+            inst = orig_ctor_b(**kwargs)
+            inst.fail_bootstrap = True
+            return inst
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", fail_bootstrap_adopt)
+        try:
+            with pytest.raises(RuntimeError, match="bootstrap failed"):
+                provider_b.acquire("t-boot-adopt", user_id="u1")
+            assert len(aio_b) == 1
+            assert provider_mod._INIT_MARKER_PATH not in aio_b[0].uploaded_files
+            assert any(a == "KillSandbox" and p["SandboxId"] == "vefaas-uninit-boot" for a, p, _ in server_b.requests)
+            assert server_b.sandboxes == {}
+        finally:
+            provider_b.shutdown()
+
+    def test_concurrent_second_worker_does_not_restore_over_live_files(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from deerflow.community.aio_sandbox.ownership import MemoryOwnershipStore
+        from deerflow.config.paths import get_paths
+
+        def _make_shared_remote_ctor(remote_files: dict[str, bytes], marker_holder: dict[str, bytes | None]) -> Callable[..., Any]:
+            class _SharedRemoteAioSandbox(_FakeAioSandbox):
+                def update_file(self, path: str, content: bytes) -> None:
+                    super().update_file(path, content)
+                    if path == provider_mod._INIT_MARKER_PATH:
+                        marker_holder["marker"] = content
+
+                def execute_command(self, command: str) -> str:
+                    self.commands.append(command)
+                    if command == provider_mod._BOOTSTRAP_COMMAND:
+                        return f"{provider_mod._BOOTSTRAP_OK_MARKER}\n"
+                    if "INIT_MARKER:" in command:
+                        marker = marker_holder["marker"]
+                        if marker is not None:
+                            return f"INIT_MARKER:{marker.decode('utf-8').strip()}\n"
+                        return "INIT_MARKER:MISSING\n"
+                    if "UPLOAD_OK" in command:
+                        # Extract uploaded tar archive into shared remote_files to observe overwrites.
+                        for path, raw in list(self.uploaded_files.items()):
+                            if path.endswith(".tar.gz") and path in command:
+                                with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
+                                    for member in tf.getmembers():
+                                        if member.isfile():
+                                            extracted = tf.extractfile(member)
+                                            if extracted is not None:
+                                                remote_files[member.name] = extracted.read()
+                        return "UPLOAD_OK\n"
+                    return ""
+
+            return _SharedRemoteAioSandbox
+
+        # Case A (cross-process style): shared ownership store + distinct in-process lock keys.
+        # Worker A holds an exclusive claim while initializing; Worker B probes missing, sees claim() == False,
+        # waits until Worker A finishes and writes a live file, then adopts without restoring stale host files.
+        server_a = _FakeVeFaaSServer()
+        sid_a = derive_sandbox_scope_token(user_id="u1", thread_id="t-peer-race")
+        server_a.sandboxes["vefaas-shared-1"] = {
+            "Id": "vefaas-shared-1",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_a,
+            },
+        }
+        provider_1, _, _ = _install_provider(monkeypatch, tmp_path / "peer-a", server=server_a)
+        provider_2, _, _ = _install_provider(monkeypatch, tmp_path / "peer-a", server=server_a)
+
+        # Share one underlying ownership table across two distinct owner IDs (simulating two workers on Redis).
+        shared_leases: dict[str, tuple[str, float]] = {}
+        store_1 = MemoryOwnershipStore(owner_id="worker-1", ttl_seconds=60.0)
+        store_2 = MemoryOwnershipStore(owner_id="worker-2", ttl_seconds=60.0)
+        store_1._leases = shared_leases
+        store_2._leases = shared_leases
+        store_1._lock = store_2._lock
+        provider_1._ownership = store_1
+        provider_2._ownership = store_2
+
+        # Simulate separate OS processes where in-process locks do not collide.
+        provider_1._config["endpoint"] = "https://worker-1.vefaas.example"
+        provider_2._config["endpoint"] = "https://worker-2.vefaas.example"
+
+        remote_files_a: dict[str, bytes] = {}
+        marker_a: dict[str, bytes | None] = {"marker": None}
+        monkeypatch.setattr(provider_mod, "AioSandbox", _make_shared_remote_ctor(remote_files_a, marker_a))
+
+        uploads_dir = get_paths().sandbox_uploads_dir("t-peer-race", user_id="u1")
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        (uploads_dir / "report.txt").write_text("stale-host-copy", encoding="utf-8")
+
+        worker1_in_init = threading.Event()
+        worker2_blocked_on_claim = threading.Event()
+        orig_init_1 = provider_1._initialize_remote_sandbox
+        orig_claim_2 = store_2.claim
+
+        def paused_init_1(sandbox: Any, **kwargs: Any) -> None:
+            worker1_in_init.set()
+            assert worker2_blocked_on_claim.wait(timeout=5)
+            orig_init_1(sandbox, **kwargs)
+            # Simulate live agent write immediately after initialization completes.
+            remote_files_a["uploads/report.txt"] = b"live-peer-write"
+
+        def spy_claim_2(sid: str, *, for_destroy: bool = False) -> bool:
+            res = orig_claim_2(sid, for_destroy=for_destroy)
+            if not res:
+                worker2_blocked_on_claim.set()
+            return res
+
+        monkeypatch.setattr(provider_1, "_initialize_remote_sandbox", paused_init_1)
+        monkeypatch.setattr(store_2, "claim", spy_claim_2)
+
+        errors: list[BaseException] = []
+        results: dict[str, str] = {}
+
+        def run_worker(name: str, prov: VeFaaSSandboxProvider) -> None:
+            try:
+                results[name] = prov.acquire("t-peer-race", user_id="u1")
+            except BaseException as exc:  # pragma: no cover - surfaced via assertion
+                errors.append(exc)
+
+        try:
+            t1 = threading.Thread(target=run_worker, args=("w1", provider_1))
+            t2 = threading.Thread(target=run_worker, args=("w2", provider_2))
+            t1.start()
+            assert worker1_in_init.wait(timeout=5)
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+            assert not errors, f"Unexpected errors: {errors}"
+            assert results == {"w1": sid_a, "w2": sid_a}
+            assert remote_files_a["uploads/report.txt"] == b"live-peer-write"
+        finally:
+            provider_1.shutdown()
+            provider_2.shutdown()
+
+        # Case B (stale observation before claim): Worker B's first probe sees missing, then Worker A finishes
+        # initialization, writes a live file, and releases ownership before Worker B claims. Worker B's post-claim
+        # re-probe observes the marker and skips restoration.
+        server_b = _FakeVeFaaSServer()
+        sid_b = derive_sandbox_scope_token(user_id="u1", thread_id="t-stale-probe")
+        server_b.sandboxes["vefaas-shared-2"] = {
+            "Id": "vefaas-shared-2",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_b,
+            },
+        }
+        provider_b, _, _ = _install_provider(monkeypatch, tmp_path / "peer-b", server=server_b)
+        remote_files_b: dict[str, bytes] = {}
+        marker_b: dict[str, bytes | None] = {"marker": None}
+        monkeypatch.setattr(provider_mod, "AioSandbox", _make_shared_remote_ctor(remote_files_b, marker_b))
+
+        uploads_dir_b = get_paths().sandbox_uploads_dir("t-stale-probe", user_id="u1")
+        uploads_dir_b.mkdir(parents=True, exist_ok=True)
+        (uploads_dir_b / "report.txt").write_text("stale-host-copy", encoding="utf-8")
+
+        orig_claim_b = provider_b._ownership.claim
+
+        def peer_finishes_before_claim(sid: str, *, for_destroy: bool = False) -> bool:
+            # Peer finishes initialization and writes a live file just before this worker's claim succeeds.
+            marker_b["marker"] = f"{sid_b}\n".encode()
+            remote_files_b["uploads/report.txt"] = b"live-after-first-probe"
+            return orig_claim_b(sid, for_destroy=for_destroy)
+
+        monkeypatch.setattr(provider_b._ownership, "claim", peer_finishes_before_claim)
+        try:
+            acquired_b = provider_b.acquire("t-stale-probe", user_id="u1")
+            assert acquired_b == sid_b
+            assert remote_files_b["uploads/report.txt"] == b"live-after-first-probe"
+        finally:
+            provider_b.shutdown()
+
+        # Case C (same-process separate stores): two providers with separate MemoryOwnershipStores
+        # sharing the same remote endpoint/function/sandbox_id serialize via _remote_init_lock.
+        server_c = _FakeVeFaaSServer()
+        sid_c = derive_sandbox_scope_token(user_id="u1", thread_id="t-inproc-lock")
+        server_c.sandboxes["vefaas-shared-3"] = {
+            "Id": "vefaas-shared-3",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_c,
+            },
+        }
+        provider_c1, _, _ = _install_provider(monkeypatch, tmp_path / "peer-c", server=server_c)
+        provider_c2, _, _ = _install_provider(monkeypatch, tmp_path / "peer-c", server=server_c)
+        remote_files_c: dict[str, bytes] = {}
+        marker_c: dict[str, bytes | None] = {"marker": None}
+        monkeypatch.setattr(provider_mod, "AioSandbox", _make_shared_remote_ctor(remote_files_c, marker_c))
+
+        uploads_dir_c = get_paths().sandbox_uploads_dir("t-inproc-lock", user_id="u1")
+        uploads_dir_c.mkdir(parents=True, exist_ok=True)
+        (uploads_dir_c / "report.txt").write_text("stale-host-copy", encoding="utf-8")
+
+        c1_in_init = threading.Event()
+        release_c1 = threading.Event()
+        orig_init_c1 = provider_c1._initialize_remote_sandbox
+
+        def paused_init_c1(sandbox: Any, **kwargs: Any) -> None:
+            c1_in_init.set()
+            assert release_c1.wait(timeout=5)
+            orig_init_c1(sandbox, **kwargs)
+            remote_files_c["uploads/report.txt"] = b"live-inproc-write"
+
+        monkeypatch.setattr(provider_c1, "_initialize_remote_sandbox", paused_init_c1)
+
+        c_errors: list[BaseException] = []
+        c_results: dict[str, str] = {}
+
+        def run_c(name: str, prov: VeFaaSSandboxProvider) -> None:
+            try:
+                c_results[name] = prov.acquire("t-inproc-lock", user_id="u1")
+            except BaseException as exc:  # pragma: no cover - surfaced via assertion
+                c_errors.append(exc)
+
+        try:
+            tc1 = threading.Thread(target=run_c, args=("c1", provider_c1))
+            tc2 = threading.Thread(target=run_c, args=("c2", provider_c2))
+            tc1.start()
+            assert c1_in_init.wait(timeout=5)
+            tc2.start()
+            # Give c2 a moment to contend on _remote_init_lock while c1 is initializing.
+            time.sleep(0.05)
+            release_c1.set()
+            tc1.join(timeout=5)
+            tc2.join(timeout=5)
+            assert not c_errors, f"Unexpected errors: {c_errors}"
+            assert c_results == {"c1": sid_c, "c2": sid_c}
+            assert remote_files_c["uploads/report.txt"] == b"live-inproc-write"
+        finally:
+            provider_c1.shutdown()
+            provider_c2.shutdown()
+
+        # Case D (peer holds lease indefinitely without publishing marker): fail closed on timeout
+        # rather than stealing ownership and restoring stale files over a live peer.
+        server_d = _FakeVeFaaSServer()
+        sid_d = derive_sandbox_scope_token(user_id="u1", thread_id="t-peer-timeout")
+        server_d.sandboxes["vefaas-shared-4"] = {
+            "Id": "vefaas-shared-4",
+            "FunctionId": "fn-demo-app",
+            "Status": "Running",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_d,
+            },
+        }
+        provider_d, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "peer-d",
+            server=server_d,
+            sandbox_overrides={"vefaas": {"ready_timeout": 0.05}},
+        )
+        remote_files_d: dict[str, bytes] = {"uploads/report.txt": b"untouched"}
+        marker_d: dict[str, bytes | None] = {"marker": None}
+        monkeypatch.setattr(provider_mod, "AioSandbox", _make_shared_remote_ctor(remote_files_d, marker_d))
+        monkeypatch.setattr(provider_d._ownership, "claim", lambda _sid, *, for_destroy=False: False)
+        try:
+            with pytest.raises(RuntimeError, match="Timed out waiting for peer to initialize"):
+                provider_d.acquire("t-peer-timeout", user_id="u1")
+            assert remote_files_d["uploads/report.txt"] == b"untouched"
+        finally:
+            provider_d.shutdown()

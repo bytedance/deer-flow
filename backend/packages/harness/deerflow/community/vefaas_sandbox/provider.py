@@ -99,8 +99,15 @@ _PROTECTED_ROOTS = (
     "/var",
 )
 _WINDOWS_RESERVED_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "123456789¹²³"})
-_BOOTSTRAP_COMMAND = "mkdir -p /mnt/user-data/workspace /mnt/user-data/uploads /mnt/user-data/outputs"
+_BOOTSTRAP_OK_MARKER = "DEERFLOW_VEFAAS_BOOTSTRAP_OK"
+# Use a split printf format so PTY echo of the command string cannot satisfy the marker check,
+# and run in a subshell with ``set +e`` outside so persistent shell state is never poisoned.
+_BOOTSTRAP_COMMAND = "set +e; ( mkdir -p -- /mnt/user-data/workspace /mnt/user-data/uploads /mnt/user-data/outputs && printf 'DEERFLOW_VEFAAS_%s\\n' 'BOOTSTRAP_OK' )"
 _INIT_MARKER_PATH = "/tmp/.deerflow-vefaas-initialized"
+_ADOPT_INIT_WAIT_SECONDS = 10.0
+_ADOPT_INIT_POLL_INTERVAL_SECONDS = 0.2
+_REMOTE_INIT_LOCKS_GUARD = threading.Lock()
+_REMOTE_INIT_LOCKS: dict[tuple[str, str, str], tuple[threading.RLock, int]] = {}
 _MAX_UPLOAD_FILES = 5000
 _MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 _MAX_SYNC_FILES = 2000
@@ -750,7 +757,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                         else:
                             self._acquire_inflight[sandbox_id] = remaining
                 if rollback:
-                    self._destroy_tracked(tracked, reason="created_during_shutdown")
+                    self._destroy_tracked(tracked, reason="created_during_shutdown", require_pending=True)
                     raise RuntimeError("VeFaaSSandboxProvider shut down during acquire")
                 return sandbox_id
 
@@ -817,7 +824,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     self._bump_acquire_epoch_locked(sandbox_id)
                     rollback = False
             if rollback:
-                self._destroy_tracked(tracked, reason="created_during_shutdown")
+                self._destroy_tracked(tracked, reason="created_during_shutdown", require_pending=True)
                 raise RuntimeError("VeFaaSSandboxProvider shut down during acquire")
             return sandbox_id
         finally:
@@ -844,7 +851,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 if removed is not None:
                     self._pending_destroys[removed[0].remote_sandbox_id] = removed[0]
             if removed is not None:
-                self._destroy_tracked(removed[0], reason="warm_health_check_failed")
+                self._destroy_tracked(removed[0], reason="warm_health_check_failed", require_pending=True)
             return None
 
         if not self._ownership.take(sandbox_id):
@@ -877,10 +884,30 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 self._bump_acquire_epoch_locked(sandbox_id)
                 rollback = False
         if rollback:
-            self._destroy_tracked(removed[0], reason="reclaimed_during_shutdown")
+            self._destroy_tracked(removed[0], reason="reclaimed_during_shutdown", require_pending=True)
             raise RuntimeError("VeFaaSSandboxProvider shut down during acquire")
         logger.info("Reclaimed warm veFaaS sandbox %s (remote=%s)", sandbox_id, tracked.remote_sandbox_id)
         return sandbox_id
+
+    @contextmanager
+    def _remote_init_lock(self, remote_sandbox_id: str) -> Iterator[None]:
+        """Serialize marker checks and initialization for the same remote instance in-process."""
+        key = (str(self._config.get("endpoint") or ""), str(self._config.get("function_id") or ""), remote_sandbox_id)
+        with _REMOTE_INIT_LOCKS_GUARD:
+            lock, refs = _REMOTE_INIT_LOCKS.get(key, (threading.RLock(), 0))
+            _REMOTE_INIT_LOCKS[key] = (lock, refs + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with _REMOTE_INIT_LOCKS_GUARD:
+                entry = _REMOTE_INIT_LOCKS.get(key)
+                if entry is not None:
+                    cur_lock, cur_refs = entry
+                    if cur_refs <= 1:
+                        _REMOTE_INIT_LOCKS.pop(key, None)
+                    else:
+                        _REMOTE_INIT_LOCKS[key] = (cur_lock, cur_refs - 1)
 
     @staticmethod
     def _write_init_marker(sandbox: AioSandbox, sandbox_id: str) -> None:
@@ -909,7 +936,9 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         user_id: str | None,
     ) -> None:
         """Create workspace directories, restore host thread files/skills, and write init marker."""
-        sandbox.execute_command(_BOOTSTRAP_COMMAND)
+        bootstrap_output = sandbox.execute_command(_BOOTSTRAP_COMMAND)
+        if not any(line.strip() == _BOOTSTRAP_OK_MARKER for line in bootstrap_output.splitlines()):
+            raise RuntimeError(f"veFaaS sandbox bootstrap failed for {sandbox_id}: {bootstrap_output[:200]}")
 
         if thread_id is not None and user_id:
             if not self._uses_tos_for_user_data():
@@ -944,32 +973,83 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             if not wait_for_sandbox_ready(url, timeout=5, headers=headers):
                 continue
             sandbox = self._build_aio_sandbox(sandbox_id, record.id)
-            try:
-                init_state = self._probe_init_marker(sandbox, sandbox_id)
-            except Exception as exc:
-                logger.warning("Failed to verify initialization state for veFaaS sandbox %s (remote=%s): %s", sandbox_id, record.id, self._redact(exc))
-                sandbox.close()
-                continue
-            if init_state == "invalid":
-                logger.warning("Refusing to adopt veFaaS sandbox %s (remote=%s): invalid or mismatched initialization marker", sandbox_id, record.id)
-                sandbox.close()
-                continue
-            if not self._ownership.take(sandbox_id):
-                sandbox.close()
-                raise RuntimeError(f"veFaaS sandbox {sandbox_id} is being destroyed by a peer")
-            if init_state == "missing":
-                logger.info("Completing DeerFlow initialization before adopting veFaaS sandbox %s (remote=%s)", sandbox_id, record.id)
-                try:
-                    self._initialize_remote_sandbox(
-                        sandbox,
-                        sandbox_id=sandbox_id,
-                        thread_id=thread_id,
-                        user_id=user_id,
-                    )
-                except Exception:
+            adopt_deadline = time.monotonic() + min(self._config["ready_timeout"], _ADOPT_INIT_WAIT_SECONDS)
+            adopted = False
+            while True:
+                with self._remote_init_lock(record.id):
+                    try:
+                        init_state = self._probe_init_marker(sandbox, sandbox_id)
+                    except Exception as exc:
+                        logger.warning("Failed to verify initialization state for veFaaS sandbox %s (remote=%s): %s", sandbox_id, record.id, self._redact(exc))
+                        break
+                    if init_state == "invalid":
+                        logger.warning("Refusing to adopt veFaaS sandbox %s (remote=%s): invalid or mismatched initialization marker", sandbox_id, record.id)
+                        break
+                    if init_state == "initialized":
+                        try:
+                            taken = self._ownership.take(sandbox_id)
+                        except OwnershipBackendError:
+                            sandbox.close()
+                            raise
+                        if not taken:
+                            sandbox.close()
+                            raise RuntimeError(f"veFaaS sandbox {sandbox_id} is being destroyed by a peer")
+                        adopted = True
+                        break
+
+                    # Marker is missing: only an exclusive claim (never a takeover from a live
+                    # peer) may initialize this remote instance, preventing a second worker from
+                    # restoring older host files over a peer's live workspace.
+                    try:
+                        claimed = self._ownership.claim(sandbox_id)
+                    except OwnershipBackendError:
+                        sandbox.close()
+                        raise
+                    if claimed:
+                        try:
+                            init_state = self._probe_init_marker(sandbox, sandbox_id)
+                        except Exception as exc:
+                            logger.warning("Failed to re-verify initialization state for veFaaS sandbox %s (remote=%s): %s", sandbox_id, record.id, self._redact(exc))
+                            try:
+                                self._ownership.release(sandbox_id)
+                            except OwnershipBackendError as rel_exc:
+                                logger.warning("Failed to release ownership after failed probe on veFaaS sandbox %s: %s", sandbox_id, rel_exc)
+                            break
+                        if init_state == "invalid":
+                            logger.warning("Refusing to adopt veFaaS sandbox %s (remote=%s): invalid or mismatched initialization marker", sandbox_id, record.id)
+                            try:
+                                self._ownership.release(sandbox_id)
+                            except OwnershipBackendError as rel_exc:
+                                logger.warning("Failed to release ownership after refusing invalid veFaaS sandbox %s: %s", sandbox_id, rel_exc)
+                            break
+                        if init_state == "missing":
+                            logger.info("Completing DeerFlow initialization before adopting veFaaS sandbox %s (remote=%s)", sandbox_id, record.id)
+                            try:
+                                self._initialize_remote_sandbox(
+                                    sandbox,
+                                    sandbox_id=sandbox_id,
+                                    thread_id=thread_id,
+                                    user_id=user_id,
+                                )
+                            except Exception:
+                                sandbox.close()
+                                self._rollback_remote_sandbox(sandbox_id, record.id, release_ownership=True)
+                                raise
+                        adopted = True
+                        break
+
+                # Outside _remote_init_lock: another live worker holds ownership while this
+                # sandbox is still uninitialized. Wait briefly for it to publish the marker
+                # or drop ownership instead of stealing and restoring over live files.
+                remaining = adopt_deadline - time.monotonic()
+                if remaining <= 0:
                     sandbox.close()
-                    self._rollback_remote_sandbox(sandbox_id, record.id, release_ownership=True)
-                    raise
+                    raise RuntimeError(f"Timed out waiting for peer to initialize veFaaS sandbox {sandbox_id} (remote={record.id})")
+                time.sleep(min(_ADOPT_INIT_POLL_INTERVAL_SECONDS, remaining))
+
+            if not adopted:
+                sandbox.close()
+                continue
             try:
                 client.set_sandbox_timeout(
                     function_id,
@@ -1049,6 +1129,13 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         sandbox: AioSandbox | None = None
         ownership_taken = False
         try:
+            # Publish ownership immediately after CreateSandbox (while the instance is
+            # still starting up) so a concurrent peer cannot claim and initialize it
+            # before this worker finishes bootstrapping.
+            if not self._ownership.take(sandbox_id):
+                raise RuntimeError(f"Refused to hand out veFaaS sandbox {sandbox_id}: peer holds teardown lease")
+            ownership_taken = True
+
             deadline = time.monotonic() + self._config["ready_timeout"]
             self._wait_for_remote_running(function_id, remote_sandbox_id, deadline=deadline)
 
@@ -1057,17 +1144,18 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             if not wait_for_sandbox_ready(url, timeout=remaining, headers=headers):
                 raise TimeoutError(f"veFaaS sandbox {remote_sandbox_id} did not become HTTP-ready within {self._config['ready_timeout']}s")
 
-            if not self._ownership.take(sandbox_id):
-                raise RuntimeError(f"Refused to hand out veFaaS sandbox {sandbox_id}: peer holds teardown lease")
-            ownership_taken = True
-
-            sandbox = self._build_aio_sandbox(sandbox_id, remote_sandbox_id)
-            self._initialize_remote_sandbox(
-                sandbox,
-                sandbox_id=sandbox_id,
-                thread_id=thread_id,
-                user_id=user_id,
-            )
+            with self._remote_init_lock(remote_sandbox_id):
+                sandbox = self._build_aio_sandbox(sandbox_id, remote_sandbox_id)
+                init_state = self._probe_init_marker(sandbox, sandbox_id)
+                if init_state == "invalid":
+                    raise RuntimeError(f"Refused to hand out veFaaS sandbox {sandbox_id}: invalid initialization marker")
+                if init_state == "missing":
+                    self._initialize_remote_sandbox(
+                        sandbox,
+                        sandbox_id=sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
 
             return _TrackedVeFaaSSandbox(
                 sandbox_id=sandbox_id,
@@ -1090,7 +1178,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         )
         self._cleanup_rollback(entry, reason="rollback")
 
-    def _cleanup_rollback(self, entry: _PendingRollback, *, reason: str) -> bool:
+    def _cleanup_rollback(self, entry: _PendingRollback, *, reason: str, require_pending: bool = False) -> bool:
         """Kill and confirm absence of a failed provisioning generation.
 
         Returns ``True`` only once the remote instance is authoritatively absent
@@ -1101,6 +1189,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         sandbox_id = entry.sandbox_id
         remote_id = entry.remote_sandbox_id
         with self._lock:
+            if require_pending and self._pending_rollbacks.get(remote_id) is not entry:
+                return False
             self._pending_rollbacks[remote_id] = entry
             if remote_id in self._destroying_remote_ids:
                 return False
@@ -1176,11 +1266,13 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 pending_rollback = self._pending_rollbacks.get(remote_id)
                 pending_destroy = self._pending_destroys.get(remote_id)
             if pending_rollback is not None:
-                if not self._cleanup_rollback(pending_rollback, reason="drain_quarantine"):
-                    still_present.append(remote_id)
+                if not self._cleanup_rollback(pending_rollback, reason="drain_quarantine", require_pending=True):
+                    with self._lock:
+                        if remote_id in self._quarantined_remote_ids.get(sandbox_id, set()):
+                            still_present.append(remote_id)
                 continue
             if pending_destroy is not None:
-                self._destroy_tracked(pending_destroy, reason="drain_quarantine")
+                self._destroy_tracked(pending_destroy, reason="drain_quarantine", require_pending=True)
                 with self._lock:
                     if remote_id in self._quarantined_remote_ids.get(sandbox_id, set()):
                         still_present.append(remote_id)
@@ -1208,10 +1300,13 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         reason: str,
         still_reapable: Callable[[], bool] | None = None,
         pop_warm: bool = False,
+        require_pending: bool = False,
     ) -> bool:
         remote_id = tracked.remote_sandbox_id
         sandbox_id = tracked.sandbox_id
         with self._lock:
+            if require_pending and self._pending_destroys.get(remote_id) is not tracked:
+                return False
             if still_reapable is not None and (sandbox_id in self._local_teardown or not still_reapable()):
                 return False
             if remote_id in self._destroying_remote_ids:
@@ -1271,9 +1366,9 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             pending = list(self._pending_destroys.values())
             pending_rollbacks = list(self._pending_rollbacks.values())
         for tracked in pending:
-            self._destroy_tracked(tracked, reason="retry_destroy")
+            self._destroy_tracked(tracked, reason="retry_destroy", require_pending=True)
         for rollback in pending_rollbacks:
-            self._cleanup_rollback(rollback, reason="retry_rollback")
+            self._cleanup_rollback(rollback, reason="retry_rollback", require_pending=True)
 
     # ── Upload-based file restoration & per-agent skills isolation ───────
 
@@ -1477,7 +1572,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             reason = "recycle_corrupted" if needs_recycle else "released_during_shutdown"
             if needs_recycle:
                 logger.warning("Recycling veFaaS sandbox %s instead of returning it to the warm pool", sandbox_id)
-            self._destroy_tracked(tracked, reason=reason)
+            self._destroy_tracked(tracked, reason=reason, require_pending=True)
         else:
             logger.info("Released veFaaS sandbox %s to the warm pool", sandbox_id)
 
@@ -1586,7 +1681,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             for tracked in unique.values():
                 self._destroy_tracked(tracked, reason="shutdown")
             for rollback in pending_rollbacks:
-                self._cleanup_rollback(rollback, reason="shutdown")
+                self._cleanup_rollback(rollback, reason="shutdown", require_pending=True)
 
             with self._lock:
                 still_pending = len(self._pending_destroys) + len(self._pending_rollbacks)
