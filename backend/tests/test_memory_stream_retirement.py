@@ -559,3 +559,68 @@ async def test_close_preserves_retirement_gap_while_later_run_is_still_draining(
             return_exceptions=True,
         )
         await bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["publish", "publish_end"])
+@pytest.mark.parametrize("cancel_close", [False, True], ids=["close-completes", "close-cancelled"])
+async def test_producer_arriving_after_close_fence_is_rejected_before_waiting(monkeypatch, operation, cancel_close):
+    bridge = MemoryStreamBridge()
+    run_id = f"producer-after-close-{operation}-{cancel_close}"
+    await bridge.publish(run_id, "before", {"value": "before"})
+    stream = bridge._streams[run_id]
+    cleanup_started = asyncio.Event()
+    original_cleanup = bridge.cleanup
+
+    async def observe_cleanup(cleanup_run_id, *, delay=0):
+        cleanup_started.set()
+        await original_cleanup(cleanup_run_id, delay=delay)
+
+    monkeypatch.setattr(bridge, "cleanup", observe_cleanup)
+    closing = None
+    producer = None
+    try:
+        async with stream.condition:
+            closing = asyncio.create_task(bridge.close())
+            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            assert bridge._closing
+
+            async def produce():
+                if operation == "publish":
+                    await bridge.publish(run_id, "late", {"value": "late"})
+                else:
+                    await bridge.publish_end(run_id)
+
+            producer_started = asyncio.Event()
+
+            async def observed_producer():
+                producer_started.set()
+                await produce()
+
+            producer = asyncio.create_task(observed_producer())
+            # The task runs through the API call until it either raises at the
+            # close fence or blocks trying to acquire the held stream Condition.
+            await asyncio.wait_for(producer_started.wait(), timeout=1)
+            if cancel_close:
+                closing.cancel()
+                await asyncio.gather(closing, return_exceptions=True)
+                assert not bridge._closing
+
+        if not cancel_close:
+            await asyncio.wait_for(closing, timeout=1)
+        with pytest.raises(RuntimeError, match="closing"):
+            await asyncio.wait_for(producer, timeout=1)
+
+        if cancel_close:
+            assert not stream.retired
+            assert [event.event for event in stream.events] == ["before"]
+            assert not stream.ended
+        else:
+            assert stream.retired
+            assert stream.events == []
+    finally:
+        for task in (producer, closing):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in (producer, closing) if task is not None), return_exceptions=True)
+        await bridge.close()
