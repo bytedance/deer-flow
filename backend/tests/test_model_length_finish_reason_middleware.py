@@ -77,6 +77,20 @@ def test_additional_kwargs_finish_reason_length_records_stop_reason():
     assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
 
 
+def test_default_middleware_leaves_ollama_done_reason_to_compaction():
+    runtime = _runtime()
+    message = AIMessage(
+        content="Checking the input",
+        tool_calls=[{"name": "read_file", "args": {"path": "notes.txt"}, "id": "call-1"}],
+        response_metadata={"done_reason": "length"},
+    )
+
+    middleware = ModelLengthFinishReasonMiddleware()
+    assert middleware.after_model({"messages": [message]}, runtime) is None
+    assert "stop_reason" not in runtime.context
+    assert middleware.consume_stop_reason("run-1") is None
+
+
 def test_gemini_max_tokens_finish_reason_records_stop_reason():
     mw = ModelLengthFinishReasonMiddleware()
     runtime = _runtime()

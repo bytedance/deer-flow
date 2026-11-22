@@ -64,6 +64,7 @@ from app.gateway.routers import (
     trash,
     uploads,
     user_preferences,
+    voice_input,
 )
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
@@ -1416,6 +1417,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Input polishing API is mounted at /api/input-polish
     app.include_router(input_polish.router)
+    app.include_router(voice_input.router)
 
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)

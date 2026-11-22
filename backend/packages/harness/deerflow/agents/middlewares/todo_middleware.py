@@ -42,6 +42,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import (
     neutralize_untrusted_tags,
 )
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
+from deerflow.agents.middlewares.model_response import is_empty_stop_response
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
 from deerflow.agents.thread_state import ThreadState
 from deerflow.utils.messages import UNTRUSTED_INPUT_KEY
@@ -732,11 +733,11 @@ class TodoMiddleware(TodoListMiddleware):
             return reminders
 
     def _restore_completion_reminders(self, runtime: Runtime, reminders: list[str]) -> None:
-        """Requeue reminders taken for a model call that raised.
+        """Requeue reminders taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the reminder. The count is not bumped again: it was spent when the
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the reminder. The count is not bumped again: it was spent when the
         reminder was queued. A run whose reminder state was dropped meanwhile
         stays dropped.
         """
@@ -881,10 +882,13 @@ class TodoMiddleware(TodoListMiddleware):
         # carries the injected system prompt.
         reminders = self._drain_completion_reminders(request.runtime)
         try:
-            return super().wrap_model_call(request, lambda req: handler(self._inject_completion_reminders(req, reminders)))
+            response = super().wrap_model_call(request, lambda req: handler(self._inject_completion_reminders(req, reminders)))
         except Exception:
             self._restore_completion_reminders(request.runtime, reminders)
             raise
+        if is_empty_stop_response(response):
+            self._restore_completion_reminders(request.runtime, reminders)
+        return response
 
     @override
     async def awrap_model_call(
@@ -903,10 +907,13 @@ class TodoMiddleware(TodoListMiddleware):
             return await handler(self._inject_completion_reminders(req, reminders))
 
         try:
-            return await super().awrap_model_call(request, augmented_handler)
+            response = await super().awrap_model_call(request, augmented_handler)
         except Exception:
             self._restore_completion_reminders(request.runtime, reminders)
             raise
+        if is_empty_stop_response(response):
+            self._restore_completion_reminders(request.runtime, reminders)
+        return response
 
     @override
     def after_agent(self, state: ThreadState, runtime: Runtime) -> dict[str, Any] | None:

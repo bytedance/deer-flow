@@ -1528,6 +1528,23 @@ input_polish:
 
 
 # ============================================================================
+# Optional Voice Input (Speech-to-Text)
+# ============================================================================
+# Omit this block (or set voice_input: null) to hide the microphone in the UI.
+# Requires an OpenAI-compatible POST /audio/transcriptions endpoint and a model
+# that accepts the browser's recording format (WebM/Opus, MP4 or Ogg/Opus).
+# The base URL and key stay on the Gateway; audio is sent only after recording.
+# voice_input:
+#   base_url: https://speech.example.com/v1
+#   model: your-transcription-model
+#   api_key: $VOICE_INPUT_API_KEY  # Optional for services without authentication.
+#   language: zh                 # Optional; omit to detect the spoken language.
+#   max_audio_bytes: 10485760     # 10 MiB; must not exceed the provider's limit.
+#   max_duration_seconds: 120    # Browser recording limit.
+#   timeout_seconds: 60          # Total provider request timeout (1–120 seconds).
+
+
+# ============================================================================
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.

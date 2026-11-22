@@ -126,8 +126,9 @@ async def test_vanished_scratch_file_does_not_discard_run_file_changes(tmp_path,
     delivery = await _delivery_events(store, "thread-1", record.run_id)
     assert delivery[0]["content"]["produced_paths"] == ["/mnt/user-data/outputs/report.md"]
     assert delivery[0]["content"]["satisfied"] is False
-    assert record.status == RunStatus.error
-    assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
+    assert delivery[0]["content"]["enforcement"] == "advisory"
+    assert record.status == RunStatus.success
+    assert record.error is None
 
 
 @pytest.mark.anyio
@@ -250,12 +251,13 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
         "matched_paths": ["/mnt/user-data/outputs/report.md"],
         "stage": "presented",
         "satisfied": True,
+        "enforcement": "advisory",
     }
     assert record.status == RunStatus.success
 
 
 @pytest.mark.anyio
-async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
+async def test_changed_outputs_are_advisory_when_not_presented(monkeypatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     store = MemoryRunEventStore()
@@ -292,10 +294,96 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
         "matched_paths": [],
         "stage": "not_started",
         "satisfied": False,
+        "enforcement": "advisory",
     }
+    assert record.status == RunStatus.success
+    assert record.error is None
+    assert record.stop_reason is None
+
+
+@pytest.mark.anyio
+async def test_goal_run_delivery_stays_required_when_not_presented(monkeypatch):
+    """A goal run's missing deliverable still fails the run.
+
+    The evaluator's verdict marks the run as a goal run, so delivery keeps its
+    strict verdict instead of the ordinary advisory one.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    async def prepare_continuation(**kwargs):
+        kwargs["verdict_callback"]({"continuation_count": 1}, {"satisfied": True}, None)
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
+
+    class ProseOnlyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="SESSION SUMMARY")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProseOnlyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert delivery[0]["content"]["enforcement"] == "required"
+    assert delivery[0]["content"]["satisfied"] is False
+    assert record.goal_verdict["satisfied"] is True
     assert record.status == RunStatus.error
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
-    assert record.stop_reason is None
+
+
+@pytest.mark.anyio
+async def test_active_goal_participation_keeps_delivery_required_without_a_verdict(monkeypatch):
+    """A goal run stays required even when persisting its verdict failed.
+
+    ``capture_goal_verdict`` only fires after the checkpoint write; the
+    participation callback fires as soon as the run sees an active goal.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    async def prepare_continuation(**kwargs):
+        kwargs["participation_callback"]({"status": "active"})
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
+
+    class ProseOnlyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="SESSION SUMMARY")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProseOnlyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert delivery[0]["content"]["enforcement"] == "required"
+    assert record.goal_verdict is None
+    assert record.status == RunStatus.error
+    assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
 
 
 @pytest.mark.anyio
@@ -313,6 +401,15 @@ async def test_unpresented_outputs_publish_an_error_frame_before_end(monkeypatch
         "deerflow.runtime.runs.worker._produced_output_paths",
         AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
     )
+
+    async def prepare_continuation(**kwargs):
+        # Delivery enforcement is required only for a goal run; mark this fixture
+        # as one so it keeps exercising the required delivery path.
+        kwargs["participation_callback"]({"status": "active"})
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
+
     bridge = _RecordingBridge()
 
     class ProseOnlyAgent:
@@ -353,6 +450,15 @@ async def test_unpersisted_delivery_receipt_publishes_an_error_frame_before_end(
         "deerflow.runtime.runs.worker._persist_delivery_receipt",
         AsyncMock(return_value=False),
     )
+
+    async def prepare_continuation(**kwargs):
+        # Delivery enforcement is required only for a goal run; mark this fixture
+        # as one so it keeps exercising the required delivery path.
+        kwargs["participation_callback"]({"status": "active"})
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
+
     bridge = _RecordingBridge()
 
     class PresentingAgent:
@@ -440,6 +546,14 @@ async def test_unconfirmed_delivery_terminal_status_defers_the_error_frame_until
         AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
     )
 
+    async def prepare_continuation(**kwargs):
+        # Delivery enforcement is required only for a goal run; mark this fixture
+        # as one so it keeps exercising the required delivery path.
+        kwargs["participation_callback"]({"status": "active"})
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
+
     class ProseOnlyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             yield {"messages": [AIMessage(content="SESSION SUMMARY")]}
@@ -525,8 +639,8 @@ async def test_truncated_snapshots_limit_output_delivery_verification(tmp_path, 
     elif terminal_outcome == "cancelled":
         assert record.status == RunStatus.interrupted
     elif modify_existing:
-        assert record.status == RunStatus.error
-        assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
+        assert record.status == RunStatus.success
+        assert record.error is None
     else:
         assert record.status == RunStatus.success
         assert record.error is None
@@ -698,7 +812,7 @@ async def test_changed_outputs_succeed_when_one_of_multiple_outputs_is_presented
 
 
 @pytest.mark.anyio
-async def test_changed_outputs_fail_when_present_files_only_presents_an_unrelated_file(monkeypatch):
+async def test_changed_outputs_are_advisory_when_present_files_only_presents_an_unrelated_file(monkeypatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     store = MemoryRunEventStore()
@@ -740,7 +854,9 @@ async def test_changed_outputs_fail_when_present_files_only_presents_an_unrelate
     assert delivery["presented_paths"] == ["/mnt/user-data/outputs/old-report.md"]
     assert delivery["matched_paths"] == []
     assert delivery["satisfied"] is False
-    assert record.status == RunStatus.error
+    assert delivery["enforcement"] == "advisory"
+    assert record.status == RunStatus.success
+    assert record.error is None
 
 
 @pytest.mark.anyio
@@ -1038,7 +1154,7 @@ async def test_delivery_write_failure_preserves_real_durable_terminal_status():
 
 
 @pytest.mark.anyio
-async def test_produced_artifact_delivery_fails_closed_when_receipt_cannot_be_persisted(monkeypatch):
+async def test_produced_artifact_delivery_keeps_an_advisory_run_successful_when_receipt_cannot_be_persisted(monkeypatch):
     class FailingReceiptStore(MemoryRunEventStore):
         async def put_if_absent(self, **kwargs):
             raise RuntimeError("event store unavailable")
@@ -1050,6 +1166,61 @@ async def test_produced_artifact_delivery_fails_closed_when_receipt_cannot_be_pe
         "deerflow.runtime.runs.worker._produced_output_paths",
         AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
     )
+
+    class PresentingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._remember_current_run_tool_calls(
+                AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}]),
+                caller="lead_agent",
+            )
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=FailingReceiptStore()),
+        agent_factory=lambda *, config: PresentingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    assert record.error is None
+    assert (await run_store.get(record.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_required_delivery_receipt_failure_still_fails_a_goal_run(monkeypatch):
+    """A goal run still fails closed when its delivery receipt cannot be persisted."""
+
+    class FailingReceiptStore(MemoryRunEventStore):
+        async def put_if_absent(self, **kwargs):
+            raise RuntimeError("event store unavailable")
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    async def prepare_continuation(**kwargs):
+        kwargs["participation_callback"]({"status": "active"})
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
 
     class PresentingAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
