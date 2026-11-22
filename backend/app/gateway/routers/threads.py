@@ -1799,10 +1799,9 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     keep = body.keep.to_tuple() if body.keep is not None else None
-    from app.gateway.deps import get_thread_store
-
-    # The memory flush needs share provenance, which run admission does not set here.
-    share_copy = await is_share_copy_thread(get_thread_store(request), thread_id, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
+    # The memory flush needs share provenance, which run admission does not set
+    # here. A deployment without a thread store cannot hold share copies.
+    share_copy = await is_share_copy_thread(getattr(request.app.state, "thread_store", None), thread_id, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             result = await compact_thread_context(
