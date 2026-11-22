@@ -80,6 +80,7 @@ test.each([
   ["max_continuations_reached", "maxContinuations"],
   ["no_progress_detected", "noProgress"],
   ["token_capped", "tokenCapped"],
+  ["loop_capped", "loopCapped"],
   ["no_verdict", "noVerdict"],
 ])("unmet reason %s maps to %s", (code, reasonKey) => {
   expect(describeGoalOutcome(run({ status: "unmet", error: code }))).toEqual({

@@ -897,6 +897,69 @@ def test_update_user_normalizes_email(tmp_path):
     asyncio.run(_run())
 
 
+def test_update_user_to_a_registered_email_raises_value_error(tmp_path):
+    """An email change that collides at commit reports the conflict like create_user.
+
+    The caller's pre-check cannot see an address registered after it ran, so
+    the unique index is what catches the collision. The update must then
+    raise the documented ``ValueError`` and leave the row as it was.
+    """
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            await repo.create_user(User(email="alice@x.com", password_hash="h", system_role="user"))
+            bob = await repo.create_user(User(email="bob@x.com", password_hash="bob-hash", system_role="user"))
+            bob.email = "Alice@X.com"
+            bob.password_hash = "new-hash"
+            bob.token_version += 1
+
+            with pytest.raises(ValueError, match="Email already registered: alice@x.com"):
+                await repo.update_user(bob)
+
+            stored = await repo.get_user_by_id(str(bob.id))
+            assert stored is not None
+            assert (stored.email, stored.password_hash, stored.token_version) == ("bob@x.com", "bob-hash", 0)
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_update_user_non_email_integrity_error_propagates(tmp_path):
+    """Only the email index maps to ValueError; another unique violation is not an email conflict."""
+    import asyncio
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            await repo.create_user(User(email="alice@x.com", password_hash=None, system_role="user", oauth_provider="oidc", oauth_id="sub-1"))
+            bob = await repo.create_user(User(email="bob@x.com", password_hash="h", system_role="user"))
+            bob.oauth_provider, bob.oauth_id = "oidc", "sub-1"
+
+            with pytest.raises(IntegrityError):
+                await repo.update_user(bob)
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
 def test_distinct_emails_remain_distinct(tmp_path):
     """Case-folding must not collapse genuinely different addresses."""
     import asyncio
@@ -2250,3 +2313,13 @@ def test_validate_next_param_rejects_unsafe_paths():
     assert validate_next_param("/foo\\bar") is None
     assert validate_next_param("//evil.example") is None
     assert validate_next_param("https://evil.example") is None
+    # Browsers delete tab, LF and CR before parsing, turning these into
+    # protocol-relative URLs; every other C0 control and DEL is rejected too.
+    assert validate_next_param("/\t//evil.example") is None
+    assert validate_next_param("/\n//evil.example") is None
+    assert validate_next_param("/\r//evil.example") is None
+    assert validate_next_param("/\n/evil.example") is None
+    assert validate_next_param("/workspace\x00") is None
+    assert validate_next_param("/workspace\x7f") is None
+    # Percent-encoded forms are not decoded by URL parsers and stay local.
+    assert validate_next_param("/%0A//evil.example") == "/%0A//evil.example"

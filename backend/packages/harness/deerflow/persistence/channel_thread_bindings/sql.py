@@ -7,6 +7,10 @@ Concurrency contract, shared with ``app.channels.store.SqlChannelStore``:
   existing ``created_at`` — the overwrite semantics the JSON store had — so two
   replicas recording the same conversation never produce two rows and never
   lose the first stamp.
+- ``claim`` is the first binding of a conversation: ``INSERT ... ON CONFLICT
+  DO NOTHING`` plus a read of the winning row in the same transaction, so two
+  replicas that each created a thread for one new conversation converge on
+  the first one bound.
 - ``insert_missing`` is the one-time import primitive: ``INSERT ... ON CONFLICT
   DO NOTHING`` in bounded batches, returning only the rows it actually inserted,
   so two replicas importing the same ``store.json`` concurrently can neither
@@ -96,6 +100,14 @@ class SqlChannelThreadBindingRepository:
             )
             await session.execute(stmt)
             await session.commit()
+
+    async def claim(self, binding: ChannelThreadBinding) -> str:
+        """Insert the binding unless its key exists; return the ``thread_id`` the key is bound to."""
+        async with self._sf() as session:
+            await session.execute(_insert_for(session)(ChannelThreadBindingRow).values(**_values(binding)).on_conflict_do_nothing(index_elements=[ChannelThreadBindingRow.key]))
+            bound = (await session.execute(select(ChannelThreadBindingRow.thread_id).where(ChannelThreadBindingRow.key == binding.key))).scalar_one()
+            await session.commit()
+            return bound
 
     async def delete(self, key: str) -> bool:
         async with self._sf() as session:

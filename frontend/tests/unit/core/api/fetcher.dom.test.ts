@@ -58,3 +58,32 @@ describe("api fetcher unauthorized redirect", () => {
     expect(window.location.href).not.toContain("next=");
   });
 });
+
+describe("api fetcher CSRF cookies", () => {
+  afterEach(() => {
+    document.cookie = "theme=; max-age=0; path=/";
+    document.cookie = "csrf_token=; max-age=0; path=/";
+    rs.unstubAllGlobals();
+  });
+
+  it("forwards a malformed CSRF cookie after an unrelated malformed cookie", async () => {
+    const sentHeaders: Headers[] = [];
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sentHeaders.push(new Headers(init?.headers));
+        return new Response("ok");
+      }),
+    );
+    // Each assignment sets one cookie; semicolon-separated tails are attributes.
+    document.cookie = "theme=%E0; path=/";
+    document.cookie = "csrf_token=%gh; path=/";
+
+    expect(document.cookie).toBe("theme=%E0; csrf_token=%gh");
+
+    await apiFetch("http://localhost/api/threads", { method: "POST" });
+
+    expect(sentHeaders).toHaveLength(1);
+    expect(sentHeaders[0]?.get("X-CSRF-Token")).toBe("%gh");
+  });
+});

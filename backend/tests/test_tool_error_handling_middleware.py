@@ -1,3 +1,4 @@
+import base64
 import posixpath
 import re
 import sys
@@ -7,6 +8,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import ToolException
 from langgraph.errors import GraphInterrupt
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
@@ -201,6 +203,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
             "deerflow.agents.middlewares.input_sanitization_middleware",
             InputSanitizationMiddleware=FakeInputSanitizationMiddleware,
             neutralize_untrusted_tags=lambda value: value,
+            frame_untrusted_text=lambda value: value,
         ),
     )
 
@@ -212,7 +215,8 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
-    # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
+    # + 1 SkillActivationMiddleware (allowed-tools is metadata, no policy wrapper)
+    # + 1 ModelLengthFinishReasonMiddleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware + 1 ToolReceiptMiddleware
@@ -221,18 +225,18 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # (tool_artifacts enabled by default, #4676).
     # + 1 ModelContentCompatibilityMiddleware (unconditional read-time
     # sanitizer between DurableContext and the date/coalescer tail).
+    # + 1 HarnessGuardMiddleware (enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 23
+    assert len(middlewares) == 24
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
@@ -246,9 +250,6 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert any(isinstance(m, TokenBudgetMiddleware) for m in middlewares)
     assert any(isinstance(m, SafetyFinishReasonMiddleware) for m in middlewares)
     activation_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillActivationMiddleware))
-    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
-    assert policy_idx == activation_idx + 1
-    assert middlewares[activation_idx]._slash_source_owner_token == middlewares[policy_idx]._slash_source_owner_token
     # DurableContextMiddleware is present but not last: the coalescer (#4040) is
     # appended innermost so it can merge the SystemMessage DurableContext injects.
     # The coalescer is appended unconditionally (after the optional summarization
@@ -257,7 +258,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
     date_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SubagentDateContextMiddleware))
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
-    assert policy_idx < durable_idx < date_idx == len(middlewares) - 2
+    assert activation_idx < durable_idx < date_idx == len(middlewares) - 2
 
 
 def test_subagent_runtime_sandbox_does_not_own_lead_skill_projection() -> None:
@@ -697,6 +698,130 @@ def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():
     assert result.status == "error"
 
 
+def _adapter_image_error(payload: str) -> ToolException:
+    """The ToolException langchain-mcp-adapters raises for an image-only error.
+
+    The ``sse``/``http`` path keeps the adapter's conversion, which falls back
+    to ``str(content)`` when an error result has no text block; that string
+    embeds the inline base64 payload.
+    """
+    from langchain_mcp_adapters.tools import _convert_call_tool_result
+    from mcp.types import CallToolResult, ImageContent
+
+    with pytest.raises(ToolException) as excinfo:
+        _convert_call_tool_result(CallToolResult(content=[ImageContent(type="image", data=payload, mimeType="image/png")], isError=True))
+    return excinfo.value
+
+
+def test_error_message_redacts_inline_base64_before_truncation():
+    """A ~100 KB image-only MCP error becomes a short message without the payload."""
+    payload = base64.b64encode(b"deerflow-inline-payload-" + bytes(range(256)) * 400).decode("ascii")
+    assert len(payload) > 100_000
+    exc = _adapter_image_error(payload)
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="mcp_tool", tool_call_id="tc-img")
+
+    def _boom(_req):
+        raise exc
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert "<omitted>" in result.text
+    assert payload[:256] not in result.text
+    assert payload not in result.text
+    assert "image/png" in result.text
+    assert len(result.text) < 600
+
+
+# Encodes to "-_" in the URL-safe alphabet, so the payload only redacts once
+# the pattern accepts base64url characters as well as standard base64.
+_BASE64URL_PROBE = b"\xfb\xff"
+
+
+@pytest.mark.parametrize("encode", [base64.b64encode, base64.urlsafe_b64encode], ids=["standard", "urlsafe"])
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_error_message_redacts_python_and_json_base64_fields(quote, encode):
+    payload = encode(_BASE64URL_PROBE + b"field payload " * 20).decode("ascii")
+    detail = f"{{{quote}base64{quote}: {quote}{payload}{quote}}}"
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="mcp_tool", tool_call_id="tc-field")
+
+    def _boom(_req):
+        raise ToolException(detail)
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert f"{quote}base64{quote}: {quote}<omitted>{quote}" in result.text
+    assert payload[:64] not in result.text
+
+
+@pytest.mark.parametrize("encode", [base64.b64encode, base64.urlsafe_b64encode], ids=["standard", "urlsafe"])
+def test_error_message_redacts_data_uri_payloads_case_insensitively(encode):
+    payload = encode(_BASE64URL_PROBE + b"svg payload " * 200).decode("ascii")
+    detail = f"render failed: DATA:IMAGE/SVG+XML;charset=utf-8;BASE64,{payload}"
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_fetch", tool_call_id="tc-data-uri")
+
+    def _boom(_req):
+        raise ToolException(detail)
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert "DATA:IMAGE/SVG+XML;charset=utf-8;BASE64,<omitted>" in result.text
+    assert payload[:64] not in result.text
+
+
+def test_error_message_does_not_backtrack_quadratically_on_comma_free_text():
+    r"""The data-URI params window is bounded, so many `data:` starts stay linear.
+
+    `[^,\s]*` rescanned to the end of one comma-free run for every start
+    position; 160K characters of crafted text took seconds before the bound.
+    """
+    import time
+
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_fetch", tool_call_id="tc-adversarial")
+    detail = "data:x;y" * 20_000
+
+    def _boom(_req):
+        raise ToolException(detail)
+
+    started = time.perf_counter()
+    result = middleware.wrap_tool_call(req, _boom)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 2.0, f"redaction took {elapsed:.2f}s on a 160K comma-free string"
+    assert "data:x;y" in result.text
+
+
+def test_error_message_leaves_plain_text_unchanged():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_search", tool_call_id="tc-plain")
+
+    def _boom(_req):
+        raise ToolException("server refused: bad token")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert result.content == "Error: Tool 'web_search' failed with ToolException: server refused: bad token. Continue with available context, or choose an alternative tool."
+
+
+def test_error_message_keeps_base64_values_below_the_redaction_threshold():
+    """Payloads shorter than 64 characters cannot be a meaningful inline image
+    or file, so short diagnostics that mention a small base64 value survive."""
+    short_value = base64.b64encode(b"short").decode("ascii")
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="mcp_tool", tool_call_id="tc-short")
+
+    def _boom(_req):
+        raise ToolException(f"{{'type': 'image', 'base64': '{short_value}'}}")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert short_value in result.text
+    assert "<omitted>" not in result.text
+
+
 def test_wrap_tool_call_reraises_graph_interrupt():
     middleware = ToolErrorHandlingMiddleware()
     req = _request(name="ask_clarification", tool_call_id="tc-int")
@@ -770,7 +895,7 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
 
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
     from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
     from deerflow.tools.mcp_metadata import tag_mcp_tool
@@ -793,10 +918,10 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     assert len(filters) == 1
     assert len(audits) == 1
     audit_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolPromotionAuditMiddleware))
-    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
+    activation_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillActivationMiddleware))
     filter_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolFilterMiddleware))
     safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
-    assert audit_idx < policy_idx < filter_idx
+    assert activation_idx < audit_idx < filter_idx
     assert filter_idx < safety_idx
 
 
@@ -816,6 +941,29 @@ def test_subagent_runtime_middlewares_inject_configured_extension_middlewares(mo
         if guard_idx is not None:
             assert guard_idx < extension_idx
     assert extension_idx < safety_idx
+
+
+def test_subagent_runtime_middlewares_attach_model_length_guard_before_safety_finish(monkeypatch):
+    """Subagents must carry the lead's output-length guard so a response cut
+    off at the model's output limit drops its (possibly truncated) tool calls
+    and the executor can report ``stop_reason=model_length_capped`` through
+    the duck-typed ``consume_stop_reason`` channel. Placement mirrors the lead
+    chain: after configured extensions, before SafetyFinishReasonMiddleware."""
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+
+    app_config = _make_app_config()
+    app_config.extensions = ExtensionsConfig(middlewares=[f"{__name__}:ConfiguredSubagentMiddleware"])
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    length_idx = [i for i, m in enumerate(middlewares) if isinstance(m, ModelLengthFinishReasonMiddleware)]
+    assert len(length_idx) == 1
+    extension_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ConfiguredSubagentMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert extension_idx < length_idx[0] < safety_idx
+    assert middlewares[length_idx[0]] in [m for m in middlewares if hasattr(m, "consume_stop_reason")]
 
 
 def test_subagent_runtime_middlewares_place_mcp_routing_before_deferred_filter(monkeypatch):

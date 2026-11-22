@@ -21,10 +21,11 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, fi
 from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.extensions_config import extensions_config_file_lock
 from deerflow.config.file_signature import get_config_signature
-from deerflow.config.managed_model_providers import get_managed_model_provider, resolve_managed_model_provider, resolve_preset_model
+from deerflow.config.managed_model_providers import OPENAI_GPT6_MODELS, get_managed_model_provider, resolve_managed_model_provider, resolve_preset_model
 from deerflow.config.model_config import ModelConfig, ReasoningCapabilities
 from deerflow.config.runtime_paths import runtime_home
 from deerflow.config.secret_file import read_or_create_secret_file
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -120,18 +121,35 @@ class ManagedModel(BaseModel):
                 settings.pop("when_thinking_enabled", None)
             if self.reasoning.thinking == "required":
                 settings.pop("when_thinking_disabled", None)
-            settings["reasoning"] = self.reasoning
+            # Preset effort defaults must also obey the explicit contract.
+            # Keep compatible defaults and non-effort protocol parameters.
+            effort = self.reasoning.effort
+            for field in ("when_thinking_enabled", "when_thinking_disabled"):
+                template = settings.get(field)
+                if template and "reasoning_effort" in template:
+                    if effort is None or effort.path != "reasoning_effort" or template["reasoning_effort"] not in effort.values:
+                        template.pop("reasoning_effort")
+                        if not template:
+                            settings.pop(field)
+            reasoning = self.reasoning
+            if self.provider == "openai" and self.model in OPENAI_GPT6_MODELS and effort is not None:
+                # The preset owns Responses routing. Translate stored wire paths
+                # on a runtime copy; ChatOpenAI serializes this as reasoning.effort.
+                reasoning = reasoning.model_copy(update={"effort": effort.model_copy(update={"path": "reasoning_effort"})})
+            settings["reasoning"] = reasoning
         if self.supports_vision is not None:
             settings["supports_vision"] = self.supports_vision
         if self.max_tokens is not None:
             settings["max_tokens"] = self.max_tokens
-        return ModelConfig(
+        result = ModelConfig(
             name=self.name or "connection-check",
             display_name=self.display_name or f"{get_managed_model_provider(self.provider).display_name} · {self.model}"[:100],
             model=self.model,
             context_window=self.context_window,
             **settings,
         )
+        result._managed_provider = get_managed_model_provider(self.provider).display_name
+        return result
 
 
 class ManagedModelInputError(ValueError):
@@ -175,9 +193,15 @@ class ManagedModelStore:
             # Never include provider secrets or decrypted validation inputs.
             raise ValueError("Cannot read managed models; check the catalog and encryption key") from None
 
-    def save(self, config: ManagedModel, *, expected_revision: str | None, reserved_names: set[str] | None = None) -> ManagedModel:
+    def save(self, config: ManagedModel, *, expected_revision: str | None, reserved_names: set[str] | None = None, deduplicate: bool = False, expected_source: tuple[str, str] | None = None) -> ManagedModel:
         with _lock, extensions_config_file_lock(self.path):
             records = self.list()
+            if expected_source is not None and not any((item.name, item.revision) == expected_source for item in records):
+                raise FileExistsError("Connection changed; reload before importing")
+            if deduplicate:
+                for item in records:
+                    if (item.provider, item.base_url, item.api_key, item.model) == (config.provider, config.base_url, config.api_key, config.model):
+                        return item
             if not config.name:
                 if expected_revision is not None:
                     raise ManagedModelInputError("An existing model name is required when editing")
@@ -224,7 +248,9 @@ class ManagedModelStore:
             os.replace(temporary, path)
         finally:
             if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                # Discarding the temporary must not replace the outcome of the
+                # write (or of a failed ``os.replace``) with a cleanup error.
+                cleanup_failed_atomic_write(temporary)
 
 
 def merge_managed_models(config: AppConfig) -> AppConfig:

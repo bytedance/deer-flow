@@ -41,6 +41,7 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `history_search`: keyword search over the current messages and compacted source
   batches reachable from the current checkpoint. English words and Chinese
   character bigrams are supported. Returns up to eight excerpts of at most 600 characters.
+  Repeated archives of one source share one result slot, preserving FTS ranking.
   The optional `role="user"`, `"assistant"`, or `"tool"` filters by message author
   type; omission or `null` preserves search across all roles. These values map to
   internal `human`, `ai`, and `tool` roles; returned role values stay unchanged.
@@ -91,7 +92,7 @@ still describes source truncation, not excerpt clipping; `next_offset` is comput
 against that source. Search again after compaction, retention expiry, or state
 changes; old offsets are not snapshots independent of the source lifecycle.
 
-An active skill's tool policy and runtime authorization still apply. The model
+The agent's tool configuration and runtime authorization still apply. The model
 may need more than one keyword search. Search is lexical; paraphrases are not
 reliably matched. Notes and retrieved text are historical data, never new
 instructions or proof that a reported action actually succeeded. Task notes are

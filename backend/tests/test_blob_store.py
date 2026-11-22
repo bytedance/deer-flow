@@ -10,6 +10,8 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import re
+import sys
 import threading
 from pathlib import Path
 
@@ -68,7 +70,7 @@ def test_blob_ref_validates_digest_shape():
 
 
 def test_blob_ref_kind_is_path_safe():
-    for bad in ("../etc", "a/b", "Aupper", "", "-lead", "trailing-", "has space", "x" * 65):
+    for bad in ("../etc", "a/b", "Aupper", "", "-lead", "trailing-", "has space", "x" * 65, "tool\n", "a" * 64 + "\n"):
         with pytest.raises(ValidationError):
             BlobRef(sha256=hashlib.sha256(b"x").hexdigest(), size=1, kind=bad)
     for good in ("viewed-image", "tool-output", "a", "0", "a" * 64):
@@ -132,14 +134,19 @@ def test_dedup_records_only_the_first_writer_as_advisory_provenance(store: Local
 def test_kind_rejection_quotes_the_enforced_grammar():
     """One validator, one message: the pattern a producer is shown must be the
     pattern that is enforced (it was not, before this was centralised)."""
-    assert validate_blob_kind("tool-output") == "tool-output"
-    for bad in ("trailing-", "a--", "-lead", "Aupper", "a/b", "", "x" * 65):
+    valid_kind = "tool-output"
+    assert validate_blob_kind(valid_kind) == valid_kind
+    for bad in ("trailing-", "a--", "-lead", "Aupper", "a/b", "", "x" * 65, "tool\n", "a" * 64 + "\n"):
         with pytest.raises(ValueError) as caught:
             validate_blob_kind(bad)
         message = str(caught.value)
-        assert "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" in message, message
-        assert "1-64 chars" in message, message
-        assert "no leading or trailing hyphen" in message, message
+        prefix = "kind must match "
+        assert message.startswith(prefix), message
+        pattern, _, description = message.removeprefix(prefix).partition(" ")
+        assert re.match(pattern, valid_kind)
+        assert not re.match(pattern, bad), message
+        assert "1-64 chars" in description, message
+        assert "no leading or trailing hyphen" in description, message
     assert validate_blob_kind is contract_module.validate_blob_kind
 
 
@@ -447,6 +454,31 @@ def test_dotted_import_path_backend(tmp_path: Path):
     )
     reset_blob_store()
     assert isinstance(get_blob_store(), LocalFsBlobStore)
+
+
+@pytest.mark.parametrize("separator", [".", ":"])
+def test_single_module_import_path_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, separator: str):
+    module_name = "deployment_blob_backend"
+    (tmp_path / f"{module_name}.py").write_text(
+        "from deerflow.storage.backends.local_fs import LocalFsBlobStore\n\nclass DeploymentBlobStore(LocalFsBlobStore):\n    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    bsc.set_blob_storage_config(
+        bsc.BlobStorageConfig(
+            enabled=True,
+            backend=f"{module_name}{separator}DeploymentBlobStore",
+            backend_config={"root": str(tmp_path / "blobs")},
+        )
+    )
+    try:
+        store = get_blob_store()
+        assert type(store).__module__ == module_name
+        ref = store.put_bytes(b"custom backend content", kind="tool-output")
+        assert store.get_bytes(ref) == b"custom backend content"
+        assert get_blob_store_if_enabled() is store
+    finally:
+        sys.modules.pop(module_name, None)
 
 
 def test_relative_root_is_resolved_against_runtime_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

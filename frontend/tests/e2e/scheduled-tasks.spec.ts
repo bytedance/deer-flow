@@ -788,6 +788,42 @@ test("reuse-thread option explains the queue behaviour in the dialog", async ({
   await expect(dialog.getByRole("alert")).toHaveCount(0);
 });
 
+test("a stored DST gap shows the scheduled instant and a title edit preserves it", async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date("2026-08-01T00:00:00Z"));
+  const patches = writesTo(page, "PATCH", "/api/scheduled-tasks/dst-gap");
+  await openPage(page, {
+    scheduledTasks: [
+      task({
+        id: "dst-gap",
+        title: "Midnight reminder",
+        schedule_type: "once",
+        schedule_spec: { run_at: "2026-09-06" },
+        timezone: "America/Santiago",
+        next_run_at: "2026-09-06T04:00:00+00:00",
+      }),
+    ],
+  });
+  // The server-provided next_run_at line was already correct on main.
+  // Check the schedule description itself, not any matching date in the panel.
+  await expect(
+    detail(page).getByText("Once, Sep 6 01:00 (America/Santiago)", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await detail(page).getByRole("button", { name: "Edit" }).click();
+  await expect(form(page).getByLabel("Run at")).toHaveValue("2026-09-06T01:00");
+  await form(page)
+    .getByLabel("Title", { exact: true })
+    .fill("Renamed reminder");
+  await form(page).getByRole("button", { name: "Save changes" }).click();
+  await expect(detail(page).getByRole("heading")).toHaveText(
+    "Renamed reminder",
+  );
+  expect(patches).toEqual([{ title: "Renamed reminder" }]);
+});
+
 for (const locale of ["en-US", "zh-CN"] as const) {
   test(`list and detail show no raw identifiers (${locale})`, async ({
     page,

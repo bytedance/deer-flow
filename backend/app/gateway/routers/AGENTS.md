@@ -1,40 +1,55 @@
-# Router contracts
+# Gateway routers (`app/gateway/routers/`)
 
-Shared scheduled-task update validation preserves an unchanged future `once`
-instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
-instants and terminal reactivation still enforce the minimum delay.
+One module per API area. The parent [Gateway guide](../AGENTS.md) covers trust
+boundaries and run admission; this file covers what every route handler has to do.
 
-The MCP task list accepts optional `TaskStatus` and `active_only` query filters.
-Pass both to the repository before its limit; preserve `threads:read`, owner
-checks, current-thread incarnation scoping, and the unfiltered array response.
+## Verify
 
-Custom Agent packages are strict, versioned definition-only JSON documents.
-Export explicitly projects the caller's portable `AgentConfig` fields and SOUL;
-exclude `github` installation bindings, memory contents, conversations and
-credentials. Import may rename locally but must remain owner-scoped and
-create-only: collisions return 409, never overwrite or upsert. Ordinary creation
-and import share `_persist_new_agent`, which uses `run_drained_write` so a
-cancelled request still drains the owned persistence worker.
+```bash
+cd backend
+python -m pytest tests -q -k "<area>_router"     # e.g. threads_router, console_router
+make test-blocking-io                            # after adding any file, config or network read
+```
 
-`GET /api/agent-tool-groups` projects only configured group names for the
-custom-Agent settings allowlist. Never expose tool provider paths, credentials,
-or raw tool configuration through this catalog.
+## Rules for a route handler
 
-Custom Agent update guards apply legacy shared-file checks only when the
-resolved store is `FileAgentStore`, including the `update_agent` tool. DB
-imports retain source files for rollback; those files cannot veto SQL updates.
-Keep store resolution and filesystem checks off-loop in the HTTP route.
-
-Committed MCP reconciliation failures are logged once by
-`fail_mcp_reconciliation`, with only the underlying exception type.
-`_run_drained_mcp_apply` passes `_McpCommittedReconciliationError` as an expected
-error to `run_drained_write` to avoid a duplicate diagnostic. It still drains
-retired-pool cleanup outside the config locks and reports the fixed-detail 500.
-
-Custom-skill edit, delete and rollback hold the owning root's process mutex and
-`.custom.mutation.lock` sidecar across predecessor read, storage mutation and
-history append. Peer Gateway processes sharing that root must use this same
-critical section to preserve history ordering. Keep the sidecar distinct from
-the nested projection lock, retain it across requests, and acquire/release both
-off-loop inside the drained worker. Unrelated users retain independent locks;
-external filesystem writers do not participate in this history guarantee.
+- **Authorize first.** Check the session, role or permission before the handler
+  reads credentials, parses an upload or makes an outbound request. An
+  unauthorized caller must not be able to trigger that work.
+- **Fixed text in 5xx responses.** Exceptions from storage, config loading and
+  subprocesses contain host paths. Log the exception on the server and return a
+  fixed detail string.
+- **No blocking calls on the event loop.** `get_app_config()` stats and hashes the
+  config files on every call, and storage backends do file I/O. Call both through
+  `asyncio.to_thread`. The blocking-I/O suite fails the build otherwise.
+- **Writes survive disconnects.** Wrap a persistent write in
+  `app.gateway.persistent_writes.run_drained_write`. A cancelled request then
+  still waits for the worker that owns the write, and no half-written state stays
+  behind.
+- **Catalog responses are projections.** A listing endpoint returns names and
+  display fields. Provider paths, credentials and raw tool or server configuration
+  stay on the server.
+- **Provenance comes from the session.** Values that say who or what triggered an
+  action (for example the plugin `ActionContext.interaction`) are set from the
+  authenticated request only. Ignore the same field in a request body.
+- **Unreadable configuration is not default configuration.** When a policy cannot
+  be read, skip the optional work (cleanup, sweep) and keep serving. Applying a
+  default policy can delete data the operator wanted to keep.
+- **Imports create, they do not overwrite.** Agent and skill imports are scoped to
+  the caller and return 409 on a name collision. Exports leave out credentials,
+  memory, conversations and installation bindings.
+- **Memory backup imports** replace the selected facts and require an explicit
+  `facts` array. Omitting it returns 422. An empty array clears that bucket.
+- **Outbound requests from a route** (model discovery, connection tests) have a
+  time limit and a size limit, do not follow redirects, and return redacted
+  provider errors.
+- **Locks that several Gateway processes share** are file locks beside the data,
+  taken off the event loop. A process mutex alone does not order writes between
+  workers.
+- **Path segments from clients.** A name that becomes a directory (agent name,
+  skill name, file name) is validated when it is created, including Windows
+  reserved device names. Read and delete routes stay permissive so that data
+  stored by an older release can still be exported and removed.
+- **Search results use the latest owner-visible message.** A historical jump
+  resolves only the requested thread. Use the shared history seed path for
+  legacy checkpoints so it keeps its existing write reservation.

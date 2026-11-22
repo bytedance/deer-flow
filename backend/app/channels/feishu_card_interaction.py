@@ -26,7 +26,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from app.channels.message_bus import HUMAN_INPUT_REQUEST_METADATA_KEY
 
@@ -123,7 +123,12 @@ class ClarificationCardRequest:
 
 def build_button_card(request: ClarificationCardRequest) -> str:
     """Render the clarification as a Feishu interactive card with one button per option."""
+    # Imported here because feishu.py imports this module, and the markdown rewrite
+    # lives beside the card it was written for.
+    from app.channels.feishu import _card_markdown
+
     content = f"{request.context}\n\n{request.question}" if request.context else request.question
+    content = _card_markdown(content)
     card = {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "需要你的选择"}},
@@ -245,3 +250,39 @@ class PendingCardRegistry:
             tokens = [token for token, entry in self._entries.items() if (entry["chat_id"], entry["originator_open_id"], entry["card_message_id"]) == (chat_id, originator_open_id, card_message_id)]
             for token in tokens:
                 del self._entries[token]
+
+    def discard_thread(self, thread_id: str) -> int:
+        """Retire all pending cards registered for a given thread."""
+        with self._lock:
+            tokens = [token for token, entry in self._entries.items() if entry.get("thread_id") == thread_id]
+            for token in tokens:
+                del self._entries[token]
+            return len(tokens)
+
+    def prune_expired(self, now: float | None = None) -> int:
+        """Prune all expired entries from the registry and return the count."""
+        now = time.time() if now is None else now
+        with self._lock:
+            expired = [token for token, pending in self._entries.items() if now - pending.get("created_at", 0) > self._ttl_seconds]
+            for token in expired:
+                del self._entries[token]
+            return len(expired)
+
+    def get_pending_entry(self, callback_token: str) -> PendingCardEntry | None:
+        """Read-only lookup of a pending entry without consuming it.
+
+        .. note::
+
+            The lookup does **not** check the entry's TTL.  An expired-but-not-
+            yet-pruned entry is still reported as pending.  Callers that need
+            strict freshness should call :meth:`prune_expired` first or compare
+            ``created_at`` themselves.
+        """
+        with self._lock:
+            entry = self._entries.get(callback_token)
+            return cast(PendingCardEntry, dict(entry)) if entry is not None else None
+
+    def __len__(self) -> int:
+        """Return the number of tracked pending cards."""
+        with self._lock:
+            return len(self._entries)

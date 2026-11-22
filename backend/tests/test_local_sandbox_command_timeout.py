@@ -9,8 +9,13 @@ The platform-specific cases exercise real subprocess and process-tree/group
 semantics, while the shared tests pin the user-facing timeout notice.
 """
 
+import copy
+import json
 import os
+import pickle
 import shlex
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,6 +28,22 @@ from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
 linux_proc_fd_only = pytest.mark.skipif(not Path("/proc/self/fd").exists(), reason="requires Linux /proc fd links")
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "command,expected,exit_code",
+    [("printf 'Error: sample\\n'", "Error: sample\n", 0), ("printf 'OK\\n'; exit 7", "OK\n\nExit Code: 7", 7), (":", "(no output)", 0)],
+)
+def test_command_output_keeps_string_and_copy_contracts(command, expected, exit_code):
+    output = LocalSandbox("command-result").execute_command(command, timeout=5)
+
+    assert isinstance(output, str)
+    assert output == expected
+    assert json.loads(json.dumps({"output": output})) == {"output": expected}
+    for copied in (copy.copy(output), copy.deepcopy(output), pickle.loads(pickle.dumps(output))):
+        assert copied == expected
+        assert copied.exit_code == exit_code
 
 
 @posix_only
@@ -87,13 +108,19 @@ def test_timeout_output_carries_authoritative_failure_marker(monkeypatch):
     """A timed-out command is a failed execution: the output must carry an
     exit marker so exit-status evidence (acceptance checklist) cannot read a
     partial passing summary as success."""
+    canned = ("12 passed\n", "", 0, True)
     monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "/bin/sh")
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout, env=None: ("12 passed\n", "", 0, True)))
+    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout, env=None: canned))
+    # Windows hosts dispatch timed-out commands through the MSYS/PowerShell
+    # runner instead of the POSIX one; stub it too so the marker contract is
+    # hermetic and does not require make(1) or a resolvable shell path.
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(lambda *args, **kwargs: canned))
 
     output = LocalSandbox("t").execute_command("make test", timeout=1)
 
     assert "timed out" in output.lower()
     assert output.endswith("Exit Code: 124")
+    assert output.exit_code == 124
 
 
 def test_windows_timeout_returns_notice(monkeypatch):
@@ -216,3 +243,79 @@ def test_bash_tool_description_guides_safe_cross_platform_local_environment_prob
     assert "only when the active sandbox policy permits it" in description
     assert "do not repeat the rejected command" in description
     assert "command-only probes" in description
+
+
+@posix_only
+def test_timeout_uses_saved_process_group_id_if_leader_exits(monkeypatch):
+    """Timeout cleanup must target the saved group even if the leader has exited."""
+    calls = []
+
+    class ExitedLeaderProcess:
+        pid = 4242
+
+        def __init__(self):
+            self.returncode = None
+            self.wait_calls = 0
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                # The command crossed the deadline as its leader exited; its
+                # descendants may still hold the captured pipes open.
+                self.returncode = 0
+                raise subprocess.TimeoutExpired("fake-command", timeout)
+            return self.returncode
+
+        def kill(self):
+            pytest.fail("fallback child kill should not replace process-group cleanup")
+
+    process = ExitedLeaderProcess()
+    monkeypatch.setattr(local_sandbox.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        local_sandbox.os,
+        "getpgid",
+        lambda pid: pytest.fail("cleanup must not re-query an exited process leader"),
+    )
+    monkeypatch.setattr(
+        local_sandbox.os,
+        "killpg",
+        lambda process_group_id, sig: calls.append((process_group_id, sig)),
+    )
+
+    _, _, returncode, timed_out = LocalSandbox._run_posix_command(["fake-command"], timeout=0.01)
+
+    assert timed_out is True
+    assert returncode == 0
+    assert calls == [(process.pid, signal.SIGKILL)]
+
+
+@posix_only
+def test_process_group_lookup_failure_falls_back_to_direct_child_kill(monkeypatch):
+    """A vanished process group is tolerated by killing/reaping the direct child."""
+    calls = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def kill(self):
+            calls.append(("kill-child",))
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+
+    process = FakeProcess()
+
+    def missing_process_group(process_group_id, sig):
+        calls.append(("killpg", process_group_id, sig))
+        raise ProcessLookupError
+
+    monkeypatch.setattr(local_sandbox.os, "killpg", missing_process_group)
+
+    # ESRCH from killpg must not escape; the direct-child fallback still runs.
+    LocalSandbox._terminate_process_group(process, process.pid)
+
+    assert calls == [
+        ("killpg", process.pid, signal.SIGKILL),
+        ("kill-child",),
+        ("wait", 10),
+    ]

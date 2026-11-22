@@ -40,6 +40,10 @@ class _FakeAgent:
 
 
 class _FakeRunManager:
+    async def record_assembly_evidence(self, run_id: str, evidence: dict) -> None:
+        assert evidence["run_id"] == run_id
+        self.assembly_evidence = evidence
+
     async def try_start(self, _run_id: str) -> RunStartOutcome:
         return RunStartOutcome.started
 
@@ -204,6 +208,66 @@ async def test_run_agent_tags_the_effective_model(monkeypatch, requested_model):
     tags = fake_agent.captured_config["metadata"].get("langfuse_tags", [])
     assert "model:actual-model" in tags
     assert "model:missing-model" not in tags
+
+
+class _ModelNameRecordingRunManager(_FakeRunManager):
+    def __init__(self) -> None:
+        self.model_name_updates: list[tuple[str, str | None]] = []
+
+    async def update_model_name(self, run_id: str, model_name: str | None) -> None:
+        self.model_name_updates.append((run_id, model_name))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested_model", "expected_updates"),
+    [
+        (None, [("run-persist-model", "actual-model")]),
+        ("missing-model", [("run-persist-model", "actual-model")]),
+        ("actual-model", []),
+    ],
+)
+async def test_run_agent_persists_the_effective_model(monkeypatch, requested_model, expected_updates):
+    """The run record stores the model that ran, including when none was requested (#3109)."""
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    fake_agent = _FakeAgent()
+    app_config = AppConfig(
+        models=[ModelConfig(name="actual-model", model="actual-model", use="langchain_openai:ChatOpenAI")],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+    )
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: fake_agent)
+
+    def agent_factory(config):
+        return lead_agent_module.assemble_lead_agent(config, app_config=app_config)
+
+    record = RunRecord(
+        run_id="run-persist-model",
+        thread_id="thread-persist-model",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name=requested_model,
+    )
+    record.abort_event = asyncio.Event()
+    run_manager = _ModelNameRecordingRunManager()
+
+    await run_agent(
+        _FakeBridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, app_config=app_config),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id, "model_name": requested_model}},
+    )
+
+    assert fake_agent.captured_config is not None, "astream was not invoked"
+    assert run_manager.model_name_updates == expected_updates
 
 
 @pytest.mark.asyncio

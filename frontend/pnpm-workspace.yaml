@@ -2,6 +2,10 @@ packages: []
 overrides:
   # GHSA-965w-775f-mr7g: speech-rule-engine 4.1.2 pins vulnerable 0.9.8.
   "@xmldom/xmldom@>=0.9.0 <0.9.12": 0.9.12
+  # Nextra 4.6.1 strips children before validating required Layout props.
+  # Keep its previous Zod until https://github.com/shuding/nextra/issues/5036 is fixed.
+  "nextra@4.6.1>zod": 4.3.6
+  "nextra-theme-docs@4.6.1>zod": 4.3.6
 ignoredBuiltDependencies:
   - esbuild
   - sharp

@@ -6,7 +6,7 @@ Contains:
   catalog; it records promotions into graph state via ``Command``.
 - build_deferred_tool_setup: assembles the catalog + tool from the tools
   configured for this agent build.
-- build_mcp_routing_middleware: builds the PR2 auto-promote middleware from
+- build_mcp_routing_middleware: builds the compatibility middleware from
   serialized routing metadata on deferred tools available to the caller.
 
 The agent sees deferred tool names in <available-deferred-tools> but cannot
@@ -278,12 +278,11 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
 def build_deferred_tool_setup(candidate_tools: list[BaseTool], *, enabled: bool) -> DeferredToolSetup:
     """Build deferred-tool setup from one agent build's candidate tools.
 
-    Lead agents pass their full configured tool list; ``SkillToolPolicyMiddleware``
-    later filters model-visible schemas, execution, and ``tool_search`` results
-    for the active skill while keeping the discovery tool itself available.
-    Subagents may pass a statically policy-filtered list because their configured
-    skills are loaded at startup. The downstream deferred-schema middleware still
-    hides unpromoted MCP schemas in either case.
+    Lead agents and subagents pass their authorized tool list. Skill
+    `allowed-tools` declarations are compatibility metadata and never filter
+    this assembly; agent assembly/execution authorization owns the ceiling.
+    The downstream deferred-schema middleware still hides unpromoted MCP
+    schemas in either case.
 
     Returns an empty setup (see :class:`DeferredToolSetup`) in two distinct
     cases: deferral is disabled, or it is enabled but no MCP tool survived
@@ -305,9 +304,9 @@ def assemble_deferred_tools(candidate_tools: list[BaseTool], *, enabled: bool) -
 
     Fail closed on deferral assembly itself: if tool_search is enabled and MCP
     candidates exist but no deferred set was recovered, raise rather than silently
-    binding their full schemas to the model. Lead-agent authorization is enforced
-    separately at runtime by ``SkillToolPolicyMiddleware``; subagents may already
-    have applied their static skill policy to ``candidate_tools``.
+    binding their full schemas to the model. Agent authorization (provider
+    filtering plus runtime Guardrails) owns the permission ceiling; skill
+    `allowed-tools` is compatibility metadata and does not participate.
 
     Shared by every agent-build path (lead, embedded client, subagent) so they
     all get the same fail-closed guarantee from one place.
@@ -327,7 +326,7 @@ def _routing_priority(value: Any) -> int:
     # serialized data), so keep the two coercion rules in sync if either changes.
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -345,7 +344,7 @@ def build_mcp_routing_middleware(
     *,
     top_k: int,
 ) -> "AgentMiddleware | None":
-    """Build PR2 auto-promotion middleware from the caller's deferred tools.
+    """Build advisory routing compatibility middleware from the caller's deferred tools.
 
     The builder may inspect ``BaseTool.metadata`` at construction time, but the
     returned middleware receives only a flat serializable routing index.
@@ -365,7 +364,7 @@ def build_mcp_routing_middleware(
         if not keywords:
             continue
         if routing.get("auto_promote_top_k") is not None:
-            logger.debug("Ignoring per-tool MCP routing auto_promote_top_k for %s in PR2", tool_name)
+            logger.debug("Ignoring per-tool MCP routing auto_promote_top_k for %s (legacy configuration)", tool_name)
         routing_index[str(tool_name)] = {
             "priority": _routing_priority(routing.get("priority", 0)),
             "keywords": keywords,
@@ -388,8 +387,8 @@ def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozen
     Lists only names so the agent knows what exists and can use tool_search to
     load them. Returns empty string when there are no deferred tools. The set is
     computed at agent build time and passed in. Lead-agent sets contain the full
-    configured MCP catalog because active skill policy is applied at runtime;
-    subagent sets may already have been filtered by their startup skill policy.
+    configured MCP catalog; subagent sets may already have been narrowed by the
+    subagent's tool configuration and authorization.
 
     Lives here, next to the assembly that produces ``deferred_names``, so every
     agent-build path (lead, embedded client, subagent) renders the section the
@@ -430,15 +429,15 @@ def get_mcp_routing_hints_prompt_section(tools: Iterable[BaseTool], *, deferred_
     if not hints:
         return ""
 
-    lines = ["<mcp_routing_hints>"]
+    lines = ["<mcp_routing_hints>", "These are advisory capability descriptions. Keywords do not establish user intent or require a tool. Select tools from the full request and available evidence."]
     for priority, tool_name, keywords in sorted(hints, key=lambda item: (-item[0], item[1])):
         # tool_name comes verbatim from the external MCP server; escape at render
         # (keep the raw name for the deferred_names membership check above).
         esc_name = html.escape(tool_name, quote=False)
-        lines.append(f"When the user's request involves {_format_keyword_list(keywords)}:")
+        lines.append(f"Capability hints for {_format_keyword_list(keywords)}:")
         if tool_name in deferred_names:
-            lines.append(f"  use `tool_search` to fetch `{esc_name}`, then prefer that MCP tool.")
+            lines.append(f"  use `tool_search` to fetch `{esc_name}`, when its capability fits the task.")
         else:
-            lines.append(f"  prefer the `{esc_name}` tool.")
+            lines.append(f"  consider the `{esc_name}` tool when its capability fits the task.")
     lines.append("</mcp_routing_hints>")
     return "\n".join(lines)

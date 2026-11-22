@@ -41,7 +41,8 @@ Leaf families:
   anchor to a *specific recorded execution* — a matching bash execution
   (harvested by the executor from the same stamped ``ToolMessage``s the
   receipt layer reads) with ``status=success`` and a test-summary shape in
-  its output tail — not merely to some successful call. Matching accounts
+  its recorded output (classified before tail truncation) — not merely to
+  some successful call. Matching accounts
   for shell command structure (operator-separated segments, executables,
   arguments), so an unrelated command that merely mentions the criterion
   string (e.g. inside an ``echo`` argument or a comment) cannot anchor the
@@ -75,7 +76,7 @@ import stat
 import time
 import unicodedata
 from collections.abc import Callable, Mapping
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.subagents.report_contract import MAX_ACCEPTANCE_CRITERIA, normalize_acceptance_criteria
@@ -116,13 +117,67 @@ _FILE_CONTENT_READ_CAP_BYTES = 50_000
 #: way (UNVERIFIED), and fail shapes win over pass shapes when both appear.
 _TEST_PASS_SHAPE_RE = re.compile(
     r"\b[1-9]\d*\s+passed\b"  # pytest / jest: "5 passed" (zero is not a pass)
-    r"|^OK$"  # unittest: bare OK line
-    r"|test result: ok"  # cargo test
-    r"|^ok\s+\S"  # go test: "ok  \tpkg/path"
-    r"|\bBUILD SUCCESS(?:FUL)?\b"  # maven / gradle
     r"|\ball tests passed\b",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Go's lowercase, same-line prefix must not consume unittest's uppercase OK
+# annotations (or a package name on a later line).
+_GO_TEST_PASS_SHAPE_RE = re.compile(r"^ok[ \t]+\S", re.MULTILINE)
+_UNITTEST_RESULT_LINE_RE = re.compile(r"^OK(?:[ \t]+\([^\r\n]*\))?[ \t]*\r?$", re.MULTILINE)
+_UNITTEST_SUCCESS_SUMMARY_RE = re.compile(
+    r"^Ran (?P<total>0|[1-9][0-9]{0,8}) tests? in [0-9]+(?:\.[0-9]+)?s\r?\n\r?\n"
+    r"OK(?: \((?P<counts>[^\r\n()]*)\))?[ \t]*\r?$",
+    re.MULTILINE,
+)
+
+
+def _unittest_test_summary_holds(text: str) -> bool:
+    """Require at least one ordinary pass in a complete unittest summary."""
+    for match in _UNITTEST_SUCCESS_SUMMARY_RE.finditer(text):
+        counts: dict[str, int] = {}
+        for field in match["counts"].split(", ") if match["counts"] is not None else []:
+            counter = re.fullmatch(r"(skipped|expected failures)=(0|[1-9][0-9]{0,8})", field)
+            if counter is None or counter[1] in counts:
+                break
+            counts[counter[1]] = int(counter[2])
+        else:
+            if int(match["total"]) > sum(counts.values()):
+                return True
+    return False
+
+
+# Node's TAP/spec reporters share the same ordered counters. Individual TAP
+# points (including skipped/todo tests) are not a complete run summary and
+# must not be mistaken for Go's package-level `ok` record above.
+_NODE_TEST_POINT_RE = re.compile(r"^[ \t]*(?:\#[ \t]+Subtest:[^\r\n]*|(?:not )?ok[ \t]+[0-9]+(?:[ \t]+[-#][^\r\n]*|[ \t]*)|[✔✖﹣▶⚠][ \t]+[^\r\n]*)\r?$", re.MULTILINE)
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;:]*m")
+_NODE_TEST_SUMMARY_RE = re.compile(
+    r"^(?P<prefix>\#|ℹ)[ \t]+tests (?P<total>[0-9]{1,9})\r?\n"
+    r"(?P=prefix)[ \t]+suites [0-9]{1,9}\r?\n"
+    r"(?P=prefix)[ \t]+pass (?P<passed>[0-9]{1,9})\r?\n"
+    r"(?P=prefix)[ \t]+fail (?P<failed>[0-9]{1,9})\r?\n"
+    r"(?P=prefix)[ \t]+cancelled (?P<cancelled>[0-9]{1,9})\r?\n"
+    r"(?P=prefix)[ \t]+skipped (?P<skipped>[0-9]{1,9})\r?\n"
+    r"(?P=prefix)[ \t]+todo (?P<todo>[0-9]{1,9})[ \t]*\r?$",
+    re.MULTILINE,
+)
+
+
+def _node_test_summary_outcome(text: str) -> Literal["passed", "failed", "unverified"] | None:
+    """Use complete, consistent counts; failures/cancellations win."""
+    positive = False
+    complete = False
+    for match in _NODE_TEST_SUMMARY_RE.finditer(text):
+        total, passed, failed, cancelled, skipped, todo = (int(match[key]) for key in ("total", "passed", "failed", "cancelled", "skipped", "todo"))
+        if total != passed + failed + cancelled + skipped + todo:
+            continue
+        complete = True
+        if failed or cancelled:
+            return "failed"
+        positive = positive or passed > 0
+    return "passed" if positive else "unverified" if complete else None
+
 
 #: Zero-test evidence vetoes the pass shapes the count-bearing alternatives
 #: cannot see: "0 passed", go's no-test markers, unittest "Ran 0 tests".
@@ -130,9 +185,94 @@ _TEST_ZERO_SHAPE_RE = re.compile(r"\b0\s+passed\b|\[no test files\]|\[no tests t
 
 _GO_ZERO_TEST_LINE_RE = re.compile(r"^(?:ok|\?)[ \t]+\S+[^\r\n]*\[(?:no test files|no tests to run)\][ \t]*\r?$", re.MULTILINE)
 
+# ``go test -v`` is the only shape that records what actually happened inside a
+# package: one ``--- PASS|FAIL|SKIP:`` line per case.
+_GO_TEST_RESULT_LINE_RE = re.compile(r"^[ \t]*--- (PASS|FAIL|SKIP):", re.MULTILINE)
+
+
+def _go_package_summary_is_evidence(text: str) -> bool:
+    """Whether a Go ``ok`` package line can carry positive test evidence.
+
+    A package whose cases are all skipped still exits 0 and prints the same
+    ``ok`` banner a passing package does, so under ``-v`` the per-case lines are
+    the only evidence separating an executed test from a declined one — the bar
+    unittest's ``OK (skipped=N)`` (#6916) and Cargo's ignored-only targets (#6891)
+    already enforce. Records without per-case lines (plain ``go test``) stay
+    judged by the banner alone: Go's non-verbose output for an all-skipped
+    package is byte-identical to a passing one, so nothing in the record can
+    separate them and inventing a veto there would fail real passes.
+    """
+    results = _GO_TEST_RESULT_LINE_RE.findall(text)
+    return not results or "PASS" in results
+
+
+# Cargo emits separate summaries for unit, integration and documentation
+# targets. Only complete successful records may qualify an empty sibling;
+# a bare success banner or clipped counters cannot erase zero-test evidence.
+_CARGO_SUCCESS_SUMMARY_RE = re.compile(
+    r"^[ \t]*test result: ok\.[ \t]+(?P<passed>0|[1-9][0-9]{0,8}) passed;[ \t]+0 failed;"
+    r"[ \t]+[0-9]{1,9} ignored;[ \t]+[0-9]{1,9} measured;[ \t]+[0-9]{1,9} filtered out;"
+    r"[ \t]+finished in [0-9]+(?:\.[0-9]+)?s[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _without_empty_cargo_targets(text: str) -> str:
+    """Keep zero records unless a complete sibling proves tests executed."""
+    if not any(match["passed"] != "0" for match in _CARGO_SUCCESS_SUMMARY_RE.finditer(text)):
+        return text
+    return _CARGO_SUCCESS_SUMMARY_RE.sub(lambda match: "" if match["passed"] == "0" else match[0], text)
+
+
+# A successful build can skip every test. Require runner counts instead of
+# accepting Maven/Gradle's build banner as positive test evidence.
+_MAVEN_TEST_SUMMARY_RE = re.compile(
+    r"^[ \t]*(?:\[(?:INFO|WARNING|ERROR)\][ \t]*)?Tests run:[ \t]*(?P<total>[0-9]+),[ \t]*"
+    r"Failures:[ \t]*(?P<failed>[0-9]+),[ \t]*Errors:[ \t]*(?P<errors>[0-9]+),[ \t]*"
+    r"Skipped:[ \t]*(?P<skipped>[0-9]+)(?:,[ \t]*Time elapsed:[^\r\n]*)?[ \t]*\r?$",
+    re.MULTILINE,
+)
+_GRADLE_TEST_SUMMARY_RE = re.compile(
+    r"^[ \t]*(?P<total>[0-9]+) tests? completed(?:,[ \t]*(?P<failed>[0-9]+) failed)?"
+    r"(?:,[ \t]*(?P<skipped>[0-9]+) skipped)?[ \t]*\r?$",
+    re.MULTILINE,
+)
+# Preserve the command-attribution guard for build strings, even though these
+# strings no longer suffice as positive test evidence.
+_BUILD_SUCCESS_RE = re.compile(r"\bBUILD SUCCESS(?:FUL)?\b", re.IGNORECASE)
+
+
+def _build_test_summary_holds(text: str) -> bool | None:
+    """Return count-based JVM evidence; ``None`` means no executed-test proof.
+
+    Empty/all-skipped modules cannot supply positive evidence, but do not
+    veto other tested modules. Failures in any complete summary take priority.
+    Inconsistent counters are not evidence, and build banners never fill in
+    fields missing from a truncated summary.
+    """
+    positive = False
+    for pattern in (_MAVEN_TEST_SUMMARY_RE, _GRADLE_TEST_SUMMARY_RE):
+        for match in pattern.finditer(text):
+            # Bounded tool tails may still contain enormous decimal strings;
+            # leave these unverified instead of hitting Python's int limit.
+            fields = match.groupdict()
+            if any(len(value) > 9 for value in fields.values() if value is not None):
+                continue
+            total = int(fields["total"])
+            failed = int(fields.get("failed") or 0)
+            errors = int(fields.get("errors") or 0)
+            skipped = int(fields.get("skipped") or 0)
+            if failed + errors + skipped > total:
+                continue
+            if failed or errors:
+                return False
+            positive = positive or total > skipped
+    return True if positive else None
+
+
 _TEST_FAIL_SHAPE_RE = re.compile(
-    r"\b[1-9]\d*\s+failed\b"  # pytest / jest: "1 failed"
-    r"|\b[1-9]\d*\s+errors?\b"  # pytest: "1 error" — an errored collection means part of the selection never ran
+    r"\b[1-9]\d*[ \t]+failed\b"  # pytest / jest: same-line "1 failed", never a diagnostic location on the previous line
+    r"|\b[1-9]\d*[ \t]+errors?\b"  # pytest: "1 error" — an errored collection means part of the selection never ran
     r"|^FAILED\b"  # unittest summary line
     r"|^ERROR\s+\S"  # pytest short summary: "ERROR tests/unit/test_auth.py"
     r"|test result: FAILED"  # cargo test
@@ -784,7 +924,18 @@ def _carries_summary_shape(text: str) -> bool:
     or zero-test veto). The pass shapes match as substrings, so
     subagent-chosen strings — a ``cd`` argument, a ``CDPATH`` value — must
     not be allowed to lend the recorded tail a summary shape."""
-    return bool(_TEST_PASS_SHAPE_RE.search(text) or _TEST_FAIL_SHAPE_RE.search(text) or _TEST_ZERO_SHAPE_RE.search(text))
+    text = _ANSI_SGR_RE.sub("", text)
+    return bool(
+        _TEST_PASS_SHAPE_RE.search(text)
+        or _GO_TEST_PASS_SHAPE_RE.search(text)
+        or _UNITTEST_RESULT_LINE_RE.search(text)
+        or _TEST_FAIL_SHAPE_RE.search(text)
+        or _TEST_ZERO_SHAPE_RE.search(text)
+        or _MAVEN_TEST_SUMMARY_RE.search(text)
+        or _GRADLE_TEST_SUMMARY_RE.search(text)
+        or _BUILD_SUCCESS_RE.search(text)
+        or _NODE_TEST_SUMMARY_RE.search(text)
+    )
 
 
 def _normalize_cd_scope_path(path: str) -> tuple[str, bool] | None:
@@ -1878,6 +2029,49 @@ def _output_attribution(executed_command: str, thread_data: Mapping[str, Any] | 
     return None
 
 
+# With complete Node counters present, only independently shaped sibling runner
+# summaries may contribute evidence. Bare "N passed/errors" in program logs
+# cannot override those counters. Keep the legacy loose fallback without Node.
+_SIBLING_TEST_SUMMARY_RE = re.compile(
+    r"^[ \t=]*(?:[0-9]+ (?:passed|failed|errors?|warnings?|skipped|deselected|xfailed|xpassed)(?:, )?)+ in [0-9]+(?:\.[0-9]+)?s"
+    r"(?: \((?:[0-9]+ days?, )?[0-9]+:[0-5][0-9]:[0-5][0-9]\))?[ \t=]*\r?$"
+    r"|^test result: (?:ok|FAILED)\.[^\r\n]*$"
+    r"|^(?:ok|FAIL)[ \t]+[^\r\n]+$"
+    r"|^[ \t]*--- (?:PASS|FAIL|SKIP):[^\r\n]*$"
+    r"|^Ran [0-9]+ tests? in [0-9]+(?:\.[0-9]+)?s\r?\n\r?\n(?:OK|FAILED)[^\r\n]*$",
+    re.MULTILINE,
+)
+
+
+def summarize_test_output(output: str) -> Literal["passed", "failed", "unverified"]:
+    """Classify the complete recorded tool output before evidence is truncated.
+
+    This bounded stamp carries summary semantics without retaining full logs.
+    It is execution evidence, not an acceptance verdict: consumers must still
+    enforce command matching, exit status, output attribution and shell provenance.
+    """
+    # Test names are arbitrary data, not runner summaries. Exclude TAP/spec
+    # point labels from negative/zero evidence too (`test('1 failed', ...)`).
+    text = _NODE_TEST_POINT_RE.sub("", _ANSI_SGR_RE.sub("", output))
+    build_summary = _build_test_summary_holds(text)
+    node_summary = _node_test_summary_outcome(text)
+    if node_summary is not None:
+        # A complete Node report owns its family. Recognizable sibling reports
+        # still participate (for make/test scripts running several frameworks).
+        # Retain pytest warnings/durations and Go per-case markers too: these
+        # are part of the sibling evidence, not disposable diagnostic text.
+        text = "\n".join(match[0] for pattern in (_SIBLING_TEST_SUMMARY_RE, _MAVEN_TEST_SUMMARY_RE, _GRADLE_TEST_SUMMARY_RE) for match in pattern.finditer(text))
+    if _TEST_FAIL_SHAPE_RE.search(text) or build_summary is False or node_summary == "failed":
+        return "failed"
+    # Empty packages/targets cannot veto complete positive sibling evidence.
+    summary_text = _without_empty_cargo_targets(_GO_ZERO_TEST_LINE_RE.sub("", text))
+    go_ok = _GO_TEST_PASS_SHAPE_RE.search(summary_text) and _go_package_summary_is_evidence(summary_text)
+    passing = _TEST_PASS_SHAPE_RE.search(summary_text) or go_ok or _unittest_test_summary_holds(summary_text) or build_summary is True or node_summary == "passed"
+    if passing and not _TEST_ZERO_SHAPE_RE.search(summary_text):
+        return "passed"
+    return "unverified"
+
+
 def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None, thread_data: Mapping[str, Any] | None = None) -> AcceptanceLeaf:
     base: AcceptanceLeaf = {"criterion": "", "family": "tests_passed", "checked": False, "holds": False, "detail": ""}
     matches: list[tuple[str, dict[str, Any]]] = []
@@ -1935,19 +2129,21 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         else:
             base["detail"] = f"latest matching run recorded status={status or 'unknown'}"
         return base
-    output_tail = str(latest.get("output_tail") or "")
     unattributable = _output_attribution(str(latest.get("command") or ""), thread_data)
     if unattributable is not None:
         # Neither a pass nor a fail shape here can be trusted either way.
         base["detail"] = unattributable
         return base
-    if _TEST_FAIL_SHAPE_RE.search(output_tail):
+    # New harvests classify the full ToolMessage before truncating its tail.
+    # Legacy entries have only the tail; retain their existing conservative check.
+    summary = latest.get("test_summary")
+    if summary not in ("passed", "failed", "unverified"):
+        summary = summarize_test_output(str(latest.get("output_tail") or ""))
+    if summary == "failed":
         base["checked"] = True
         base["detail"] = "recorded output carries a failing test summary"
         return base
-    # Go zero-test markers describe one package; exclude the whole line from pass evidence.
-    summary_tail = _GO_ZERO_TEST_LINE_RE.sub("", output_tail)
-    if _TEST_PASS_SHAPE_RE.search(summary_tail) and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
+    if summary == "passed":
         base["checked"] = True
         base["holds"] = True
         base["detail"] = "recorded output carries a passing test summary"

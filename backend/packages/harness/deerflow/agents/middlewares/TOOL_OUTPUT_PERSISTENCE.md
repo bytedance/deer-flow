@@ -11,13 +11,21 @@ write failure boundary. Invalid UTF-8 text or call IDs return `None` before
 file publication, allowing the tool wrappers to use the configured inline fallback.
 
 `_externalize` creates a unique sibling `.tool-output-*.tmp` with exclusive
-creation (`open(..., "x")`). Its mode is `0o666 & ~umask`, preserving ordinary
-file-creation permissions without reading or changing the process-wide umask.
+creation (`open(..., "x")`) requesting mode `0o666`. Effective permissions follow
+the process umask and any filesystem default ACL; without a default ACL the mode
+is `0o666 & ~umask`. The writer never reads or changes the process-wide umask.
 This matters when a mounted sandbox reads the output under a different UID.
-Restrictive operator umasks remain restrictive. It also passes `newline=""`, so
+It also passes `newline=""`, so
 the file holds exactly the bytes of the stamped blob ref on every platform;
 Windows text mode would write CRLF, and restore discards a file whose size or
 digest does not match.
+
+Blob recovery uses the same exclusive sibling creation in binary mode, subject
+to the recovering Gateway's umask and filesystem default ACL. It flushes, fsyncs and
+closes the complete file before replacement. A missing or mismatched local
+copy therefore does not become fixed-mode `0600` solely because it was restored;
+the same ordinary creation policy applies. Digest-matching local files are reused
+without changing their permissions.
 
 The writer closes its file before atomically replacing the deterministic final
 path. Concurrent publishers of identical output can safely reuse that path;
@@ -45,11 +53,14 @@ existing pass-through behavior.
 
 ## Bash exit marker
 
-The subagent executor reads a bash result's exit status only from its end
-(`Exit Code: N`, or a whole-output `Command exited with code N`); with no marker
-it falls back to `deerflow_tool_meta`, which reports `success` for a nonzero
-exit. A model-visible rewrite of a `bash`/`bash_tool` result must therefore keep
-the original trailing marker last: the preview re-appends it after the `Access:`
+The subagent executor prefers an integer `deerflow_tool_meta.exit_code` stamped
+by the tool producer (`source: tool_return`), so command output that prints an
+exit marker cannot override the provider's execution result. Older checkpoints
+and plain-string providers retain the fallback: a trailing `Exit Code: N` or a
+whole-output `Command exited with code N`, then metadata/native status when no
+marker exists. A model-visible rewrite of a `bash`/`bash_tool` result keeps the
+original trailing marker last for this compatibility path: the preview
+re-appends it after the `Access:`
 footer, and the storage-unavailable fallback reserves it from `max_chars` like
 sandbox truncation. The local marker regex mirrors
 `sandbox.tools._BASH_EXIT_MARKER_TAIL_RE` and a test pins them together. The
@@ -70,9 +81,30 @@ writers' files based on a TTL.
 
 ## Model-bound write elision
 
-`wrap_model_call` elides successful `write_file` content only in model requests
-after a later successful same-path `read_file`, `write_file`, or `str_replace`
-(#5328); disk remains the reference. `keep_recent_writes` preserves the newest
-writes. Use the shared `tool_call_args` helpers (`pair_tool_call_results` and
-argument rewriting). Controls: `elide_superseded_writes` and
-`superseded_write_min_chars`.
+`wrap_model_call` can elide successful `write_file` content only in model
+requests after a later successful same-path `read_file`, `write_file`, or
+`str_replace` (#5328); disk remains the reference. The optimization is disabled
+by default because applying it after a later action rewrites an earlier request
+prefix and reduces provider prompt-cache reuse (#7319). Explicitly enable
+`elide_superseded_writes` to accept that trade-off. `keep_recent_writes`
+preserves the newest writes. Use the shared `tool_call_args` helpers
+(`pair_tool_call_results` and argument rewriting). Controls:
+`elide_superseded_writes` and `superseded_write_min_chars`.
+
+The placeholder is framework-owned text that the model can see in its own
+history, so it can be imitated. `write_file` therefore rejects a payload that
+*is* the placeholder rendered from `WRITE_ELISION_PLACEHOLDER_TEMPLATE`
+(`constants.py`), allowing only surrounding whitespace, instead of writing a
+deliverable that is ~200 bytes of placeholder (#7319). The match is
+whole-payload on purpose: a substring guard would block legitimate edits to
+this repository, whose `constants.py` and docs quote the template verbatim.
+Rendering and rejection derive from that one constant so they cannot drift.
+The character count must be an ASCII non-negative integer. A document beginning
+with the same prefix, including a quoted placeholder followed by more content,
+is allowed.
+
+Both sync and async `write_file` calls reject the placeholder before sandbox
+initialization, including when the sandbox provider is unavailable.
+
+This rejection applies only to `write_file`; `str_replace` does not validate
+`new_str` against the placeholder template.

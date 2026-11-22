@@ -777,7 +777,7 @@ mcp.run(transport="stdio")
     with patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)):
         wrapped = _make_session_pool_tool(original_tool, "crash", connection)
         with pytest.raises(McpError, match="Connection closed") as exc_info:
-            await wrapped.coroutine(runtime=runtime)
+            await wrapped.coroutine(deerflow_runtime=runtime)
 
         assert exc_info.value.error.code == CONNECTION_CLOSED
         scope_key = mcp_session_scope_key(
@@ -787,7 +787,7 @@ mcp.run(transport="stdio")
         )
         assert ("crash", scope_key) not in {k[:2] for k in get_session_pool()._entries}
 
-        content, _artifact = await wrapped.coroutine(runtime=runtime)
+        content, _artifact = await wrapped.coroutine(deerflow_runtime=runtime)
 
     assert content[0]["text"] == "recovered"
 
@@ -812,9 +812,54 @@ async def test_session_pool_tool_evicts_session_after_transport_disconnect(tmp_p
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(type(transport_error)),
     ):
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_keeps_a_business_argument_named_runtime(tmp_path):
+    """A schema property called ``runtime`` is the tool's own argument, not LangGraph's."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import StructuredTool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    original_tool = StructuredTool(
+        name="srv_run",
+        description="test",
+        args_schema={
+            "type": "object",
+            "properties": {"runtime": {"type": "string"}, "code": {"type": "string"}},
+            "required": ["runtime", "code"],
+        },
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    session = AsyncMock()
+    session.call_tool = AsyncMock(return_value=CallToolResult(content=[TextContent(type="text", text="ok")], isError=False))
+    pool = MagicMock()
+    pool.get_session = AsyncMock(return_value=session)
+    pool.close_session_if_current = AsyncMock()
+    with patch("deerflow.mcp.tools.get_session_pool", return_value=pool):
+        wrapped = _make_session_pool_tool(original_tool, "srv", {"transport": "stdio", "command": "x", "args": []})
+
+    builder = StateGraph(MessagesState, context_schema=dict)
+    builder.add_node("tools", ToolNode([wrapped]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+
+    with patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)):
+        await graph.ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[{"name": "srv_run", "args": {"runtime": "python", "code": "print(1)"}, "id": "call-1", "type": "tool_call"}])]},
+            context={"thread_id": "thread-1", "thread_incarnation": None},
+        )
+
+    assert session.call_tool.await_args.args[1] == {"runtime": "python", "code": "print(1)"}
 
 
 @pytest.mark.asyncio
@@ -837,7 +882,7 @@ async def test_session_pool_tool_evicts_connection_closed_through_interceptor(tm
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(McpError, match="Connection closed"),
     ):
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
 
@@ -861,7 +906,7 @@ async def test_session_pool_tool_keeps_session_after_nonfatal_mcp_error(tmp_path
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(McpError, match=str(error)),
     ):
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_not_awaited()
 
@@ -880,7 +925,7 @@ async def test_session_pool_tool_preserves_disconnect_error_when_eviction_fails(
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(anyio.ClosedResourceError) as exc_info,
     ):
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), value=1)
 
     assert exc_info.value is error
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
@@ -944,7 +989,7 @@ async def test_session_pool_tool_keeps_session_after_tool_error_result(tmp_path)
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(ToolException, match="invalid input"),
     ):
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_not_awaited()
 
@@ -968,7 +1013,7 @@ async def test_session_pool_tool_keeps_session_after_interceptor_error(tmp_path)
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(RuntimeError, match="interceptor failed"),
     ):
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), value=1)
 
     session.call_tool.assert_not_awaited()
     pool.close_session_if_current.assert_not_awaited()
@@ -1031,15 +1076,15 @@ async def test_late_disconnect_from_old_session_does_not_evict_replacement(tmp_p
             {"transport": "stdio", "command": "x", "args": []},
         )
         runtime = _legacy_tool_runtime()
-        first_call = asyncio.create_task(wrapped.coroutine(runtime=runtime, value=1))
-        late_call = asyncio.create_task(wrapped.coroutine(runtime=runtime, value=2))
+        first_call = asyncio.create_task(wrapped.coroutine(deerflow_runtime=runtime, value=1))
+        late_call = asyncio.create_task(wrapped.coroutine(deerflow_runtime=runtime, value=2))
         await asyncio.wait_for(both_started.wait(), timeout=1)
 
         first_failure.set()
         with pytest.raises(anyio.ClosedResourceError):
             await first_call
 
-        await wrapped.coroutine(runtime=runtime, value=3)
+        await wrapped.coroutine(deerflow_runtime=runtime, value=3)
         late_failure.set()
         with pytest.raises(anyio.ClosedResourceError):
             await late_call
@@ -1084,7 +1129,7 @@ async def test_session_pool_tool_wrapping():
         mock_runtime.context = {"thread_id": "thread-42", "thread_incarnation": "incarnation-1"}
         mock_runtime.config = {}
 
-        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+        await wrapped.coroutine(deerflow_runtime=mock_runtime, url="https://example.com")
 
     mock_session.call_tool.assert_awaited_once_with("navigate", {"url": "https://example.com"})
 
@@ -1129,7 +1174,7 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
         patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
     ):
         wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
-        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+        await wrapped.coroutine(deerflow_runtime=mock_runtime, url="https://example.com")
 
     session_connection = create_session.call_args.args[0]
     workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
@@ -1185,7 +1230,7 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
         patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
     ):
         wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
-        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+        await wrapped.coroutine(deerflow_runtime=mock_runtime, url="https://example.com")
 
     session_connection = create_session.call_args.args[0]
     # Operator-provided TMPDIR is preserved; TMP/TEMP still get our default.
@@ -1232,7 +1277,7 @@ async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
         patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
     ):
         wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
-        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+        await wrapped.coroutine(deerflow_runtime=mock_runtime, url="https://example.com")
 
     session_connection = create_session.call_args.args[0]
     workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
@@ -1279,7 +1324,7 @@ async def test_session_pool_tool_skips_fs_work_for_non_stdio_transport(tmp_path)
         patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
     ):
         wrapped = _make_session_pool_tool(original_tool, "srv", connection)
-        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+        await wrapped.coroutine(deerflow_runtime=mock_runtime, url="https://example.com")
 
     session_connection = create_session.call_args.args[0]
     assert "cwd" not in session_connection
@@ -1333,7 +1378,7 @@ async def test_session_pool_tool_skips_after_walk_when_no_text_content(tmp_path)
         patch("deerflow.mcp.tools._changed_workspace_files") as changed_files,
     ):
         wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
-        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+        await wrapped.coroutine(deerflow_runtime=mock_runtime, url="https://example.com")
 
     changed_files.assert_not_called()
 
@@ -1379,7 +1424,7 @@ async def test_session_pool_tool_runs_after_walk_when_text_content_present(tmp_p
         patch("deerflow.mcp.tools._changed_workspace_files", return_value=[]) as changed_files,
     ):
         wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
-        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+        await wrapped.coroutine(deerflow_runtime=mock_runtime, url="https://example.com")
 
     changed_files.assert_called_once()
 
@@ -1422,7 +1467,7 @@ async def test_session_pool_tool_forwards_interceptor_headers():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[header_interceptor],
         )
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1}, meta={"headers": {"X-User-Id": "u-42"}})
 
@@ -1471,7 +1516,7 @@ async def test_session_pool_interceptor_reads_request_scoped_secret():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[secret_header_interceptor],
         )
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with(
         "act",
@@ -1517,7 +1562,7 @@ async def test_session_pool_tool_no_headers_omits_meta():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[passthrough_interceptor],
         )
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1})
 
@@ -1561,7 +1606,7 @@ async def test_session_pool_tool_ignores_unsupported_header_type(caplog):
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[invalid_header_interceptor],
         )
-        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
+        await wrapped.coroutine(deerflow_runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1})
     assert "unsupported type" in caplog.text
@@ -1599,7 +1644,7 @@ async def test_session_pool_tool_extracts_thread_id():
         mock_runtime.context = {"thread_incarnation": "incarnation-1"}
         mock_runtime.config = {"configurable": {"thread_id": "from-config"}}
 
-        await wrapped.coroutine(runtime=mock_runtime, x=1)
+        await wrapped.coroutine(deerflow_runtime=mock_runtime, x=1)
 
     # Verify the session was created with the canonical versioned JSON scope;
     # the autouse fixture sets the effective user to "test-user-autouse".
@@ -1641,7 +1686,7 @@ async def test_session_pool_tool_default_scope():
         wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []})
 
         # No thread_id in runtime at all.
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(deerflow_runtime=None, x=1)
 
     pool = get_session_pool()
     assert ("server", "test-user-autouse:default") in {k[:2] for k in pool._entries}
@@ -1681,7 +1726,7 @@ async def test_session_pool_tool_get_config_fallback():
         wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []})
 
         # runtime=None — get_config() fallback should provide thread_id
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(deerflow_runtime=None, x=1)
 
     pool = get_session_pool()
     assert ("server", "test-user-autouse:from-langgraph-config") in {k[:2] for k in pool._entries}
@@ -1737,6 +1782,7 @@ async def test_http_transport_tools_not_pooled():
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
+    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     class Args(BaseModel):
@@ -1763,18 +1809,17 @@ async def test_http_transport_tools_not_pooled():
     mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
     mock_cm.__aexit__ = AsyncMock(return_value=False)
 
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {
-        "myserver": MagicMock(type="http", url="http://localhost:8000/mcp", headers=None, command=None, args=[], env=None),
-        "playwright": MagicMock(type="stdio", command="npx", args=["-y", "@anthropic/mcp-server-playwright"], env=None, url=None, headers=None),
-    }
-    extensions_config.model_extra = {}
+    extensions_config = ExtensionsConfig(
+        mcpServers={
+            "myserver": McpServerConfig(type="http", url="http://localhost:8000/mcp"),
+            "playwright": McpServerConfig(type="stdio", command="npx", args=["-y", "@anthropic/mcp-server-playwright"]),
+        }
+    )
 
     servers_config = {
         "myserver": {"transport": "http", "url": "http://localhost:8000/mcp"},
         "playwright": {"transport": "stdio", "command": "npx", "args": ["-y", "@anthropic/mcp-server-playwright"]},
     }
-
     with (
         patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
         patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
@@ -1817,7 +1862,7 @@ async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
-    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     class Args(BaseModel):
@@ -1836,10 +1881,7 @@ async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
         url="https://example.com/mcp",
         tool_call_timeout=30.0,
     )
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {"remote": server_cfg}
-    extensions_config.mcp_servers = {"remote": server_cfg}
-    extensions_config.model_extra = {}
+    extensions_config = ExtensionsConfig(mcpServers={"remote": server_cfg})
 
     servers_config = {
         "remote": {"transport": "http", "url": "https://example.com/mcp"},
@@ -1879,7 +1921,7 @@ async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
-    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     class Args(BaseModel):
@@ -1907,10 +1949,7 @@ async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
         tool_call_timeout=60.0,
     )
 
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {"biomcp": server_cfg}
-    extensions_config.mcp_servers = {"biomcp": server_cfg}
-    extensions_config.model_extra = {}
+    extensions_config = ExtensionsConfig(mcpServers={"biomcp": server_cfg})
 
     # Connection dict must NOT contain tool_call_timeout — this is the key assertion.
     servers_config = {
@@ -3145,3 +3184,80 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
     routing = dict(routed)
     assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
     assert routing["web_open"] == "web"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
+    """A stuck owner exit cannot hold a disconnected tool call indefinitely."""
+    pool = MCPSessionPool()
+    pool.SESSION_CLOSE_TIMEOUT = 0.01
+    tracked_teardown_targets = []
+    track_owner_teardown = pool._track_owner_teardown
+
+    def record_owner_teardown(task):
+        tracked_teardown_targets.append(task)
+        track_owner_teardown(task)
+
+    pool._track_owner_teardown = record_owner_teardown
+    exit_started = asyncio.Event()
+    release_exit = asyncio.Event()
+    session = AsyncMock()
+    session.initialize = AsyncMock()
+    session.call_tool = AsyncMock(side_effect=anyio.EndOfStream())
+
+    class Cm:
+        owner: asyncio.Task | None = None
+
+        async def __aenter__(self):
+            self.owner = asyncio.current_task()
+            return session
+
+        async def __aexit__(self, *_args):
+            assert asyncio.current_task() is self.owner
+            exit_started.set()
+            await release_exit.wait()
+            return False
+
+    cm = Cm()
+    connection = {"transport": "stdio", "command": "x", "args": []}
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
+        pooled = await pool.get_session("srv", "scope", connection)
+        call = asyncio.create_task(call_pooled_session_tool(pooled, pool, server_name="srv", scope_key="scope", tool_name="act", arguments={}, call_kwargs={}))
+        try:
+            await asyncio.wait_for(exit_started.wait(), timeout=0.5)
+
+            # asyncio.wait() observes the deadline without cancelling the caller.
+            # wait_for(call) would wait for cancellation to propagate and could
+            # hang here if the cleanup path regressed to an unbounded wait.
+            done, _pending = await asyncio.wait({call}, timeout=1.0)
+            assert call in done, "disconnected tool call exceeded the cleanup deadline"
+            with pytest.raises(anyio.EndOfStream):
+                await call
+
+            # The caller has returned, but __aexit__ is deliberately still blocked.
+            # Wait for the cleanup waiter itself to finish before checking owner
+            # tracking; otherwise its own reaper could satisfy a set-nonempty check.
+            cleanup_waiter = next(
+                (task for task in tracked_teardown_targets if task.get_name() == "mcp-disconnect-cleanup:srv"),
+                None,
+            )
+            assert cleanup_waiter is not None
+            await asyncio.wait_for(asyncio.gather(cleanup_waiter, return_exceptions=True), timeout=0.5)
+            assert cleanup_waiter.done()
+
+            # The pool must have handed off this exact owner, and its reaper must
+            # remain retained until the blocked __aexit__ is released.
+            assert cm.owner is not None and not cm.owner.done()
+            assert cm.owner in tracked_teardown_targets
+            owner_reaper = f"mcp-session-owner-reap:{cm.owner.get_name()}"
+            assert any(task.get_name() == owner_reaper for task in pool._teardown_tasks)
+        finally:
+            # Always release the owner, including when the deadline assertion fails.
+            release_exit.set()
+            await asyncio.gather(call, return_exceptions=True)
+            if cm.owner is not None:
+                await asyncio.gather(cm.owner, return_exceptions=True)
+            while pool._teardown_tasks:
+                await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
+
+    assert not pool._teardown_tasks

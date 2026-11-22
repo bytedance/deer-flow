@@ -68,6 +68,21 @@ def test_process_environment_wins(tmp_path, value):
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_a_bom_prefixed_selection_file_loads_its_first_variable(tmp_path, entrypoint):
+    """Windows Notepad and the PowerShell 5.1 ``Set-Content -Encoding UTF8``
+    switch write a UTF-8 BOM. Plain utf-8 decoding keeps U+FEFF, and dotenv
+    then parses the first variable under a BOM-prefixed key no consumer
+    reads — a silently dropped first variable. The BOM is an encoding
+    artifact, so the selection loader consumes it."""
+    selected = tmp_path / "bom.env"
+    selected.write_bytes(b"\xef\xbb\xbf" + b"ENV_FILE_TEST_VALUE=bom-selected\nENV_FILE_TEST_DEFAULT_ONLY=from-bom\n")
+    assert selected.read_bytes().startswith(b"\xef\xbb\xbf"), "fixture must carry a real BOM"
+    result = run_startup(tmp_path, entrypoint, selected)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["bom-selected", "from-bom"]
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
 def test_unset_preserves_default_loading(tmp_path, entrypoint):
     result = run_startup(tmp_path, entrypoint)
     assert result.returncode == 0, result.stderr

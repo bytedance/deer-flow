@@ -11,16 +11,18 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.persistence.base import Base
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime import goal
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.runs import worker
-from deerflow.runtime.runs.manager import ConflictError, RunManager, RunRecord
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager, RunRecord
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.store.base import canonical_run_created_at
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -397,7 +399,12 @@ async def test_expired_lease_fences_cleanup_until_recovery_reuses_the_thread(inf
 
     async def evaluate(*args, **kwargs):
         expiry = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-        assert await store.update_lease(record.run_id, owner_worker_id="expired", lease_expires_at=expiry)
+        if isinstance(store, MemoryRunStore):
+            store._runs[record.run_id]["lease_expires_at"] = expiry
+        else:
+            async with store._sf() as session:
+                await session.execute(update(RunRow).where(RunRow.run_id == record.run_id).values(lease_expires_at=datetime.fromisoformat(expiry)))
+                await session.commit()
         record.lease_expires_at = expiry
         return {"satisfied": True, "blocker": "none", "reason": "Verified", "relied_on_assumption": False}
 
@@ -618,3 +625,132 @@ async def test_cancel_accepted_at_terminal_cas_wins_after_worker_abort_check(inf
     snapshot = await CheckpointStateAccessor.bind(compiled, checkpointer, mode=mode).aget({"configurable": {"thread_id": "result"}})
     answers = [message.content for message in snapshot.values.get("messages", []) if isinstance(message, AIMessage)]
     assert ("Report verified" in answers) is (action == "interrupt")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_scheduled_goal_cleanup_failure_reaches_the_stream_as_an_error(infrastructure, monkeypatch, mode):
+    """A terminal error the finalizer commits must not end the stream as a success.
+
+    The finalizer flips the record to ``error`` when it cannot remove the
+    occurrence's goal. Without a matching ``error`` event, the web UI raises no
+    run-failure toast and streaming IM channels mark the turn successful while
+    the stored run (and ``/wait``) report the failure.
+    """
+    store, checkpointer = infrastructure
+    manager = RunManager(store=store, worker_id="scheduler")
+    metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Scheduled report"}
+    record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)
+    events = []
+
+    class RecordingBridge:
+        async def publish(self, _run_id, event, payload=None, **kwargs):
+            events.append((event, payload))
+
+        async def publish_end(self, _run_id, **kwargs):
+            events.append(("end", None))
+
+        async def cleanup(self, _run_id, **kwargs):
+            return None
+
+    async def failing_cleanup(**kwargs):
+        raise RuntimeError("goal store unavailable")
+
+    monkeypatch.setattr(worker, "_clear_scheduled_goal", failing_cleanup)
+
+    async def node(state):
+        return {"messages": [AIMessage(content="Report ready")], "title": "Report"}
+
+    compiled = _graph(node, checkpointer, mode)
+    await worker.run_agent(
+        RecordingBridge(),
+        manager,
+        record,
+        ctx=worker.RunContext(
+            checkpointer=checkpointer,
+            checkpoint_channel_mode=mode,
+            scheduled_task_runtime={
+                "task_id": "task",
+                "occurrence_id": "occurrence",
+                "user_id": "alice",
+                "goal_objective": metadata["scheduled_goal_objective"],
+            },
+        ),
+        agent_factory=lambda config: compiled,
+        graph_input={"messages": [HumanMessage(content="Report")]},
+        config={"configurable": {"thread_id": "result"}, "context": {"non_interactive": True}},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "Scheduled goal cleanup failed"
+    assert [payload for event, payload in events if event == "error"] == [{"message": "Scheduled goal cleanup failed", "name": "RunError"}]
+    assert events[-1][0] == "end"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("action", ["interrupt", "rollback"])
+async def test_cancellation_during_failing_cleanup_ends_as_the_cancellation(infrastructure, monkeypatch, mode, action):
+    """A staged error frame must not describe a run a cancellation replaced.
+
+    A cancellation is accepted while the occurrence's goal cleanup runs (the run
+    slot stays active until cleanup finishes). Cleanup then fails, so the error is
+    staged; the cancellation branch then commits the cancellation's outcome —
+    ``interrupted`` for an interrupt, ``error`` with ``Rolled back by user`` for a
+    rollback. The stale frame belongs to an outcome that lost: the stream has to
+    agree with the record and ``/wait``.
+    """
+    store, checkpointer = infrastructure
+    manager = RunManager(store=store, worker_id="scheduler")
+    metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Scheduled report"}
+    record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)
+    events = []
+    cancels = []
+
+    class RecordingBridge:
+        async def publish(self, _run_id, event, payload=None, **kwargs):
+            events.append((event, payload))
+
+        async def publish_end(self, _run_id, **kwargs):
+            events.append(("end", None))
+
+        async def cleanup(self, _run_id, **kwargs):
+            return None
+
+    async def cancel_then_fail(**kwargs):
+        cancels.append(await manager.cancel(record.run_id, action=action))
+        raise RuntimeError("goal store unavailable")
+
+    monkeypatch.setattr(worker, "_clear_scheduled_goal", cancel_then_fail)
+
+    async def node(state):
+        return {"messages": [AIMessage(content="Report ready")], "title": "Report"}
+
+    compiled = _graph(node, checkpointer, mode)
+    await worker.run_agent(
+        RecordingBridge(),
+        manager,
+        record,
+        ctx=worker.RunContext(
+            checkpointer=checkpointer,
+            checkpoint_channel_mode=mode,
+            scheduled_task_runtime={
+                "task_id": "task",
+                "occurrence_id": "occurrence",
+                "user_id": "alice",
+                "goal_objective": metadata["scheduled_goal_objective"],
+            },
+        ),
+        agent_factory=lambda config: compiled,
+        graph_input={"messages": [HumanMessage(content="Report")]},
+        config={"configurable": {"thread_id": "result"}, "context": {"non_interactive": True}},
+    )
+
+    assert cancels == [CancelOutcome.cancelled]
+    if action == "interrupt":
+        assert record.status == RunStatus.interrupted
+    else:
+        assert record.status == RunStatus.error
+        assert record.error.startswith("Rolled back by user")
+    assert [payload for event, payload in events if event == "error"] == []
+    assert events[-1][0] == "end"

@@ -30,6 +30,7 @@ describe("raw identifier guard", () => {
     "Stopped: blocked:needs_user_input",
     "max_continuations_reached",
     "Reason token_capped",
+    "Reason loop_capped",
     "thread_changed_after_evaluation",
     "goal_outcome missing",
     "last_evaluation.stand_down_reason",

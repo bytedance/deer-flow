@@ -33,6 +33,11 @@ rs.mock("@/core/i18n/hooks", () => ({
     t: {
       modelPicker: {
         title: "Choose a model",
+        search: "Search models",
+        provider: "Provider",
+        allProviders: "All providers",
+        noResults: "No matching models",
+        recent: "Recently used",
         favorites: "Favorites",
         otherModels: "Other models",
         noModels: "No models available",
@@ -162,6 +167,7 @@ function favoriteButton(model: Model) {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   authUser = { id: "alice" };
   authLoading = false;
   favoriteNames = [MODELS[1]!.name];
@@ -443,4 +449,151 @@ describe("ModelPickerContent popover lifecycle", () => {
       screen.getByRole("button", { name: "Current model" }),
     );
   });
+});
+
+it("searches model IDs and intersects provider filtering without changing selection", async () => {
+  const onSelect = rs.fn();
+  render(
+    <StatefulPicker
+      models={MODELS.map((model, i) => ({
+        ...model,
+        provider: i === 0 ? "First" : "Second",
+      }))}
+      onModelSelect={onSelect}
+    />,
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "Search models" }), {
+    target: { value: "BETA-API" },
+  });
+  expect(modelButtons().length).toBe(1);
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "First" },
+  });
+  expect(screen.getByText("No matching models")).not.toBeNull();
+  expect(onSelect).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "" },
+  });
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Search models" }), {
+    key: "ArrowDown",
+  });
+  expect(document.activeElement).toBe(modelButtons()[0]);
+});
+
+it("navigates in rendered provider order, including wrapping and filtered results", async () => {
+  favoriteNames = [];
+  const models = [
+    { ...MODELS[0]!, name: "a1", provider: "A" },
+    { ...MODELS[1]!, name: "b1", provider: "B" },
+    { ...MODELS[2]!, name: "a2", provider: "A" },
+  ];
+  render(<StatefulPicker models={models} selectedModelName="a1" />);
+  await screen.findByRole("group", { name: "A" });
+  const buttons = modelButtons();
+  expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+    "Shared label (a1)",
+    "Gamma (a2)",
+    "Shared label (b1)",
+  ]);
+  for (const direction of ["ArrowDown", "ArrowUp"]) {
+    buttons[0]!.focus();
+    for (let step = 1; step <= buttons.length; step++) {
+      fireEvent.keyDown(document.activeElement!, { key: direction });
+      const index =
+        (direction === "ArrowDown" ? step : buttons.length - step) %
+        buttons.length;
+      expect(document.activeElement).toBe(buttons[index]);
+    }
+  }
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "A" },
+  });
+  const filtered = modelButtons();
+  filtered[0]!.focus();
+  fireEvent.keyDown(filtered[0]!, { key: "ArrowDown" });
+  expect(document.activeElement).toBe(filtered[1]);
+});
+
+it.each([0, 1, 2])(
+  "clears a removed provider filter with %i providers remaining",
+  async (remaining) => {
+    favoriteNames = [];
+    const models = [
+      { ...MODELS[0]!, name: "a1", provider: "A" },
+      { ...MODELS[1]!, name: "b1", provider: "B" },
+      { ...MODELS[2]!, name: "c1", provider: "C" },
+    ];
+    const view = render(<ControlledPicker open models={models} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+      target: { value: "A" },
+    });
+    expect(modelButtons()).toHaveLength(1);
+    view.rerender(
+      <ControlledPicker open models={models.slice(1, remaining + 1)} />,
+    );
+    await waitFor(() => expect(modelButtons()).toHaveLength(remaining));
+    if (remaining > 0)
+      expect(modelButtons()[0]!.getAttribute("aria-label")).toBe(
+        "Shared label (b1)",
+      );
+    if (remaining < 2)
+      expect(screen.queryByRole("combobox", { name: "Provider" })).toBeNull();
+    else
+      expect(screen.getByRole("combobox", { name: "Provider" })).toHaveProperty(
+        "value",
+        "",
+      );
+    view.rerender(<ControlledPicker open models={models} />);
+    expect(modelButtons()).toHaveLength(3);
+  },
+);
+
+it("keeps a provider filter while that provider still has a model", async () => {
+  favoriteNames = [];
+  const models = [
+    { ...MODELS[0]!, name: "a1", provider: "A" },
+    { ...MODELS[1]!, name: "b1", provider: "B" },
+    { ...MODELS[2]!, name: "a2", provider: "A" },
+  ];
+  const view = render(<ControlledPicker open models={models} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "A" },
+  });
+  view.rerender(<ControlledPicker open models={models.slice(1)} />);
+  await waitFor(() => expect(modelButtons()).toHaveLength(1));
+  expect(modelButtons()[0]!.getAttribute("aria-label")).toBe("Gamma (a2)");
+  expect(screen.getByRole("combobox", { name: "Provider" })).toHaveProperty(
+    "value",
+    "A",
+  );
+});
+
+it("keeps an active provider filter clearable when YAML models remain", async () => {
+  favoriteNames = [];
+  const models = [
+    { ...MODELS[0]!, name: "a1", provider: "A" },
+    { ...MODELS[1]!, name: "b1", provider: "B" },
+    { ...MODELS[2]!, name: "yaml-model", model: "yaml-model" },
+  ];
+  const view = render(<ControlledPicker open models={models} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "A" },
+  });
+  view.rerender(<ControlledPicker open models={[models[0]!, models[2]!]} />);
+  expect(modelButtons()).toHaveLength(1);
+  expect(screen.getByRole("combobox", { name: "Provider" })).toHaveProperty(
+    "value",
+    "A",
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "Search models" }), {
+    target: { value: "yaml-model" },
+  });
+  expect(modelButtons()).toHaveLength(0);
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "" },
+  });
+  await waitFor(() => expect(modelButtons()).toHaveLength(1));
+  expect(modelButtons()[0]!.getAttribute("aria-label")).toBe(
+    "Gamma (yaml-model)",
+  );
 });

@@ -7,6 +7,27 @@ test("reads the title from a leading ATX heading", () => {
 });
 
 test.each([
+  ["#\tReal Title", "Real Title"],
+  ["#\t Real Title", "Real Title"],
+  ["# \tReal Title", "Real Title"],
+  ["   #\tReal Title\r\nbody", "Real Title"],
+  ["#\tReal Title ###\t\r\nbody", "Real Title"],
+  ["#\t", undefined],
+  ["#\t###", undefined],
+])("accepts ASCII tab separators in %j", (markdown, expected) => {
+  expect(extractTitleFromMarkdown(markdown)).toBe(expected);
+});
+
+test.each(["\u00a0", "\u2003", "\v", "\f"])(
+  "does not treat %j as an ATX separator",
+  (separator) => {
+    expect(
+      extractTitleFromMarkdown(`#${separator}Not A Title`),
+    ).toBeUndefined();
+  },
+);
+
+test.each([
   ["# Release Notes ###", "Release Notes"],
   ["# Release Notes ###   ", "Release Notes"],
   ["# Release Notes\t###\t", "Release Notes"],

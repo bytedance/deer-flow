@@ -14,7 +14,7 @@ import { Callout } from "nextra/components";
 | `TaskLifecycleContributor`   | `registry.task_lifecycle()`              | 每次 Lead 运行和子 Agent 的开始与结束 | 异步，被等待     | 任务存储            |
 | `SystemModelCallObserver`    | `registry.system_model_observer()`       | 每次 DeerFlow 自有模型调用之后     | 异步               | 任务存储，或分离存储 |
 | `AgentAssemblyObserver`      | `registry.agent_assembly_observer()`     | 每次 Agent 构建结束时              | **同步**           | 仅应用存储          |
-| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | 每次摘要压缩之后                   | 异步，即发即弃     | 分离存储            |
+| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | 每次摘要压缩之后                   | 异步，即发即弃     | 任务存储，或分离存储 |
 
 本页所有示例都来自同一个注册了全部四种贡献的扩展：
 
@@ -63,6 +63,10 @@ class TaskLifecycleContributor(Protocol):
 | `parent_task_id` | `None`                     | 父运行 id，也就是 Lead 任务的 `task_id`     |
 | `agent_name`     | assistant 或自定义 Agent id | 子 Agent 名称，例如 `general-purpose`      |
 | `resumed`        | `False`                    | `False`                                    |
+| `metadata`       | 运行 metadata 的只读副本    | 空                                         |
+| `stop`           | 开始时为 `None`；停止时为 `TaskStopDetail` | 开始时为 `None`；停止时为 `TaskStopDetail` |
+
+对定时运行，`metadata` 中包含 `scheduled_task_id`、`scheduled_task_run_id` 和 `scheduled_trigger`，观察者可据此区分定时运行和交互式运行。
 
 <Callout type="info">
   `resumed` 属于契约的一部分，但当前宿主从不把它设为 `True`。暂时不要依赖它来识别续跑。
@@ -81,6 +85,23 @@ class TaskLifecycleContributor(Protocol):
 | `failed`    | 其他情况，例如 `error`                     | 其他情况，包括超时             |
 
 这个映射刻意偏保守。触达 token 或轮次预算的子 Agent 仍可能是 `completed`。
+
+### TaskStopDetail
+
+`info.stop` 携带结果背后的细节。Lead 运行的状态在图结束后才由宿主决定（模型重试后仍失败时，图会正常结束），因此基于回调的追踪看不到它；`on_task_stop` 在宿主尝试持久化状态之后运行。
+
+| 字段           | Lead 运行                                           | 子 Agent                                       |
+| -------------- | --------------------------------------------------- | ---------------------------------------------- |
+| `status`       | 运行状态：`success`、`error`、`timeout`、`interrupted` 或 `waiting_for_input` | `completed`、`failed`、`cancelled` 或 `timed_out` |
+| `error`        | 运行上保存的简短错误信息（如有）                    | 执行的错误信息（如有）                         |
+| `goal_verdict` | 评估过目标时，目标评估器结论的只读副本              | `None`                                         |
+| `persisted`    | 宿主无法确认终态写入时为 `False`                    | `True`                                         |
+
+`waiting_for_input` 是可恢复的暂停，而非终态失败：运行因审批或向用户提问而停下，其粗粒度结果为 `failed`。请读取 `stop.status` 区分两者；回应请求会启动一个新的运行，并有各自的开始与停止。
+
+`persisted=False` 表示运行存储拒绝了终态写入，或 worker 失去了运行的所有权。此时 `status` 是 worker 暂存的状态，存储中的运行可能仍为 `running` 或带有其他 worker 的结果。请照常释放按任务保存的状态，但不要把该状态当作最终结果上报。
+
+带目标的定时运行，在状态为 `success` 但 `goal_verdict` 缺失或未 `satisfied` 时记为未达成（unmet）。`stop` 只设置在传给 `on_task_stop` 的 `info` 上；任务存储中的 `TaskInfo` 保持 `stop=None`。`stop` 与 `metadata` 不参与相等比较和哈希，因此停止时的 `info` 能找到以开始时的 `info` 为键保存的状态。两者都是 `ReadOnlyDict` 快照：嵌套映射为只读，列表转为元组，`dataclasses.asdict()` 和 `json.dumps()` 均可使用。
 
 ### 示例
 
@@ -309,10 +330,13 @@ class ContextCompactionObserver(Protocol):
 | `output_content_hash`     | 摘要文本的 `canonical_hash`                            |
 | `compacted_message_count` | 移除了多少条消息                                       |
 | `kept_message_count`      | 保留了多少条消息                                       |
+| `task_id`                 | 压缩发生在哪个任务里；不在任务内时为 `None`            |
+| `run_id`                  | 该任务所属的运行，或 `None`                            |
+| `thread_id`               | 该任务所属的线程，或 `None`                            |
 
 要把事件和你手里的消息对应起来，必须用完全相同的方式哈希：`canonical_hash(message.content)`，直接传入 content 本身。绝不要先转成字符串，因为多模态 content 是 dict 列表，`str()` 的结果取决于键顺序。也不要试图事后通过对模型看到的内容做哈希来找回摘要：提示词里带的是摘要经过截断和转义的渲染版本，它的哈希不会等于 `output_content_hash`。
 
-这个通知是即发即弃的。它被分派到通知循环，不会阻塞模型这一轮；观察者收到的是**分离**存储，因为在这个调用点没有活跃任务。没有注册压缩观察者时，宿主连哈希这一步也会跳过。
+这个通知是即发即弃的。它被分派到通知循环，不会阻塞模型这一轮。在 Lead 运行或子 Agent 内部，观察者收到的是该任务的存储，`task_id`、`run_id`、`thread_id` 取自宿主放在其中的 `TaskInfo`，因此你可以按 `(thread_id, run_id)` 关联一次压缩，而不必去匹配哈希。手动 `/compact` 不在任何任务之内，所以观察者收到的是**分离**存储，三个 id 都是 `None`。没有父运行就启动的子 Agent 会传入它自己的存储，但其中没有 `TaskInfo`，所以 id 同样是 `None`。没有注册压缩观察者时，宿主连哈希这一步也会跳过。
 
 ### 示例
 
@@ -320,12 +344,13 @@ class ContextCompactionObserver(Protocol):
 class CompactionLogger:
     async def on_context_compacted(self, app_store: ExtensionData, task_store: ExtensionData, event: CompactionEvent) -> None:
         logger.info(
-            "%s v%s folded %d message(s) into summary %s, kept %d",
+            "%s v%s folded %d message(s) into summary %s, kept %d (run %s)",
             event.transform_kind,
             event.transform_version,
             event.compacted_message_count,
             event.output_content_hash[:12],
             event.kept_message_count,
+            event.run_id or "none",
         )
 ```
 

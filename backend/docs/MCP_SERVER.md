@@ -163,10 +163,7 @@ Use `routing` when an MCP server should be preferred for specific requests, such
 as internal database questions that should use a PostgreSQL MCP tool before web
 search. Routing hints are soft model guidance: they add a
 `<mcp_routing_hints>` prompt section, but they do not forbid other tools. Use
-agent-level allow/deny policy for hard restrictions. If `tool_search.enabled`
-defers MCP tool schemas, matching routing metadata can also auto-promote the
-deferred schema before the model call. Auto-promotion is controlled by the
-top-level `config.yaml -> tool_search.auto_promote_top_k` setting.
+agent-level allow/deny policy for hard restrictions. When deferred schemas are enabled, the model uses tool_search to select a tool explicitly. Keyword mentions, quotes and negation do not automatically promote schemas. The legacy auto_promote_top_k setting is accepted for configuration compatibility and has no automatic effect.
 
 ```json
 {
@@ -197,21 +194,15 @@ top-level `config.yaml -> tool_search.auto_promote_top_k` setting.
 
 - `routing.mode`: `off` disables hints; `prefer` emits hints.
 - `routing.priority`: `0` to `100`; higher-priority hints are rendered first.
-  When `tool_search.enabled=true`, priority also orders auto-promote matches.
-- `routing.keywords`: operator-authored terms that describe when to prefer the
-  MCP tool. Empty keywords are allowed but do not emit a hint line and do not
-  trigger auto-promotion. Auto-promote matching is a case-insensitive substring
-  test against the latest user message (not token/word-boundary matching), so
-  prefer distinctive keywords — a short term like `api` also matches `rapid`.
-  Over-matching only exposes an extra tool schema (soft/additive), never
-  disables other tools.
+  This ordering does not select or authorize tools.
+- routing.keywords: operator-authored capability descriptions for advisory hints. They are not matched against conversation text to select a tool or infer user intent. Empty keywords emit no hint line.
 - `tools.<original_tool_name>.routing`: overrides only the fields explicitly
   set for that tool. The key is the MCP server's original tool name, before the
   `<server>_` prefix added for model binding. If the server-level
   `routing.mode` is `off`, a tool override must set `mode: "prefer"`; setting
   only `priority` or `keywords` still inherits `off` and emits no hint.
-- `tool_search.auto_promote_top_k`: global limit for auto-promoted deferred MCP
-  schemas per model call. Default `3`; valid range `1..5`.
+- tool_search.auto_promote_top_k: legacy setting; default 3 and accepted range 1..5 remain compatible, but do not expose deferred schemas automatically.
+
 
 ## Tool Name Prefixes
 
@@ -392,7 +383,7 @@ runtime-internal. Query the current thread through:
 Task toolsets require `database.backend: sqlite` or `postgres`; startup fails
 instead of falling back to a synchronous submit when persistence or the task
 runtime is disabled. Restart recovery also requires the remote service to keep
-the task alive and recognize its ID after DeerFlow reconnects. A stdio server
+the task alive and recognize its ID after DeerFlow reconnects. Status and cancellation calls renew their control lease while executing and saving their result; the lease duration is a crash-recovery window, not a tool-call timeout. See [control-call leases](mcp-control-leases.md) for ownership loss, cancellation cleanup, and SQLite claim serialization. A stdio server
 must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
@@ -412,11 +403,19 @@ Tool-cache resets and rediscovery keep that state. Token rotation does not
 modify the parsed configuration or trigger the startup-snapshot drift guard;
 real operator configuration changes still require a restart.
 
-This state is process-local and is never written back to `extensions_config.json`
-or an environment variable. A restarted Gateway needs a valid configured
-refresh token, and separate Gateway workers do not coordinate token rotation.
+This state is never written back to `extensions_config.json` or an environment
+variable. With a SQL database, a `refresh_token` connection's tokens are also kept
+in the shared `mcp_oauth_tokens` table, so a restarted Gateway and its peers
+continue the rotated chain (see
+[Refresh-token rotation](#refresh-token-rotation-across-restarts-and-replicas)).
 Personal MCP connections remain owner-scoped and do not use this deployment
-state, even if their runtime names match a deployment server.
+state, even if their runtime names match a deployment server. A personal
+server's runtime name is derived from its complete definition, so editing,
+disabling, or deleting it while a task is in flight leaves the persisted task
+handle unresolvable. That task fails permanently with the connection error
+instead of retrying forever; if the user had requested cancellation, it also
+ends as `failed` because the remote task can no longer be reached. Restoring
+the same definition does not revive an already terminal task.
 
 When `user_auth` is enabled on an HTTP/SSE server, background status and
 cancellation calls use the persisted task owner's configured credential,
@@ -474,6 +473,185 @@ Example:
    }
 }
 ```
+
+### Refresh-token rotation across restarts and replicas
+
+Providers such as Auth0, Okta and Google rotate refresh tokens: every refresh
+returns a new one and invalidates the old one. With `database.backend: sqlite`
+or `postgres`, the Gateway keeps each `refresh_token` connection's latest access
+token and refresh token in the `mcp_oauth_tokens` table (migration
+`0047_mcp_oauth_tokens`), encrypted with `DEER_FLOW_CREDENTIALS_KEY` (see
+[CONFIGURATION.md](CONFIGURATION.md#credentials-encryption-key-deer_flow_credentials_key)):
+
+- A restart, a tool-cache reset, or a later run of a personal connection
+  continues from the stored chain instead of the configured `refresh_token`.
+- Gateway replicas share one chain. Before refreshing, a replica re-reads the
+  row and uses a peer's still-valid access token. Otherwise it claims the
+  refresh with a 30-second lease, so only one replica calls the token endpoint
+  and the others wait for its result. The holder renews the lease while the
+  token request runs (HTTP timeouts bound each read, not the whole response)
+  and abandons a request after 120 seconds. No row lock is held during the
+  token request.
+- If the new tokens cannot be stored (the database is briefly unavailable),
+  the process keeps using them, retries storing them every few seconds, and
+  stores them before its next refresh, so nobody falls back to the refresh
+  token it already consumed.
+- A stored access token is reused only by processes that request it the same
+  way (`extra_token_params` such as `resource`, and the response-field
+  settings). After such a change the next request refreshes from the stored
+  refresh token instead, so the chain is kept.
+- The configured `refresh_token` is only the seed. The row records which
+  `token_url`, `client_id`, `grant_type`, `scope`, `audience` and seed it
+  continues (as a SHA-256 fingerprint). After you change any of them, the next
+  refresh starts again from the configured value. To recover from a revoked
+  chain (`invalid_grant`), configure a new `refresh_token`; changing only
+  `client_secret` keeps the stored chain.
+- Personal connections get one row per owner, keyed by their runtime name.
+  Editing a personal connection changes that name, so it starts again from its
+  configured refresh token. Saving a configuration deletes the rows of the
+  connections it no longer has: an edited or deleted personal connection, or a
+  deployment server removed through the MCP configuration API (a server removed
+  by hand-editing `extensions_config.json` is dropped on the next API save).
+  Disabling a connection keeps its row, so re-enabling it continues the chain.
+- When the provider rejects the refresh token (`invalid_grant`), the tool call
+  fails with an error that names the server and asks for a new refresh token.
+  If the instance fell back to the seed because it could not decrypt the chain
+  another instance stored, the error also says that every instance needs the
+  same `DEER_FLOW_CREDENTIALS_KEY`.
+- `client_credentials` tokens are not stored; each process requests its own.
+- Tokens stay in process memory, as before, with `database.backend: memory`,
+  in the embedded `DeerFlowClient` (no Gateway), or when the credentials key
+  cannot be loaded. If the database cannot be read or written, the refresh
+  fails instead of consuming a refresh token that nothing records; a still-valid
+  access token keeps working.
+- A declared multi-instance deployment (`deployment.multi_instance: true`) with
+  an enabled `refresh_token` OAuth server refuses to start without a shared
+  `DEER_FLOW_CREDENTIALS_KEY`. Personal OAuth connections are saved at runtime,
+  so that startup check cannot see them; set the variable on every
+  multi-instance deployment that uses them.
+
+## Per-agent credentials (deployment HTTP servers)
+
+For a shared HTTP MCP server, an administrator can grant a different OAuth
+service account to each custom agent. The Gateway admits an owner and an
+approved agent definition; changing a client-supplied `agent_name` or creating
+a same-named agent in another account does not grant credentials.
+
+Enable enforcement on the deployment server in `extensions_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "ticketing": {
+      "type": "http",
+      "url": "https://ticketing.example/mcp",
+      "headers": {"Authorization": "Bearer $MCP_DISCOVERY_TOKEN"},
+      "agent_auth": true
+    }
+  }
+}
+```
+
+Tool discovery still uses the server's static headers or server-level OAuth.
+Use a discovery credential limited to listing tools. Calls to a protected
+server always require an agent grant; there is no passthrough to discovery
+credentials. Default Lead, bootstrap runs and owners without a matching grant
+cannot call its tools. Personal MCP connections cannot enable this feature.
+
+Enabling protection also denies calls through tools issued before the change;
+start a new run to discover tools with the current authentication chain. Editing
+a server preserves `agent_auth` when the field is omitted, including on the
+single-server replacement endpoint. Disabling protection requires explicit
+`agent_auth: false`.
+
+Keep the grants in operator-owned `config.yaml`, separately from the
+API-writable server configuration:
+
+```yaml
+mcp_agent_auth:
+  research-tickets:  # Stable binding ID; durable tasks retain this reference.
+    server: ticketing
+    agent: research-bot
+    owners: ["alice-user-id", "bob-user-id"]
+    definition_digests: ["<approved 64-character SHA-256 digest>"]
+    oauth:
+      grant_type: client_credentials
+      token_url: https://idp.example/realms/work/protocol/openid-connect/token
+      client_id: research-bot
+      client_secret: $RESEARCH_BOT_CLIENT_SECRET
+      scope: tickets.read
+```
+
+This first version supports explicit owner IDs and OAuth `client_credentials`
+on deployment-managed HTTP servers. An owners list lets a GitOps job maintain
+membership for identical per-user copies. Wildcards, group matching, static
+per-agent tokens and refresh-token grants are not supported. Enabled bindings
+must not overlap for the same server, agent and owner.
+
+### Approve a definition
+
+Generate the digest in the Gateway environment with the same DeerFlow version
+and data root, after reviewing the stored agent:
+
+```bash
+uv run --no-sync --project backend python - alice-user-id research-bot <<'PY'
+import sys
+from deerflow.config.agents_config import load_agent_config, load_agent_soul
+from deerflow.mcp.agent_auth import agent_definition_digest
+
+owner, name = sys.argv[1:]
+config = load_agent_config(name, user_id=owner)
+if config is None:
+    raise SystemExit("Agent not found")
+print(agent_definition_digest(config, load_agent_soul(name, user_id=owner)))
+PY
+```
+
+The versioned digest covers the parsed `AgentConfig` and the exact SOUL text.
+The Gateway verifies these at run admission and assembles the run from that
+same in-memory snapshot. Editing either invalidates admission until an
+administrator approves the new digest. Editing an agent does not edit its
+grant. For rolling syncs, the binding can temporarily allow both old and new
+digests, then remove the old one after copies have been updated.
+
+The digest does not attest dynamic tool schemas, skill file contents, remote
+data or the model's behavior. Review the approved tool/skill selections and
+enforce service-account permissions at the MCP service. Operator-controlled
+custom interceptors remain trusted code.
+
+### Delegation, tasks and revocation
+
+Ordinary subagents inherit the calling agent's grant, even if a child has its
+own name or binding. Durable subagent batches and ordinary MCP background
+tasks store only nonsecret binding/definition references, then restore that
+identity after worker recovery. A new definition rollout does not switch an
+existing task's service account or break its status/cancel calls.
+
+References also bind the MCP transport and exact URL. Changing that destination
+invalidates existing references, including after a Gateway restart; old tasks
+cannot send their account's credential to the replacement endpoint. References
+without a destination fingerprint are refused rather than upgraded implicitly.
+
+Each call checks the current operator grant, including when the access token
+is cached. Disable/delete the binding or remove an owner to deny subsequent
+calls, polls and cancellations. A call already sent cannot be recalled.
+Changing the OAuth endpoint, client, scope or audience also invalidates old
+references; rotating the same account's client secret keeps them valid and
+refreshes the cache. Missing grants or failed token acquisition never fall
+back to user or server credentials.
+
+Grant edits are hot-reloaded independently of the server connection snapshot.
+As with other task-tool connection settings, changing the server's
+`agent_auth` flag requires a Gateway restart when it has `task_toolsets`.
+Environment secrets are resolved at configuration load; roll out a config
+reload or restart when rotating them. Access tokens are cached in process by
+server, binding and credential configuration, using the existing OAuth expiry
+and refresh logic. Logs identify the server, agent, owner and binding without
+logging credential values.
+
+Config loading rejects enabled `user_auth` on protected servers and any enabled
+`headers_from_context` mapping of `Authorization`, regardless of header casing.
+Non-auth context headers can still be forwarded on foreground calls.
 
 ## Request-Scoped Headers (HTTP/SSE MCP Servers)
 
@@ -545,15 +723,16 @@ The caller supplies the values on each run request:
   way a value reaches these headers: `user_auth`, the OAuth token returned by
   the token endpoint, and the static `headers` in the config file.
 - Precedence for a server declaring several sources: static `headers` <
-  `oauth` < `user_auth` < `headers_from_context`. The value chosen for this one
-  request is the most specific, so it wins.
+  `oauth` < `user_auth` < `headers_from_context`. Protected `agent_auth` servers
+  reject competing built-in auth sources as described above.
 - `sse`/`http` only. A stdio server has no HTTP headers; declaring the block
   there logs a warning and is ignored.
 - Durable background tasks are the one exception, and only half of one: a
   `task_toolsets` submit is awaited inside the Agent run and carries these
   headers, but the status and cancel polls run after that run ends, so they skip
   them and use configured static/OAuth credentials or the persisted owner's
-  `user_auth` credential. See *Durable Background
+  `user_auth` credential, or the admitted agent binding on `agent_auth` servers.
+  See *Durable Background
   Tasks* above.
 
 Use `user_auth` instead when the credential belongs to a configured DeerFlow
@@ -580,7 +759,7 @@ Each entry is a Python import path in `module:variable` format (resolved via `re
 Tool discovery is server-scoped, so every server gets its own interceptor instance built
 from a single-server configuration view, and a stateful interceptor (a counter, a cache,
 a rate limiter) only ever observes that server's calls. Do not rely on one instance being
-shared across servers. The built-in OAuth, per-user and context-header interceptors are
+shared across servers. The built-in OAuth, agent, user and context-header interceptors are
 unaffected: they resolve everything per `request.server_name`. Servers that are not
 discovered never run their builder.
 
@@ -655,6 +834,90 @@ Current history APIs hide legacy `metadata.auth_token` and `config.metadata.auth
 material already retained by those systems. Restarting or upgrading DeerFlow does
 not rotate credentials or perform historical cleanup; operators must complete
 both actions explicitly.
+
+### Browser authorization for deployment MCP
+
+An operator can opt a Streamable HTTP server into per-user browser authorization
+by setting its `user_oauth` block in `extensions_config.json`. Register the
+exact public Gateway callback URL `/api/mcp/user-oauth/callback` with the
+provider before enabling the server. Configure access logs to omit the query
+string for this callback, which carries the one-time code and state.
+
+```json
+{
+  "mcpServers": {
+    "tickets": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "user_oauth": {
+        "issuer": "https://identity.example.com",
+        "client_id": "deerflow",
+        "client_secret": "$TICKETS_OAUTH_CLIENT_SECRET",
+        "redirect_uri": "https://deerflow.example.com/api/mcp/user-oauth/callback",
+        "scope": "tickets:read"
+      }
+    }
+  }
+}
+```
+
+Omit `client_secret` for a registered public client. The authorization server
+must support authorization code with S256 PKCE and publish MCP resource and
+authorization server metadata. Discovered authorization and token endpoints
+must share the configured issuer origin. For explicitly trusted private MCP or
+issuer addresses, set `allow_private_addresses: true` in `user_oauth`; both
+origins still require HTTPS. Local browser callbacks may use loopback HTTP.
+
+Sign in and open **Capability Center → Tools & integrations → My MCP connections** to connect
+or disconnect your account. Browsing and invoking the tools uses your upstream
+permissions. An existing conversation picks up the connection on the next
+run. Disconnect takes effect before the next dispatch, including in existing
+runs on another Gateway. A request already accepted by the remote server
+may finish. If an operator disables the server or removes its browser authorization
+configuration, you can still disconnect your saved grant in My MCP connections.
+Foreground lead-agent chat supports these connections. Subagents,
+scheduled runs, IM, and other background runs use their existing credential modes.
+
+This mode requires SQLite or PostgreSQL and the existing credentials key.
+Multiple Gateway hosts need shared PostgreSQL and the same credentials key.
+A server using browser authorization has a single authorization source: omit
+`agent_auth`, `user_auth`, deployment `oauth`, any static or per-request
+`Authorization` header, and durable MCP task toolsets for that server. Increase
+`grant_revision` when deliberately invalidating grants, including if an old
+issuer or server configuration is restored.
+
+## Tool Discovery Cache
+
+Deployment servers that do not require a browser grant use a shared discovery
+cache keyed by server name. Entries contain the tools, server configuration
+snapshot, normalized interceptor chain, and any pooled stdio session binding.
+Browser-authorized tools are discovered for the signed-in user within each run.
+
+- **Reuse.** On every (re)initialization, a server's cached tools are reused only
+  when its configuration snapshot and global interceptor chain are unchanged
+  *and* it still owns the process's current binding. The chain is checked against
+  each entry's published wrappers, including after a failed initialization attempt
+  or an edit between reconciliation and initialization. An unchanged server keeps
+  the exact same tool objects and is not re-discovered, so it does not re-fetch
+  OAuth headers or respawn its stdio process. Only changed servers are re-discovered.
+- **Invalidation.** Editing a server's configuration (connection, description,
+  routing, tool prefixes, ...) drops that server's entry; deleting or disabling a
+  server drops it; an explicit cache reset or a shared reset marker clears every
+  server. Reordering servers only changes the flattened tool order.
+- **Failure handling.** A server whose discovery fails is left absent for that
+  pass and its previous entry is dropped, while healthy servers still publish. If
+  *every* enabled server fails, initialization is aborted rather than publishing
+  an empty tool set, and the next call retries. A server that legitimately
+  returns zero tools is cached as a successful empty result and is not
+  re-discovered.
+- **Remote tool changes.** The cache is configuration-driven: a remote MCP server
+  that changes its `tools/list` response without a configuration change is not
+  picked up automatically. Use `POST /api/mcp/cache/reset` (or disable/re-enable
+  or edit the server) to force re-discovery, which the shared reset marker
+  propagates to every worker mounting the same config directory.
+
+Because reuse is scoped to one server, changing only one server never re-discovers,
+re-authenticates, or restarts the others.
 
 ## How It Works
 

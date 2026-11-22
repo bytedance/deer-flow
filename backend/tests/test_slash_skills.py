@@ -556,6 +556,43 @@ def test_skill_activation_middleware_reactivates_on_new_user_slash_command(monke
     assert sum(1 for kwargs in recorded if kwargs.get("action") == "activate") == 2
 
 
+def test_skill_activation_strips_a_leading_bom_from_skill_content(monkeypatch, tmp_path):
+    """A SKILL.md saved by a Windows editor must reach the model without its BOM.
+
+    The frontmatter path already tolerates one — ``_FRONTMATTER_RE``
+    (``deerflow/skills/frontmatter.py``) consumes an optional leading BOM — so a
+    skill written by Notepad or PowerShell 5.1 parses and installs fine. That
+    tolerance covers the front matter only. Activation then reads the whole file
+    for the model, and reading it as plain ``utf-8`` there would hand the model a
+    body starting with U+FEFF and fingerprint that BOM in the ``sha256`` the
+    reminder publishes. This pins both halves.
+    """
+    body = "# Data Analysis\nUse pandas."
+    skill = _make_skill(tmp_path, "data-analysis", content=body)
+    # Re-write the same content with a UTF-8 BOM, the way those editors save.
+    skill.skill_file.write_text("\ufeff" + body, encoding="utf-8")
+
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    middleware.wrap_model_call(_make_model_request([original], runtime=SimpleNamespace(context=None)), handler)
+
+    reminders = [message for message in captured["messages"] if is_slash_skill_activation_reminder(message)]
+    assert len(reminders) == 1
+    content = reminders[0].content
+    assert "\ufeff" not in content
+    # The published digest fingerprints the skill, not the editor's byte-order mark:
+    # it equals the digest of the same file written without one.
+    assert f'sha256="{hashlib.sha256(body.encode("utf-8")).hexdigest()}"' in content
+
+
 def test_skill_activation_middleware_activates_per_call_when_run_context_is_none(monkeypatch, tmp_path):
     # Regression for the degraded-path contract: when runtime.context is None
     # (e.g. no run-scoped context is threaded through - the #3989 case), _run_context()

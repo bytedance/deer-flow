@@ -87,13 +87,7 @@ def _no_existing_boxlite_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep provider startup reconciliation isolated from the real SDK state."""
 
     class _EmptyRuntime:
-        def start(self):
-            return self
-
-        def stop(self):
-            pass
-
-        def list_info(self):
+        async def list_info(self):
             return []
 
     class _EmptyBoxlite:
@@ -101,7 +95,7 @@ def _no_existing_boxlite_boxes(monkeypatch: pytest.MonkeyPatch) -> None:
         def default():
             return _EmptyRuntime()
 
-    monkeypatch.setattr("deerflow.community.boxlite.provider._import_sync_boxlite_runtime", lambda: _EmptyBoxlite)
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_boxlite_runtime", lambda: _EmptyBoxlite)
 
 
 def test_import_simplebox_missing_raises_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,6 +179,44 @@ def test_execute_command_appends_exit_marker_when_failure_has_output(monkeypatch
     )
 
     assert box.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
+def test_execute_command_bridge_timeout_appends_exit_marker() -> None:
+    """The real loop-bridge deadline produces exit code 124 (#6847)."""
+    from deerflow.community.boxlite.provider import _EventLoopThread
+
+    started, cancelled = threading.Event(), threading.Event()
+    terminal_failures = []
+
+    class SlowBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    loop_thread = _EventLoopThread()
+    box = BoxliteBox("box-id", box=SlowBox(), run=loop_thread.run, on_terminal_failure=lambda *args: terminal_failures.append(args))
+    try:
+        assert box.execute_command("sleep 9999", timeout=0.05) == "Error: command timed out\nExit Code: 124"
+        assert started.wait(1)
+        assert cancelled.wait(1), "bridge timeout must cancel its submitted coroutine"
+        assert terminal_failures == []
+    finally:
+        loop_thread.close()
+
+
+@pytest.mark.parametrize("error_message", [None, "execution timed out"])
+def test_execute_command_preserves_sdk_wait_failure_exit_code(error_message: str | None) -> None:
+    """SDK-returned failure results are distinct from bridge TimeoutError."""
+
+    class FailedBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(exit_code=-1, stdout="partial output", stderr="", error_message=error_message)
+
+    box = BoxliteBox("box-id", box=FailedBox(), run=_fake_run)
+    assert box.execute_command("sleep 9999", timeout=5) == "partial output\nExit Code: -1"
 
 
 def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -405,26 +437,34 @@ def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
         lambda: _stub_config(),
     )
     stopped: list[str] = []
+    commands = []
+    monkeypatch.setitem(sys.modules, "boxlite", types.SimpleNamespace(ExecResult=types.SimpleNamespace))
 
     class _NativeBox:
-        def stop(self):
+        async def exec(self, command, args=None, env=None, tty=False, user=None, timeout_secs=None, cwd=None):
+            commands.append((command, args, env, timeout_secs, threading.get_ident()))
+
+            async def stream(*values):
+                for value in values:
+                    yield value
+
+            async def wait():
+                return types.SimpleNamespace(exit_code=0, error_message=None)
+
+            return types.SimpleNamespace(stdout=lambda: stream("ok\n" if args[-1] == "echo ok" else "restored\n"), stderr=lambda: stream(), wait=wait)
+
+        async def stop(self):
             stopped.append("adopted")
 
     class _Runtime:
-        def start(self):
-            return self
-
-        def stop(self):
-            pass
-
-        def list_info(self):
+        async def list_info(self):
             return [
                 types.SimpleNamespace(name="deer-flow-boxlite-adopted"),
                 types.SimpleNamespace(name="unrelated-box"),
                 types.SimpleNamespace(name=None),
             ]
 
-        def get(self, name):
+        async def get(self, name):
             if name == "deer-flow-boxlite-adopted":
                 return _NativeBox()
             raise AssertionError(f"unexpected box lookup: {name}")
@@ -434,13 +474,19 @@ def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
         def default():
             return _Runtime()
 
-    monkeypatch.setattr("deerflow.community.boxlite.provider._import_sync_boxlite_runtime", lambda: _Boxlite)
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_boxlite_runtime", lambda: _Boxlite)
 
     provider = BoxliteProvider()
 
     assert list(provider._warm_pool) == ["adopted"]
     adopted_box = provider._warm_pool["adopted"][0]
     assert adopted_box.id == "adopted"
+    assert provider._reclaim_warm_pool("adopted", ("user", "thread")) == "adopted"
+    assert adopted_box.execute_command("echo restored", env={"KEY": "value"}, timeout=2) == "restored\n"
+    assert commands == [
+        ("sh", ["-lc", "echo ok"], None, 5, provider._loop._thread.ident),
+        ("sh", ["-lc", "echo restored"], [("KEY", "value")], 2, provider._loop._thread.ident),
+    ]
 
     provider.shutdown()
     assert stopped == ["adopted"]
@@ -708,7 +754,7 @@ def test_adopted_warm_pool_box_still_health_checks(monkeypatch):
         _fake_run,
         default_env={},
     )
-    provider._warm_pool["adopted"] = (adopted, time.time())
+    provider._warm_pool["adopted"] = (adopted, time.monotonic())
     calls = 0
     original_execute = adopted.execute_command
 
@@ -1001,8 +1047,8 @@ def test_reset_parked_resources_are_reaped_after_idle_timeout(monkeypatch):
 
     provider.reset()
 
-    provider._warm_pool[sid_active] = (active_box, time.time() - 9999)
-    provider._warm_pool[sid_warm] = (warm_box, time.time() - 9999)
+    provider._warm_pool[sid_active] = (active_box, time.monotonic() - 9999)
+    provider._warm_pool[sid_warm] = (warm_box, time.monotonic() - 9999)
     provider._reap_expired_warm(idle_timeout=1)
 
     assert provider._warm_pool == {}
@@ -1038,7 +1084,7 @@ def test_idle_reaper_destroys_expired_warm_boxes(monkeypatch):
 
     # Backdate the warm-pool timestamp so it appears long-expired
     warm_box = provider._warm_pool[sid][0]
-    provider._warm_pool[sid] = (warm_box, time.time() - 9999)
+    provider._warm_pool[sid] = (warm_box, time.monotonic() - 9999)
 
     # Wait long enough for the reaper to detect and destroy it
     time.sleep(0.3)
@@ -1080,10 +1126,10 @@ def test_replica_enforcement_evicts_oldest_warm(monkeypatch):
 
     # Make sid_a definitely older by backdating its timestamp
     box_a = provider._warm_pool[sid_a][0]
-    provider._warm_pool[sid_a] = (box_a, time.time() - 100)
+    provider._warm_pool[sid_a] = (box_a, time.monotonic() - 100)
     # Refresh sid_b's timestamp so it's newer
     box_b = provider._warm_pool[sid_b][0]
-    provider._warm_pool[sid_b] = (box_b, time.time())
+    provider._warm_pool[sid_b] = (box_b, time.monotonic())
 
     # Acquiring a third thread triggers replica enforcement:
     # warm pool count (2) >= replicas (2) → evict oldest (sid_a)
@@ -1469,12 +1515,12 @@ def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
         _fake_run,
         default_env={},
     )
-    provider._warm_pool["shared-id"] = (stale, time.time())
+    provider._warm_pool["shared-id"] = (stale, time.monotonic())
     provider._warm_pool_identity["shared-id"] = ("user-a", "thread-a")
 
     def _swap_during_health_check(*args, **kwargs):
         with provider._lock:
-            provider._warm_pool["shared-id"] = (replacement, time.time())
+            provider._warm_pool["shared-id"] = (replacement, time.monotonic())
             provider._warm_pool_identity["shared-id"] = (
                 "user-b",
                 "thread-b",

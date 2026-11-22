@@ -24,7 +24,13 @@ def extended_length_path(path: Path) -> Path:
         return path
     absolute = os.path.abspath(path)
     if absolute.startswith("\\\\"):
-        return Path("\\\\?\\UNC\\" + absolute[2:])
+        # Win32 only accepts \\?\UNC\server\share\...; a share-less UNC root
+        # (\\server, \\server\, or a bare \) is not a valid device path, so
+        # keep its ordinary spelling instead of forging an invalid one.
+        server, separator, share = absolute[2:].partition("\\")
+        if server and separator and share:
+            return Path("\\\\?\\UNC\\" + absolute[2:])
+        return Path(absolute)
     return Path("\\\\?\\" + absolute)
 
 

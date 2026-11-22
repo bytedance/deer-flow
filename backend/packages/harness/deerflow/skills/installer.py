@@ -5,16 +5,18 @@ Both Gateway and Client delegate to these functions.
 """
 
 import asyncio
+import codecs
 import concurrent.futures
 import logging
 import os
 import posixpath
 import shutil
 import stat
+import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from deerflow.skills.package_files import is_code_path, is_executable_binary_prefix
+from deerflow.skills.package_files import MAX_MODEL_BYTES, MAX_MODEL_FILE_BYTES, MAX_MODEL_FILES, is_code_path, is_executable_binary_prefix
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -25,8 +27,54 @@ from deerflow.skills.security_static_scanner import (
     scan_archive_preflight,
     skill_scan_enabled,
 )
+from deerflow.skills.skillscan.orchestrator import contains_sensitive_package_content
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
+
+# Mirror the path limits export.py applies to installed skills, so an archive
+# that cannot be listed or extracted fails as a validation error instead of an
+# OS error during installation. Export limits depth relative to the skill root,
+# so the archive limit adds the enclosing skill directory component.
+_MAX_MEMBER_PATH_BYTES = 1024
+_MAX_MEMBER_DEPTH = 33
+_MAX_MEMBER_SEGMENT_BYTES = 255
+
+
+def _host_path_length(path: Path, *, windows: bool | None = None) -> int:
+    """Return a path's length in the units the host filesystem limits."""
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        # Win32 path limits count UTF-16 code units, not UTF-8 bytes.
+        return len(str(path).encode("utf-16-le")) // 2
+    return len(os.fsencode(path))
+
+
+def _host_path_limit(root: Path, *, windows: bool | None = None) -> int:
+    """Return the destination filesystem's maximum path length in host units."""
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\FileSystem",
+            ) as key:
+                if winreg.QueryValueEx(key, "LongPathsEnabled")[0]:
+                    return 32767
+        except (ImportError, OSError):
+            pass
+        return 260
+    if hasattr(os, "pathconf"):
+        try:
+            return os.pathconf(root, "PC_PATH_MAX")
+        except (OSError, ValueError):
+            pass
+    return 4096
+
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
@@ -128,11 +176,15 @@ def safe_extract_skill_archive(
       a huge number of tiny/empty members can be cheap to store yet still
       slow to extract, independent of total size).
     - Reject executable binaries (ELF/PE/Mach-O) by magic bytes.
+    - Reject member path segments that cannot be created on every host (Windows
+      reserved device names, trailing dots or spaces), so an unusable member
+      name fails the install instead of leaving a partially installed skill.
 
     Raises:
         ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
+    host_path_limit = _host_path_limit(dest_root)
     total_written = 0
 
     infos = zip_ref.infolist()
@@ -145,6 +197,11 @@ def safe_extract_skill_archive(
         # it lives in the extraction path every install goes through.
         raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries}).")
 
+    # Validate every member before writing anything, so an archive whose paths
+    # cannot form a file tree fails without leaving a partial install.
+    planned: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
+    seen_files: set[tuple[str, ...]] = set()
+    seen_dirs: set[tuple[str, ...]] = set()
     for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
@@ -154,7 +211,45 @@ def safe_extract_skill_archive(
             continue
 
         normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
-        member_path = dest_root.joinpath(*PurePosixPath(normalized_name).parts)
+        parts = PurePosixPath(normalized_name).parts
+        if not parts or normalized_name in ("", "."):
+            raise ValueError(f"Archive member path is not extractable: {info.filename!r}")
+        if len(parts) > _MAX_MEMBER_DEPTH:
+            raise ValueError(f"Archive member path is too deep: {info.filename!r}")
+        if len(normalized_name.encode("utf-8")) > _MAX_MEMBER_PATH_BYTES:
+            raise ValueError(f"Archive member path is too long: {info.filename!r}")
+        for segment in parts:
+            if len(segment.encode("utf-8")) > _MAX_MEMBER_SEGMENT_BYTES:
+                raise ValueError(f"Archive member path segment is too long: {info.filename!r}")
+            reason = windows_incompatible_segment(segment)
+            if reason is not None:
+                # Extraction creates one host path component per segment; a
+                # Windows device name cannot become one, and the same names are
+                # already refused for support-file writes and skill names.
+                raise ValueError(f"Archive member path is not portable to Windows: {info.filename!r} ({reason})")
+
+        if _host_path_length(dest_root.joinpath(*parts)) >= host_path_limit:
+            raise ValueError(f"Archive member path is too long for the destination filesystem: {info.filename!r}")
+
+        # Compare NFC+casefolded keys so case-insensitive and normalization-
+        # sensitive filesystems cannot turn a distinct path into a collision.
+        key = tuple(unicodedata.normalize("NFC", part).casefold() for part in parts)
+        if any(key[:index] in seen_files for index in range(1, len(key))):
+            raise ValueError(f"Archive member path conflicts with a file member: {info.filename!r}")
+        if info.is_dir():
+            if key in seen_files:
+                raise ValueError(f"Archive contains conflicting member paths: {info.filename!r}")
+            seen_dirs.add(key)
+        else:
+            if key in seen_dirs or key in seen_files:
+                raise ValueError(f"Archive contains conflicting member paths: {info.filename!r}")
+            seen_files.add(key)
+        for index in range(1, len(key)):
+            seen_dirs.add(key[:index])
+        planned.append((info, parts))
+
+    for info, parts in planned:
+        member_path = dest_root.joinpath(*parts)
         if not member_path.resolve().is_relative_to(dest_root):
             raise ValueError(f"Zip entry escapes destination: {info.filename!r}")
         member_path.parent.mkdir(parents=True, exist_ok=True)
@@ -177,13 +272,7 @@ def safe_extract_skill_archive(
             member_path.chmod(0o755 if (info.external_attr >> 16) & 0o111 else 0o644)
 
 
-def _is_script_support_file(rel_path: Path) -> bool:
-    return bool(rel_path.parts) and rel_path.parts[0] == "scripts"
-
-
-def _should_scan_support_file(rel_path: Path) -> bool:
-    if _is_script_support_file(rel_path):
-        return True
+def _is_prompt_input(rel_path: Path) -> bool:
     return bool(rel_path.parts) and rel_path.parts[0] in _PROMPT_INPUT_DIRS and rel_path.suffix.lower() in _PROMPT_INPUT_SUFFIXES
 
 
@@ -228,16 +317,43 @@ def _findings_for_file(findings: list[StaticFinding], rel_path: str) -> list[Sta
     return [finding for finding in findings if finding.get("file") in {rel_path, None}]
 
 
-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None, app_config=None) -> None:
-    rel_path = path.relative_to(skill_dir).as_posix()
+def _read_additional_text(path: Path, rel_path: str, location: str) -> tuple[str, int] | None:
+    """Recognize complete UTF-8 text while retaining at most one model input."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    parts = []
+    size = 0
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(64 * 1024):
+                if b"\0" in chunk:
+                    return None
+                decoded = decoder.decode(chunk)
+                size += len(chunk)
+                if size <= MAX_MODEL_FILE_BYTES:
+                    parts.append(decoded)
+        decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        return None
+    # A binary asset can have a valid text prefix past the limit, so apply the text budget only after validating EOF.
+    if size > MAX_MODEL_FILE_BYTES:
+        raise SkillSecurityScanError(f"Security scan failed for {location}: additional text file exceeds the review size limit")
+    content = "".join(parts)
+    if contains_sensitive_package_content(rel_path, content):
+        raise SkillSecurityScanError(f"Security scan blocked {location}: remove sensitive configuration before model review")
+    return content, size
+
+
+def _read_required_text(path: Path, location: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise SkillSecurityScanError(f"Security scan failed for {location}: file must be valid UTF-8") from e
+
+
+async def _scan_skill_file_or_raise(content: str, rel_path: str, skill_name: str, *, executable: bool, static_findings: list[StaticFinding], app_config=None) -> None:
     location = f"{skill_name}/{rel_path}"
     try:
-        content = await asyncio.to_thread(path.read_text, encoding="utf-8")
-    except UnicodeDecodeError as e:
-        raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
-
-    try:
-        result = await scan_skill_content(content, executable=executable, location=location, app_config=app_config, static_findings=static_findings or [])
+        result = await scan_skill_content(content, executable=executable, location=location, app_config=app_config, static_findings=static_findings)
     except Exception as e:
         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
 
@@ -280,42 +396,49 @@ async def _scan_static_skill_archive_or_raise(skill_dir: Path, skill_name: str, 
 
 
 def _collect_scannable_files(skill_dir: Path) -> list[Path]:
-    """Enumerate archive files for scanning (blocking; run off the event loop)."""
-    return [candidate for candidate in sorted(skill_dir.rglob("*")) if candidate.is_file()]
+    """Review the required declaration first, then the remaining archive files."""
+    skill_md = skill_dir / "SKILL.md"
+    others = sorted(candidate for candidate in skill_dir.rglob("*") if candidate != skill_md and candidate.is_file())
+    return [skill_md, *others]
+
+
+async def _prepare_model_review(skill_dir: Path, skill_name: str) -> list[tuple[str, bool, str | None]]:
+    """Check the package budget before moderation. Cache only budgeted text."""
+    review_files = []
+    skill_md = skill_dir / "SKILL.md"
+    additional_files = additional_bytes = 0
+    for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
+        rel_path = path.relative_to(skill_dir)
+        if path != skill_md and path.name == "SKILL.md":
+            raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
+        rel_path_posix = rel_path.as_posix()
+        executable = await _is_code_file(path, rel_path)
+        if path == skill_md or executable or _is_prompt_input(rel_path):
+            review_files.append((rel_path_posix, executable, None))
+            continue
+
+        # An interpreter can consume text under any name. Require explicit
+        # approval for these files even when optional SkillScan is disabled.
+        location = f"{skill_name}/{rel_path_posix}"
+        additional = await asyncio.to_thread(_read_additional_text, path, rel_path_posix, location)
+        if additional is None:
+            continue
+        content, size = additional
+        additional_files += 1
+        additional_bytes += size
+        if additional_files > MAX_MODEL_FILES or additional_bytes > MAX_MODEL_BYTES:
+            raise SkillSecurityScanError(f"Security scan failed for {location}: additional text exceeds the package review budget")
+        review_files.append((rel_path_posix, True, content))
+    return review_files
 
 
 async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
     """Run the skill security scanner against all installable text and script files."""
     static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
-
-    skill_md = skill_dir / "SKILL.md"
-    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"), app_config=app_config)
-
-    for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
-        rel_path = path.relative_to(skill_dir)
-        if rel_path == Path("SKILL.md"):
-            continue
-        if path.name == "SKILL.md":
-            raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
-        rel_path_posix = rel_path.as_posix()
-        if await _is_code_file(path, rel_path):
-            await _scan_skill_file_or_raise(
-                skill_dir,
-                path,
-                skill_name,
-                executable=True,
-                static_findings=_findings_for_file(static_findings, rel_path_posix),
-                app_config=app_config,
-            )
-        elif _should_scan_support_file(rel_path):
-            await _scan_skill_file_or_raise(
-                skill_dir,
-                path,
-                skill_name,
-                executable=False,
-                static_findings=_findings_for_file(static_findings, rel_path_posix),
-                app_config=app_config,
-            )
+    for rel_path, executable, content in await _prepare_model_review(skill_dir, skill_name):
+        if content is None:
+            content = await asyncio.to_thread(_read_required_text, skill_dir / rel_path, f"{skill_name}/{rel_path}")
+        await _scan_skill_file_or_raise(content, rel_path, skill_name, executable=executable, static_findings=_findings_for_file(static_findings, rel_path), app_config=app_config)
     return static_findings
 
 

@@ -1,7 +1,7 @@
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
 
@@ -134,9 +134,12 @@ class ReasoningCapabilities(BaseModel):
 class ModelConfig(BaseModel):
     """Config section for a model"""
 
+    _managed_provider: str | None = PrivateAttr(default=None)
+
     name: str = Field(..., description="Unique name for the model")
     request_admission: RequestAdmissionConfig | None = Field(default=None, description="Opt-in process-local RPM pacing. Changing an active group's policy requires a process restart.")
     display_name: str | None = Field(..., default_factory=lambda: None, description="Display name for the model")
+    aliases: list[str] = Field(default_factory=list, max_length=16, description="Optional names users can use when selecting this configured model")
     description: str | None = Field(..., default_factory=lambda: None, description="Description for the model")
     use: str = Field(
         ...,

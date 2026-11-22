@@ -1,5 +1,6 @@
 import { GitHubLogoIcon } from "@radix-ui/react-icons";
 import Link from "next/link";
+import { type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { DEFAULT_LOCALE, type Locale } from "@/core/i18n/locale";
@@ -14,9 +15,16 @@ export type HeaderProps = {
   className?: string;
   homeURL?: string;
   locale?: Locale;
+  /** Optional search control, e.g. the docs layout's Pagefind search. */
+  search?: ReactNode;
 };
 
-export async function Header({ className, homeURL, locale }: HeaderProps) {
+export async function Header({
+  className,
+  homeURL,
+  locale,
+  search,
+}: HeaderProps) {
   const isExternalHome = !homeURL;
   const { locale: resolvedLocale, t } = await getI18n(locale ?? DEFAULT_LOCALE);
   const lang = resolvedLocale.substring(0, 2);
@@ -51,6 +59,7 @@ export async function Header({ className, homeURL, locale }: HeaderProps) {
           {t.home.blog}
         </Link>
       </nav>
+      {search && <div className="hidden w-40 sm:block lg:w-56">{search}</div>}
       <div className="relative">
         <div
           className="pointer-events-none absolute inset-0 z-0 h-full w-full rounded-full opacity-30 blur-2xl"
@@ -81,6 +90,7 @@ export async function Header({ className, homeURL, locale }: HeaderProps) {
           { href: `/${lang}/docs`, label: t.home.docs },
           { href: "/blog/posts", label: t.home.blog },
         ]}
+        search={search}
       />
       <hr className="from-border/0 via-border/70 to-border/0 absolute top-16 right-0 left-0 z-10 m-0 h-px w-full border-none bg-linear-to-r" />
     </header>

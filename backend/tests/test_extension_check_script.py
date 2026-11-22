@@ -43,6 +43,22 @@ def test_packaged_entry_is_checked_without_importing_plugin(tmp_path):
     checker.check_wheel(tmp_path, wheel(tmp_path))
 
 
+def test_documentation_must_survive_packaging(tmp_path):
+    package = tmp_path / "src/example"
+    package.mkdir(parents=True)
+    (package / "deerflow-extension.json").write_text("{}")
+    with pytest.raises(ValueError, match="documentation is not packaged"):
+        checker.check_wheel(tmp_path, wheel(tmp_path))
+
+
+def test_packaged_documentation_requires_usage(tmp_path):
+    page = {"schema_version": 1, "id": "example.helper", "locales": {"en-US": {"title": "Helper", "description": "Does useful work."}}}
+    with pytest.raises(ValueError, match="usage"):
+        checker.check_wheel(tmp_path, wheel(tmp_path, files={"example/deerflow-extension.json": json.dumps(page)}))
+    page["locales"]["en-US"]["usage"] = [{"title": "Start a task", "description": "Works automatically."}]
+    checker.check_wheel(tmp_path, wheel(tmp_path, files={"example/deerflow-extension.json": json.dumps(page)}))
+
+
 def test_backend_only_wheel_skips_extraction(tmp_path, monkeypatch):
     def fail_if_extracted(*args, **kwargs):
         pytest.fail("Backend-only wheels must not be extracted")
@@ -133,7 +149,18 @@ def test_wheel_paths_cannot_escape_temporary_directory(tmp_path, monkeypatch, na
     def fail_if_extracted(*args, **kwargs):
         pytest.fail("Unsafe wheel paths reached extraction")
 
+    # zipfile normalizes os.sep in entry names on Windows, so a wheel built
+    # through writestr never carries a verbatim backslash name there. Inject
+    # the hostile name into namelist unless the archive already stores it, so
+    # the guard contract is exercised with identical bytes on every host.
+    real_namelist = ZipFile.namelist
+
+    def namelist_with_hostile_entry(self):
+        stored = real_namelist(self)
+        return stored if name in stored else [*stored, name]
+
     monkeypatch.setattr(ZipFile, "extractall", fail_if_extracted)
+    monkeypatch.setattr(ZipFile, "namelist", namelist_with_hostile_entry)
     with pytest.raises(ValueError, match="wheel path"):
         checker.check_wheel(tmp_path, wheel(tmp_path, files={name: "no"}))
 

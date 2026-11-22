@@ -49,8 +49,10 @@ def test_gateway_runtime_commands_never_sync_dependencies() -> None:
     compose = _read("docker/docker-compose.yaml")
     serve = _read("scripts/serve.sh")
 
-    assert "PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app" in compose
-    assert "PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app" in serve
+    # Dependency syncing is independent of the surrounding shell/exec form.
+    # Exact container launch forms belong to test_gateway_sigterm_delivery.py.
+    assert "uv run --no-sync uvicorn app.gateway.app:app" in compose
+    assert "uv run --no-sync uvicorn app.gateway.app:app" in serve
 
 
 def test_local_frontend_ignores_public_docker_port() -> None:

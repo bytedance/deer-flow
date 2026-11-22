@@ -2,12 +2,14 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 
 from firecrawl import AsyncFirecrawlApp
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
-from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
+from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -83,10 +85,12 @@ def _get_firecrawl_client(
     """
     if cfg is None:
         cfg = _get_tool_config_extra(tool_name)
-    api_key = cfg.get("api_key")
+    api_key = resolve_api_key(cfg.get("api_key")) or resolve_api_key(os.getenv("FIRECRAWL_API_KEY"))
     if api_url is None:
         api_url = cfg.get("base_url")
-    kwargs = {"api_key": api_key}
+    # The SDK re-reads FIRECRAWL_API_KEY unstripped when api_key is None; "" makes
+    # a blank value act as a missing key.
+    kwargs = {"api_key": api_key or ""}
     if api_url:
         kwargs["api_url"] = api_url
     return AsyncFirecrawlApp(**kwargs)  # type: ignore[arg-type]
@@ -101,12 +105,12 @@ async def web_search_tool(query: str) -> str:
     """
     client: AsyncFirecrawlApp | None = None
     try:
-        config = get_app_config().get_tool_config("web_search")
-        max_results = DEFAULT_MAX_RESULTS
-        if config is not None:
-            max_results = coerce_max_results(config.model_extra.get("max_results", max_results), provider="Firecrawl", logger=logger)
+        # Config resolution stats and hashes the config files; keep it off the
+        # event loop, and build the client from the same read.
+        cfg = await asyncio.to_thread(_get_tool_config_extra, "web_search")
+        max_results = coerce_max_results(cfg.get("max_results", DEFAULT_MAX_RESULTS), provider="Firecrawl", logger=logger)
 
-        client = _get_firecrawl_client("web_search")
+        client = _get_firecrawl_client("web_search", cfg=cfg)
         result = await client.search(query, limit=max_results)
 
         # result.web contains list of SearchResultWeb objects
@@ -114,7 +118,7 @@ async def web_search_tool(query: str) -> str:
         normalized_results = [
             {
                 "title": getattr(item, "title", "") or "",
-                "url": getattr(item, "url", "") or "",
+                "url": safe_public_result_url(getattr(item, "url", None)),
                 "snippet": getattr(item, "description", "") or "",
             }
             for item in web_results
@@ -141,7 +145,8 @@ async def web_fetch_tool(url: str) -> str:
     """
     client: AsyncFirecrawlApp | None = None
     try:
-        cfg = _get_tool_config_extra("web_fetch")
+        # Config resolution stats and hashes the config files; keep it off the event loop.
+        cfg = await asyncio.to_thread(_get_tool_config_extra, "web_fetch")
         allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses"), False)
         url_error = await asyncio.to_thread(validate_public_http_url, url, allow_private_addresses=allow_private_addresses)
         if url_error:

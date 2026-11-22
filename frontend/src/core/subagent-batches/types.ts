@@ -30,6 +30,13 @@ export type SubagentBatch = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  continuation_status?:
+    | "pending"
+    | "dispatching"
+    | "dispatched"
+    | "suppressed"
+    | "cancelled";
+  continuation_run_id?: string | null;
 };
 
 export type SubagentBatchItem = {
@@ -51,8 +58,50 @@ export type SubagentBatchItem = {
   updated_at: string;
 };
 
+export type SubagentBatchEvidenceSource = {
+  id: string;
+  provider: "ragflow";
+  dataset_id: string;
+  document_id: string;
+  chunk_id: string;
+  dataset_name: string;
+  document_name: string;
+  text: string;
+  pages: number[];
+  truncated: boolean;
+};
+
+export type SubagentBatchEvidence = {
+  version: 1;
+  sources: SubagentBatchEvidenceSource[];
+  omitted_count: number;
+};
+
+export type SubagentBatchItemDetail = {
+  id: string;
+  item_key: string;
+  position: number;
+  status: SubagentBatchItemStatus;
+  attempt: number;
+  model_name: string | null;
+  report: string | null;
+  report_truncated: boolean;
+  error: string | null;
+  stop_reason: string | null;
+  acceptance_criteria: string[] | null;
+  acceptance_verdict: Record<string, unknown> | null;
+  evidence: SubagentBatchEvidence | null;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+};
+
 export function isActiveSubagentBatch(batch: SubagentBatch): boolean {
-  return ["queued", "running", "paused"].includes(batch.status);
+  return (
+    ["queued", "running", "paused"].includes(batch.status) ||
+    batch.continuation_status === "pending" ||
+    batch.continuation_status === "dispatching"
+  );
 }
 
 export function completedSubagentBatchItems(batch: SubagentBatch): number {

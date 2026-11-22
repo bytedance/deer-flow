@@ -220,6 +220,33 @@ def test_merge_preserves_masked_env_values():
     assert merged.env["KEY"] == "real_secret"
 
 
+def test_bulk_merge_preserves_agent_auth_until_explicitly_changed():
+    existing = McpServerConfigResponse(type="http", url="https://mcp.example", agent_auth=True)
+    assert _merge_preserving_secrets(McpServerConfigResponse(description="Renamed"), existing).agent_auth is True
+    assert _merge_preserving_secrets(McpServerConfigResponse(agent_auth=False), existing).agent_auth is False
+
+
+@pytest.mark.asyncio
+async def test_targeted_edit_preserves_agent_auth_until_explicitly_changed(monkeypatch, tmp_path):
+    from deerflow.config.extensions_config import reset_extensions_config
+
+    path = tmp_path / "extensions_config.json"
+    path.write_text(json.dumps({"mcpServers": {"target": {"type": "http", "url": "https://mcp.example", "agent_auth": True}}}), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(path))
+    _track_mcp_reconciliation_handoff(monkeypatch)
+    reset_extensions_config()
+    try:
+        edit = {"type": "http", "url": "https://mcp.example", "description": "Updated description"}
+        response = await update_mcp_server(_request_with_role("admin"), McpServerConfigUpdateRequest(server_name="target", server=McpServerConfigResponse.model_validate(edit)))
+        assert response.mcp_servers["target"].agent_auth is True
+        assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["target"]["agent_auth"] is True
+        edit["agent_auth"] = False
+        await update_mcp_server(_request_with_role("admin"), McpServerConfigUpdateRequest(server_name="target", server=McpServerConfigResponse.model_validate(edit)))
+        assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["target"]["agent_auth"] is False
+    finally:
+        reset_extensions_config()
+
+
 def test_merge_preserves_masked_header_values():
     """Incoming '***' header values should be replaced with existing secrets."""
     incoming = McpServerConfigResponse(headers={"Authorization": "***"})
@@ -1845,7 +1872,7 @@ async def test_mcp_create_without_existing_config_uses_resolvable_project_root(o
         return expected_path if expected_path.exists() else None
 
     monkeypatch.chdir(working_dir)
-    monkeypatch.setattr(mcp_router, "project_root", lambda: project_dir, raising=False)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project_dir))
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", resolve_created_config)
     monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: SimpleNamespace(skills={}))
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: ExtensionsConfig.from_file(str(expected_path)))
@@ -1861,6 +1888,58 @@ async def test_mcp_create_without_existing_config_uses_resolvable_project_root(o
     assert resolve_created_config() == expected_path
     assert set(response.mcp_servers) == {"added"}
     assert not (working_dir.parent / "extensions_config.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_writer", ["skill", "mcp"])
+async def test_skill_toggle_and_mcp_create_share_one_new_config(first_writer, monkeypatch, tmp_path):
+    """With no config anywhere, the first skill toggle and the first MCP edit
+    must create and then reuse ONE file that resolution reads back."""
+    from app.gateway.routers import skills as skills_router
+    from deerflow.config import extensions_config as extensions_config_module
+
+    project_dir = tmp_path / "project"
+    working_dir = tmp_path / "runtime" / "nested"
+    project_dir.mkdir()
+    working_dir.mkdir(parents=True)
+    for name in ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_EXTENSIONS_CONFIG_PATH", "DEER_FLOW_HOME", "DEER_FLOW_SKILLS_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project_dir))
+    monkeypatch.chdir(working_dir)
+    # Real resolver, but its legacy search anchored on an empty fake checkout
+    # so a developer's own extensions_config.json can never be found or written.
+    fake_module_file = tmp_path / "fake-backend" / "packages" / "harness" / "deerflow" / "config" / "extensions_config.py"
+    fake_module_file.parent.mkdir(parents=True)
+    fake_module_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(extensions_config_module, "__file__", str(fake_module_file))
+    assert ExtensionsConfig.resolve_config_path() is None
+
+    monkeypatch.setattr(skills_router, "get_extensions_config", lambda: ExtensionsConfig())
+    monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: SimpleNamespace(skills={}))
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: ExtensionsConfig.from_file())
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    async def _create_mcp_server() -> None:
+        body = McpConfigUpdateRequest(mcp_servers={"added": McpServerConfigResponse(command="npx")})
+        await create_mcp_servers(_request_with_role("admin"), body)
+
+    def _toggle_skill() -> None:
+        skills_router._write_extensions_skill_state(None, "demo-skill", False, rebuild_public_projection=False)
+
+    if first_writer == "skill":
+        _toggle_skill()
+        await _create_mcp_server()
+    else:
+        await _create_mcp_server()
+        _toggle_skill()
+
+    created = project_dir / "extensions_config.json"
+    assert ExtensionsConfig.resolve_config_path() == created
+    persisted = json.loads(created.read_text(encoding="utf-8"))
+    assert persisted["skills"] == {"demo-skill": {"enabled": False}}
+    assert set(persisted["mcpServers"]) == {"added"}
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("extensions_config.json")) == ["project/extensions_config.json"]
 
 
 @pytest.mark.asyncio

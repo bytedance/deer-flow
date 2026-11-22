@@ -6,6 +6,7 @@ Run from repo root:
 
 from __future__ import annotations
 
+import pytest
 import yaml
 from wizard import ui as wizard_ui
 from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, LLMProvider, with_thinking_support
@@ -146,6 +147,20 @@ class TestProviders:
             assert provider.extra_config_for("MiniMax-M2.7-highspeed")["supports_vision"] is False
             # Override must not mutate the shared provider-level config.
             assert provider.extra_config["supports_vision"] is True
+
+    def test_anthropic_sonnet_5_5_omits_rejected_thinking_templates(self):
+        """Sonnet 5.5 rejects budget_tokens and thinking disabled; other Claude models keep them."""
+        providers = {provider.name: provider for provider in LLM_PROVIDERS}
+        anthropic = providers["anthropic"]
+        assert anthropic.default_model == "claude-sonnet-5-5"
+
+        config = anthropic.extra_config_for("claude-sonnet-5-5")
+        assert "when_thinking_enabled" not in config
+        assert "when_thinking_disabled" not in config
+
+        assert anthropic.extra_config_for("claude-sonnet-4-5")["when_thinking_enabled"]["thinking"]["budget_tokens"] == 4096
+        # Omission must not mutate the shared provider-level config.
+        assert "when_thinking_enabled" in anthropic.extra_config
 
     def test_extra_config_for_returns_provider_config_without_override(self):
         """Providers without per-model overrides return their config unchanged."""
@@ -469,6 +484,55 @@ class TestThinkingSupport:
 
 
 class TestLLMStep:
+    @pytest.mark.parametrize("override", [False, True])
+    def test_rapid_mlx_keyless_config(self, monkeypatch, tmp_path, override):
+        provider_index = next(i for i, p in enumerate(LLM_PROVIDERS) if p.name == "rapid_mlx")
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: provider_index)
+        prompts = []
+
+        def ask_text(prompt, default="", **_kwargs):
+            prompts.append((prompt, default))
+            if override:
+                return "http://host.docker.internal:8000/v1" if len(prompts) == 1 else "my-exact-model-id"
+            return default
+
+        monkeypatch.setattr(llm_step, "ask_text", ask_text)
+        monkeypatch.setattr(
+            llm_step,
+            "ask_secret",
+            lambda *_args: pytest.fail("keyless provider requested a secret"),
+        )
+        monkeypatch.setattr(
+            llm_step,
+            "ask_yes_no",
+            lambda *_args, **_kwargs: pytest.fail("unexpected capability prompt"),
+        )
+        result = llm_step.run_llm_step()
+        assert prompts == [
+            ("Rapid-MLX base URL", "http://127.0.0.1:8000/v1"),
+            ("Exact model ID from GET /v1/models", "qwen3.5-4b-4bit"),
+        ]
+        assert result.api_key is None
+        assert result.provider.env_var is None
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            config_path,
+            provider_use=result.provider.use,
+            model_name=result.model_name,
+            display_name=result.provider.display_name,
+            api_key_field=result.provider.api_key_field,
+            env_var=result.provider.env_var,
+            extra_model_config=result.provider.extra_config_for(result.model_name),
+            base_url=result.base_url,
+        )
+        model = yaml.safe_load(config_path.read_text())["models"][0]
+        assert model["use"] == "langchain_openai:ChatOpenAI"
+        assert model["api_key"] == "not-required"
+        assert model["base_url"] == ("http://host.docker.internal:8000/v1" if override else "http://127.0.0.1:8000/v1")
+        assert model["model"] == ("my-exact-model-id" if override else "qwen3.5-4b-4bit")
+        assert not any(key in model for key in ("supports_thinking", "supports_vision", "reasoning"))
+        assert LLM_PROVIDERS[provider_index].extra_config["base_url"] == "http://127.0.0.1:8000/v1"
+
     def test_model_selection_defaults_to_provider_default_model(self, monkeypatch):
         provider = LLMProvider(
             name="test",

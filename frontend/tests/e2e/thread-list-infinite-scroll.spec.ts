@@ -64,6 +64,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
   test("chats list page loads more threads when scrolling to the bottom", async ({
     page,
   }) => {
+    const offsets = observeSearchOffsets(page);
     mockLangGraphAPI(page, { threads: THREADS });
 
     await page.goto("/workspace/chats");
@@ -80,7 +81,12 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     // Scrolling the sentinel into view triggers the next page.
     const sentinel = page.getByTestId("chats-page-sentinel");
     await sentinel.scrollIntoViewIfNeeded();
+    await expect.poll(() => offsets).toContain(PAGE_SIZE);
 
+    // Crossing the virtualization threshold can unmount Conversation 051
+    // while the scroll anchor stays near the bottom of the expanded list.
+    // Filter the fetched rows to verify the next page reached the UI.
+    await page.getByPlaceholder("Search chats").fill(SECOND_PAGE_FIRST);
     await expect(main.getByText(SECOND_PAGE_FIRST)).toBeVisible({
       timeout: 15_000,
     });

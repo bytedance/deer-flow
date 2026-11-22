@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
@@ -16,15 +17,18 @@ from langgraph.types import Command, Overwrite
 from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
+    ensure_sandbox_lease_owner,
     get_sandbox_lease_manager,
+    register_sandbox_prewarm_cleanup,
     release_sandbox_execution_lease,
     release_sandbox_execution_lease_async,
 )
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
+from deerflow.sandbox.prewarm import should_prewarm_sandbox
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
-from deerflow.sandbox.tools import ensure_sandbox_initialized, ls_tool
+from deerflow.sandbox.tools import ensure_sandbox_initialized, ensure_sandbox_initialized_async, ls_tool
 
 
 class _SyncProvider(SandboxProvider):
@@ -172,6 +176,24 @@ class _AsyncOnlyProvider(SandboxProvider):
         return None
 
 
+class _DelayedAsyncProvider(_AsyncOnlyProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.allow_finish = asyncio.Event()
+
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        self.thread_ids.append(thread_id)
+        self.user_ids.append(user_id)
+        self.started.set()
+        await self.allow_finish.wait()
+        return "async-sandbox"
+
+
+def _aio_prewarm_config() -> SimpleNamespace:
+    return SimpleNamespace(sandbox=SimpleNamespace(prewarm=True, use="deerflow.community.aio_sandbox:AioSandboxProvider"))
+
+
 def test_sandbox_middleware_state_matches_thread_state_sandbox_field() -> None:
     """Middleware-local schema must not drift from ThreadState.sandbox."""
     middleware_hints = get_type_hints(SandboxMiddlewareState, include_extras=True)
@@ -243,10 +265,13 @@ def test_explicit_skill_policy_eagerly_acquires_and_syncs_existing_thread(
     assert provider.skill_syncs == [("sync-sandbox", "thread-policy", "owner-policy", projection)]
 
 
+@pytest.mark.parametrize("lazy_projection", [False, True])
 def test_explicit_skill_policy_fails_closed_for_unsupported_provider(
     monkeypatch: pytest.MonkeyPatch,
+    lazy_projection: bool,
 ) -> None:
     provider = _SyncProvider()
+    provider.supports_lazy_agent_skill_isolation = lazy_projection
     middleware = SandboxMiddleware(lazy_init=True, available_skills={"allowed"})
     monkeypatch.setattr(
         middleware,
@@ -267,6 +292,147 @@ def test_explicit_skill_policy_fails_closed_for_unsupported_provider(
         reset_sandbox_provider()
 
     assert provider.thread_ids == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_hook", [False, True])
+async def test_fresh_skill_projection_defers_acquire_until_first_tool(monkeypatch, async_hook):
+    provider = _AgentSkillSyncProvider()
+    # Bind-mounted providers install the prepared projection during acquire.
+    provider.supports_lazy_agent_skill_isolation = True
+    projection = object()
+    middleware = SandboxMiddleware(available_skills={"allowed"})
+    prepared = []
+
+    def prepare(thread_id, *, user_id):
+        prepared.append((thread_id, user_id))
+        return projection
+
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", prepare)
+    context = {"thread_id": "thread-lazy-policy", "user_id": "owner-policy"}
+    set_sandbox_provider(provider)
+    try:
+        runtime = Runtime(context=context)
+        result = await middleware.abefore_agent({}, runtime) if async_hook else middleware.before_agent({}, runtime)
+        assert result is None
+        assert prepared == [("thread-lazy-policy", "owner-policy")]
+        assert provider.thread_ids == []
+        assert provider.skill_syncs == []
+        assert "sandbox_id" not in context
+
+        tool_runtime = ToolRuntime(state={}, context=context, config={}, stream_writer=lambda _: None, tools=[], tool_call_id="tool-1", store=None)
+        if async_hook:
+            sandbox = await ensure_sandbox_initialized_async(tool_runtime)
+        else:
+            sandbox = ensure_sandbox_initialized(tool_runtime)
+        assert sandbox is provider.sandbox
+        assert provider.thread_ids == ["thread-lazy-policy"]
+        assert provider.user_ids == ["owner-policy"]
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_hook", [False, True])
+async def test_deferred_skill_projection_still_authorizes_first_tool(monkeypatch, async_hook):
+    provider = _AgentSkillSyncProvider()
+    provider.supports_lazy_agent_skill_isolation = True
+    middleware = SandboxMiddleware(available_skills=set())
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_args, **_kwargs: object())
+
+    def deny(**_kwargs):
+        raise SandboxAuthorizationError("denied at first tool")
+
+    async def deny_async(**_kwargs):
+        deny()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.authorize_sandbox_execution", deny)
+    monkeypatch.setattr("deerflow.sandbox.tools.authorize_sandbox_execution_async", deny_async)
+    context = {"thread_id": "thread-lazy-denied", "user_id": "owner-policy"}
+    set_sandbox_provider(provider)
+    try:
+        runtime = Runtime(context=context)
+        result = await middleware.abefore_agent({}, runtime) if async_hook else middleware.before_agent({}, runtime)
+        assert result is None
+        tool_runtime = ToolRuntime(state={}, context=context, config={}, stream_writer=lambda _: None, tools=[], tool_call_id="tool-1", store=None)
+        with pytest.raises(SandboxAuthorizationError, match="denied at first tool"):
+            if async_hook:
+                await ensure_sandbox_initialized_async(tool_runtime)
+            else:
+                ensure_sandbox_initialized(tool_runtime)
+        assert provider.thread_ids == []
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_hook", [False, True])
+@pytest.mark.parametrize("existing", ["checkpoint", "fork", "context", "empty-state", "eager", "upload"])
+async def test_skill_projection_keeps_eager_rebind_and_upload_sync(monkeypatch, async_hook, existing):
+    provider = _AgentSkillSyncProvider()
+    if existing != "upload":
+        provider.supports_lazy_agent_skill_isolation = True
+    projection = object()
+    middleware = SandboxMiddleware(lazy_init=existing != "eager", available_skills=set())
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_args, **_kwargs: projection)
+    context = {"thread_id": "thread-policy", "user_id": "owner-policy"}
+    state = {}
+    if existing == "checkpoint":
+        state["sandbox"] = {"sandbox_id": "shared-view-sandbox"}
+    elif existing == "fork":
+        state["sandbox"] = Overwrite({"sandbox_id": "shared-view-sandbox"})
+    elif existing == "context":
+        context["sandbox_id"] = "shared-view-sandbox"
+    elif existing == "empty-state":
+        state["sandbox"] = {}
+    set_sandbox_provider(provider)
+    try:
+        runtime = Runtime(context=context)
+        result = await middleware.abefore_agent(state, runtime) if async_hook else middleware.before_agent(state, runtime)
+        assert result is not None
+        assert context["sandbox_id"] == "sync-sandbox"
+        assert provider.thread_ids == ["thread-policy"]
+        assert provider.skill_syncs == [("sync-sandbox", "thread-policy", "owner-policy", projection)]
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_hook", [False, True])
+@pytest.mark.parametrize("existing", ["checkpoint", "fork", "context"])
+async def test_lazy_projection_existing_binding_still_fails_closed_on_deny(monkeypatch, async_hook, existing):
+    provider = _AgentSkillSyncProvider()
+    provider.supports_lazy_agent_skill_isolation = True
+    middleware = SandboxMiddleware(available_skills=set())
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_args, **_kwargs: object())
+
+    def deny(**_kwargs):
+        raise SandboxAuthorizationError("denied before rebinding")
+
+    async def deny_async(**_kwargs):
+        deny()
+
+    monkeypatch.setattr("deerflow.sandbox.middleware.authorize_sandbox_execution", deny)
+    monkeypatch.setattr("deerflow.sandbox.middleware.authorize_sandbox_execution_async", deny_async)
+    context = {"thread_id": "thread-policy", "user_id": "owner-policy"}
+    state = {}
+    if existing == "context":
+        context["sandbox_id"] = "shared-view-sandbox"
+    else:
+        binding = {"sandbox_id": "shared-view-sandbox"}
+        state["sandbox"] = Overwrite(binding) if existing == "fork" else binding
+    set_sandbox_provider(provider)
+    try:
+        runtime = Runtime(context=context)
+        with pytest.raises(SandboxAuthorizationError, match="denied before rebinding"):
+            if async_hook:
+                await middleware.abefore_agent(state, runtime)
+            else:
+                middleware.before_agent(state, runtime)
+        assert provider.thread_ids == []
+        assert provider.skill_syncs == []
+    finally:
+        reset_sandbox_provider()
 
 
 def test_non_owner_skill_policy_preserves_lazy_init_without_projection_or_acquire(
@@ -440,6 +606,102 @@ async def test_default_lazy_tool_acquisition_uses_async_provider() -> None:
     assert provider.user_ids == ["owner-lazy"]
     assert runtime.state["sandbox"] == {"sandbox_id": "async-sandbox"}
     assert runtime.context["sandbox_id"] == "async-sandbox"
+
+
+@pytest.mark.anyio
+async def test_prewarm_overlaps_model_call_and_is_claimed_by_first_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _DelayedAsyncProvider()
+    monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
+    set_sandbox_provider(provider)
+    context = {"thread_id": "thread-prewarm", "user_id": "owner-prewarm"}
+    ensure_sandbox_lease_owner(context)
+    runtime = Runtime(context=context)
+    tool_runtime = ToolRuntime(
+        state={},
+        context=context,
+        config={"configurable": {}},
+        stream_writer=lambda _: None,
+        tools=[],
+        tool_call_id="call-prewarm",
+        store=None,
+    )
+    try:
+        middleware = SandboxMiddleware()
+        register_sandbox_prewarm_cleanup(context)
+        await middleware.abefore_model({"messages": [HumanMessage(content="```sh\ngit status\n```")]}, runtime)
+        await asyncio.wait_for(provider.started.wait(), timeout=5)
+        tool_task = asyncio.create_task(ensure_sandbox_initialized_async(tool_runtime))
+        await asyncio.sleep(0)
+        assert provider.thread_ids == ["thread-prewarm"]
+        provider.allow_finish.set()
+        sandbox = await tool_task
+    finally:
+        provider.allow_finish.set()
+        await release_sandbox_execution_lease_async(context)
+        reset_sandbox_provider()
+
+    assert sandbox.id == "async-sandbox"
+    assert tool_runtime.state["sandbox"] == {"sandbox_id": "async-sandbox"}
+    assert provider.thread_ids == ["thread-prewarm"]
+
+
+@pytest.mark.anyio
+async def test_unused_prewarm_is_released_after_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _AsyncOnlyProvider()
+    monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
+    set_sandbox_provider(provider)
+    runtime = Runtime(context={"thread_id": "thread-unused", "user_id": "owner-unused"})
+    ensure_sandbox_lease_owner(runtime.context)
+    try:
+        register_sandbox_prewarm_cleanup(runtime.context)
+        middleware = SandboxMiddleware()
+        await middleware.abefore_model({"messages": [HumanMessage(content="Traceback (most recent call last):")]}, runtime)
+        await runtime.context["__deerflow_sandbox_prewarm"].task
+        await middleware.aafter_agent({}, runtime)
+        assert provider.released_ids == ["async-sandbox"]
+    finally:
+        await release_sandbox_execution_lease_async(runtime.context)
+        reset_sandbox_provider()
+
+    assert provider.thread_ids == ["thread-unused"]
+    assert provider.released_ids == ["async-sandbox"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Please explain this concept.",
+        "The source file is interesting but no path or command is supplied.",
+    ],
+)
+@pytest.mark.anyio
+async def test_prewarm_skips_messages_without_structured_signal(monkeypatch: pytest.MonkeyPatch, content: str) -> None:
+    provider = _AsyncOnlyProvider()
+    monkeypatch.setattr("deerflow.sandbox.prewarm.get_app_config", _aio_prewarm_config)
+    set_sandbox_provider(provider)
+    runtime = Runtime(context={"thread_id": "thread-no-prewarm"})
+    ensure_sandbox_lease_owner(runtime.context)
+    try:
+        register_sandbox_prewarm_cleanup(runtime.context)
+        await SandboxMiddleware().abefore_model({"messages": [HumanMessage(content=content)]}, runtime)
+        await asyncio.sleep(0)
+    finally:
+        await release_sandbox_execution_lease_async(runtime.context)
+        reset_sandbox_provider()
+
+    assert provider.thread_ids == []
+
+
+def test_sandbox_config_prewarm_defaults_disabled_and_accepts_true() -> None:
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    assert SandboxConfig(use="test").prewarm is False
+    assert SandboxConfig(use="test", prewarm=True).prewarm is True
+
+
+@pytest.mark.parametrize("content", ["Review /mnt/user-data/workspace/app.py", r"Open C:\\work\\app.py"])
+def test_prewarm_recognizes_unambiguous_unix_and_windows_paths(content: str) -> None:
+    assert should_prewarm_sandbox({"messages": [HumanMessage(content=content)]}) is True
 
 
 @pytest.mark.anyio

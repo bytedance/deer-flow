@@ -146,6 +146,17 @@ List all sandboxes currently managed.
 
 ## Configuration
 
+When `USERDATA_PVC_NAME` is set, user-data and extra mounts share the `user-data` volume.
+User data, extra mounts and Lark broker credentials use separate `subPath` mounts
+on that volume. Read-only flags remain per mount; broker credentials are mounted
+only in the broker container. This avoids repeated claim publication on NFS CSI
+drivers that cannot handle multiple volume declarations for one claim. Without
+`USERDATA_PVC_NAME`, each hostPath keeps its own volume.
+
+If `SKILLS_PVC_NAME` is also configured, use a different claim name from
+`USERDATA_PVC_NAME`: unrestricted threads still declare a separate `skills`
+volume, so using the same claim for both can reintroduce duplicate publication.
+
 The provisioner is configured via environment variables (set in [docker-compose-dev.yaml](../docker-compose-dev.yaml)):
 
 | Variable | Default | Description |
@@ -425,8 +436,8 @@ chart's `provisioner.replicas`; compose runs a single container):
 
 The one startup write is `_ensure_namespace()`: when `K8S_NAMESPACE` does not
 exist yet, two replicas starting together can both see `404` and race to create
-it; the loser's `409` is not caught, so that process exits and is restarted into
-the now-existing namespace. Under the Helm chart the provisioner runs inside the
+it; the loser's `409 AlreadyExists` is treated as "the namespace exists", so
+both replicas start. Under the Helm chart the provisioner runs inside the
 namespace it manages, so this path never runs there.
 
 ## Security Considerations

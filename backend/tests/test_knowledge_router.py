@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import knowledge
+from deerflow.community.ragflow import provider as ragflow_provider
 
 
 def _config(
@@ -56,8 +57,8 @@ def _app(
     app.include_router(knowledge.router)
     app.dependency_overrides[get_config] = lambda: config or _config()
     monkeypatch.setattr(
-        knowledge,
-        "_build_retrieval_client",
+        ragflow_provider,
+        "build_ragflow_retrieval_client",
         lambda settings: client,
     )
     return app

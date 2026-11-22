@@ -1,0 +1,9 @@
+{
+  "project": "DeerFlow",
+  "status": "ready",
+  "deliverables": 5,
+  "review": {
+    "owner": "Design team",
+    "approved": true
+  }
+}

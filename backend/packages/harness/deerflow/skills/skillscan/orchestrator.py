@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import ast
 import io
+import json
 import logging
+import math
 import posixpath
 import re
 import stat
@@ -24,7 +26,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
-from deerflow.skills.package_files import is_code_file, is_executable_binary_prefix
+from deerflow.skills.package_files import EXEC_SNIFF_BYTES, executable_binary_magic, is_code_file, is_executable_binary_prefix
 from deerflow.skills.package_paths import is_eval_fixture_skill_md
 from deerflow.skills.skillscan.models import (
     FindingSeverity,
@@ -44,6 +46,9 @@ _BLOCK_SEVERITY = "CRITICAL"
 _NESTED_ZIP_PEEK_MEMBER_LIMIT = 256
 _MAX_ARCHIVE_MEMBERS = 4096
 _TEXT_PROBE_BYTES = 4096
+# Trying the Python parser on a data file can amplify a compact JSON array into
+# many AST nodes. Bound speculative parsing separately from known Python files.
+_MAX_INFERRED_PYTHON_CHARS = 128 * 1024
 
 _SPECS = [
     RuleSpec("package-path-traversal", "CRITICAL", "Archive member path traverses outside the skill root.", "Remove parent-directory traversal from the package path."),
@@ -63,6 +68,7 @@ _SPECS = [
     RuleSpec("package-nested-archive", "HIGH", "Package contains a nested archive file.", "Unpack and review nested archives before packaging the skill."),
     RuleSpec("package-hidden-sensitive-file", "HIGH", "Package contains a hidden sensitive file.", "Remove hidden credential or package-manager config files."),
     RuleSpec("package-undecodable-script", "HIGH", "Code file is not NUL-free UTF-8 text, so it was analyzed from a lossy decode.", "Store code as UTF-8 text without NUL bytes, and keep compiled or binary artifacts out of scripts/."),
+    RuleSpec("package-python-analysis-limit", "HIGH", "Text exceeds the limit for inferring Python source.", "Review the file or split it into smaller files before installation."),
     RuleSpec("package-git-directory", "MEDIUM", "Package contains a .git directory.", "Package only source files needed by the skill, excluding repository metadata."),
     RuleSpec("secret-private-key", "CRITICAL", "Private key material is embedded in skill content.", "Move private keys to a managed secret store and remove them from the skill."),
     RuleSpec("secret-cloud-token", "CRITICAL", "High-confidence cloud or API token is embedded in skill content.", "Move tokens to environment variables or a secret store."),
@@ -126,6 +132,8 @@ _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "e
 # word (`tokenizer`, `secretive`) still stays quiet, so this is not a blanket match.
 _SECRET_ASSIGNMENT_RE = re.compile(r"(?im)(?<![A-Za-z0-9])(token|password|passwd|api[_-]?key|secret|credential)s?\b[\"']?\s*[:=]\s*[\"']?([^\"'\s#]+)")
 _SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
+# Model-usage counters share the credential suffix but hold integer measurements.
+_TOKEN_COUNT_NAMES = {"tokens", "total_tokens", "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens"}
 _SECRET_TOKEN_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
@@ -177,7 +185,13 @@ _ENV_STANDALONE_OPTIONS = {"0", "i", "v"}
 _ENV_EXIT_OPTIONS = {"--help", "--version", "--null"}
 _ENV_MAX_SPLIT_STEPS = 256
 _ENV_MAX_SPLIT_CHARS = 65_536
-_SHELL_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
+_SHELL_NAMES = {"ash", "bash", "csh", "dash", "fish", "ksh", "mksh", "sh", "tcsh", "zsh"}
+# The download-pipe matcher below and the structural `env` fallback share this one
+# vocabulary: a name listed here is matched after a pipe, after an interpreter path
+# and behind `env`/`sudo`. Every entry starts with a distinct character, which is
+# what keeps the alternation free of the overlapping repeats the pattern above
+# documents, so a new name has to keep that property.
+_SHELL_NAME_ALTERNATION = "|".join(sorted(_SHELL_NAMES))
 _SHELL_SEPARATORS = {";", "&", "&&", "|", "||", "(", ")", "`", "\n"}
 # The head of a heredoc redirection: `<<` or `<<-`, an optional quoted delimiter,
 # then the delimiter word. Requiring a leading letter/underscore keeps arithmetic
@@ -262,7 +276,7 @@ def scan_archive_preflight(archive_path: Path) -> ScanResult:
                     continue
                 try:
                     with zf.open(info) as member:
-                        prefix = member.read(8)
+                        prefix = member.read(EXEC_SNIFF_BYTES)
                 except Exception as e:
                     scanner_errors.append(f"{normalized}: failed to read archive member prefix: {e}")
                     continue
@@ -313,7 +327,7 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
             findings.append(_finding("package-undecodable-script", file=rel_path, evidence=evidence))
             # A decoded executable is string-table noise that reads as secrets
             # and URLs; its CRITICAL executable finding already blocks it.
-            if is_executable_binary_prefix(file_bytes[:8]):
+            if is_executable_binary_prefix(file_bytes[:EXEC_SNIFF_BYTES]):
                 continue
 
         try:
@@ -354,25 +368,45 @@ def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: i
         findings.append(_finding("package-git-directory", file=rel_path, evidence=".git"))
     if _is_nested_archive_name(rel_path) or _looks_like_archive(file_bytes):
         findings.append(_nested_archive_finding(rel_path, file_bytes[:8], lambda: file_bytes, []))
-    if is_executable_binary_prefix(file_bytes[:8]):
-        findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:8])))
+    if is_executable_binary_prefix(file_bytes[:EXEC_SNIFF_BYTES]):
+        findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:EXEC_SNIFF_BYTES])))
     return findings
 
 
 def _scan_text_file(rel_path: str, text: str) -> list[SecurityFinding]:
-    findings: list[SecurityFinding] = []
-    findings.extend(_scan_secrets(rel_path, text))
+    # Python accepts a leading UTF-8 BOM in a source file. ast.parse(str)
+    # expects it to have been consumed by the decoder.
+    text = text.removeprefix("\ufeff")
+    named_python = _is_python_path(rel_path, text)
+    over_python_limit = not named_python and len(text) > _MAX_INFERRED_PYTHON_CHARS
+    tree = None if over_python_limit else _parse_python(text)
+    findings = _scan_secrets(rel_path, text, tree, named_python=named_python)
     if PurePosixPath(rel_path).name == "SKILL.md":
         findings.extend(_scan_declaration(rel_path, text))
-    if _is_python_path(rel_path, text):
-        findings.extend(_scan_python(rel_path, text))
-    if _is_shell_path(rel_path, text):
-        findings.extend(_scan_shell(rel_path, text))
+    # A JSON array/object is valid Python syntax too. A literal-only document
+    # with path or URL labels does not perform a sensitive read or network call.
+    if tree is not None and (named_python or _has_python_operations(tree)):
+        findings.extend(_scan_python(rel_path, tree, named_python=named_python))
+    if over_python_limit:
+        findings.append(_finding("package-python-analysis-limit", file=rel_path, evidence=f"{len(text)} characters"))
+    shell_findings = _scan_shell(rel_path, text)
+    if shell_findings and tree is not None and not _is_shell_path(rel_path, text):
+        _moderate_quoted_shell_findings(shell_findings, tree)
+    findings.extend(shell_findings)
     findings.extend(_scan_network_and_resource(rel_path, text))
     return findings
 
 
-def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
+def contains_sensitive_package_content(rel_path: str, text: str) -> bool:
+    """Keep newly reviewed package data with recognizable secrets local."""
+    if _is_hidden_sensitive_path(rel_path):
+        return True
+    text = text.removeprefix("\ufeff")
+    tree = _parse_python(text) if len(text) <= _MAX_INFERRED_PYTHON_CHARS else None
+    return bool(_scan_secrets(rel_path, text, tree, named_python=False))
+
+
+def _scan_secrets(rel_path: str, text: str, python_tree: ast.Module | None, *, named_python: bool) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     private_key = re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", text)
     if private_key:
@@ -388,11 +422,11 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
             continue
         break
 
-    if _is_python_path(rel_path, text):
-        findings.extend(_scan_python_secret_assignments(rel_path, text))
-        return findings
-
-    findings.extend(_scan_secret_assignments_by_text(rel_path, text))
+    if python_tree is None or not named_python:
+        text_bindings = _scan_secret_assignments_by_text(rel_path, text)
+        if text_bindings or python_tree is None:
+            return [*findings, *text_bindings]
+    findings.extend(_scan_python_secret_assignments(rel_path, python_tree, data_text=None if named_python else text))
     return findings
 
 
@@ -400,9 +434,52 @@ def _scan_secret_assignments_by_text(rel_path: str, text: str) -> list[SecurityF
     """``name[:=]value`` sweep for line-oriented text, and for Python that will not parse."""
     for match in _SECRET_ASSIGNMENT_RE.finditer(text):
         value = match.group(2).strip()
+        if _is_token_usage_measurement(text, match):
+            continue
         if not _looks_like_placeholder(value):
             return [_finding_from_match("secret-env-assignment", rel_path, text, match)]
     return []
+
+
+def _is_token_usage_measurement(text: str, match: re.Match[str]) -> bool:
+    """Recognize typed usage counts and benchmark summaries, not credentials."""
+    if match.group(1).lower() != "token" or text[match.end(1) : match.end(1) + 1].lower() != "s":
+        return False
+    start = match.start(1)
+    # Recover the entire key: matching only its suffix would also exempt an
+    # unrelated credential such as access_total_tokens. Scan only this key.
+    while start and (text[start - 1].isalnum() or text[start - 1] in "_.-"):
+        start -= 1
+    end = match.end(1) + 1
+    name = text[start:end].lower()
+    if name not in _TOKEN_COUNT_NAMES:
+        return False
+    if text[end : end + 1] in {'"', "'"} and (not start or text[start - 1] != text[end]):
+        return False
+    value_start = match.start(2)
+    quote = text[value_start - 1] if value_start else ""
+    # The text sweep includes an adjacent JSON delimiter in the value. Require
+    # the whole value to be numeric so strings and trailing payloads stay visible.
+    if quote not in {'"', "'"} and re.fullmatch(r"[0-9]+[,}\]]?", match.group(2)):
+        return True
+    if name != "tokens":
+        return False
+    # Benchmark summaries use four numeric statistics or a signed numeric delta.
+    # Bound parsing independently of file size; other containers remain findings.
+    if quote == '"':
+        value_start -= 1
+    try:
+        value, _ = json.JSONDecoder(object_pairs_hook=tuple).raw_decode(text[value_start : value_start + 512])
+    except ValueError:
+        return False
+    if isinstance(value, str):
+        return re.fullmatch(r"[+-][0-9]+(?:\.[0-9]+)?", value) is not None
+    return (
+        isinstance(value, tuple)
+        and len(value) == 4
+        and {key for key, _ in value} == {"mean", "stddev", "min", "max"}
+        and all(type(number) in {int, float} and number >= 0 and (isinstance(number, int) or math.isfinite(number)) for _, number in value)
+    )
 
 
 def _python_secret_assignment_target(node: ast.expr) -> str | None:
@@ -606,7 +683,7 @@ def _python_secret_literal_candidates(expr: ast.expr) -> list[tuple[ast.expr, st
     return candidates
 
 
-def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
+def _scan_python_secret_assignments(rel_path: str, tree: ast.Module, *, data_text: str | None) -> list[SecurityFinding]:
     """Report embedded Python secrets from real literal bindings, not from raw text.
 
     A line-oriented sweep cannot tell an annotation (``token: Optional[str]``), a
@@ -627,14 +704,21 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
     separates from its name (``[token, version] = ["…", 2]``): those two shapes are
     reported while the file parses and go quiet once it carries a syntax error.
     """
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return _scan_secret_assignments_by_text(rel_path, text)
-
+    source: bytes | None = None
+    line_starts: list[int] = []
     for name, value in _python_secret_bindings(tree):
         if not _SECRET_ASSIGNMENT_NAME_RE.match(name or ""):
             continue
+        if data_text is not None and (name or "").lower() == "tokens" and value is not None:
+            # Preserve the text format's usage-counter exemption when the data
+            # also parses as Python. AST column offsets count UTF-8 bytes.
+            if source is None:
+                source = data_text.replace("\r\n", "\n").replace("\r", "\n").encode()
+                line_starts = [0, *(match.end() for match in re.finditer(b"\n", source))]
+            start = line_starts[value.lineno - 1] + value.col_offset
+            sample = "tokens=" + source[start : start + 512].decode("utf-8", errors="ignore")
+            if (match := _SECRET_ASSIGNMENT_RE.match(sample)) and _is_token_usage_measurement(sample, match):
+                continue
         for node, literal in _python_secret_literal_candidates(value):
             if _looks_like_placeholder(literal):
                 continue
@@ -664,12 +748,38 @@ def _scan_declaration(rel_path: str, text: str) -> list[SecurityFinding]:
     return findings
 
 
-def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
-    findings: list[SecurityFinding] = []
+def _parse_python(text: str) -> ast.Module | None:
     try:
-        tree = ast.parse(text)
+        return ast.parse(text)
     except SyntaxError:
-        return findings
+        return None
+
+
+def _has_python_operations(tree: ast.Module) -> bool:
+    return any(not isinstance(statement, ast.Expr) for statement in tree.body) or any(isinstance(node, (ast.Call, ast.Attribute)) for node in ast.walk(tree))
+
+
+def _inferred_sensitive_file_read(node: ast.Call, call_name: str, aliases: dict[str, str]) -> bool:
+    """Recognize literal operands of file reads in text that only resembles Python."""
+    mode: ast.expr | None = None
+    if call_name in {"open", "builtins.open", "io.open"}:
+        path = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "file"), None)
+        mode = node.args[1] if len(node.args) > 1 else next((kw.value for kw in node.keywords if kw.arg == "mode"), None)
+    elif isinstance(node.func, ast.Attribute) and node.func.attr in {"read_text", "read_bytes", "open"}:
+        path = node.func.value
+        if node.func.attr == "open":
+            mode = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "mode"), None)
+    else:
+        return False
+    if mode is not None and not (isinstance(mode, ast.Constant) and isinstance(mode.value, str) and ("r" in mode.value or "+" in mode.value)):
+        return False
+    if isinstance(path, ast.Call) and _python_call_name(path, aliases) == "pathlib.Path":
+        return any(isinstance(arg, ast.Constant) and isinstance(arg.value, str) and _SENSITIVE_PATH_RE.search(arg.value) for arg in path.args)
+    return isinstance(path, ast.Constant) and isinstance(path.value, str) and bool(_SENSITIVE_PATH_RE.search(path.value))
+
+
+def _scan_python(rel_path: str, tree: ast.Module, *, named_python: bool) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
 
     aliases = _collect_python_aliases(tree)
     has_sensitive_read = False
@@ -678,17 +788,21 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     sensitive_node: ast.AST | None = None
     env_node: ast.AST | None = None
     network_node: ast.AST | None = None
+    # The environment-dump rule retains its established URL/constructor signals.
+    env_network_hint: ast.AST | None = None
     reverse_shell_parts: set[str] = set()
     reverse_shell_node: ast.AST | None = None
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if _SENSITIVE_PATH_RE.search(node.value):
+            if named_python and _SENSITIVE_PATH_RE.search(node.value):
                 has_sensitive_read = True
                 sensitive_node = sensitive_node or node
             if _is_outbound_url(node.value):
-                has_network_sink = True
-                network_node = network_node or node
+                env_network_hint = env_network_hint or node
+                if named_python:
+                    has_network_sink = True
+                    network_node = network_node or node
 
         if isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
             has_env_dump = True
@@ -710,9 +824,15 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         elif call_name in {"pickle.load", "pickle.loads"} or (call_name == "yaml.load" and not _yaml_load_uses_safe_loader(node)):
             findings.append(_finding_for_node("python-unsafe-deserialization", rel_path, node, call_name))
 
-        if _call_is_network_sink(call_name):
+        if not named_python and _inferred_sensitive_file_read(node, call_name, aliases):
+            has_sensitive_read = True
+            sensitive_node = sensitive_node or node
+
+        if _call_is_network_sink(call_name) and (named_python or call_name != "socket.socket"):
             has_network_sink = True
             network_node = network_node or node
+        elif call_name == "socket.socket":
+            env_network_hint = env_network_hint or node
 
         if call_name == "os.dup2":
             reverse_shell_parts.add("dup2")
@@ -739,8 +859,8 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_for_node("python-sensitive-exfil", rel_path, sensitive_node or network_node, "sensitive read + network sink"))
     elif has_sensitive_read:
         findings.append(_finding_for_node("python-sensitive-path-read", rel_path, sensitive_node, "sensitive path read"))
-    if has_env_dump and has_network_sink:
-        findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node, "environment dump + network sink"))
+    if has_env_dump and (has_network_sink or env_network_hint):
+        findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node or env_network_hint, "environment dump + network sink"))
     return findings
 
 
@@ -1150,7 +1270,7 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         # the two branches mutually exclusive, so each token is consumed in
         # exactly one way and a failing chain stays linear.
         r"|-(?![acCDghprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
-        r"(?:bash|zsh|dash|fish|sh)\b",
+        rf"(?:{_SHELL_NAME_ALTERNATION})\b",
         text,
     ):
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
@@ -1177,7 +1297,71 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
                 continue
         findings.append(_finding("shell-env-dump", file=rel_path, line=_line_number(code, match.start("cmd")), evidence=command))
         break
+    # The original shell rules also flag prose mentions. Preserve those signals
+    # for contextual review; reserve blocking inferred files for command use.
+    criticals = [finding for finding in findings if finding["severity"] == "CRITICAL"]
+    if criticals and not _is_shell_path(rel_path, text):
+        confirmed = _inferred_shell_critical_evidence(code)
+        for finding in criticals:
+            if command := confirmed.get(finding["rule_id"]):
+                finding["line"], finding["evidence"] = command
+            else:
+                finding["severity"] = "HIGH"
     return findings
+
+
+def _inferred_shell_critical_evidence(code: str) -> dict[str, tuple[int, str]]:
+    """Corroborate raw path/tool matches with shell operators or command arguments."""
+    evidence: dict[str, tuple[int, str]] = {}
+    sensitive_path: tuple[int, str] | None = None
+    transfer_command = False
+    transfers = {"curl", "wget", "nc", "scp"}
+    path_commands = transfers | {"test", "[", "[[", "cat", "head", "tail", "grep", "awk", "sed", "cut", "read", "tee"}
+    markers = ("/dev/tcp/", "/etc/passwd", "/etc/shadow", *transfers)
+    for number, line in enumerate(code.split("\n"), 1):
+        if not any(marker in line for marker in markers):
+            continue
+        for tokens in _inferred_shell_commands(line):
+            words = [token for token in tokens if isinstance(token, _ShellWord)]
+            head = next((i for i, word in enumerate(words) if word not in {"!", "if", "then", "elif", "else", "while", "until", "do", "command", "exec", "env", "sudo"} and not re.match(r"[A-Za-z_]\w*=", word)), None)
+            name = PurePosixPath(words[head]).name if head is not None else ""
+            if name == "nc" and "-e" in words[head + 1 :]:
+                evidence.setdefault("shell-reverse-shell", (number, "nc -e"))
+            transfer_command |= name in transfers
+            for index, token in enumerate(tokens):
+                redirected = index > 0 and not isinstance(tokens[index - 1], _ShellWord) and _ENV_REDIRECTION_RE.fullmatch(tokens[index - 1]) is not None
+                if not redirected and name not in path_commands:
+                    continue
+                if token.startswith("/dev/tcp/"):
+                    evidence.setdefault("shell-reverse-shell", (number, "/dev/tcp/"))
+                if token.removeprefix("@") in {"/etc/passwd", "/etc/shadow"}:
+                    sensitive_path = sensitive_path or (number, "/etc")
+    if transfer_command and sensitive_path:
+        evidence["shell-sensitive-exfil"] = sensitive_path
+    return evidence
+
+
+def _inferred_shell_commands(line: str) -> Iterable[list[str]]:
+    # A backtick-delimited mention in ordinary Markdown is not a command
+    # boundary. The original raw finding remains available for model review.
+    line = line.replace("`", '"')
+    start = 0
+    while start < len(line):
+        budget = _ShellTokenBudget(len(line) - start)
+        tokens = _tokenize_shell(line, start, budget=budget)
+        if tokens:
+            yield tokens
+        # The tokenizer stops at the next unquoted command separator.
+        start = len(line) - budget.remaining + 1
+
+
+def _moderate_quoted_shell_findings(findings: list[SecurityFinding], tree: ast.Module) -> None:
+    """Send a shell idiom quoted as data to contextual review at warning severity."""
+    for finding in findings:
+        if finding["severity"] != "CRITICAL" or not (line_number := finding["line"]) or not (evidence := finding["evidence"]):
+            continue
+        if any(isinstance(node, ast.Constant) and isinstance(node.value, str) and node.lineno <= line_number <= (node.end_lineno or node.lineno) and evidence in node.value for node in ast.walk(tree)):
+            finding["severity"] = "HIGH"
 
 
 def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding]:
@@ -1249,7 +1433,7 @@ def _nested_zip_contains_executable(data: bytes) -> bool:
                     continue
                 try:
                     with nested.open(info) as member:
-                        if is_executable_binary_prefix(member.read(8)):
+                        if is_executable_binary_prefix(member.read(EXEC_SNIFF_BYTES)):
                             return True
                 except Exception:
                     continue
@@ -1328,6 +1512,8 @@ def _relative_file(path: Path, root: Path) -> str:
 
 def _is_hidden_sensitive_path(rel_path: str) -> bool:
     parts = PurePosixPath(rel_path).parts
+    if not parts:
+        return False
     if ".aws" in parts and parts[-1] == "credentials":
         return True
     if ".git" in parts and parts[-1] == "config":
@@ -1345,9 +1531,10 @@ def _looks_like_archive(file_bytes: bytes) -> bool:
 
 
 def _binary_magic_evidence(prefix: bytes) -> str:
-    if prefix.startswith(b"\x7fELF"):
+    magic = executable_binary_magic(prefix) or b""
+    if magic.startswith(b"\x7fELF"):
         return "ELF"
-    if prefix.startswith(b"MZ"):
+    if magic.startswith(b"MZ"):
         return "PE"
     return "Mach-O"
 
@@ -1392,11 +1579,15 @@ def _http_host(url: str) -> str | None:
     if not url[:8].lower().startswith(("http://", "https://")):
         return None
     try:
-        # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
-        # for the host. Malformed URLs remain outbound in _is_outbound_url.
-        host = urlsplit(url).hostname
+        parts = urlsplit(url)
     except ValueError:
         return None
+    # Python versions differ on which brackets in userinfo they accept.
+    # Treat raw brackets there as malformed so the URL stays outbound.
+    userinfo, at_sign, _hostport = parts.netloc.rpartition("@")
+    if at_sign and ("[" in userinfo or "]" in userinfo):
+        return None
+    host = parts.hostname
     return host.lower() if host else None
 
 
@@ -1511,7 +1702,12 @@ def _call_is_network_sink(call_name: str) -> bool:
 # narrowing the model has to change that test rather than change behaviour silently.
 #
 # Compound bodies are still walked from isolated entry-state copies so `if True:` is not a
-# universal bypass, but ambiguous bindings are dropped rather than joined. Every AST visit
+# universal bypass. A part that cannot follow a sibling's binding -- an `if` branch, the one
+# `match` case that runs, a `try` or loop body -- keeps the enclosing handle live and applies its
+# own rebinding in source order; parts that can follow a sibling (a loop or `try` `else`, a
+# handler, a `finally`) still start with those names dropped, so a rebind on one path cannot be
+# read as live on the next. Names the statement binds as it dispatches -- a loop target, an
+# `except ... as` name, a `match` capture -- are always dropped first. Every AST visit
 # and copied scope entry consumes a deterministic work budget, and the walk stops as soon
 # as it finds one sink. This bounds the branch-copy cost on untrusted source.
 
@@ -1525,6 +1721,7 @@ class _ClientSpec:
 
 # Keep response-only operations such as `getresponse()` out: this signal needs outbound I/O.
 _PYTHON_CLIENT_SPECS = {
+    "socket.socket": _ClientSpec(frozenset({"connect", "connect_ex", "send", "sendall", "sendto", "sendmsg", "sendfile"}), sync_context=True),
     "http.client.HTTPConnection": _ClientSpec(frozenset({"request", "connect", "send"})),
     "http.client.HTTPSConnection": _ClientSpec(frozenset({"request", "connect", "send"})),
     "requests.Session": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options", "send"}), sync_context=True),
@@ -1532,7 +1729,6 @@ _PYTHON_CLIENT_SPECS = {
     "aiohttp.ClientSession": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), async_context=True),
 }
 _PYTHON_CLIENT_CONSTRUCTORS = frozenset(_PYTHON_CLIENT_SPECS)
-_PYTHON_CLIENT_SINK_METHODS = frozenset().union(*(spec.methods for spec in _PYTHON_CLIENT_SPECS.values()))
 _PYTHON_CLIENT_ANALYSIS_BUDGET = 100_000
 _PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -1680,19 +1876,31 @@ def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientSco
 
 
 def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
-    """Analyze a compound statement without deciding which of its parts run, or in what order.
+    """Analyze a compound statement part by part, dropping only the bindings that can already be stale.
 
-    Every name the statement may bind is dropped *before* any body is walked, not after. Dropping
-    afterwards would be wrong for the parts that run after a sibling has already rebound the name --
-    a `finally` after a handler replaced the handle, a later `except*` clause, a second loop
-    iteration -- and each of those disagreements is a benign file hard-blocked as `CRITICAL`.
-    Ordering the parts instead of dropping is the control-flow interpreter this signal is not.
+    A name is dropped before a part is walked when some *other* part of the same statement can run
+    before it and rebind that name: an `else` after a loop body, a `finally` after a handler replaced
+    the handle, a later `except*` clause. Reading such an earlier path's rebind as still live is a
+    benign file hard-blocked as `CRITICAL`.
 
-    Bodies are still walked, each from its own copy, so a construction inside one branch cannot leak
-    into a sibling and a sink inside a branch is still seen. What is lost is a name that the same
-    statement both calls and rebinds; that is the documented false negative.
+    A part that cannot follow a sibling -- a branch of an `if`/`elif`/`else` chain, the one `match`
+    case that runs, a `try` body, a loop body -- is walked with the enclosing handle intact, and the
+    part then applies its own rebinding in source order. That is the rule the top level already uses,
+    where a rebind after a call cannot retract it, and it is what stops a call that really happened
+    from disappearing because a later statement in that same part rebinds the name (issue #4296,
+    case 1).
+
+    Names the statement binds as it dispatches -- a loop target, an `except ... as` name, a `match`
+    capture -- are dropped after the header is walked and before every part, because the header is
+    evaluated while those bindings do not exist yet: a sink in `for s in s.post(...)` really happens
+    under the enclosing handle. Everything the statement may bind is then dropped from the enclosing
+    scope once its parts are walked, so a binding made inside a part never reaches the code that
+    follows the statement.
     """
-    _drop_client_bindings(scope, _branching_bound_names(node, analysis))
+    entry_names = _branching_entry_bound_names(node, analysis)
+    # Names rebound by ordinary statements inside the parts: which part ran is undecided here, so they
+    # stay dropped for the parts that can follow a sibling and live for the parts that cannot.
+    sibling_names = _branching_bound_names(node, analysis) - entry_names
     for header in _branching_header_exprs(node):
         walrus_names = _walrus_target_names(header, analysis)
         if walrus_names:
@@ -1701,11 +1909,13 @@ def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _Clien
         _walk_client_scope(header, scope, inherited, analysis)
         if analysis.found is not None:
             return
-    for body in _branching_bodies(node):
-        branch_scope = scope.copy_without(analysis)
+    _drop_client_bindings(scope, entry_names)
+    for body, follows_sibling in _branching_parts(node):
+        branch_scope = scope.copy_without(analysis, sibling_names if follows_sibling else None)
         _walk_client_statements(body, branch_scope, inherited, analysis)
         if analysis.found is not None:
             return
+    _drop_client_bindings(scope, entry_names | sibling_names)
 
 
 def _branching_header_exprs(node: ast.AST) -> list[ast.AST]:
@@ -1720,20 +1930,54 @@ def _branching_header_exprs(node: ast.AST) -> list[ast.AST]:
     return []  # `try` has no header; handler types run only when an exception was raised
 
 
-def _branching_bodies(node: ast.AST) -> list[list[ast.AST]]:
+def _branching_parts(node: ast.AST) -> list[tuple[list[ast.AST], bool]]:
+    """The statement's parts, each tagged with whether a sibling part can run before it.
+
+    `False` marks a part that starts from the state at the statement itself: the branches of an
+    `if`/`elif`/`else` chain are mutually exclusive, only one `match` case runs, and a `try` body or a
+    loop body is the first thing its statement runs. A binding made in some other part cannot be the
+    value this part starts from, so an enclosing handle stays live here.
+
+    `True` marks a part that can follow a sibling's binding: a loop or `try` `else`, a handler after
+    its `try` body, a later `except*` clause, and a `finally` after any of them.
+    """
     if isinstance(node, (ast.Try, ast.TryStar)):
         # A handler's `type` expression and its body run on the same path, so they share one copy.
         handlers = [[*([handler.type] if handler.type is not None else []), *handler.body] for handler in node.handlers]
-        return [node.body, *handlers, node.orelse, node.finalbody]
+        return [(node.body, False), *((body, True) for body in [*handlers, node.orelse, node.finalbody])]
     if isinstance(node, ast.Match):
-        return [[*([case.guard] if case.guard is not None else []), *case.body] for case in node.cases]
+        return [([*([case.guard] if case.guard is not None else []), *case.body], False) for case in node.cases]
     if isinstance(node, ast.If):
-        return [node.body, node.orelse]
+        return [(node.body, False), (node.orelse, False)]
     if isinstance(node, (ast.For, ast.AsyncFor)):
-        return [node.body, node.orelse]
+        return [(node.body, False), (node.orelse, True)]
     if isinstance(node, ast.While):
-        return [node.body, node.orelse]
+        return [(node.body, False), (node.orelse, True)]
     return []
+
+
+def _branching_bodies(node: ast.AST) -> list[list[ast.AST]]:
+    return [body for body, _follows_sibling in _branching_parts(node)]
+
+
+def _branching_entry_bound_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
+    """Names the statement binds as it dispatches, never from a statement inside one of its parts.
+
+    These are not order-dependent: a loop target, an exception name and a `match` capture hold a new
+    value before any body of the statement runs, so an enclosing handle under the same name is already
+    gone for every part walked below. Dropping them here rather than with the rest is what lets a
+    later sink in the same part still be seen.
+    """
+    names: set[str] = set()
+    declared: set[str] = set()
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        names.update(_client_assignment_target_names(node.target))
+    if isinstance(node, (ast.Try, ast.TryStar)):
+        names.update(handler.name for handler in node.handlers if handler.name)
+    if isinstance(node, ast.Match):
+        for case in node.cases:
+            _collect_client_scope_bindings(case.pattern, names, declared, analysis)
+    return names - declared
 
 
 def _branching_bound_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:

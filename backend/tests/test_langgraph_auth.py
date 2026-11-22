@@ -304,6 +304,9 @@ def test_run_admission_uses_persisted_incarnation_and_scrubs_client_values():
         "if_not_exists": "reject",
     }
 
+    for section in (value["kwargs"]["context"], *value["kwargs"]["config"].values()):
+        section.update(is_subagent=True, agent_id="privileged-child")
+
     with patch.object(
         auth_module,
         "_read_standalone_thread",
@@ -325,6 +328,11 @@ def test_run_admission_uses_persisted_incarnation_and_scrubs_client_values():
     assert value["kwargs"]["context"]["user_id"] == "user-a"
     assert value["kwargs"]["context"]["thread_id"] == str(thread_id)
     assert value["kwargs"]["context"]["run_id"] == str(run_id)
+    assert value["kwargs"]["context"]["is_subagent"] is False
+    assert value["kwargs"]["context"]["agent_id"] is None
+    for section in value["kwargs"]["config"].values():
+        assert "is_subagent" not in section
+        assert "agent_id" not in section
     assert THREAD_INCARNATION_CONTEXT_KEY not in value["metadata"]
     assert THREAD_INCARNATION_METADATA_GUARD_KEY not in value["metadata"]
     assert THREAD_INCARNATION_CONTEXT_KEY not in value["kwargs"]["config"]["context"]
@@ -336,6 +344,17 @@ def test_run_admission_uses_persisted_incarnation_and_scrubs_client_values():
     assert THREAD_INCARNATION_METADATA_GUARD_KEY not in value["kwargs"]["config"]["metadata"]
     assert THREAD_INCARNATION_CONTEXT_KEY not in value["kwargs"]["config"]["configurable"]
     assert THREAD_INCARNATION_METADATA_GUARD_KEY not in value["kwargs"]["config"]["configurable"]
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_assistant_writes_cannot_persist_child_execution_identity(action):
+    forged = {"is_subagent": True, "agent_id": "privileged-child", "agent_name": "researcher"}
+    value = {"context": dict(forged), "config": {"context": dict(forged), "configurable": dict(forged)}}
+    asyncio.run(add_owner_filter(_make_ctx("alice", resource="assistants", action=action), value))
+    for section in (value["context"], *value["config"].values()):
+        assert "is_subagent" not in section
+        assert "agent_id" not in section
+        assert section["agent_name"] == "researcher"
 
 
 def test_existing_legacy_thread_uses_explicit_none_without_backfill():

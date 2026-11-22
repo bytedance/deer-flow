@@ -21,10 +21,11 @@ export interface ChannelProvider {
   credential_fields: ChannelCredentialField[];
   credential_values?: ChannelRuntimeConfigValues;
   /**
-   * The app can receive scheduled-task updates (proactive push; only WeCom
-   * today). Absent from older backends, which cannot say: show nothing.
+   * The app can receive scheduled-task updates through proactive push. This
+   * is a capability, not a notification preference. Older backends may omit it.
    */
   proactive_notifications?: boolean;
+  proactive_group_notifications?: boolean;
 }
 
 export interface ChannelProvidersResponse {

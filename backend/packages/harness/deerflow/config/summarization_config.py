@@ -85,7 +85,7 @@ class SummarizationConfig(BaseModel):
     trim_tokens_to_summarize: int | None = Field(
         default=4000,
         ge=1,
-        description="Maximum tokens to keep when preparing messages for summarization. Pass null to skip trimming.",
+        description="Raw-text budget per summary step. Generated carry uses at most half, reserving the rest for source; a pass has at most 64 chunks. Pass null for one unbounded step.",
     )
 
     @field_validator("trim_tokens_to_summarize", mode="before")
@@ -95,7 +95,7 @@ class SummarizationConfig(BaseModel):
 
     summary_prompt: str | None = Field(
         default=None,
-        description="Custom prompt template for generating summaries. If not provided, uses the default LangChain prompt.",
+        description="Custom prompt template for generating summaries. Null selects DeerFlow's built-in prompt.",
     )
     skill_file_read_tool_names: list[str] = Field(
         default_factory=lambda: list(DEFAULT_SKILL_FILE_READ_TOOL_NAMES),

@@ -3,6 +3,7 @@ import asyncio
 from langchain.tools import tool
 
 from deerflow.community.jina_ai.jina_client import JinaClient
+from deerflow.community.url_safety import validate_hosted_fetch_url
 from deerflow.config import get_app_config
 from deerflow.utils.readability import ReadabilityExtractor
 
@@ -52,12 +53,17 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    url_error = validate_hosted_fetch_url(url)
+    if url_error:
+        return url_error
+
     jina_client = JinaClient()
     timeout = 10
     proxy = None
     trust_env = True
     request_options = {}
-    config = get_app_config().get_tool_config("web_fetch")
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    config = (await asyncio.to_thread(get_app_config)).get_tool_config("web_fetch")
     if config is not None:
         timeout = _coerce_timeout(config.model_extra.get("timeout"), timeout)
         proxy = _coerce_proxy(config.model_extra.get("proxy"))

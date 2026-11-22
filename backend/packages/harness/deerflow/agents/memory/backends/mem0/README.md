@@ -71,3 +71,11 @@ not block unrelated ASGI handlers or SSE heartbeats.
 `failure_policy.read: fail_open` logs a recall failure and continues without
 new memory context. `fail_closed` propagates the backend error through prompt
 construction and aborts the run instead of silently degrading.
+
+Context-injection deduplication follows the same read policy when a remote
+record has a list or object ID. The whole recall falls back to empty context
+or raises `MemoryReadError`, including when the invalid ID appears on a later
+page; no partial context is returned. Diagnostics identify the ID field without
+echoing the invalid ID or memory content. Existing scalar and absent-ID
+handling, first-occurrence ordering, and whole-entry character budgets remain
+unchanged.

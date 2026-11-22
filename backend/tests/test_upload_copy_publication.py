@@ -99,7 +99,10 @@ def test_publishes_with_supported_link_options(upload_paths, monkeypatch, nofoll
     dest = copy_upload_file_no_replace(uploads, "notes.txt", source)
 
     assert dest.read_bytes() == b"uploaded content"
-    assert dest.stat().st_nlink == 1
+    if os.name != "nt":
+        # Windows never decrements the link count when the staged name is removed,
+        # so a freshly published upload reads back as ``st_nlink == 2`` there.
+        assert dest.stat().st_nlink == 1
     assert calls == [{"follow_symlinks": False} if nofollow else {}]
 
 

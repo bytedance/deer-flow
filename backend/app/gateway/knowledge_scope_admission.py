@@ -8,13 +8,14 @@ from fastapi import HTTPException
 from langchain_core.messages import BaseMessage, HumanMessage
 from pydantic import ValidationError
 
+from deerflow.knowledge.providers import RAGFLOW_KNOWLEDGE_TOOL, get_knowledge_capabilities, validate_scope_capabilities
 from deerflow.knowledge_scope import (
     KNOWLEDGE_SCOPE_KEY,
     canonicalize_knowledge_scope,
     execution_scope,
 )
 
-RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER = "deerflow.community.ragflow.tools:knowledge_search_tool"
+RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER = RAGFLOW_KNOWLEDGE_TOOL  # Legacy import compatibility.
 
 
 def assistant_supports_knowledge_scope(
@@ -22,6 +23,7 @@ def assistant_supports_knowledge_scope(
     assistant_id: str | None,
     app_config: Any,
     agent_config: Any | None,
+    extensions: Any = None,
 ) -> bool:
     """Return whether this exact assistant/provider pairing is supported."""
     if not assistant_id:
@@ -29,9 +31,7 @@ def assistant_supports_knowledge_scope(
     knowledge_base = getattr(app_config, "knowledge_base", None)
     if not getattr(knowledge_base, "enabled", False):
         return False
-    get_tool_config = getattr(app_config, "get_tool_config", None)
-    tool = get_tool_config("knowledge_search") if callable(get_tool_config) else None
-    if getattr(tool, "use", None) != RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER:
+    if not get_knowledge_capabilities(app_config, extensions=extensions).supports("search"):
         return False
     # The main assistant has no custom-agent config row. Its knowledge tool is
     # controlled solely by the app-level provider configuration.
@@ -60,6 +60,7 @@ def admit_message_knowledge_scope(
     agent_config: Any | None,
     recovery_scope: object | None = None,
     recovery: bool = False,
+    extensions: Any = None,
 ) -> dict[str, Any] | None:
     """Canonicalize the sole eligible HumanMessage and return execution scope.
 
@@ -115,6 +116,7 @@ def admit_message_knowledge_scope(
             assistant_id=assistant_id,
             app_config=app_config,
             agent_config=agent_config,
+            extensions=extensions,
         ):
             raise HTTPException(
                 status_code=422,
@@ -127,6 +129,10 @@ def admit_message_knowledge_scope(
                 status_code=422,
                 detail=f"Invalid knowledge_scope: {exc.errors()[0]['msg']}",
             ) from exc
+        try:
+            validate_scope_capabilities(canonical, get_knowledge_capabilities(app_config, extensions=extensions))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
     elif scoped_indexes and not recovery:
         raise HTTPException(status_code=422, detail="knowledge_scope must be an object")
 

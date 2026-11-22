@@ -11,7 +11,7 @@ concurrent upload vs project delete, and concurrent duplicate upload.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -137,6 +137,23 @@ class TestReadsFilterTrashed:
         assert total == 0
 
 
+async def _stamp_updated_at(docs: ProjectDocumentRepository, stamps: dict[str, datetime]) -> None:
+    """Pin ``updated_at`` so ordering tests do not depend on the wall clock.
+
+    Rows inserted back to back can share a timestamp on hosts with a coarse
+    clock (Windows ticks at ~15.6 ms), which silently falls through to the
+    ``id`` tie-break.
+    """
+    import sqlalchemy as sa
+
+    from deerflow.persistence.projects.model import ProjectDocumentRow
+
+    async with docs._sf() as session:
+        for doc_id, updated_at in stamps.items():
+            await session.execute(sa.update(ProjectDocumentRow).where(ProjectDocumentRow.id == doc_id).values(updated_at=updated_at))
+        await session.commit()
+
+
 class TestShelfSnapshot:
     async def test_ordering_is_updated_desc_id_asc_with_one_round_trip_shape(self, repos):
         projects, docs = repos
@@ -146,13 +163,10 @@ class TestShelfSnapshot:
             rows.append(await _insert(docs, project["id"], sha=f"{i}" * 64, name=f"f{i}.txt", doc_id=f"d{i}"))
         # Re-touch d2 so it becomes the most recently updated row.
         await _insert(docs, project["id"], sha="e" * 64, name="f5.txt", doc_id="d5")
-        import sqlalchemy as sa
-
-        from deerflow.persistence.projects.model import ProjectDocumentRow
-
-        async with docs._sf() as session:
-            await session.execute(sa.update(ProjectDocumentRow).where(ProjectDocumentRow.id == "d2").values(updated_at=datetime(2999, 1, 1, tzinfo=UTC)))
-            await session.commit()
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        stamps = {f"d{i}": base + timedelta(seconds=i) for i in range(6)}
+        stamps["d2"] = datetime(2999, 1, 1, tzinfo=UTC)
+        await _stamp_updated_at(docs, stamps)
 
         snapshot_rows, total = await docs.shelf_snapshot(project["id"], limit=3, user_id="u1")
         assert total == 6
@@ -168,6 +182,8 @@ class TestShelfSnapshot:
         project = await _project(projects)
         for i in range(7):
             await _insert(docs, project["id"], sha=f"{i}" * 64, name=f"f{i}.txt", doc_id=f"d{i}")
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        await _stamp_updated_at(docs, {f"d{i}": base + timedelta(seconds=i) for i in range(7)})
         seen: list[str] = []
         offset = 0
         while True:

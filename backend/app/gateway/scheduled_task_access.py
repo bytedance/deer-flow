@@ -26,7 +26,6 @@ from app.gateway.deps import get_config, get_local_provider, get_scheduled_task_
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.scheduled_task_errors import active_occurrence_error, repository_error, scheduler_error, tool_error_payload
 from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_create, validate_scheduled_task_update
-from app.scheduler.service import TASK_CHANGED_ERROR
 from deerflow.agents.interaction_policy import RunInteractionMode, RunInteractionPolicy
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict
 from deerflow.scheduler import host_notes
@@ -61,99 +60,6 @@ _HOST_RUN_ERROR_KEYS = {
 }
 _REASON_CODE = re.compile(r"[a-z_]+(:[a-z_]+)?")
 _ZONE_ERRORS = (ValueError, KeyError, OSError, TypeError)
-
-# --- Trial consent -----------------------------------------------------------
-
-_TRIAL_TRAILING_PUNCTUATION = ".!。！~～…"
-_TRIAL_ACK_SEPARATORS = ",，、 "
-_TRIAL_ACKS = tuple(sorted(("yes please", "yes", "sure", "ok", "okay", "please", "go ahead and", "alright", "好的", "好", "可以", "行", "嗯", "那就", "请", "麻烦"), key=len, reverse=True))
-_TRIAL_PARTICLES = (" please", "吧", "呗", "啊", "呀", "哈", "看看")
-_TRIAL_VERBS = ("run", "try", "test")
-_TRIAL_TARGETS = ("it", "this task", "the task", "this")
-_TRIAL_TIMINGS = ("now", "once", "once now", "right now", "now please")
-_TRIAL_PHRASES = frozenset(
-    {f"{verb} {target} {timing}" for verb in _TRIAL_VERBS for target in _TRIAL_TARGETS for timing in _TRIAL_TIMINGS}
-    | {"run it", "try it", "run a trial", "run a trial now", "do a trial run", "do a test run", "do a trial run now", "do a test run now", "try it out", "test it now"}
-    | {
-        "先跑一次",
-        "现在跑一次",
-        "先试跑一次",
-        "现在试跑一次",
-        "先运行一次",
-        "现在运行一次",
-        "试跑一下",
-        "试跑一次",
-        "先试一下",
-        "先试试",
-        "试一下",
-        "试试",
-        "跑一次",
-        "跑一下",
-        "先跑一下",
-        "现在跑一下",
-        "马上跑一次",
-        "立即运行一次",
-        "运行一次",
-        "执行一次",
-        "先执行一次",
-        "现在执行一次",
-        "试运行一次",
-        "先试运行一次",
-        "现在试运行",
-        "立即试运行",
-    }
-)
-
-
-def _strip_trailing_punctuation(text: str) -> str:
-    return text.rstrip(_TRIAL_TRAILING_PUNCTUATION).strip()
-
-
-def _strip_acknowledgement(command: str) -> str | None:
-    """Remove one leading "yes"/"好的"-style word; None when there is none."""
-    for ack in _TRIAL_ACKS:
-        if not command.startswith(ack):
-            continue
-        rest = command[len(ack) :]
-        # An English word must end at a separator ("okay" is not "ok" + "ay").
-        if ack.isascii() and rest and rest[0] not in _TRIAL_ACK_SEPARATORS:
-            continue
-        return rest.lstrip(_TRIAL_ACK_SEPARATORS)
-    return None
-
-
-def _has_explicit_trial_request(user_text: str, task: Mapping[str, Any]) -> bool:
-    """Accept a bounded direct-run request in the current turn, never a keyword in arbitrary text.
-
-    This is deliberately not a general intent parser: after removing up to
-    two leading acknowledgements and one trailing particle, the whole turn
-    must be one of the known direct requests. Bare confirmations, quoted,
-    conditional or compound turns, other tasks and task titles are rejected.
-    """
-    if not isinstance(user_text, str) or not user_text.strip() or len(user_text) > 500:
-        return False
-    command = _strip_trailing_punctuation(" ".join(user_text.casefold().split()))
-    for _ in range(2):
-        rest = _strip_acknowledgement(command)
-        if rest is None:
-            break
-        command = rest
-    if not command:
-        return False
-    for particle in _TRIAL_PARTICLES:
-        if command.endswith(particle) and len(command) > len(particle):
-            command = _strip_trailing_punctuation(command[: -len(particle)])
-            break
-    phrases = set(_TRIAL_PHRASES)
-    # Titles are arbitrary prose and may contain quoted/conditional clauses.
-    # Only an opaque selector can safely be interpolated into a direct request.
-    task_id = task.get("id")
-    if isinstance(task_id, str) and 5 < len(task_id) <= 64 and task_id.startswith("task-") and task_id.isascii() and task_id.replace("-", "").replace("_", "").isalnum():
-        target = task_id.casefold()
-        phrases.update(f"{verb} {target} {timing}" for verb in _TRIAL_VERBS for timing in _TRIAL_TIMINGS)
-        phrases.update({f"先试跑{target}", f"现在试跑{target}", f"先运行{target}一次", f"现在运行{target}一次"})
-    return command in phrases
-
 
 # --- Projections ---------------------------------------------------------------
 
@@ -545,21 +451,15 @@ class _SchedulerCapability:
         return self._result("note", task=await self._view(updated))
 
     async def _trial(self, task: dict[str, Any]) -> dict[str, Any]:
-        if not _has_explicit_trial_request(self._original_user_text, task):
-            raise scheduler_error(403, "trial_requires_direct_request", "A trial requires a direct request in the current user turn, such as 'Run this task now' or '先跑一次'; a task mention or bare confirmation is insufficient")
-        result = await self._service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
-        outcome = result.get("outcome")
-        error = result.get("error") or "Scheduled task trial could not be dispatched"
-        if outcome == "not_found":
-            raise scheduler_error(404, "task_not_found", error)
-        if outcome == "conflict":
-            raise scheduler_error(409, "task_changed" if error == TASK_CHANGED_ERROR else "task_running", error)
-        if outcome == "failed":
-            raise scheduler_error(502, "trigger_failed", error)
-        current = await self._task_repo.get(task["id"], user_id=self._owner_id) or task
-        thread_id = result.get("thread_id")
-        trial = {"outcome": outcome, "existing": bool(result.get("existing")), "thread_id": thread_id if isinstance(thread_id, str) else None}
-        return self._result("trial", task=await self._view(current), trial=trial)
+        # Natural-language wording is not an execution authorization protocol.
+        # The authenticated task-card/page button owns manual dispatch. This
+        # capability has already checked owner, conversation and permissions.
+        return self._result(
+            "trial",
+            task=await self._view(task),
+            requires_user_action="run_once_now",
+            instruction="No trial has started. Use the task card's Run once now button, or open /workspace/scheduled-tasks and run this task there.",
+        )
 
     async def _pause_or_delete(self, action: str, task: dict[str, Any]) -> dict[str, Any]:
         task_id = task["id"]

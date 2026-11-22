@@ -4,6 +4,7 @@ import { describe, expect, it } from "@rstest/core";
 import type { MessageGroup } from "@/core/messages/utils";
 import {
   collectRenderedSubtasks,
+  findSubtaskResultMessage,
   resolveRenderedSubtask,
 } from "@/core/tasks/subtask-render";
 import type { Subtask } from "@/core/tasks/types";
@@ -28,6 +29,44 @@ function subagentGroup(messages: Message[]) {
 }
 
 describe("collectRenderedSubtasks", () => {
+  it("limits report evidence to the matching result after its invocation in this group", () => {
+    const invocation = {
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "task-1",
+          name: "task",
+          args: {},
+        },
+      ],
+    } as unknown as Message;
+    const result = {
+      type: "tool",
+      name: "task",
+      tool_call_id: "task-1",
+      content: "done",
+    } as Message;
+    expect(
+      findSubtaskResultMessage(subagentGroup([invocation, result]), "task-1"),
+    ).toBe(result);
+    for (const messages of [
+      [result, invocation],
+      [invocation],
+      [invocation, { ...result, tool_call_id: "task-2" } as Message],
+      [invocation, { ...result, name: "other_tool" } as Message],
+      [invocation, { ...result, type: "ai" } as Message],
+    ])
+      expect(
+        findSubtaskResultMessage(subagentGroup(messages), "task-1"),
+      ).toBeUndefined();
+    expect(
+      findSubtaskResultMessage(
+        { id: "other", type: "assistant", messages: [invocation, result] },
+        "task-1",
+      ),
+    ).toBeUndefined();
+  });
   it("derives an in-progress task while the subagent turn is still streaming", () => {
     const groups: MessageGroup[] = [
       {

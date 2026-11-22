@@ -5,8 +5,9 @@ import os
 from firecrawl import FirecrawlApp
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
-from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
+from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -33,14 +34,18 @@ def _get_fastcrw_client(
     """
     if cfg is None:
         cfg = _get_tool_config_extra(tool_name)
-    api_key = cfg.get("api_key")
+    api_key = resolve_api_key(cfg.get("api_key"))
     if base_url is None:
         base_url = cfg.get("base_url")
     if api_key is None:
-        api_key = os.getenv("CRW_API_KEY")
+        api_key = resolve_api_key(os.getenv("CRW_API_KEY"))
     if base_url is None:
         base_url = os.getenv("CRW_API_URL", DEFAULT_BASE_URL)
-    return FirecrawlApp(api_key=api_key, api_url=base_url)  # type: ignore[arg-type]
+    # The Firecrawl SDK reads FIRECRAWL_API_KEY when api_key is None; "" stops it
+    # sending another provider's key to the fastCRW endpoint. Only the SDK's v2
+    # client, which serves search and scrape, honours "": its v1 client still reads
+    # FIRECRAWL_API_KEY, so never call ``client.v1`` here.
+    return FirecrawlApp(api_key=api_key or "", api_url=base_url)  # type: ignore[arg-type]
 
 
 def _resolve_fastcrw_base_url(cfg: dict | None) -> str:
@@ -107,7 +112,7 @@ def web_search_tool(query: str) -> str:
         normalized_results = [
             {
                 "title": getattr(item, "title", "") or "",
-                "url": getattr(item, "url", "") or "",
+                "url": safe_public_result_url(getattr(item, "url", None)),
                 "snippet": getattr(item, "description", "") or "",
             }
             for item in web_results

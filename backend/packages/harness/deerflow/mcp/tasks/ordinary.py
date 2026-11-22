@@ -23,6 +23,19 @@ class McpTaskProtocolError(RuntimeError):
     """A remote task tool returned a deterministic contract violation."""
 
 
+class McpTaskConnectionUnavailableError(LookupError):
+    """The persisted task connection no longer resolves to a configured server.
+
+    Personal server names are content-addressed by their full definition, and
+    deployment servers belong to the startup snapshot. Once that definition
+    changes or disappears, retrying the lookup cannot restore the handle.
+
+    It remains a ``LookupError``: these call sites previously raised that type,
+    so existing callers keep their behavior. The task service catches this
+    exact type when it needs to classify the lookup failure as permanent.
+    """
+
+
 class McpTaskToolCaller(Protocol):
     async def call_tool(
         self,
@@ -35,6 +48,7 @@ class McpTaskToolCaller(Protocol):
         thread_incarnation: str | None = None,
         request_scoped_headers: bool = False,
         connection_scope: Literal["deployment", "personal"] = "deployment",
+        agent_auth: dict[str, Any] | None = None,
     ) -> Any: ...
 
 
@@ -175,6 +189,7 @@ class OrdinaryMcpTaskDriver:
             # credentials; status and cancel run after that run ended.
             request_scoped_headers=True,
             connection_scope=_connection_scope(request.driver_data),
+            **({"agent_auth": request.driver_data["agent_auth"]} if "agent_auth" in request.driver_data else {}),
         )
         payload = _parse(
             _SubmitPayload,
@@ -198,6 +213,7 @@ class OrdinaryMcpTaskDriver:
             thread_id=task.thread_id,
             thread_incarnation=task.thread_incarnation,
             connection_scope=_connection_scope(task.driver_data),
+            **({"agent_auth": task.driver_data["agent_auth"]} if "agent_auth" in task.driver_data else {}),
         )
         payload = _parse(
             _StatusPayload,
@@ -218,6 +234,7 @@ class OrdinaryMcpTaskDriver:
             thread_id=task.thread_id,
             thread_incarnation=task.thread_incarnation,
             connection_scope=_connection_scope(task.driver_data),
+            **({"agent_auth": task.driver_data["agent_auth"]} if "agent_auth" in task.driver_data else {}),
         )
         payload = _parse(
             _CancelPayload,

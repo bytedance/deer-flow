@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -489,6 +491,93 @@ def test_find_glob_matches_raises_not_a_directory(tmp_path) -> None:
         pass
 
 
+_NON_ROOT_POSIX = pytest.mark.skipif(
+    os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="requires non-root POSIX directory permissions",
+)
+
+
+@_NON_ROOT_POSIX
+def test_local_list_dir_propagates_permission_error(tmp_path) -> None:
+    """Permission-denied roots must not look like an empty successful listing."""
+    from deerflow.sandbox.local.list_dir import list_dir
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "secret.txt").write_text("hidden\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError) as caught:
+            list_dir(str(locked))
+        assert caught.value.filename is not None
+        assert Path(os.fsdecode(caught.value.filename)).resolve() == locked.resolve()
+    finally:
+        locked.chmod(0o700)
+
+
+@_NON_ROOT_POSIX
+def test_find_glob_matches_propagates_permission_error(tmp_path) -> None:
+    """Inaccessible subtrees must surface instead of being skipped as no matches."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    locked = workspace / "locked"
+    locked.mkdir()
+    (locked / "secret.py").write_text("x = 1\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError) as caught:
+            find_glob_matches(workspace, "**/*.py")
+        assert caught.value.filename is not None
+        assert Path(os.fsdecode(caught.value.filename)).resolve() == locked.resolve()
+    finally:
+        locked.chmod(0o700)
+
+
+@_NON_ROOT_POSIX
+def test_ls_tool_permission_error_names_denied_entry(tmp_path, monkeypatch) -> None:
+    """ls must name the denied entry, not only the requested root."""
+    runtime = _make_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    locked = workspace / "locked"
+    locked.mkdir()
+    (locked / "secret.txt").write_text("hidden\n", encoding="utf-8")
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: LocalSandbox(id="local"))
+    locked.chmod(0o000)
+    try:
+        result = ls_tool.func(runtime=runtime, description="list locked", path="/mnt/user-data/workspace/locked")
+    finally:
+        locked.chmod(0o700)
+    assert result.startswith("Error: Permission denied:"), result
+    assert "/mnt/user-data/workspace/locked" in result
+    assert str(workspace) not in result
+    assert str(tmp_path) not in result
+
+
+@_NON_ROOT_POSIX
+def test_glob_tool_permission_error_names_denied_subdirectory(tmp_path, monkeypatch) -> None:
+    """glob must name the denied subdirectory, not only the search root."""
+    runtime = _make_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    locked = workspace / "locked"
+    locked.mkdir()
+    (locked / "secret.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: LocalSandbox(id="local"))
+    locked.chmod(0o000)
+    try:
+        result = glob_tool.func(
+            runtime=runtime,
+            description="search locked",
+            path="/mnt/user-data/workspace",
+            pattern="**/*.py",
+        )
+    finally:
+        locked.chmod(0o700)
+    assert result.startswith("Error: Permission denied:"), result
+    assert "/mnt/user-data/workspace/locked" in result
+    assert str(workspace) not in result
+    assert str(tmp_path) not in result
+
+
 def test_find_grep_matches_accepts_single_file(tmp_path) -> None:
     file_path = tmp_path / "file.txt"
     file_path.write_text("TODO\n", encoding="utf-8")
@@ -788,6 +877,71 @@ def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
     assert "/mnt/user-data/uploads/report.txt" in result
     assert "/mnt/user-data/uploads/.upload-note.txt" in result
     assert ".upload-active.part" not in result
+
+
+@pytest.mark.parametrize("path", ["/mnt/user-data", "/mnt/user-data/"])
+def test_ls_tool_lists_user_data_root(tmp_path, monkeypatch, path) -> None:
+    """The local provider maps the aggregate root, so ls must list it like AIO."""
+    runtime = _make_runtime(tmp_path)
+    (tmp_path / "uploads" / "report.txt").write_text("ready\n", encoding="utf-8")
+    (tmp_path / "uploads" / ".upload-active.part").write_text("partial\n", encoding="utf-8")
+    (tmp_path / "workspace" / "src").mkdir()
+    (tmp_path / "workspace" / "src" / "deep.py").write_text("x = 1\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = ls_tool.func(runtime=runtime, description="list user data", path=path)
+
+    for name in ("workspace", "uploads", "outputs"):
+        assert f"/mnt/user-data/{name}" in result
+    assert "/mnt/user-data/uploads/report.txt" in result
+    assert "/mnt/user-data/workspace/src" in result
+    # Two levels from the root, like any other ls.
+    assert "deep.py" not in result
+    assert ".upload-active.part" not in result
+    assert str(tmp_path) not in result
+
+
+def _plant_outside_allowed_dirs(tmp_path) -> None:
+    """Content in user-data/ that is not under workspace, uploads, or outputs."""
+    (tmp_path / "private.txt").write_text("ROOT_SECRET\n", encoding="utf-8")
+    (tmp_path / "extra").mkdir()
+    (tmp_path / "extra" / "notes.txt").write_text("EXTRA_SECRET\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("path", ["/mnt/user-data", "/mnt/user-data/"])
+def test_ls_tool_on_user_data_root_lists_only_allowed_dirs(tmp_path, monkeypatch, path) -> None:
+    runtime = _make_runtime(tmp_path)
+    _plant_outside_allowed_dirs(tmp_path)
+    symlink_or_skip(tmp_path / "workspace" / "alias.txt", tmp_path / "private.txt")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = ls_tool.func(runtime=runtime, description="list user data", path=path)
+
+    assert "/mnt/user-data/workspace" in result
+    assert "private.txt" not in result
+    assert "extra" not in result
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (glob_tool, {"pattern": "**/*.txt"}),
+        (grep_tool, {"pattern": "SECRET"}),
+    ],
+)
+@pytest.mark.parametrize("path", ["/mnt/user-data", "/mnt/user-data/"])
+def test_search_tools_reject_user_data_root(tmp_path, monkeypatch, tool, arguments, path) -> None:
+    """A search walks every descendant, so it must not start above the allowed dirs."""
+    runtime = _make_runtime(tmp_path)
+    _plant_outside_allowed_dirs(tmp_path)
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = tool.func(runtime=runtime, description="search user data", path=path, **arguments)
+
+    assert result == f"Error: Permission denied: {path}"
 
 
 def _make_skills_sandbox(tmp_path, monkeypatch, *, disabled: str):

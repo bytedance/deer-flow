@@ -11,6 +11,7 @@ import abc
 import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from deerflow.config.stream_bridge_config import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, MAX_HEARTBEAT_INTERVAL_SECONDS
@@ -54,10 +55,19 @@ END_SENTINEL = StreamEvent(id="", event="__end__", data=None)
 type StreamItem = StreamEvent | StreamGap
 
 
+class StreamProducerLeaseState(StrEnum):
+    """Cross-process liveness state for a run's stream producer."""
+
+    untracked = "untracked"
+    active = "active"
+    expired = "expired"
+
+
 class StreamBridge(abc.ABC):
     """Abstract base for stream bridges."""
 
     supports_cross_process: bool = False
+    producer_lease_recovery_enabled: bool = False
 
     def __init__(self, *, heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS) -> None:
         self._heartbeat_interval = self._validate_heartbeat_interval(heartbeat_interval)
@@ -122,6 +132,32 @@ class StreamBridge(abc.ABC):
         raising) when the backend is down.
         """
         return True
+
+    async def start_producer_lease(self, run_id: str) -> bool:
+        """Start producer liveness tracking; return whether it is active."""
+        return False
+
+    async def finish_producer_lease(self, run_id: str) -> None:
+        """Stop producer liveness tracking when supported."""
+
+    async def abort_producer_lease(self, run_id: str) -> None:
+        """Discard tracking for a producer whose run was never admitted."""
+        await self.finish_producer_lease(run_id)
+
+    def transfer_producer_lease(
+        self,
+        run_id: str,
+        owner_task: Any,
+    ) -> None:
+        """Transfer cancellation ownership to the task publishing the tail."""
+
+    async def producer_lease_state(self, run_id: str) -> StreamProducerLeaseState:
+        """Return producer liveness without inferring it from stream contents."""
+        return StreamProducerLeaseState.untracked
+
+    async def cleanup_expired_producer(self, run_id: str) -> bool:
+        """Delete an expired producer marker without touching an active owner."""
+        return False
 
     async def close(self) -> None:
         """Release backend resources.  Default is a no-op."""

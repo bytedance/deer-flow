@@ -124,3 +124,75 @@ test("useRequireAuth returns to the page it guards, query string included", () =
     "/login?next=%2Fworkspace%2Fscheduled-tasks%3Ftask_id%3Dt-1",
   );
 });
+
+test.each(["applyUser", "logout"] as const)(
+  "%s supersedes an older successful auth refresh",
+  async (action) => {
+    mount();
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>((done) => (resolve = done));
+    globalThis.fetch = rs.fn((input) =>
+      input === "/api/v1/auth/me"
+        ? pending
+        : Promise.resolve(new Response(null, { status: 204 })),
+    ) as typeof globalThis.fetch;
+    let completion!: Promise<void>;
+    act(() => {
+      completion = ctx!.refreshUser();
+    });
+    const nextUser = { ...initialUser, id: "u-2" };
+    await act(async () => {
+      if (action === "logout") await ctx!.logout();
+      else ctx!.applyUser(nextUser);
+    });
+    await act(async () => {
+      resolve(jsonResponse(initialUser));
+      await completion;
+    });
+
+    expect(ctx!.user).toEqual(action === "logout" ? null : nextUser);
+    expect(ctx!.isLoading).toBe(false);
+  },
+);
+
+test("a stale disabled-session response cannot clear a newer account or redirect it", async () => {
+  mount();
+  let resolve!: (response: Response) => void;
+  globalThis.fetch = rs.fn(
+    () => new Promise<Response>((done) => (resolve = done)),
+  );
+  let completion!: Promise<void>;
+  act(() => {
+    completion = ctx!.refreshUser();
+  });
+  const nextUser = { ...initialUser, id: "u-2" };
+  act(() => ctx!.applyUser(nextUser));
+  await act(async () => {
+    resolve(jsonResponse({ detail: { code: "account_disabled" } }, 401));
+    await completion;
+  });
+
+  expect(ctx!.user).toEqual(nextUser);
+  expect(push).not.toHaveBeenCalled();
+});
+
+test("a response whose body completes after an account switch cannot restore the old account", async () => {
+  mount();
+  let resolve!: (user: User) => void;
+  const body = new Promise<User>((done) => (resolve = done));
+  const response = jsonResponse(initialUser);
+  response.json = () => body;
+  globalThis.fetch = rs.fn(async () => response);
+  let completion!: Promise<void>;
+  await act(async () => {
+    completion = ctx!.refreshUser();
+  });
+  const nextUser = { ...initialUser, id: "u-2" };
+  act(() => ctx!.applyUser(nextUser));
+  await act(async () => {
+    resolve(initialUser);
+    await completion;
+  });
+
+  expect(ctx!.user).toEqual(nextUser);
+});

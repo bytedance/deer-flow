@@ -14,7 +14,11 @@ from pathlib import Path
 import pytest
 
 from app.channels.base import Channel
-from app.channels.capabilities import CHANNEL_CAPABILITIES, supports_proactive_notifications
+from app.channels.capabilities import (
+    CHANNEL_CAPABILITIES,
+    supports_proactive_group_notifications,
+    supports_proactive_notifications,
+)
 from app.channels.service import _CHANNEL_REGISTRY
 from deerflow.reflection import resolve_class
 
@@ -26,24 +30,32 @@ _CHANNEL_SDK_MODULES = ("lark_oapi", "slack_sdk", "telegram", "discord", "dingta
 def test_capabilities_cover_channel_registry():
     # A provider registered without a capability entry (as qq once was) fails here.
     assert set(CHANNEL_CAPABILITIES) == set(_CHANNEL_REGISTRY)
-    assert CHANNEL_CAPABILITIES["qq"]["proactive_notifications"] is False
+    assert CHANNEL_CAPABILITIES["qq"]["proactive_notifications"] is True
 
 
 def test_every_entry_declares_both_flags_as_bools():
     for provider, entry in CHANNEL_CAPABILITIES.items():
-        assert set(entry) == {"supports_streaming", "proactive_notifications"}, provider
+        assert set(entry) == {"supports_streaming", "proactive_notifications", "proactive_group_notifications"}, provider
         assert all(isinstance(value, bool) for value in entry.values()), provider
 
 
-def test_wecom_and_feishu_push_proactively():
-    assert {provider for provider, entry in CHANNEL_CAPABILITIES.items() if entry["proactive_notifications"]} == {"wecom", "feishu"}
-    assert supports_proactive_notifications("wecom") is True
-    assert supports_proactive_notifications("feishu") is True
+def test_supported_notification_channels_push_proactively():
+    assert {provider for provider, entry in CHANNEL_CAPABILITIES.items() if entry["proactive_notifications"]} == {"wecom", "feishu", "wechat", "qq"}
+    for provider in ("wecom", "feishu", "wechat", "qq"):
+        assert supports_proactive_notifications(provider) is True
+
+
+def test_supported_group_notification_channels():
+    assert {provider for provider, entry in CHANNEL_CAPABILITIES.items() if entry["proactive_group_notifications"]} == {"wecom", "feishu", "qq"}
+    for provider in ("wecom", "feishu", "qq"):
+        assert supports_proactive_group_notifications(provider) is True
+    assert supports_proactive_group_notifications("wechat") is False
 
 
 @pytest.mark.parametrize("provider", ["", "unknown", "WeCom", None, 1])
 def test_unknown_provider_has_no_proactive_push(provider):
     assert supports_proactive_notifications(provider) is False
+    assert supports_proactive_group_notifications(provider) is False
 
 
 def _missing_optional_module(exc: BaseException) -> str | None:
@@ -70,6 +82,8 @@ def test_proactive_flag_matches_send_notification_override(provider):
         pytest.skip(f"{provider}: optional SDK {missing} not installed")
     overrides = cls.send_notification is not Channel.send_notification
     assert CHANNEL_CAPABILITIES[provider]["proactive_notifications"] is overrides
+    group_overrides = cls.send_group_notification_for_owner is not Channel.send_group_notification_for_owner
+    assert CHANNEL_CAPABILITIES[provider]["proactive_group_notifications"] is group_overrides
 
 
 def test_importing_capabilities_loads_no_channel_sdk():

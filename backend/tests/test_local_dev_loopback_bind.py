@@ -246,7 +246,7 @@ def test_default_bind_host_removes_a_config_rendered_for_an_earlier_bind_host(ch
     result = _run(checkout, bind_host)
 
     assert result.returncode == 0, result.stderr
-    assert Path(result.stdout.strip()) == (checkout / "docker" / "nginx" / "nginx.local.conf").resolve()
+    assert Path(_normalize_rendered_path(result.stdout.strip())) == (checkout / "docker" / "nginx" / "nginx.local.conf").resolve()
     assert not rendered.exists(), "a stale render with the old listen lines should not be left behind"
 
 

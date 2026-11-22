@@ -181,48 +181,7 @@ load_proxy_env_from_dotenv() {
 }
 
 detect_sandbox_mode() {
-    local config_file="$PROJECT_ROOT/config.yaml"
-    local sandbox_use=""
-    local provisioner_url=""
-
-    if [ ! -f "$config_file" ]; then
-        echo "local"
-        return
-    fi
-
-    sandbox_use=$(awk '
-        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-        in_sandbox && /^[[:space:]]*use:[[:space:]]*/ {
-            line=$0
-            sub(/^[[:space:]]*use:[[:space:]]*/, "", line)
-            print line
-            exit
-        }
-    ' "$config_file")
-
-    provisioner_url=$(awk '
-        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-        in_sandbox && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
-            line=$0
-            sub(/^[[:space:]]*provisioner_url:[[:space:]]*/, "", line)
-            print line
-            exit
-        }
-    ' "$config_file")
-
-    if [[ "$sandbox_use" == *"deerflow.sandbox.local:LocalSandboxProvider"* ]]; then
-        echo "local"
-    elif [[ "$sandbox_use" == *"deerflow.community.aio_sandbox:AioSandboxProvider"* ]]; then
-        if [ -n "$provisioner_url" ]; then
-            echo "provisioner"
-        else
-            echo "aio"
-        fi
-    else
-        echo "local"
-    fi
+    bash "$SCRIPT_DIR/sandbox-mode.sh" "$PROJECT_ROOT/config.yaml"
 }
 
 # Cleanup function for Ctrl+C
@@ -336,6 +295,7 @@ start() {
     services="redis frontend gateway nginx"
     if [ "$sandbox_mode" = "provisioner" ]; then
         services="redis frontend gateway provisioner nginx"
+        COMPOSE_CMD="$COMPOSE_CMD --profile provisioner"
     fi
 
     # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
@@ -479,6 +439,14 @@ logs() {
 
     compose_preflight
 
+    # The provisioner is profile-gated in docker-compose-dev.yaml. Enable the
+    # profile for dev logs that need to include it; --prod uses a different file.
+    if [ "$is_prod" = 0 ]; then
+        if [ "$service" = "provisioner" ] || { [ -z "$service" ] && [ "$(detect_sandbox_mode)" = "provisioner" ]; }; then
+            COMPOSE_CMD="$COMPOSE_CMD --profile provisioner"
+        fi
+    fi
+
     # Append --env-file only after compose_preflight(): its Compose detection
     # may rebuild COMPOSE_CMD, which would drop anything appended before it.
     if [ "$is_prod" = 1 ] && [ -f "$PROJECT_ROOT/.env" ]; then
@@ -500,7 +468,8 @@ logs() {
 stop() {
     compose_preflight
     echo "Stopping Docker development services..."
-    cd "$DOCKER_DIR" && $COMPOSE_CMD down
+    # Include profile-gated services so a running provisioner is removed too.
+    cd "$DOCKER_DIR" && $COMPOSE_CMD --profile provisioner down
     echo "Cleaning up sandbox containers..."
     bash "$SCRIPT_DIR/cleanup-containers.sh" deer-flow-sandbox 2>/dev/null || true
     echo -e "${GREEN}✓ Docker services stopped${NC}"
@@ -508,7 +477,13 @@ stop() {
 
 # Restart Docker development environment
 restart() {
+    local sandbox_mode
+
     compose_preflight
+    sandbox_mode="$(detect_sandbox_mode)"
+    if [ "$sandbox_mode" = "provisioner" ]; then
+        COMPOSE_CMD="$COMPOSE_CMD --profile provisioner"
+    fi
     echo "========================================"
     echo "  Restarting DeerFlow Docker Services"
     echo "========================================"

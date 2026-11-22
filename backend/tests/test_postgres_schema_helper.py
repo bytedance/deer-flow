@@ -53,6 +53,9 @@ class TestDsnWithSearchPath:
         dsn = "postgresql://u:p@h:5432/db"
         assert dsn_with_search_path(dsn, "") == dsn
 
+    def test_empty_schema_still_drops_driver_suffix(self):
+        assert dsn_with_search_path("postgresql+asyncpg://u:p@h:5432/db", "") == "postgresql://u:p@h:5432/db"
+
     def test_appends_options_query_encoded(self):
         dsn = "postgresql://u:p@h:5432/db"
         out = dsn_with_search_path(dsn, "deerflow")

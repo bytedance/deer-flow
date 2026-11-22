@@ -8,7 +8,8 @@ This module provides a session pool that maintains persistent MCP sessions,
 scoped by ``(server_name, scope_key, owning_loop, ownership_domain)``. Consecutive calls on
 the same loop share server-side state; independent loops use separate sessions.
 The sync wrapper uses a fresh loop per call, so it does not preserve that state.
-Sessions are evicted in LRU order when the pool reaches capacity.
+Idle sessions are evicted in LRU order when the pool reaches capacity.
+If every session is executing a tool, acquisition of a new session fails.
 
 Lifecycle model (owner task)
 ----------------------------
@@ -47,7 +48,8 @@ import json
 import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -115,6 +117,8 @@ _MCP_CLOSED_STREAM_ERRORS = (
     anyio.EndOfStream,
 )
 
+_MCP_DISCONNECT_CLEANUP_TIMEOUT_SECONDS = 5.0
+
 
 def _is_mcp_transport_disconnect(error: Exception) -> bool:
     if isinstance(error, _MCP_CLOSED_STREAM_ERRORS):
@@ -122,14 +126,38 @@ def _is_mcp_transport_disconnect(error: Exception) -> bool:
     return isinstance(error, McpError) and error.error.code == CONNECTION_CLOSED and error.error.message == "Connection closed"
 
 
-async def _finish_session_cleanup(cleanup: asyncio.Task[Any], server_name: str) -> bool:
-    """Wait for cleanup despite cancellation and report whether it was requested."""
+async def _finish_session_cleanup(
+    cleanup: asyncio.Task[Any],
+    server_name: str,
+    *,
+    timeout_seconds: float,
+) -> bool:
+    """Wait for cleanup up to a bound despite cancellation and report caller cancellation."""
     cancelled = False
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout_seconds)
     while not cleanup.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.warning(
+                "Timed out waiting for disconnected MCP session cleanup for server '%s' after %.1fs; teardown remains supervised",
+                server_name,
+                timeout_seconds,
+            )
+            cleanup.cancel()
+            return cancelled
         try:
-            await asyncio.shield(cleanup)
+            await asyncio.wait_for(asyncio.shield(cleanup), timeout=remaining)
         except asyncio.CancelledError:
             cancelled = True
+        except TimeoutError:
+            logger.warning(
+                "Timed out waiting for disconnected MCP session cleanup for server '%s' after %.1fs; teardown remains supervised",
+                server_name,
+                timeout_seconds,
+            )
+            cleanup.cancel()
+            return cancelled
         except Exception:
             logger.warning(
                 "Failed to close disconnected MCP session for server '%s'",
@@ -165,23 +193,28 @@ async def call_pooled_session_tool(
     call_kwargs: dict[str, Any],
     domain: MCPPoolDomain = "deployment",
 ) -> Any:
-    """Call a pooled session and evict it only after an explicit disconnect."""
-    try:
-        return await session.call_tool(tool_name, arguments, **call_kwargs)
-    except Exception as error:
-        if _is_mcp_transport_disconnect(error):
-            cleanup_call = pool.close_session_if_current(server_name, scope_key, session) if domain == "deployment" else pool.close_session_if_current(server_name, scope_key, session, domain=domain)
-            cleanup = asyncio.create_task(cleanup_call)
-            if await _finish_session_cleanup(cleanup, server_name):
-                raise asyncio.CancelledError
-        raise
+    """Protect a pooled tool call from LRU eviction and retire on disconnect."""
+    with pool._session_call(server_name, scope_key, session, domain=domain):
+        try:
+            return await session.call_tool(tool_name, arguments, **call_kwargs)
+        except Exception as error:
+            if _is_mcp_transport_disconnect(error):
+                cleanup_call = pool.close_session_if_current(server_name, scope_key, session) if domain == "deployment" else pool.close_session_if_current(server_name, scope_key, session, domain=domain)
+                cleanup = asyncio.create_task(cleanup_call, name=f"mcp-disconnect-cleanup:{server_name}")
+                pool._track_owner_teardown(cleanup)
+                timeout_seconds = getattr(pool, "SESSION_CLOSE_TIMEOUT", None)
+                if type(timeout_seconds) not in (int, float):
+                    timeout_seconds = _MCP_DISCONNECT_CLEANUP_TIMEOUT_SECONDS
+                if await _finish_session_cleanup(cleanup, server_name, timeout_seconds=float(timeout_seconds)):
+                    raise asyncio.CancelledError
+            raise
 
 
 class MCPSessionPool:
     """Manages persistent MCP sessions scoped by ``(server_name, scope_key, owning_loop, ownership_domain)``."""
 
     MAX_SESSIONS = 256
-    SESSION_CLOSE_TIMEOUT = 5.0  # seconds to wait when closing a session on a foreign loop
+    SESSION_CLOSE_TIMEOUT = _MCP_DISCONNECT_CLEANUP_TIMEOUT_SECONDS  # disconnect + synchronous foreign-loop close bound
 
     def __init__(self) -> None:
         # Each entry: (session, owning_loop, owner_task, close_event).
@@ -213,6 +246,9 @@ class MCPSessionPool:
         # threading.Lock is not bound to any event loop, so it is safe to
         # acquire from both async paths and sync/worker-thread paths.
         self._lock = threading.Lock()
+        # Counts follow owner identity, not the reusable server/scope key.
+        # Explicit retirement may detach an owner while its calls unwind.
+        self._active_calls: dict[asyncio.Task[Any], int] = {}
         # Strong references to detached teardown reaper tasks. The event loop
         # only keeps weak references to tasks, so an unheld reaper — and with
         # it the owner it is awaiting, mid-__aexit__ — could be
@@ -377,6 +413,50 @@ class MCPSessionPool:
     # Session owner task
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _session_call(
+        self,
+        server_name: str,
+        scope_key: str,
+        session: ClientSession,
+        *,
+        domain: MCPPoolDomain,
+    ) -> Iterator[None]:
+        """Protect a tool call from capacity eviction, but not explicit close."""
+        key = (server_name, scope_key, asyncio.get_running_loop(), domain)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or entry[0] is not session or entry[2].done():
+                raise RuntimeError(f"MCP session for '{server_name}' is no longer pooled; acquire a new session")
+            owner = entry[2]
+            self._active_calls[owner] = self._active_calls.get(owner, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                remaining = self._active_calls[owner] - 1
+                if remaining:
+                    self._active_calls[owner] = remaining
+                else:
+                    self._active_calls.pop(owner)
+
+    def _evict_idle_locked(self) -> list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]]:
+        """Make room for one entry without detaching any active owners."""
+        needed = max(0, len(self._entries) - self.MAX_SESSIONS + 1)
+        if not needed:
+            return []
+        victims = []
+        for key, (_session, loop, task, close_evt) in self._entries.items():
+            if not self._active_calls.get(task, 0):
+                victims.append((key, loop, task, close_evt))
+                if len(victims) == needed:
+                    break
+        if len(victims) < needed:
+            raise RuntimeError("MCP session pool is at capacity with all sessions busy; retry after a tool call completes")
+        for key, _loop, _task, _close_evt in victims:
+            self._entries.pop(key)
+        return [(loop, task, close_evt) for _key, loop, task, close_evt in victims]
+
     def _discard_owner(
         self,
         key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
@@ -428,11 +508,8 @@ class MCPSessionPool:
                 binding_ok = not self._retired and self._bindings.get(binding_key) is expected_binding
                 still_ours = self._inflight.get(key) == (loop, ready, task, close_evt)
                 if still_ours and binding_ok:
+                    promoted_evicted = self._evict_idle_locked()
                     self._inflight.pop(key)
-                    while len(self._entries) >= self.MAX_SESSIONS:
-                        oldest_key, (_, ent_loop, ent_task, ent_close) = next(iter(self._entries.items()))
-                        self._entries.pop(oldest_key)
-                        promoted_evicted.append((ent_loop, ent_task, ent_close))
                     self._entries[key] = (session, loop, task, close_evt)
                     if not ready.done():
                         ready.set_result(session)
@@ -533,16 +610,13 @@ class MCPSessionPool:
             if inflight is not None:
                 join = inflight[1]
             else:
+                # Reject before publishing an owner if there is no idle victim.
+                evicted = self._evict_idle_locked()
                 ready = current_loop.create_future()
                 close_evt = asyncio.Event()
                 task = current_loop.create_task(self._run_session(key, connection, ready, close_evt, expected_binding))
                 self._inflight[key] = (current_loop, ready, task, close_evt)
                 task.add_done_callback(lambda owner: self._discard_owner(key, owner))
-
-            while len(self._entries) >= self.MAX_SESSIONS:
-                oldest_key, (_, loop, ent_task, ent_close) = next(iter(self._entries.items()))
-                self._entries.pop(oldest_key)
-                evicted.append((loop, ent_task, ent_close))
 
         for loop, _ent_task, ent_close in evicted:
             self._signal_close(loop, ent_close)

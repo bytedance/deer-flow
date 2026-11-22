@@ -11,7 +11,6 @@ from deerflow.skills.describe import (
     build_skill_search_setup,
     get_skill_index_prompt_section,
 )
-from deerflow.skills.tool_policy import allowed_tool_names_for_skills
 from deerflow.skills.types import Skill, SkillCategory
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -59,7 +58,7 @@ def test_render_metadata_format(sample_skills: list[Skill]):
     assert "## Skill: data-analysis" in rendered
     assert "Description: Analyze data with Python" in rendered
     assert "[built-in]" in rendered
-    assert "Allowed tools: execute_code, read_file" in rendered
+    assert "Allowed tools (compatibility metadata, not enforced): execute_code, read_file" in rendered
     assert "Location: /mnt/skills/public/data-analysis/SKILL.md" in rendered
 
 
@@ -69,11 +68,11 @@ def test_render_custom_skill_mutability(sample_skills: list[Skill]):
     assert "[custom, editable]" in rendered
 
 
-def test_render_no_allowed_tools_shows_all(sample_skills: list[Skill]):
-    """Skills without allowed_tools should show '(all)'."""
+def test_render_no_allowed_tools_shows_not_declared(sample_skills: list[Skill]):
+    """Skills without allowed_tools should show '(not declared)'."""
     no_tools = [s for s in sample_skills if s.allowed_tools is None]
     rendered = _render_skill_metadata(no_tools[:1], "/mnt/skills")
-    assert "Allowed tools: (all)" in rendered
+    assert "Allowed tools (compatibility metadata, not enforced): (not declared)" in rendered
 
 
 def test_render_multiple_skills(sample_skills: list[Skill]):
@@ -290,16 +289,21 @@ def test_describe_tool_select_uncapped():
 def test_render_explicit_empty_allowed_tools_does_not_claim_all():
     restricted = _make_skill("locked-down", allowed_tools=())
     rendered = _render_skill_metadata([restricted], "/mnt/skills")
-    assert "Allowed tools: (all)" not in rendered
-    assert "Allowed tools: (none)" in rendered
+    assert "(all)" not in rendered
+    assert "(not declared)" not in rendered
+    assert "Allowed tools (compatibility metadata, not enforced): (empty declaration)" in rendered
 
 
-def test_rendered_allowed_tools_agree_with_skill_tool_policy():
-    """`(all)` must mean unrestricted, which is the one state that renders it."""
+def test_rendered_allowed_tools_are_labeled_compatibility_metadata():
+    """allowed-tools is exported for other agent frameworks but never enforced:
+    `(not declared)` means only "field omitted"; `(empty declaration)` means
+    only "declared empty"."""
     omitted = _make_skill("legacy")
-    assert allowed_tool_names_for_skills([omitted]) is None
-    assert "Allowed tools: (all)" in _render_skill_metadata([omitted], "/mnt/skills")
+    rendered = _render_skill_metadata([omitted], "/mnt/skills")
+    assert "Allowed tools (compatibility metadata, not enforced): (not declared)" in rendered
 
-    restricted = _make_skill("locked-down", allowed_tools=())
-    assert allowed_tool_names_for_skills([restricted]) == set()
-    assert "Allowed tools: (all)" not in _render_skill_metadata([restricted], "/mnt/skills")
+    restricted = _make_skill("locked-down", allowed_tools=("read_file",))
+    rendered = _render_skill_metadata([restricted], "/mnt/skills")
+    assert "Allowed tools (compatibility metadata, not enforced): read_file" in rendered
+    # The label makes clear the declaration does not restrict or grant tools.
+    assert "not enforced" in rendered

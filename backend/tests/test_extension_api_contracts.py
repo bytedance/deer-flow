@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import dis
 import importlib.resources
 import inspect
+from collections.abc import Sequence
+from typing import Any, Protocol
 
 import pytest
 from deerflow_extension_api import (
@@ -123,6 +126,82 @@ def test_agent_build_context_optional_fields_keep_their_defaults():
     assert isinstance(ctx.policy, HostPolicySnapshot)
 
 
+def _dummy_args_for_protocol_method(func):
+    sig = inspect.signature(func)
+    kwargs = {}
+    positional = []
+    sample_by_name = {
+        "app_store": ExtensionData("app"),
+        "task_store": ExtensionData("task-1"),
+        "ctx": AgentBuildContext(scope=AgentScope.LEAD),
+        "info": TaskInfo(task_id="t", run_id="r", thread_id="th", kind="lead"),
+        "outcome": TaskOutcome.COMPLETED,
+        "kind": SystemOperationKind.GOAL,
+        "request": SystemModelRequest(messages=("prompt",)),
+        "result": SystemModelResult(response="ok", duration_ms=1.0),
+        "deps": ExtensionRuntimeDeps(),
+        "cursor": None,
+        "limit": 10,
+        "thread_id": "th",
+        "run_id": "r",
+        "after_seq": None,
+        "name": "demo",
+        "routers": (),
+    }
+    for idx, (pname, param) in enumerate(sig.parameters.items()):
+        if idx == 0:
+            continue  # self
+        val = sample_by_name.get(pname, object())
+        if param.kind == inspect.Parameter.KEYWORD_ONLY:
+            kwargs[pname] = val
+        elif param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional.append(val)
+    return positional, kwargs
+
+
+def _assert_protocol_has_defaults(protocol: type, *, expects_not_implemented: bool = False) -> None:
+    """Invoke every public Protocol method on a bare instance and verify its documented default."""
+
+    class _Bare:
+        pass
+
+    bare = _Bare()
+    checked = 0
+    for name, member in vars(protocol).items():
+        if name.startswith("_") or not inspect.isfunction(member):
+            continue
+        checked += 1
+        sig = inspect.signature(member)
+        ret_ann = sig.return_annotation
+        pos_args, kw_args = _dummy_args_for_protocol_method(member)
+
+        if expects_not_implemented:
+            with pytest.raises(NotImplementedError):
+                if inspect.iscoroutinefunction(member):
+                    asyncio.run(member(bare, *pos_args, **kw_args))
+                else:
+                    member(bare, *pos_args, **kw_args)
+            continue
+
+        result = asyncio.run(member(bare, *pos_args, **kw_args)) if inspect.iscoroutinefunction(member) else member(bare, *pos_args, **kw_args)
+
+        if ret_ann in ("bool", bool):
+            assert result is False, f"{protocol.__name__}.{name} must default to False (got {result!r}); an unimplemented `...` stub implicitly returns None"
+        elif (isinstance(ret_ann, str) and ret_ann.startswith("Sequence[")) or ret_ann is Sequence:
+            assert isinstance(result, Sequence) and not isinstance(result, str | bytes) and tuple(result) == (), f"{protocol.__name__}.{name} must default to an empty sequence (got {result!r})"
+        elif ret_ann in ("None", None):
+            assert result is None, f"{protocol.__name__}.{name} must return None (got {result!r})"
+            ret_spans = [(ins.positions.end_col_offset or 0) - (ins.positions.col_offset or 0) for ins in dis.get_instructions(member) if ins.opname in ("RETURN_VALUE", "RETURN_CONST") and ins.positions is not None]
+            assert ret_spans and all(span not in (0, 3) for span in ret_spans), f"{protocol.__name__}.{name} uses an unimplemented `...` stub instead of an explicit `return None` default"
+        else:
+            raise AssertionError(f"Unhandled return annotation {ret_ann!r} on {protocol.__name__}.{name}; assert its contract-specific default explicitly")
+
+    assert checked > 0, f"{protocol.__name__} declared no methods to check"
+
+
 @pytest.mark.parametrize(
     "protocol",
     [
@@ -135,22 +214,41 @@ def test_agent_build_context_optional_fields_keep_their_defaults():
     ],
 )
 def test_every_protocol_method_has_a_default_implementation(protocol):
-    """Adding a method to a Protocol is only additive when it has a default.
+    """Adding a method to a Protocol is only additive when it carries a concrete default."""
+    _assert_protocol_has_defaults(protocol, expects_not_implemented=(protocol is RunEvidenceReader))
 
-    Without this, shipping a new contract method breaks every already-released
-    extension that does not implement it.
-    """
-    checked = 0
-    for name, member in vars(protocol).items():
-        if name.startswith("_") or not inspect.isfunction(member):
-            continue
-        checked += 1
-        body = inspect.getsource(member).split("\n", 1)[1]
-        if protocol is RunEvidenceReader:
-            assert "raise NotImplementedError" in body
-        else:
-            assert "return" in body, f"{protocol.__name__}.{name} has no default implementation. Adding a contract method is only additive when it returns a default; otherwise every already-released extension breaks on upgrade."
-    assert checked > 0, f"{protocol.__name__} declared no methods to check"
+
+def test_protocol_default_guard_rejects_unimplemented_ellipsis_stubs():
+    """Verify the default-implementation guard catches `...` stubs across bool, sequence, void, and reader contracts."""
+
+    class _StubBoolProtocol(Protocol):
+        def knowledge_provider(self, name: str, provider: Any) -> bool: ...
+
+    class _StubSequenceProtocol(Protocol):
+        def contribute_middlewares(self) -> Sequence[Any]: ...
+
+    class _StubInlineVoidProtocol(Protocol):
+        def on_event(self) -> None: ...
+
+    class _StubMultilineVoidProtocol(Protocol):
+        async def start(self) -> None:
+            """Unimplemented async hook stub."""
+            ...
+
+    class _StubReaderProtocol(Protocol):
+        def get_run(self, run_id: str) -> Any: ...
+
+    for broken_proto in (
+        _StubBoolProtocol,
+        _StubSequenceProtocol,
+        _StubInlineVoidProtocol,
+        _StubMultilineVoidProtocol,
+    ):
+        with pytest.raises(AssertionError):
+            _assert_protocol_has_defaults(broken_proto)
+
+    with pytest.raises(pytest.fail.Exception):
+        _assert_protocol_has_defaults(_StubReaderProtocol, expects_not_implemented=True)
 
 
 def test_contributor_defaults_return_empty():
@@ -342,7 +440,7 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     """Every additive contract slice bumps both gates together."""
     from importlib.metadata import version
 
-    assert API_VERSION == "0.2.5"
+    assert API_VERSION == "0.2.13"
     assert API_VERSION == version("deerflow-extension-api")
 
 

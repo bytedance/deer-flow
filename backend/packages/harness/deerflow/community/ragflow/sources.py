@@ -6,6 +6,16 @@ from collections.abc import Mapping
 from typing import Any
 
 
+def _clean_citation_fragments(summary: str) -> str:
+    """Keep complete shared links; remove orphaned or truncated destinations."""
+    return re.sub(
+        r"(\[(?:\\.|[^\[\]\\\n])*\]\(#(?:user-content-)?knowledge-source-[a-f0-9]{32}\))"
+        r"|#(?:user-content-)?knowledge-[\w-]*",
+        lambda match: match[1] or "",
+        summary,
+    )
+
+
 def budget_source_artifact(content: str, artifact: object, max_chars: int, *, summary: str = "") -> tuple[str, dict[str, Any] | None] | None:
     """Keep whole evidence records and their links together within a tool budget.
 
@@ -38,9 +48,13 @@ def budget_source_artifact(content: str, artifact: object, max_chars: int, *, su
 
     notice = "Knowledge sources omitted to fit output budget; request smaller excerpts."
     # Remove old destinations before shortening the report, including any link
-    # fragments left by the generic synopsis/truncation transform.
-    summary = re.sub(r"\[([^\]\n]*)\]\(#(?:user-content-)?knowledge-[^)\s]*\)", r"\1", summary)
-    summary = re.sub(r"#(?:user-content-)?knowledge-[\w-]*", "", summary)
+    # fragments left by the generic synopsis/truncation transform. Scope the
+    # match to the native ``#knowledge-<id>`` namespace: the unified
+    # ``#knowledge-source-<id>`` contract is a different namespace that
+    # ``prune_sources`` reconciles downstream, so flattening it here would
+    # strip a legitimate citation this budgeter never rebuilds.
+    summary = re.sub(r"\[([^\]\n]*)\]\(#(?:user-content-)?knowledge-(?!source-)[^)\s]*\)", r"\1", summary)
+    summary = _clean_citation_fragments(summary)
     summary_limit = min(1000, max_chars // 4) if max_chars >= 160 else 0
     if not summary_limit:
         summary = ""
@@ -49,7 +63,8 @@ def budget_source_artifact(content: str, artifact: object, max_chars: int, *, su
         # for the full externalized task report.
         head = (summary_limit - 3) // 2
         summary = summary[:head] + "\n…\n" + summary[-(summary_limit - head - 3) :]
-    summary = summary.rstrip()
+    # The head/tail split can cut a previously complete shared link.
+    summary = _clean_citation_fragments(summary).rstrip()
     entries = [summary] if summary else []
     used = len(summary)
     retained = []

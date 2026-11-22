@@ -1,6 +1,7 @@
 """Unit tests for the Exa community tools."""
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -181,6 +182,37 @@ class TestWebSearchTool:
 
 
 class TestWebFetchTool:
+    @pytest.mark.parametrize("base_url", [None, "https://api.exa.ai", "https://API.EXA.AI:443/", "https://api.exa.ai/v1"])
+    def test_hosted_fetch_refuses_private_target_before_delegation(self, mock_app_config, caplog, monkeypatch, base_url):
+        from deerflow.community.exa.tools import web_fetch_tool
+
+        mock_app_config.return_value.get_tool_config.return_value.model_extra["base_url"] = base_url
+        monkeypatch.delenv("EXA_BASE_URL", raising=False)
+        caplog.set_level(logging.DEBUG, logger="deerflow.community.exa")
+        marker = "private-fetch-marker"
+        with patch("exa_py.api.requests.post") as post, patch("socket.getaddrinfo") as lookup:
+            output = web_fetch_tool.invoke({"url": f"https://127.0.0.1/{marker}"})
+
+        post.assert_not_called()
+        lookup.assert_not_called()
+        assert output.startswith("Error:")
+        assert marker not in output and marker not in caplog.text
+
+    def test_hosted_fetch_delegates_public_target_unchanged_without_dns(self, mock_app_config, monkeypatch):
+        from deerflow.community.exa.tools import web_fetch_tool
+
+        target = "https://docs.example/articles%2Freport?lang=en&a=1&a=2"
+        monkeypatch.delenv("EXA_BASE_URL", raising=False)
+        with patch("exa_py.api.requests.post") as post, patch("socket.getaddrinfo") as lookup:
+            post.return_value.status_code = 200
+            post.return_value.json.return_value = {"results": [], "requestId": "example"}
+            output = web_fetch_tool.invoke({"url": target})
+
+        assert output == "Error: No results found"
+        post.assert_called_once()
+        assert json.loads(post.call_args.kwargs["data"])["urls"] == [target]
+        lookup.assert_not_called()
+
     def test_basic_fetch(self, mock_app_config, mock_exa_client):
         """Test basic web fetch returns formatted content."""
         mock_result = MagicMock()
@@ -304,3 +336,90 @@ class TestWebFetchTool:
         # "# Long Page\n\n" is 14 chars, content truncated to 4096
         content_after_header = result.split("\n\n", 1)[1]
         assert len(content_after_header) == 4096
+
+
+@pytest.fixture(autouse=True)
+def _no_exa_base_url_env(monkeypatch):
+    monkeypatch.delenv("EXA_BASE_URL", raising=False)
+
+
+def _patch_tool_config(extra):
+    patcher = patch("deerflow.community.exa.tools.get_app_config")
+    mock_config = patcher.start()
+    tool_config = MagicMock()
+    tool_config.model_extra = extra
+    mock_config.return_value.get_tool_config.return_value = tool_config
+    return patcher
+
+
+class TestBaseUrl:
+    def _search(self, extra):
+        patcher = _patch_tool_config(extra)
+        try:
+            with patch("deerflow.community.exa.tools.Exa") as mock_exa_cls:
+                mock_exa_cls.return_value.search.return_value = MagicMock(results=[])
+                from deerflow.community.exa.tools import web_search_tool
+
+                result = web_search_tool.invoke({"query": "q"})
+                return result, mock_exa_cls
+        finally:
+            patcher.stop()
+
+    def test_default_endpoint_when_unset(self):
+        result, mock_exa_cls = self._search({"api_key": "k"})
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k")
+
+    def test_tool_base_url_is_passed_to_sdk_without_trailing_slash(self, monkeypatch):
+        monkeypatch.setenv("EXA_BASE_URL", "https://env.example")
+        result, mock_exa_cls = self._search({"api_key": "k", "base_url": "  https://exa-compatible.example/api/  "})
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://exa-compatible.example/api")
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", 123])
+    def test_env_base_url_is_used_when_tool_value_missing(self, monkeypatch, raw):
+        monkeypatch.setenv("EXA_BASE_URL", "https://env.example/")
+        extra = {"api_key": "k"} if raw is None else {"api_key": "k", "base_url": raw}
+        result, mock_exa_cls = self._search(extra)
+        assert result == "[]"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://env.example")
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["api.example.com", "ftp://api.example.com", "https://", "https://api.example.com?x=1", "https://api.example.com/#", "https://api.example.com:99999"],
+    )
+    def test_invalid_base_url_returns_error_without_value(self, raw):
+        result, mock_exa_cls = self._search({"api_key": "k", "base_url": raw})
+        assert result.startswith("Error: Invalid Exa base_url/EXA_BASE_URL")
+        assert raw not in result
+        mock_exa_cls.assert_not_called()
+
+    def _fetch(self, extra, *, target="https://example.com"):
+        patcher = _patch_tool_config(extra)
+        try:
+            with patch("deerflow.community.exa.tools.Exa") as mock_exa_cls:
+                mock_exa_cls.return_value.get_contents.return_value = MagicMock(results=[MagicMock(title="Page", text="Body")])
+                from deerflow.community.exa.tools import web_fetch_tool
+
+                result = web_fetch_tool.invoke({"url": target})
+                return result, mock_exa_cls
+        finally:
+            patcher.stop()
+
+    def test_fetch_refuses_private_backend_without_isolation_confirmation(self):
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "http://127.0.0.1:8080"})
+        assert result.startswith("Error:")
+        assert "network_isolation_confirmed" in result
+        mock_exa_cls.assert_not_called()
+
+    def test_fetch_allows_private_backend_with_isolation_confirmed(self):
+        target = "https://192.0.2.7/manual"
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "http://127.0.0.1:8080", "network_isolation_confirmed": "true"}, target=target)
+        assert result == "# Page\n\nBody"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="http://127.0.0.1:8080")
+        mock_exa_cls.return_value.get_contents.assert_called_once_with([target], text={"max_characters": 4096})
+
+    def test_fetch_allows_public_backend(self):
+        result, mock_exa_cls = self._fetch({"api_key": "k", "base_url": "https://93.184.216.34"})
+        assert result == "# Page\n\nBody"
+        mock_exa_cls.assert_called_once_with(api_key="k", base_url="https://93.184.216.34")

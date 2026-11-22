@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any
@@ -32,7 +33,8 @@ class Crawl4AiClient:
 
         logger.debug(f"Fetching URL via Crawl4AI: {url}")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            # Client construction loads TLS trust synchronously; keep it off the loop.
+            async with await asyncio.to_thread(httpx.AsyncClient, timeout=self.timeout_s) as client:
                 resp = await client.post(f"{self.base_url}/md", json=payload, headers=headers)
 
                 if resp.status_code != 200:
@@ -44,10 +46,22 @@ class Crawl4AiClient:
                     content_type = resp.headers.get("content-type", "unknown")
                     return f"Error: Crawl4AI returned a non-JSON 200 response (content-type: {content_type}): {resp.text[:200]}"
 
+                # A JSON 200 that is not an object is a format error, not a
+                # success: indexing it raised "'list' object has no attribute
+                # 'get'" and the generic handler below echoed that Python text
+                # to the agent. Sibling providers (tavily's _response_objects)
+                # report a format error instead.
+                if not isinstance(data, dict):
+                    logger.error("Crawl4AI returned an unexpected payload type: %s", type(data).__name__)
+                    return "Error: Crawl4AI returned an unexpected response format"
+
                 if not data.get("success", False):
                     return f"Error: Crawl4AI reported failure for {url}"
 
                 markdown = data.get("markdown") or ""
+                if not isinstance(markdown, str):
+                    logger.error("Crawl4AI returned an unexpected 'markdown' payload type: %s", type(markdown).__name__)
+                    return "Error: Crawl4AI returned an unexpected response format"
                 if not markdown.strip():
                     return "Error: Crawl4AI returned empty markdown"
 

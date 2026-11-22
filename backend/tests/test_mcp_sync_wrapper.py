@@ -130,7 +130,11 @@ def test_mcp_tool_loading_skips_failed_server():
     assert [tool.name for tool in tools] == ["good-server_search"]
     assert tools[0].func is not None
     mock_warning.assert_called_once()
-    assert "bad-server" in mock_warning.call_args[0][0]
+    args, kwargs = mock_warning.call_args
+    assert args[1] == "bad-server"
+    assert args[2] == "RuntimeError"
+    assert "server 'bad-server'" in args[0] % args[1:]
+    assert kwargs.get("exc_info") is None
 
 
 def test_mcp_tool_sync_wrapper_in_running_loop():
@@ -288,16 +292,16 @@ def test_func_patched_mcp_tool_keeps_toolnode_runtime_injection(tmp_path):
         (tool,) = asyncio.run(get_mcp_tools())
 
     # After func patching, LangGraph must still detect the runtime injection.
-    assert _get_all_injected_args(tool).runtime == "runtime"
+    assert _get_all_injected_args(tool).runtime == "deerflow_runtime"
 
     # And a real ToolNode must pass the ToolRuntime through to the coroutine.
     seen: dict[str, object] = {}
 
     orig = tool.coroutine
 
-    async def spy(runtime: object | None = None, **arguments: object) -> str:
-        seen["runtime"] = runtime
-        return await orig(runtime=runtime, **arguments)
+    async def spy(deerflow_runtime: object | None = None, **arguments: object) -> str:
+        seen["runtime"] = deerflow_runtime
+        return await orig(deerflow_runtime=deerflow_runtime, **arguments)
 
     tool.coroutine = spy
 

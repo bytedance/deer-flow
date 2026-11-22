@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import copy
+import hashlib
 import html
 import json
 import logging
@@ -37,6 +38,10 @@ from .storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class DuplicateFactIdError(ValueError):
+    """A backup contains more than one entry for a fact ID."""
 
 
 # Thread pool for offloading sync memory updates when called from an async
@@ -75,17 +80,9 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
         return 0.5
     try:
         val = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.5
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
-
-
-def _next_confirmation_count(fact: dict[str, Any]) -> int:
-    """Increment a valid prior confirmation count, resetting malformed values."""
-    prior_count = fact.get("confirmationCount", 0)
-    if isinstance(prior_count, bool) or not isinstance(prior_count, int) or prior_count < 0:
-        return 1
-    return prior_count + 1
 
 
 def _extract_text(content: Any) -> str:
@@ -174,6 +171,22 @@ def _removal_scope_gate_reason(removal: dict[str, Any]) -> str | None:
     return None
 
 
+def _log_dropped_confidence(raw: object) -> None:
+    """Make a systematic out-of-range confidence visible without logging content."""
+    logger.warning(
+        "Dropping an extracted fact with out-of-range confidence %s; expected 0.0-1.0. A model emitting a percentage scale would lose every extracted fact.",
+        repr(raw)[:80],
+    )
+
+
+def _log_defaulted_consolidation_confidence(raw: object) -> None:
+    """Make a systematically out-of-range consolidation confidence visible."""
+    logger.warning(
+        "Defaulting a consolidation with out-of-range confidence %s to 0.9; expected 0.0-1.0. A model emitting a percentage scale would lose the confidence signal.",
+        repr(raw)[:80],
+    )
+
+
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
     """Normalize a single fact entry from a model-produced memory update."""
     if not isinstance(fact, dict):
@@ -198,14 +211,29 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
             return None
         try:
             raw_confidence = float(raw_confidence)
-        except ValueError:
+        except (OverflowError, ValueError):
             return None
-    elif isinstance(raw_confidence, (int, float)):
+    elif isinstance(raw_confidence, int):
+        # Range-check before float(): an unbounded JSON integer such as 10**400
+        # raises OverflowError in float() and would fail the whole batch.
+        if not 0 <= raw_confidence <= 1:
+            _log_dropped_confidence(raw_confidence)
+            return None
         raw_confidence = float(raw_confidence)
+    elif isinstance(raw_confidence, float):
+        pass
     else:
         return None
 
-    if not math.isfinite(raw_confidence):
+    if not math.isfinite(raw_confidence) or not 0.0 <= raw_confidence <= 1.0:
+        # Out-of-range confidence (for example a model emitting 95 or 1.5) is
+        # malformed like every other shape above: drop this item instead of
+        # letting the storage layer reject the whole update. A rejected batch
+        # never advances the extraction watermark, so the same paid call would
+        # otherwise repeat on every turn. Values are dropped, never rescaled:
+        # silently rewriting the scale would change the confidence-threshold
+        # semantics, and the warning makes a percentage-scale model visible.
+        _log_dropped_confidence(raw_confidence)
         return None
 
     normalized_fact = {
@@ -339,7 +367,10 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             # apply path never silently writes a zero-delta extension.
             raw_extend = entry.get("extend_by_days")
             if isinstance(raw_extend, (int, float)) and not isinstance(raw_extend, bool):
-                extend_by = int(raw_extend)
+                # int() raises on a non-finite float (a JSON number such as 1e400 parses
+                # to inf), which would fail the whole batch; drop it like any other
+                # unusable value. An int is kept as-is, including values beyond float range.
+                extend_by = int(raw_extend) if isinstance(raw_extend, int) or math.isfinite(raw_extend) else 0
                 if extend_by > 0:
                     reason = entry.get("reason", "")
                     normalized_stale_extensions.append(
@@ -378,8 +409,16 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             if isinstance(_raw_conf, bool) or not isinstance(_raw_conf, (int, float)):
                 _norm_conf = 0.9
             else:
-                _f = float(_raw_conf)
-                _norm_conf = _f if math.isfinite(_f) else 0.9
+                # float() raises on an unbounded JSON integer such as 10**400, which
+                # would fail the whole batch; fall back like any other invalid value.
+                try:
+                    _f = float(_raw_conf)
+                except OverflowError:
+                    _f = math.inf
+                if not math.isfinite(_f):
+                    _log_defaulted_consolidation_confidence(_raw_conf)
+                    _f = 0.9
+                _norm_conf = _f
             _raw_cat = consolidated.get("category")
             _norm_cat = _raw_cat.strip() if isinstance(_raw_cat, str) and _raw_cat.strip() else "context"
             normalized_consolidation.append(
@@ -427,40 +466,8 @@ def _parse_memory_update_response(response_content: Any) -> dict[str, Any]:
     raise json.JSONDecodeError("No valid memory update JSON object found", response_text, 0)
 
 
-# Matches sentences that describe a file-upload *event* rather than general
-# file-related work.  Deliberately narrow to avoid removing legitimate facts
-# such as "User works with CSV files" or "prefers PDF export".
-_UPLOAD_SENTENCE_RE = re.compile(
-    r"[^.!?]*\b(?:"
-    r"upload(?:ed|ing)?(?:\s+\w+){0,3}\s+(?:file|files?|document|documents?|attachment|attachments?)"
-    r"|file\s+upload"
-    r"|/mnt/user-data/uploads/"
-    r"|<current_uploads>"
-    r")[^.!?]*[.!?]?\s*",
-    re.IGNORECASE,
-)
-
-
 def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str, Any]:
-    """Remove sentences about file uploads from all memory summaries and facts.
-
-    Uploaded files are session-scoped; persisting upload events in long-term
-    memory causes the agent to search for non-existent files in future sessions.
-    """
-    # Scrub summaries in user/history sections
-    for section in ("user", "history"):
-        section_data = memory_data.get(section, {})
-        for _key, val in section_data.items():
-            if isinstance(val, dict) and "summary" in val:
-                cleaned = _UPLOAD_SENTENCE_RE.sub("", val["summary"]).strip()
-                cleaned = re.sub(r"  +", " ", cleaned)
-                val["summary"] = cleaned
-
-    # Also remove any facts that describe upload events
-    facts = memory_data.get("facts", [])
-    if facts:
-        memory_data["facts"] = [f for f in facts if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))]
-
+    """Keep legacy API; prose cannot establish whether a fact is session-scoped."""
     return memory_data
 
 
@@ -826,10 +833,12 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     valid when summarization removes the conversation front (an index watermark
     would point at the wrong message after a front removal, silently skipping
     un-extracted turns). Prefers the langgraph message ``id`` (unique, robust to
-    duplicate content); falls back to ``(type, content)`` when no id is set
-    (e.g. plain ``HumanMessage(content=...)`` in tests). Returns ``None`` for a
-    message with neither id nor extractable text -- the caller then feeds the
-    full list, which is safe over-extraction and never loss.
+    duplicate content); falls back to ``(type, sha256(content))`` when no id is
+    set (e.g. plain ``HumanMessage(content=...)`` in tests) -- a digest because
+    the identity is also persisted to the watermark sidecar, which must not hold
+    conversation text. Returns ``None`` for a message with neither id nor
+    extractable text -- the caller then feeds the full list, which is safe
+    over-extraction and never loss.
     """
     mid = getattr(msg, "id", None)
     if isinstance(mid, str) and mid:
@@ -838,7 +847,19 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     if not text:
         return None
     msg_type = getattr(msg, "type", "") or ""
-    return ("content", msg_type, text)
+    return ("content", msg_type, hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
+# DeerMem is portable; the host test pins this map to its UI allowlist.
+_MEMORY_UI_LANGUAGES = {"en-US": "English", "zh-CN": "Simplified Chinese"}
+
+
+def _memory_language_preference(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        locale = (getattr(message, "additional_kwargs", {}) or {}).get("deerflow_ui_locale")
+        if isinstance(locale, str) and locale in _MEMORY_UI_LANGUAGES:
+            return f"Preferred memory language: {_MEMORY_UI_LANGUAGES[locale]} ({locale})"
+    return ""
 
 
 class MemoryUpdater:
@@ -864,10 +885,12 @@ class MemoryUpdater:
         self._prompts_dir = prompts_dir
         self._callbacks = callbacks
         # Watermark: last-extracted message identity per (thread_id, user_id,
-        # agent_name), held in memory so a restart re-extracts one batch. The
-        # cache is a bounded LRU (config.watermark_max_keys) so a long-lived
-        # gateway handling many threads cannot grow it without limit; a dropped
-        # key re-extracts one batch on that thread's next turn.
+        # agent_name). This process caches it in a bounded LRU
+        # (config.watermark_max_keys) so a long-lived gateway handling many
+        # threads cannot grow it without limit, and writes it through to the
+        # storage's per-agent sidecar so a restart or a peer replica sharing the
+        # storage root continues from it. A key missing from both re-extracts
+        # one batch on that thread's next turn.
         self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[str, ...] | None] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
@@ -923,6 +946,8 @@ class MemoryUpdater:
             "access_half_life_days": self._config.eviction_access_half_life_days,
             "correction_reserved_fraction": self._config.eviction_correction_reserved_fraction,
             "correction_reserved_max": self._config.eviction_correction_reserved_max,
+            "reserved_categories": self._config.eviction_reserved_categories,
+            "decay_exempt_categories": self._config.eviction_decay_exempt_categories,
         }
         decision = select_facts_for_capacity(
             facts,
@@ -976,7 +1001,20 @@ class MemoryUpdater:
         raw_facts = memory_data.get("facts")
         if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) or not isinstance(fact.get("content"), str) or not fact["content"].strip() for fact in raw_facts):
             raise ValueError("memory_data.facts must be a list of facts with non-empty content")
+        for fact in raw_facts:
+            revision = fact.get("revision", 1)
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise ValueError("fact.revision must be an integer >= 1")
         memory_data = normalize_memory_data(memory_data)
+        # Duplicate detection must cover BOTH storage paths (the apply_changes
+        # override and the base save() path) and run before capacity selection,
+        # which can drop one of two same-id entries and hide the duplicate.
+        seen_import_ids: set[str] = set()
+        for fact in memory_data.get("facts", []):
+            fact_id = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
+            if fact_id in seen_import_ids:
+                raise DuplicateFactIdError(f"Duplicate fact id {fact_id!r} in memory import")
+            seen_import_ids.add(fact_id)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
             incoming_facts = copy.deepcopy(memory_data.get("facts", []))
@@ -991,10 +1029,17 @@ class MemoryUpdater:
                 user_id=user_id,
             )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
-            incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+            upsert_revisions = {fact["id"]: (int(current_by_id[fact["id"]].get("revision") or 1) if fact["id"] in current_by_id else None) for fact in incoming_facts}
+            # Backup revisions describe the exported snapshot; writes use the
+            # current snapshot's preconditions, including the fact payload.
+            for fact in incoming_facts:
+                current_revision = upsert_revisions[fact["id"]]
+                if current_revision is not None:
+                    fact["revision"] = current_revision
+            incoming_ids = set(upsert_revisions)
             change_set = {
                 "upserts": incoming_facts,
-                "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                "upsertRevisions": upsert_revisions,
                 "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
                 "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
             }
@@ -1311,37 +1356,14 @@ class MemoryUpdater:
         return updated_memory
 
     def _build_signal_hints(self, signals: frozenset[str]) -> str:
-        """Build optional prompt hints for the detected signal classes.
-
-        Each present signal contributes one instruction nudging the extraction
-        LLM toward the right category and confidence. The variable is still
-        rendered into the template's ``{correction_hint}`` slot (the name is
-        historical -- it now carries the full signal-hint set, plus the manual
-        fact note appended by :meth:`_prepare_update_prompt`).
-        """
-        hints: list[str] = []
-        if "correction" in signals:
-            hints.append(
-                "IMPORTANT: Explicit correction signals were detected in this conversation. "
-                "Record a correction with confidence >= 0.95 only when it describes a durable, user-level "
-                "working preference that is safe to reuse across unrelated tasks. A correction to facts, files, "
-                "directions, or constraints in the current task is thread- or project-scoped and must not be stored."
-            )
-        if "reinforcement" in signals:
-            hints.append(
-                "IMPORTANT: Positive reinforcement signals were detected in this conversation. "
-                "Record the confirmed approach, style, or preference with high confidence only if it is a durable, "
-                "user-level pattern. Approval of the current result or current task is thread-scoped and must not be stored."
-            )
-        if "preference" in signals:
-            hints.append("IMPORTANT: A preference signal was detected. Record it with high confidence only when it is a durable, user-level preference; a one-off choice for the current task is thread-scoped and must not be stored.")
-        if "identity" in signals:
-            hints.append("IMPORTANT: An identity signal was detected. Record the user's stated role, profession, or background only when it is user-level and durable across tasks.")
-        if "goal" in signals:
-            hints.append("IMPORTANT: A goal signal was detected. Record only a durable, user-level goal that remains useful across unrelated tasks; the objective of the current task, sprint, PR, or thread must not be stored.")
-        if "decision" in signals:
-            hints.append("IMPORTANT: A decision signal was detected. Record only a durable, user-level decision or working pattern; a choice made for the current task, file, PR, or thread must not be stored.")
-        return "\n".join(hints)
+        """Remind extraction that lexical matches cannot establish intent."""
+        if not signals:
+            return ""
+        return (
+            "Some lexical patterns may be present in this conversation. They are not evidence of user intent. "
+            "Examine the full context, including quotations, negation and whether the user is discussing someone else. "
+            "Store only durable, descriptive user-level facts supported by the conversation, not transient current task or thread state."
+        )
 
     def _prepare_update_prompt(
         self,
@@ -1406,6 +1428,13 @@ class MemoryUpdater:
             "consolidation_section": consolidation_section,
         }
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
+        language_preference = _memory_language_preference(messages)
+        if language_preference:
+            # Per-run preference is data, not part of the cached system text.
+            for index, message in enumerate(prompt):
+                if message.type == "human":
+                    prompt[index] = message.model_copy(update={"content": f"{language_preference}\n\n{message.content}"})
+                    break
         if config.prompt_prepend or config.prompt_append:
             # Extend trusted instructions only, after formatting the original
             # template. Conversation/memory data stays in its human message.
@@ -1699,17 +1728,71 @@ class MemoryUpdater:
         value: tuple[str, ...] | None,
     ) -> None:
         """Store ``value`` for ``key``, evicting the least-recently-used entry
-        when the bounded LRU cache exceeds ``config.watermark_max_keys``.
+        when the bounded LRU cache exceeds ``config.watermark_max_keys``, and
+        write a real identity through to the storage sidecar.
 
         A dropped key is safe: the next turn for that thread finds no watermark
-        and re-extracts one batch (the documented restart behavior). ``0`` =
-        unbounded (no eviction).
+        and re-extracts one batch. ``0`` = unbounded (no eviction).
         """
         self._watermarks[key] = value
         self._watermarks.move_to_end(key)
         cap = self._config.watermark_max_keys
         if cap > 0 and len(self._watermarks) > cap:
             self._watermarks.popitem(last=False)
+        self._store_persisted_watermark(key, value)
+
+    @staticmethod
+    def _persisted_watermark_scope(key: tuple[str | None, str | None, str | None]) -> tuple[str, str | None, str] | None:
+        """Return ``(thread_id, user_id, agent_name)`` when ``key`` can be
+        persisted; the sidecar is per agent and keyed by thread id."""
+        thread_id, user_id, agent_name = key
+        if not isinstance(thread_id, str) or not thread_id or agent_name is None:
+            return None
+        return thread_id, user_id, agent_name
+
+    def _load_persisted_watermark(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
+        """Read ``key``'s watermark from the storage sidecar.
+
+        ``None`` when the storage keeps none or the read fails: the sidecar is
+        best-effort, so the in-process cache then decides alone.
+        """
+        scope = self._persisted_watermark_scope(key)
+        getter = getattr(self._storage, "get_extraction_watermark", None)
+        if scope is None or getter is None:
+            return None
+        thread_id, user_id, agent_name = scope
+        try:
+            value = getter(thread_id, agent_name=agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to read the persisted memory watermark (thread=%s)", thread_id, exc_info=True)
+            return None
+        if isinstance(value, list | tuple) and value and all(isinstance(part, str) for part in value):
+            return tuple(value)
+        return None
+
+    def _store_persisted_watermark(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        value: tuple[str, ...] | None,
+    ) -> None:
+        """Write ``key``'s watermark to the storage sidecar, best-effort.
+
+        A ``None`` identity (the last message has neither id nor text) is not
+        written: the persisted entry, possibly advanced by a peer, still marks
+        an extracted prefix, and the furthest-of-both read keeps using it.
+        A failure is logged and leaves the in-process cache authoritative for
+        this process; the extraction it follows has already been persisted, so
+        it must not turn into a failed update.
+        """
+        scope = self._persisted_watermark_scope(key)
+        setter = getattr(self._storage, "set_extraction_watermark", None)
+        if value is None or scope is None or setter is None:
+            return
+        thread_id, user_id, agent_name = scope
+        try:
+            setter(thread_id, list(value), agent_name=agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to persist the memory watermark (thread=%s)", thread_id, exc_info=True)
 
     def _feed_after_watermark(
         self,
@@ -1719,19 +1802,25 @@ class MemoryUpdater:
         """Return the slice of ``messages`` not yet extracted.
 
         The watermark stores the identity of the last-extracted message (see
-        :func:`_message_identity`). If that message is still present, everything
-        *after* it is fed; if it is absent (front removed by summarization, or
-        the first-ever extraction for this key) the full list is fed. Re-feeding
-        is safe over-extraction -- it never skips a turn, which is the only
-        failure direction that would lose facts.
+        :func:`_message_identity`). Two copies are consulted: this process's LRU
+        entry and the storage sidecar (written by this process, an earlier one,
+        or a peer replica sharing the storage root). Each marks a prefix that
+        was already extracted, so the feed starts after whichever is found
+        furthest along ``messages``; a stale copy therefore costs nothing. If
+        neither is present (front removed by summarization, or the first-ever
+        extraction for this key) the full list is fed. Re-feeding is safe
+        over-extraction -- it never skips a turn, which is the only failure
+        direction that would lose facts.
         """
-        last_id = self._watermark_get(watermark_key)
-        if last_id is None:
+        candidates = {self._watermark_get(watermark_key), self._load_persisted_watermark(watermark_key)} - {None}
+        if not candidates:
             return messages
-        for i, msg in enumerate(messages):
-            if _message_identity(msg) == last_id:
-                return messages[i + 1 :]
-        return messages
+        identities = [_message_identity(msg) for msg in messages]
+        start = 0
+        for last_id in candidates:
+            if last_id in identities:
+                start = max(start, identities.index(last_id) + 1)
+        return messages[start:]
 
     def _do_update_memory_sync_impl(
         self,
@@ -1756,10 +1845,11 @@ class MemoryUpdater:
         Watermark: the middleware passes the full conversation each turn, so
         without skipping already-extracted turns every update re-feeds old
         messages. The watermark stores the identity of the last-extracted
-        message (content/id based, in-memory only) so it stays correct when
-        summarization removes the conversation front; a restart loses it and
-        re-extracts one batch. ``bypass_watermark`` is set by the emergency
-        (summarization) flush path: the subset it carries is a one-shot
+        message (content/id based, cached in-process and persisted per agent
+        by the storage) so it stays correct when summarization removes the
+        conversation front and survives a restart or a move to a peer replica
+        (see :meth:`_feed_after_watermark`). ``bypass_watermark`` is set by the
+        emergency (summarization) flush path: the subset it carries is a one-shot
         "extract before removal" snapshot, so it is fed in full and does not
         read or advance the conversation watermark (advancing it from the
         subset's own length would regress the watermark and skip un-extracted
@@ -1793,6 +1883,15 @@ class MemoryUpdater:
             # at recent turns, a veto answers for the batch.
             batch_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir, window=None)
             batch_text = format_conversation_for_update(feed_messages)
+            project = None
+            if callable(self._config.project_memory):
+                try:
+                    project = self._config.project_memory(feed_messages, thread_id, user_id)
+                except Exception:
+                    logger.warning("Project memory preparation failed; deferring extraction", exc_info=True)
+                    return False
+            # The user-profile pre-screen cannot decide whether a batch contains
+            # project facts. An active project pool therefore vetoes its skip.
             # The memory judge (when the host injected one) runs here: still off the
             # turn path, before any LLM call, on exactly the text the extractor would
             # see -- no second truncation. ``judge=False`` (the shutdown drain) and a
@@ -1811,7 +1910,9 @@ class MemoryUpdater:
             verdict_payload = getattr(verdict, "payload", None)
             if isinstance(verdict_payload, dict):
                 metrics.update({key: value for key, value in verdict_payload.items() if value is not None})
-            if getattr(verdict, "skip", False):
+            if getattr(verdict, "skip", False) and project is not None:
+                metrics["project_memory_prescreen_veto"] = True
+            if getattr(verdict, "skip", False) and project is None:
                 # The pre-screen decided this batch is not worth a call: consume it
                 # and advance the watermark (nothing else runs -- no prompt, no
                 # invoke, no apply). Advancing is what makes the saving real; leaving
@@ -1829,9 +1930,8 @@ class MemoryUpdater:
             prepared = self._prepare_update_prompt(
                 messages=feed_messages,
                 agent_name=agent_name,
-                # Hint text takes the union (deterministic + model hints); the
-                # reinforcement evidence gate below still reads the deterministic
-                # set only, so a model verdict can never confirm a fact (S4).
+                # Hints can invite contextual review; neither lexical nor model
+                # signals authorize an automatic confirmation of a stored fact.
                 signals=frozenset(feed_signals) | (model_hints if isinstance(model_hints, frozenset) else frozenset()),
                 user_id=user_id,
                 conversation_text=batch_text,
@@ -1840,6 +1940,10 @@ class MemoryUpdater:
                 return False
 
             current_memory, prompt = prepared
+            if project is not None:
+                prompt = list(prompt)
+                prompt[0] = prompt[0].model_copy(update={"content": prompt[0].content + "\n\n" + project["instruction"]})
+                prompt[-1] = prompt[-1].model_copy(update={"content": prompt[-1].content + "\n\n" + project["context"]})
             model_name = self._config.model.model
             model = self._llm
             if model is None:
@@ -1896,6 +2000,16 @@ class MemoryUpdater:
                 metrics=metrics,
                 signals=frozenset(feed_signals),
             )
+            if success and project is not None:
+                try:
+                    project["apply"](_parse_memory_update_response(response.content), self._config.fact_confidence_threshold)
+                except Exception:
+                    # The user pool has committed. Consume this batch rather than
+                    # replaying its paid extraction and user writes on every turn.
+                    metrics["project_memory_apply_success"] = False
+                    logger.warning("Project memory apply failed after user memory committed; consuming extraction batch", exc_info=True)
+                else:
+                    metrics["project_memory_apply_success"] = True
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
                 # suffix, so this is messages[-1]). Skipped on the emergency
@@ -2084,41 +2198,15 @@ class MemoryUpdater:
         def reject_by_scope_gate(kind: str, reason: str) -> None:
             scope_gate_rejections[kind][reason] += 1
 
-        # Explicit confirmation is distinct from extraction duplication. The
-        # deterministic gate is batch-level: it proves only that a human
-        # message among the last six filtered messages matched a reinforcement
-        # pattern. The LLM remains responsible for binding that signal to an
-        # existing id, which must be user-scoped and carry a non-empty reason.
-        tracks_hybrid_signals = config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or config.fact_eviction_shadow_enabled
-        if tracks_hybrid_signals and "reinforcement" in signals:
-            reinforced_ids = {
-                entry["id"]
-                for entry in update_data.get("factsToReinforce", [])
-                if isinstance(entry, dict) and entry.get("scope") == "user" and isinstance(entry.get("reason"), str) and entry["reason"].strip() and isinstance(entry.get("id"), str)
-            }
-            # Only an id that actually exists can be confirmed. A nonexistent
-            # target changes nothing, so counting it would report an accepted
-            # mutation that never landed (the pre-screen evaluation reads the
-            # counter as "worth remembering").
-            reinforced_ids &= {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
-            if reinforced_ids:
-                current_memory["facts"] = [
-                    {
-                        **fact,
-                        "lastConfirmedAt": now,
-                        "confirmationCount": _next_confirmation_count(fact),
-                    }
-                    if isinstance(fact, dict) and fact.get("id") in reinforced_ids
-                    else fact
-                    for fact in current_memory.get("facts", [])
-                ]
-                mutations_accepted += len(reinforced_ids)
+        # A lexical match and a model-proposed fact ID cannot establish that
+        # the user explicitly confirmed that fact. Do not update confirmation
+        # counters without a trusted fact-bound confirmation event.
 
         # Update user sections
         user_updates = update_data.get("user", {})
         for section in ["workContext", "personalContext", "topOfMind", "cognitiveStyle"]:
             section_data = user_updates.get(section, {})
-            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not isinstance(section_data.get("summary"), str) or not section_data["summary"]:
                 continue
             rejection_reason = _summary_scope_gate_reason(section_data)
             if rejection_reason is not None:
@@ -2133,7 +2221,7 @@ class MemoryUpdater:
         history_updates = update_data.get("history", {})
         for section in ["recentMonths", "earlierContext", "longTermBackground"]:
             section_data = history_updates.get(section, {})
-            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not isinstance(section_data.get("summary"), str) or not section_data["summary"]:
                 continue
             rejection_reason = _summary_scope_gate_reason(section_data)
             if rejection_reason is not None:
@@ -2321,7 +2409,7 @@ class MemoryUpdater:
                         existing_confidence = float(merge_target.get("confidence"))
                         if not math.isfinite(existing_confidence):
                             raise ValueError
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         existing_confidence = 0.0
                     if confidence > existing_confidence:
                         merge_target["confidence"] = confidence
@@ -2596,10 +2684,9 @@ class MemoryUpdater:
                     current_memory["facts"].extend(new_consolidated)
                     mutations_accepted += merge_count
 
-        # Finalization scrubs upload-event facts (session-scoped) from the memory it
-        # persists; apply that here, before scoring survival, so a fact accepted by
-        # the apply but dropped by the scrub is not counted as a landed mutation
-        # (the shadow evaluation reads a positive count on a skip as a lost memory).
+        # Keep this compatibility hook aligned with finalization. It preserves
+        # facts: upload vocabulary cannot distinguish a transient event from a
+        # durable preference or profession.
         current_memory = _strip_upload_mentions_from_memory(current_memory)
 
         # Count new facts and changed near-duplicate targets only once they survive

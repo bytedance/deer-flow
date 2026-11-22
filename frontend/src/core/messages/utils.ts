@@ -12,6 +12,9 @@ import {
   isClosingFence,
 } from "@/core/streamdown/fences";
 
+import { modelControlDisplayText } from "./model-control";
+import { indexToolResults } from "./tool-result";
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
@@ -683,6 +686,8 @@ export function getMessageCopyData(message: Message) {
 }
 
 export function extractTextFromMessage(message: Message) {
+  const selectedModelText = modelControlDisplayText(message);
+  if (selectedModelText !== null) return selectedModelText;
   if (typeof message.content === "string") {
     return (
       splitInlineReasoningFromAIMessage(message)?.content ??
@@ -941,6 +946,8 @@ function splitInlineReasoningFromAIMessage(message: Message) {
 }
 
 export function extractContentFromMessage(message: Message) {
+  const selectedModelText = modelControlDisplayText(message);
+  if (selectedModelText !== null) return selectedModelText;
   if (typeof message.content === "string") {
     return (
       splitInlineReasoningFromAIMessage(message)?.content ??
@@ -1107,8 +1114,21 @@ export function hasSubagent(message: AIMessage) {
   return false;
 }
 
-export function findToolCallResult(toolCallId: string, messages: Message[]) {
-  for (const message of messages) {
+export function findToolCallResult(
+  toolCallId: string,
+  messages: Message[],
+  assistantMessageId?: string,
+) {
+  const start = assistantMessageId
+    ? messages.findIndex(
+        (message) => message.type === "ai" && message.id === assistantMessageId,
+      )
+    : -1;
+  if (assistantMessageId && start < 0) return undefined;
+  const candidates = assistantMessageId
+    ? (indexToolResults(messages).get(start) ?? [])
+    : messages;
+  for (const message of candidates) {
     if (message.type === "tool" && message.tool_call_id === toolCallId) {
       const content = extractTextFromMessage(message);
       if (content) {

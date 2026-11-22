@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import socket
 import uuid
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.channels.capabilities import supports_proactive_notifications
+from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
+from app.channels.notification_groups import is_notification_group
 from app.scheduler.notification_text import NOTIFICATION_LOCALES
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.run.model import RunRow
@@ -22,10 +24,12 @@ from deerflow.persistence.scheduled_task_runs.finalization import LIFECYCLE_EVEN
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.sql import run_number_expression
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
 from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
+from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
-from deerflow.scheduler.schedules import next_run_at
+from deerflow.scheduler.schedules import pauses_unschedulable, should_advance_schedule_cursor, stored_next_run_at
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -217,6 +221,7 @@ class ScheduledTaskService:
         connection_repo=None,
         notification_repo=None,
         own_stop_available: bool | None = None,
+        resolve_human_input_request: Callable[[RunRecord], Any] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -237,6 +242,7 @@ class ScheduledTaskService:
         # sends. Either being None sends no IM notices.
         self._connection_repo = connection_repo
         self._notification_repo = notification_repo
+        self._resolve_human_input_request = resolve_human_input_request
         # Whether scheduled runs get stop_scheduled_task (scheduler.tool_enabled).
         # Decides how a launch phrases the user's stop rule (stop_rule.launch_prompt).
         # None (production) reads the live config at each launch, the same source
@@ -360,13 +366,45 @@ class ScheduledTaskService:
         group_connection_id = getattr(task, "notification_group_connection_id", None)
         if not bindings and not group_connection_id:
             return
+        # Serialize with opt-out only when there is a potential recipient.
+        preferences = await ImNotificationPreferencesRepository.get_in_session(session, task.user_id, lock_owner=True)
+        bindings = [
+            binding
+            for binding in bindings
+            if preferences.get(binding.provider, False)
+            # QQ group member OpenIDs are not the C2C recipient namespace.
+            and (binding.provider != "qq" or ((binding.metadata_json or {}).get("chat_type") == "c2c" and (binding.workspace_id or "").endswith(":c2c")))
+        ]
         payload = _notice_payload(task, occurrence, event, reason, locale=await self._owner_locale(session, task.user_id))
         task_run_id = occurrence.id if occurrence is not None else _idle_notice_key(task.id, lifecycle_anchor(task, occurrence, now=now))
         recipients = [(binding.provider, binding.external_account_id, payload) for binding in bindings]
         if group_connection_id:
-            # Keep the selected binding identity even if it was removed: the
-            # worker records an explicit failed delivery after its owner check.
-            recipients.append(("feishu", group_connection_id, {**payload, "target_type": "group"}))
+            group_row = await session.scalar(select(ChannelConnectionRow).where(ChannelConnectionRow.id == group_connection_id))
+            if group_row is None:
+                # Normal disconnects soft-revoke ChannelConnectionRow (status="revoked"),
+                # keeping group_row.provider intact. If the row was hard-deleted after a
+                # prior delivery, recover its provider from the outbox history before
+                # falling back to legacy "feishu".
+                from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
+
+                prior_provider = await session.scalar(
+                    select(NotificationDeliveryRow.provider)
+                    .where(
+                        NotificationDeliveryRow.owner_user_id == task.user_id,
+                        NotificationDeliveryRow.target == group_connection_id,
+                    )
+                    .order_by(NotificationDeliveryRow.created_at.desc())
+                    .limit(1)
+                )
+                group_provider: str | None = prior_provider if isinstance(prior_provider, str) and supports_proactive_group_notifications(prior_provider) else "feishu"
+            elif group_row.owner_user_id == task.user_id and isinstance(group_row.provider, str) and supports_proactive_group_notifications(group_row.provider):
+                group_provider = group_row.provider
+            else:
+                group_provider = None
+            if group_provider and preferences.get(group_provider, False):
+                # Keep the selected binding identity even if it was removed: the
+                # worker records an explicit failed delivery after its owner check.
+                recipients.append((group_provider, group_connection_id, {**payload, "target_type": "group"}))
         for provider, target, notice_payload in recipients:
             await self._notification_repo.enqueue_in_session(
                 session,
@@ -412,11 +450,31 @@ class ScheduledTaskService:
             else:
                 await self._reconcile_active_state(now=now)
         else:
-            await self._task_run_repo.recover_expired_launch_claims(
-                error=_LEASE_RECOVERY_ERROR,
-                now=now,
-            )
-        await self._expire_waiting_runs(now=now)
+            try:
+                await self._task_run_repo.recover_expired_launch_claims(
+                    error=_LEASE_RECOVERY_ERROR,
+                    now=now,
+                )
+            except Exception:
+                # Like the reconciliation below: a failed recovery pass must
+                # not keep every other due task from being admitted.
+                logger.exception("Failed to recover expired scheduled launch claims")
+            try:
+                finalized = await self._task_repo.reconcile_terminal_runs(now=now)
+                if finalized:
+                    logger.info("Finalized %d scheduled occurrence(s) from terminal durable runs", finalized)
+            except Exception:
+                # The pass already isolates per-occurrence failures; a remaining
+                # failure (e.g. the candidate query) must not skip admission or
+                # queue draining for this poll.
+                logger.exception("Failed to reconcile terminal scheduled runs")
+        try:
+            await self._expire_waiting_runs(now=now)
+        except Exception:
+            # A failed timeout sweep must not skip queue draining or this
+            # poll's due-task admission. Individual rows are also isolated by
+            # expire_queued_runs; this guard covers the candidate query/session.
+            logger.exception("Failed to expire queued scheduled runs")
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
         # persisted even when all execution slots are busy; claim_queued_run()
@@ -428,13 +486,35 @@ class ScheduledTaskService:
             limit=self._max_concurrent_runs,
         )
         for task in claimed:
-            await self.dispatch_task(task, now=now, trigger="scheduled")
+            try:
+                await self.dispatch_task(task, now=now, trigger="scheduled")
+            except Exception:
+                # A per-record failure inside one task's dispatch must not abort
+                # the rest of this poll's claimed batch: every claimed task
+                # already holds a lease, and the next tick would skip them the
+                # same way. Claim-level store failures stay loud above the loop.
+                logger.exception(
+                    "Scheduled task %s: dispatch failed; continuing with the claimed batch",
+                    task.get("id"),
+                )
 
     @staticmethod
     def _is_overlap_conflict(exc: Exception) -> bool:
         if isinstance(exc, ConflictError):
             return True
-        return isinstance(exc, HTTPException) and exc.status_code == 409
+        # ``start_run`` converts a run-manager admission conflict into this
+        # typed HTTP 409. Other 409s (idempotency-key mismatch, thread or
+        # assistant drift) are permanent launch failures; retrying them would
+        # keep the occurrence queued until the queue timeout.
+        #
+        # Keep the import local to avoid changing the scheduler module's
+        # load-time import graph. The scheduler is wired by the Gateway, where
+        # ``app.gateway.services`` is already loaded, so this lookup is
+        # guaranteed; do not make it optional without moving the
+        # classification to a dependency that is always importable here.
+        from app.gateway.services import BusyThreadConflict
+
+        return isinstance(exc, BusyThreadConflict)
 
     @staticmethod
     def _task_status_for_failure(task: dict[str, Any], *, trigger: str) -> str:
@@ -465,6 +545,45 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
+    @staticmethod
+    def _next_run_at_after_launch(
+        task: dict[str, Any],
+        *,
+        trigger: str,
+        now: datetime,
+    ) -> tuple[datetime | str | None, str | None]:
+        """Keep a recurring task's cadence when a manual trial launches.
+
+        A manual run is an extra trial and must not consume the task's next
+        scheduled occurrence. One-time tasks retain their existing boundary
+        semantics, so only recurring manual launches keep the stored value.
+        The second value is why a stored schedule no longer computes; the
+        launch bookkeeping then pauses the task instead of raising out of the
+        poll (see ``_unschedulable_outcome``).
+        """
+        if not should_advance_schedule_cursor(task["schedule_type"], trigger=trigger):
+            return task.get("next_run_at"), None
+        return stored_next_run_at(
+            task["schedule_type"],
+            task["schedule_spec"],
+            task["timezone"],
+            now=now,
+        )
+
+    @staticmethod
+    def _unschedulable_outcome(
+        task: dict[str, Any],
+        *,
+        status: str,
+        last_error: str | None,
+        schedule_error: str | None,
+    ) -> tuple[str, str | None]:
+        """The status and ``last_error`` to write, pausing an unschedulable task."""
+        if not pauses_unschedulable(task["schedule_type"], status, schedule_error):
+            return status, last_error
+        logger.warning("Paused scheduled task %s: %s", task["id"], schedule_error)
+        return "paused", schedule_error
+
     async def dispatch_task(
         self,
         task: dict[str, Any],
@@ -489,20 +608,21 @@ class ScheduledTaskService:
             # surface as HTTP 500 on manual trigger and, in the poller, abort
             # the rest of the claimed batch every cycle while the task itself
             # is never marked with last_error.
-            task_status = self._task_status_for_failure(task, trigger=trigger)
+            next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+            task_status, last_error = self._unschedulable_outcome(
+                task,
+                status=self._task_status_for_failure(task, trigger=trigger),
+                last_error=str(exc),
+                schedule_error=schedule_error,
+            )
             await self._task_repo.update_after_launch(
                 task["id"],
                 status=task_status,
-                next_run_at=next_run_at(
-                    task["schedule_type"],
-                    task["schedule_spec"],
-                    task["timezone"],
-                    now=now,
-                ),
+                next_run_at=next_at,
                 last_run_at=now,
                 last_run_id=None,
                 last_thread_id=execution_thread_id,
-                last_error=str(exc),
+                last_error=last_error,
                 increment_run_count=False,
                 expected_lease_owner=expected_lease_owner,
             )
@@ -569,6 +689,10 @@ class ScheduledTaskService:
             "task_id": task["id"],
             "thread_id": execution_thread_id,
             "trigger": trigger,
+            # Freeze the admitted occurrence time in the synthetic row: the
+            # provenance below must be identical if this launch is retried at a
+            # later now, or start_run's idempotency key sees a different request.
+            "scheduled_for": now,
         }
         return await self._attempt_queued_run(task, queued, now=now)
 
@@ -586,6 +710,7 @@ class ScheduledTaskService:
         queued: dict[str, Any],
         *,
         now: datetime,
+        created_after: datetime | None = None,
     ) -> dict[str, Any]:
         """Turn one queued occurrence into a live run under its own trace scope.
 
@@ -594,9 +719,17 @@ class ScheduledTaskService:
         sharing one id across a whole poll cycle. A manual trigger arrives
         inside a Gateway request and keeps that request's trace instead, so
         the launched run stays correlated with the call that asked for it.
+
+        ``created_after`` applies the queue-age cutoff when retrying a row
+        from the waiting queue. A freshly admitted row has not waited.
         """
         with ensure_trace_context():
-            return await self._launch_queued_occurrence(task, queued, now=now)
+            return await self._launch_queued_occurrence(
+                task,
+                queued,
+                now=now,
+                created_after=created_after,
+            )
 
     async def _launch_queued_occurrence(
         self,
@@ -604,6 +737,7 @@ class ScheduledTaskService:
         queued: dict[str, Any],
         *,
         now: datetime,
+        created_after: datetime | None = None,
     ) -> dict[str, Any]:
         task_run_id = queued["id"]
         execution_thread_id = queued["thread_id"]
@@ -615,9 +749,16 @@ class ScheduledTaskService:
             lease_seconds=self._lease_seconds,
             global_max_concurrent_runs=self._max_concurrent_runs,
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+            created_after=created_after,
         )
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
+
+        # Every claim increments attempt_count. Late bookkeeping from this
+        # attempt must carry that generation: after lease expiry the same
+        # process can reclaim the occurrence, so the lease owner alone cannot
+        # distinguish the two attempts.
+        claim_attempt = int(claimed["attempt_count"]) if claimed.get("attempt_count") is not None else None
 
         # Track whether _launch_run has produced a live run. A bookkeeping
         # failure after launch must retain the non-terminal slot so a later
@@ -656,13 +797,13 @@ class ScheduledTaskService:
             launch_succeeded = True
             launched_run_id = result["run_id"]
             launched_thread_id = result["thread_id"]
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
+            next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+            task_status, last_error = self._unschedulable_outcome(
+                task,
+                status=self._task_status_for_launch(task, trigger=trigger, next_at=next_at),
+                last_error=None,
+                schedule_error=schedule_error,
             )
-            task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
             await self._record_launched_run(
                 task_run_id=task_run_id,
                 task_id=task["id"],
@@ -676,7 +817,7 @@ class ScheduledTaskService:
                 last_run_at=now,
                 last_run_id=launched_run_id,
                 last_thread_id=launched_thread_id,
-                last_error=None,
+                last_error=last_error,
                 increment_run_count=True,
                 task_run_id=task_run_id,
                 # Same race as the run-row write above: a fast-failing run's
@@ -692,19 +833,25 @@ class ScheduledTaskService:
             }
         except Exception as exc:
             if not launch_succeeded and self._is_overlap_conflict(exc):
-                await self._task_run_repo.requeue_claimed_run(
+                requeue_kwargs = {
+                    "lease_owner": self._lease_owner,
+                    "error": str(exc),
+                }
+                # Omit the generation keyword entirely for legacy/custom repos:
+                # passing None would break implementations that predate the
+                # optional fence and do not accept the argument.
+                if claim_attempt is not None:
+                    requeue_kwargs["expected_attempt_count"] = claim_attempt
+                requeued = await self._task_run_repo.requeue_claimed_run(
                     task_run_id,
-                    lease_owner=self._lease_owner,
-                    error=str(exc),
+                    **requeue_kwargs,
                 )
+                if not requeued:
+                    logger.warning(
+                        "Scheduled task-run %s lost its launch claim before requeue bookkeeping; leaving recovery-owned state unchanged",
+                        task_run_id,
+                    )
                 return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
-
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
 
             if launch_succeeded:
                 # _launch_run succeeded, so a run is live even though
@@ -716,7 +863,13 @@ class ScheduledTaskService:
                 # if the DB is still down the row stays "queued" -- still
                 # active, still holding the slot -- so we log and still report
                 # the run as launched so callers know a run is in flight.
-                task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
+                next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+                task_status, last_error = self._unschedulable_outcome(
+                    task,
+                    status=self._task_status_for_launch(task, trigger=trigger, next_at=next_at),
+                    last_error=None,
+                    schedule_error=schedule_error,
+                )
                 try:
                     await self._record_launched_run(
                         task_run_id=task_run_id,
@@ -746,7 +899,7 @@ class ScheduledTaskService:
                         # on a task whose run is actively running; the real
                         # terminal outcome is written by handle_run_completion.
                         # The transient itself is logged above.
-                        last_error=None,
+                        last_error=last_error,
                         increment_run_count=True,
                         task_run_id=task_run_id,
                         protect_terminal=True,
@@ -767,12 +920,17 @@ class ScheduledTaskService:
 
             # _launch_run itself failed (or a step before it did): no live run
             # was created, so it is safe to release the active slot.
+            fail_kwargs = {
+                "task_id": task["id"],
+                "lease_owner": self._lease_owner,
+                "error": str(exc),
+                "now": now,
+            }
+            if claim_attempt is not None:
+                fail_kwargs["expected_attempt_count"] = claim_attempt
             finalized = await self._task_run_repo.fail_launching_run(
                 task_run_id,
-                task_id=task["id"],
-                lease_owner=self._lease_owner,
-                error=str(exc),
-                now=now,
+                **fail_kwargs,
             )
             if not finalized:
                 logger.warning(
@@ -797,8 +955,10 @@ class ScheduledTaskService:
         one the run row shows once the launch is accounted.
         """
         trigger = queued["trigger"]
-        scheduled_for = _as_utc(queued.get("scheduled_for")) if trigger == "scheduled" else None
-        scheduled_for = scheduled_for or now
+        # Use the occurrence's admitted time for every trigger. A manual trial
+        # retried by the queue drain must reproduce the first request's origin;
+        # falling back to the retry clock changes start_run's idempotent input.
+        scheduled_for = _as_utc(queued.get("scheduled_for")) or now
         run_number = None
         number_lookup = getattr(self._task_run_repo, "run_number", None)
         if trigger == "scheduled" and callable(number_lookup):
@@ -907,31 +1067,52 @@ class ScheduledTaskService:
         queued_rows = await self._task_run_repo.list_queued_runs(
             limit=max(16, self._max_concurrent_runs * 4),
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+            created_after=now - timedelta(seconds=self._queue_timeout_seconds),
         )
         for queued in queued_rows:
-            await self._task_repo.release_queued_admission_lease(queued["task_id"])
-            task = await self._task_repo.get_internal(queued["task_id"])
-            if task is None:
-                await self._task_run_repo.update_status(
-                    queued["id"],
-                    status="interrupted",
-                    error=RUN_ERROR_DELETED_WHILE_QUEUED,
-                    finished_at=now,
+            try:
+                await self._drain_queued_run(queued, now=now)
+            except Exception:
+                # A storage failure on one occurrence must not leave every
+                # later queued row and this poll's due tasks undispatched. The
+                # failed row keeps its queue/lease state for the next recovery
+                # pass, and queue_timeout still bounds how long it can wait.
+                logger.exception(
+                    "Failed to drain scheduled occurrence %s; continuing with the remaining queue",
+                    queued.get("id"),
                 )
-                continue
-            # Pausing suppresses automatic occurrences, but a manual trigger is
-            # an explicit request and has always been allowed to run without
-            # resuming the schedule. A later pause still cancels an already
-            # queued manual row atomically in pause_with_queue_cancellation().
-            if task.get("status") == "paused" and queued["trigger"] != "manual":
-                await self._task_run_repo.update_status(
-                    queued["id"],
-                    status="interrupted",
-                    error=RUN_ERROR_PAUSED_WHILE_QUEUED,
-                    finished_at=now,
-                )
-                continue
-            await self._attempt_queued_run(task, queued, now=now)
+
+    async def _drain_queued_run(self, queued: dict[str, Any], *, now: datetime) -> None:
+        await self._task_repo.release_queued_admission_lease(queued["task_id"])
+        task = await self._task_repo.get_internal(queued["task_id"])
+        if task is None:
+            await self._task_run_repo.update_status(
+                queued["id"],
+                status="interrupted",
+                error=RUN_ERROR_DELETED_WHILE_QUEUED,
+                finished_at=now,
+            )
+            return
+        # Pausing suppresses automatic occurrences, but a manual trigger is
+        # an explicit request and has always been allowed to run without
+        # resuming the schedule. A later pause still cancels an already
+        # queued manual row atomically in pause_with_queue_cancellation().
+        if task.get("status") == "paused" and queued["trigger"] != "manual":
+            await self._task_run_repo.update_status(
+                queued["id"],
+                status="interrupted",
+                error=RUN_ERROR_PAUSED_WHILE_QUEUED,
+                finished_at=now,
+            )
+            return
+        # The timeout sweep may have failed for this row. Enforce the same
+        # cutoff in the atomic claim so cleanup retries cannot start it.
+        await self._attempt_queued_run(
+            task,
+            queued,
+            now=now,
+            created_after=now - timedelta(seconds=self._queue_timeout_seconds),
+        )
 
     async def _expire_waiting_runs(self, *, now: datetime) -> None:
         await self._task_run_repo.expire_queued_runs(
@@ -941,10 +1122,15 @@ class ScheduledTaskService:
         )
 
     async def handle_run_completion(self, record: RunRecord) -> None:
+        if getattr(record, "terminal_status_persisted", True) is False:
+            return
         metadata = record.metadata or {}
         task_id = metadata.get("scheduled_task_id")
         task_run_id = metadata.get("scheduled_task_run_id")
         user_id = record.user_id
+        if not isinstance(task_id, str) and not isinstance(task_run_id, str):
+            await self._handle_ordinary_run_completion(record)
+            return
         if not isinstance(task_id, str) or not isinstance(task_run_id, str) or not user_id:
             return
 
@@ -987,6 +1173,182 @@ class ScheduledTaskService:
             finished_at=datetime.now(UTC),
             **completion_kwargs,
         )
+
+    async def _handle_ordinary_run_completion(self, record: RunRecord) -> None:
+        if self._notification_repo is None or self._connection_repo is None:
+            return
+        if getattr(record, "terminal_status_persisted", True) is False:
+            return
+        user_id = record.user_id
+        if not isinstance(user_id, str) or not user_id.strip():
+            return
+        operation_kind = str(getattr(record, "operation_kind", "run"))
+        if operation_kind != "run":
+            return
+        metadata = record.metadata if isinstance(record.metadata, Mapping) else {}
+        if origin_kind_of(metadata) in {"im_channel", "github", "schedule"} or metadata.get("channel_source") or metadata.get("im_channel"):
+            return
+        abort_event = getattr(record, "abort_event", None)
+        if (abort_event is not None and abort_event.is_set()) or record.status.value == "interrupted":
+            return
+
+        human_input = getattr(record, "human_input_request", None)
+        if human_input is None and self._resolve_human_input_request is not None:
+            try:
+                resolved = self._resolve_human_input_request(record)
+                if inspect.isawaitable(resolved):
+                    resolved = await resolved
+                human_input = resolved
+            except Exception:
+                logger.warning("Could not inspect human input request for run %s", record.run_id, exc_info=True)
+                human_input = None
+        if not isinstance(human_input, Mapping) or human_input.get("kind") not in {None, "human_input_request"}:
+            human_input = None
+
+        if record.status.value == "success" and human_input is not None:
+            event = "human_input_requested"
+            source_kind = "human_input_request"
+            request_id = str(human_input.get("request_id") or human_input.get("tool_call_id") or record.run_id).strip() or record.run_id
+            source_key = f"{record.thread_id}:{request_id}"[:128]
+            question = str(human_input.get("question") or "").strip() or None
+        elif record.status.value == "success":
+            verdict = getattr(record, "goal_verdict", None)
+            if isinstance(verdict, Mapping) and verdict.get("satisfied") is not True:
+                return
+            event = "run_completed"
+            source_kind = "run"
+            source_key = record.run_id
+            request_id = None
+            question = None
+        elif record.status.value in {"error", "timeout"}:
+            event = "run_failed"
+            source_kind = "run"
+            source_key = record.run_id
+            request_id = None
+            question = None
+        else:
+            return
+
+        session_factory = getattr(self._notification_repo, "session_factory", None)
+        if session_factory is None:
+            return
+        group_connection_id = metadata.get("notification_group_connection_id")
+        if not isinstance(group_connection_id, str) or not group_connection_id.strip():
+            group_connection_id = None
+        else:
+            group_connection_id = group_connection_id.strip()
+
+        async with session_factory() as session:
+            # Cheap read-only pre-gate: runtime notices are opt-in (default False),
+            # so runs for users who have not enabled this event exit without
+            # scanning bindings, querying thread metadata, or taking write locks.
+            unlocked_preferences = await ImNotificationPreferencesRepository.get_in_session(
+                session,
+                user_id,
+                lock_owner=False,
+                include_events=True,
+            )
+            if not unlocked_preferences.get(event, False):
+                return
+            persisted_run = await session.get(RunRow, record.run_id)
+            if persisted_run is not None and persisted_run.status != record.status.value:
+                return
+            candidate_bindings = [
+                (binding.provider, binding.external_account_id)
+                for binding in await session.scalars(
+                    select(ChannelConnectionRow).where(
+                        ChannelConnectionRow.owner_user_id == user_id,
+                        ChannelConnectionRow.status == "connected",
+                    )
+                )
+                if binding.provider
+                and binding.external_account_id
+                and supports_proactive_notifications(binding.provider)
+                and (binding.provider != "qq" or ((binding.metadata_json or {}).get("chat_type") == "c2c" and (binding.workspace_id or "").endswith(":c2c")))
+            ]
+            candidate_group_provider: str | None = None
+            if group_connection_id:
+                group_row = await session.scalar(select(ChannelConnectionRow).where(ChannelConnectionRow.id == group_connection_id))
+                if (
+                    group_row is not None
+                    and group_row.owner_user_id == user_id
+                    and isinstance(group_row.provider, str)
+                    and supports_proactive_group_notifications(group_row.provider)
+                    and is_notification_group(
+                        provider=group_row.provider,
+                        status=group_row.status,
+                        workspace_id=group_row.workspace_id,
+                        metadata=group_row.metadata_json,
+                    )
+                ):
+                    candidate_group_provider = group_row.provider
+            if not candidate_bindings and candidate_group_provider is None:
+                return
+
+            thread_title = None
+            try:
+                thread_title = await session.scalar(
+                    select(ThreadMetaRow.display_name).where(
+                        ThreadMetaRow.thread_id == record.thread_id,
+                        ThreadMetaRow.user_id == user_id,
+                    )
+                )
+            except Exception:
+                thread_title = None
+            if not isinstance(thread_title, str) or not thread_title.strip():
+                raw_title = metadata.get("title") or getattr(record, "first_human_message", None)
+                thread_title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
+            else:
+                thread_title = thread_title.strip()
+            locale = await self._owner_locale(session, user_id)
+
+        run_status = "success" if record.status.value == "success" else "failed"
+        payload: dict[str, Any] = {
+            "payload_version": NOTIFICATION_PAYLOAD_VERSION,
+            "source_kind": source_kind,
+            "thread_id": record.thread_id,
+            "task_title": thread_title,
+            "locale": locale,
+            "run_status": run_status,
+        }
+        if event == "human_input_requested":
+            payload["request_id"] = request_id
+            if question:
+                payload["question"] = question
+        elif event == "run_completed":
+            verdict = getattr(record, "goal_verdict", None)
+            if isinstance(verdict, Mapping) and verdict.get("satisfied") is True:
+                payload["relied_on_assumption"] = verdict.get("relied_on_assumption") is True
+            last_ai = getattr(record, "last_ai_message", None)
+            if isinstance(last_ai, str) and last_ai.strip():
+                payload["result_summary"] = last_ai
+
+        async with session_factory() as session, session.begin():
+            preferences = await ImNotificationPreferencesRepository.get_in_session(
+                session,
+                user_id,
+                lock_owner=True,
+                include_events=True,
+            )
+            if not preferences.get(event, False):
+                return
+            recipients = [(provider, target, payload) for provider, target in candidate_bindings if preferences.get(provider, False)]
+            if group_connection_id and candidate_group_provider and preferences.get(candidate_group_provider, False):
+                recipients.append((candidate_group_provider, group_connection_id, {**payload, "target_type": "group"}))
+            for provider, target, notice_payload in recipients:
+                await self._notification_repo.enqueue_in_session(
+                    session,
+                    source_kind=source_kind,
+                    source_key=source_key,
+                    task_id=None,
+                    task_run_id=None,
+                    run_id=record.run_id,
+                    event=event,
+                    provider=provider,
+                    target=target,
+                    owner_user_id=user_id,
+                    payload=notice_payload,
+                )
 
     async def start(self) -> None:
         if self._task is not None:

@@ -2254,7 +2254,7 @@ def test_absent_teardown_preserves_pending_port_on_unknown_network_cleanup_error
     assert backend._pending_cleanup_ports == {"old-generation": ("existing", 18080)}
 
 
-@pytest.mark.parametrize("error_style", ["legacy", "lowercase-scaffolding", "uppercase-scaffolding"])
+@pytest.mark.parametrize("error_style", ["legacy", "lowercase-scaffolding", "uppercase-scaffolding", "cli-exit-status"])
 @pytest.mark.parametrize("sandbox_id", ["existing", "Mixed-Case"])
 def test_absent_teardown_accepts_only_exact_missing_networks(monkeypatch, error_style, sandbox_id):
     backend = _restricted_backend()
@@ -2269,6 +2269,7 @@ def test_absent_teardown_accepts_only_exact_missing_networks(monkeypatch, error_
         "legacy": ("Error: No such container: {}", "Error response from daemon: network {} not found"),
         "lowercase-scaffolding": ("error: no such object: {}", "error: network {} not found"),
         "uppercase-scaffolding": ("ERROR: NO SUCH OBJECT: {}", "ERROR: NETWORK {} NOT FOUND"),
+        "cli-exit-status": ("Error: No such container: {}", "Error response from daemon: network {} not found\nexit status 1\n"),
     }
     container_error, network_error = error_formats[error_style]
 
@@ -2296,6 +2297,12 @@ def test_absent_teardown_accepts_only_exact_missing_networks(monkeypatch, error_
         ("error: no such network: sandbox-net", True),
         ("No such network: sandbox-net", True),
         ("network sandbox-net not found", True),
+        ("Error response from daemon: network sandbox-net not found\nexit status 1\n", True),
+        ("Error response from daemon: network sandbox-net-extra not found\nexit status 1", False),
+        ("Error response from daemon: network Sandbox-Net not found\nexit status 1", False),
+        ("Error response from daemon: network sandbox-net not found\nexit status 2", False),
+        ("Error response from daemon: network sandbox-net not found\npermission denied\nexit status 1", False),
+        ("Error response from daemon: network sandbox-net not found\nexit status 1\nunknown failure", False),
         ("error: network sandbox-net-extra not found", False),
         ("error: network Sandbox-Net not found", False),
         ("error: no such network: sandbox-other", False),

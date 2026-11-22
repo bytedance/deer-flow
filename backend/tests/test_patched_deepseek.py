@@ -9,8 +9,12 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
+import httpx
+import pytest
+import pytest_asyncio
 from langchain_core.messages import AIMessage, HumanMessage
 
 
@@ -22,6 +26,117 @@ def _make_model(**kwargs):
         api_key="test-key",
         **kwargs,
     )
+
+
+@pytest_asyncio.fixture
+async def cache_usage_model():
+    """Exercise the real factory and SDK; supply only the provider HTTP response."""
+    from deerflow.config.app_config import AppConfig
+    from deerflow.models.factory import create_chat_model
+
+    clients = []
+    async_clients = []
+
+    def build(usage, *, use="deerflow.models.patched_deepseek:PatchedChatDeepSeek"):
+        requests = []
+
+        def respond(request):
+            payload = json.loads(request.content)
+            requests.append(payload)
+            common = {"id": "cache-test", "created": 1, "model": "deepseek-chat"}
+            if not payload.get("stream"):
+                return httpx.Response(200, json={**common, "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}], "usage": usage})
+            chunks = [
+                {**common, "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "done"}, "finish_reason": None}]},
+                {**common, "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                {**common, "object": "chat.completion.chunk", "choices": [], "usage": usage},
+            ]
+            body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        async_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        clients.append(client)
+        async_clients.append(async_client)
+        config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "models": [{"name": "deepseek", "use": use, "model": "deepseek-chat", "api_key": "offline-test-key"}]})
+        return create_chat_model("deepseek", app_config=config, attach_tracing=False, http_client=client, http_async_client=async_client), requests
+
+    try:
+        yield build
+    finally:
+        for client in clients:
+            client.close()
+        for client in async_clients:
+            await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["invoke", "ainvoke", "stream", "astream"])
+@pytest.mark.parametrize("use", ["langchain_deepseek:ChatDeepSeek", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"])
+async def test_native_cache_usage_survives_sdk_and_agent_accounting(cache_usage_model, mode, use):
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.journal import RunJournal
+    from deerflow.subagents.token_collector import SubagentTokenCollector
+
+    model, requests = cache_usage_model({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 20}, use=use)
+    journal = RunJournal("lead-run", "thread", MemoryRunEventStore(), flush_threshold=100)
+    collector = SubagentTokenCollector("subagent:research")
+    config = {"callbacks": [journal, collector]}
+    if mode == "invoke":
+        message = model.invoke("Summarize the document", config=config)
+    elif mode == "ainvoke":
+        message = await model.ainvoke("Summarize the document", config=config)
+    else:
+        chunks = list(model.stream("Summarize the document", config=config)) if mode == "stream" else [chunk async for chunk in model.astream("Summarize the document", config=config)]
+        message = sum(chunks[1:], chunks[0])
+        assert requests[0]["stream_options"]["include_usage"] is True
+    assert len(requests) == 1
+    assert message.content == "done"
+    assert message.usage_metadata == {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "input_token_details": {"cache_read": 80}, "output_token_details": {}}
+    expected = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cache_read_tokens": 80}
+    assert journal.get_completion_data()["token_usage_by_model"] == {"deepseek-chat": expected}
+    parent = RunJournal("parent-run", "thread", MemoryRunEventStore(), flush_threshold=100)
+    records = collector.snapshot_records()
+    assert len(records) == 1 and records[0]["cache_read_tokens"] == 80
+    parent.record_external_llm_usage_records(records)
+    parent.record_external_llm_usage_records(records)
+    completion = parent.get_completion_data()
+    assert completion["token_usage_by_model"] == {"deepseek-chat": expected}
+    assert completion["total_tokens"] == 120
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    "extra,expected",
+    [
+        ({"prompt_cache_hit_tokens": 80, "prompt_tokens_details": {"cached_tokens": 0}}, 0),
+        ({"prompt_cache_hit_tokens": 80, "prompt_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 10}}, 60),
+        ({"prompt_cache_hit_tokens": 0}, 0),
+        ({"prompt_cache_hit_tokens": 80, "prompt_tokens_details": {"cached_tokens": None}}, 80),
+        ({}, None),
+        ({"prompt_cache_hit_tokens": -1}, None),
+        ({"prompt_cache_hit_tokens": 101}, None),
+        ({"prompt_cache_hit_tokens": True}, None),
+        ({"prompt_cache_hit_tokens": "80"}, None),
+    ],
+)
+async def test_cache_usage_preserves_standard_fields_and_ignores_invalid_hints(cache_usage_model, streaming, extra, expected):
+    raw_usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, **extra}
+    original = json.dumps(raw_usage, sort_keys=True)
+    model, requests = cache_usage_model(raw_usage)
+    if streaming:
+        chunks = [chunk async for chunk in model.astream("Continue")]
+        message = sum(chunks[1:], chunks[0])
+    else:
+        message = await model.ainvoke("Continue")
+    assert len(requests) == 1 and message.content == "done"
+    usage = message.usage_metadata
+    assert usage["input_tokens"] == 100 and usage["output_tokens"] == 20 and usage["total_tokens"] == 120
+    assert usage.get("input_token_details", {}).get("cache_read") == expected
+    if "cache_write_tokens" in extra.get("prompt_tokens_details", {}):
+        assert usage["input_token_details"]["cache_creation"] == 10
+    assert json.dumps(raw_usage, sort_keys=True) == original
 
 
 # ---------------------------------------------------------------------------
@@ -339,3 +454,79 @@ def test_legacy_fallback_assistant_is_removed_before_deepseek_replay():
 
     assert payload["messages"] == base_payload["messages"]
     assert not any(message.get("role") == "assistant" for message in payload["messages"])
+
+
+# ---------------------------------------------------------------------------
+# cache_write_tokens preservation (#7426)
+# ---------------------------------------------------------------------------
+
+
+def _chat_completion_response():
+    from openai.types import CompletionUsage
+    from openai.types.chat import ChatCompletion, ChatCompletionMessage
+    from openai.types.chat.chat_completion import Choice
+
+    return ChatCompletion(
+        id="chatcmpl-cache-write",
+        choices=[
+            Choice(
+                finish_reason="stop",
+                index=0,
+                message=ChatCompletionMessage(role="assistant", content="ok"),
+            )
+        ],
+        created=1761200000,
+        model="kimi-k3.1-pro",
+        object="chat.completion",
+        usage=CompletionUsage(
+            prompt_tokens=373,
+            completion_tokens=112,
+            total_tokens=485,
+            prompt_tokens_details={"cached_tokens": 100, "cache_write_tokens": 256},
+            completion_tokens_details={"reasoning_tokens": 90},
+        ),
+    )
+
+
+def test_cache_write_tokens_survive_the_conversion():
+    """Moonshot reports ``prompt_tokens_details.cache_write_tokens``; the locked
+    langchain-openai 1.2.1 conversion drops it, so the patch layer must restore
+    it as ``input_token_details["cache_creation"]`` (#7426)."""
+    model = _make_model()
+    result = model._create_chat_result(_chat_completion_response())
+
+    usage = result.generations[0].message.usage_metadata
+    assert usage["input_tokens"] == 373
+    assert usage["output_tokens"] == 112
+    assert usage["input_token_details"]["cache_read"] == 100
+    assert usage["input_token_details"]["cache_creation"] == 256
+    assert usage["output_token_details"]["reasoning"] == 90
+
+
+def test_cache_write_tokens_survive_streaming_conversion():
+    """Streamed runs (web UI `messages-tuple`) go through
+    `_convert_chunk_to_generation_chunk`, which must also restore
+    `cache_creation` (#7426)."""
+    from langchain_core.messages import ChatMessageChunk
+
+    model = _make_model()
+    chunk = {
+        "id": "chatcmpl-cache-write",
+        "object": "chat.completion.chunk",
+        "created": 1761200000,
+        "model": "kimi-k3.1-pro",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 373,
+            "completion_tokens": 112,
+            "total_tokens": 485,
+            "prompt_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 256},
+            "completion_tokens_details": {"reasoning_tokens": 90},
+        },
+    }
+    generation = model._convert_chunk_to_generation_chunk(chunk, ChatMessageChunk, None)
+
+    usage = generation.message.usage_metadata
+    assert usage["input_tokens"] == 373
+    assert usage["input_token_details"]["cache_read"] == 100
+    assert usage["input_token_details"]["cache_creation"] == 256

@@ -81,16 +81,36 @@ def execution_stdout(execution: Any) -> str:
 
 def format_execution(execution: Any) -> str:
     """Combine stdout, result text, and stderr using DeerFlow's string contract."""
-    output = execution_stdout(execution)
-    result = _join_event_text(item.text for item in getattr(execution, "result", []) if getattr(item, "text", None) is not None)
-    output = _append_output(output, result)
-    stderr = _join_event_text(message.text for message in getattr(getattr(execution, "logs", None), "stderr", []))
-    output = _append_output(output, stderr)
+    output = execution_body(execution)
     error = getattr(execution, "error", None)
     if error is not None:
         detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}"
         output = _append_output(output, detail)
     return output
+
+
+def execution_body(execution: Any) -> str:
+    """Combine the command's own stdout, result text and stderr.
+
+    Excludes the error detail so a caller that reports the failure itself (the
+    timeout branch) can present the partial output without a second, rawer copy
+    of the same failure underneath it.
+    """
+    output = execution_stdout(execution)
+    result = _join_event_text(item.text for item in getattr(execution, "result", []) if getattr(item, "text", None) is not None)
+    output = _append_output(output, result)
+    stderr = _join_event_text(message.text for message in getattr(getattr(execution, "logs", None), "stderr", []))
+    return _append_output(output, stderr)
+
+
+def _is_timeout_execution(execution: Any, exit_code: int | None) -> bool:
+    """Recognize an explicit command deadline, not an ambiguous signal kill.
+
+    The SDK leaves exit_code unset when the error value is nonnumeric. A
+    bare -1 only indicates signal termination and cannot prove a timeout.
+    """
+    error = getattr(execution, "error", None)
+    return exit_code is None and getattr(error, "name", None) == "CommandExecError" and getattr(error, "value", None) == "context deadline exceeded"
 
 
 class OpenSandboxSandbox(Sandbox):
@@ -99,6 +119,7 @@ class OpenSandboxSandbox(Sandbox):
     #: Every call is a fresh ``run_command`` execution — no shell state
     #: survives into the next command.
     persistent_shell_sessions = False
+    artifact_root = "/mnt/user-data"
 
     def __init__(
         self,
@@ -206,7 +227,12 @@ class OpenSandboxSandbox(Sandbox):
         self._note_failure(failure, api_not_found_is_terminal=True)
         raise failure
 
-    def _file_op(self, operation):
+    def _file_op(self, operation, *, missing_path: str | None = None):
+        """Run a file API call, renewing the sandbox first when it has a server-side timeout.
+
+        With ``missing_path``, a not-found answer from the operation itself raises FileNotFoundError (LocalSandbox's
+        contract). A failed renewal keeps its own error even when it is a 404: the sandbox is gone, not the file.
+        """
         with self._operation_lock:
             with self._state_lock:
                 if self._closed:
@@ -224,6 +250,8 @@ class OpenSandboxSandbox(Sandbox):
                     failure = exc
                     renewal_failed = False
         self._note_failure(failure, api_not_found_is_terminal=renewal_failed)
+        if missing_path is not None and not renewal_failed and _is_not_found(failure):
+            raise FileNotFoundError(f"File not found: {missing_path}") from failure
         raise failure
 
     @staticmethod
@@ -254,8 +282,15 @@ class OpenSandboxSandbox(Sandbox):
         except Exception as exc:
             logger.error("Failed to execute command in OpenSandbox %s: %s", self.id, exc)
             return f"Error: {exc}"
-        output = format_execution(execution)
         exit_code = getattr(execution, "exit_code", None)
+        # Command deadlines arrive as execution error events, not builtin
+        # TimeoutError. Normalize only the explicit deadline result; transport
+        # errors, launch failures and signal-only exits keep their own details.
+        if _is_timeout_execution(execution, exit_code):
+            body = execution_body(execution)
+            message = "Error: command timed out\nExit Code: 124"
+            return f"{body}\n{message}" if body else message
+        output = format_execution(execution)
         if exit_code is None:
             detail = output or "no completion or error event"
             return f"Error: OpenSandbox command completed without an exit code: {detail}"
@@ -268,7 +303,13 @@ class OpenSandboxSandbox(Sandbox):
     def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
         resolved = self._resolve_path(path)
         try:
-            content = self._file_op(lambda files: files.read_file(resolved))
+            content = self._file_op(lambda files: files.read_file(resolved), missing_path=path)
+        except FileNotFoundError as exc:
+            # Same contract as LocalSandbox: callers tell "missing" from "unreadable" by the exception type
+            # (read_file reports not_found, the read-before-write gate lets write_file create the file).
+            # A missing file is an expected answer, not an error to log.
+            logger.debug("OpenSandbox file %s not found: %s", resolved, exc.__cause__)
+            raise
         except Exception as exc:
             logger.error("Failed to read OpenSandbox file %s: %s", resolved, exc)
             return f"Error: {exc}"
@@ -288,10 +329,8 @@ class OpenSandboxSandbox(Sandbox):
             return
         with self._append_lock:
             try:
-                previous = self._file_op(lambda files: files.read_bytes(resolved))
-            except Exception as exc:
-                if not _is_not_found(exc):
-                    raise
+                previous = self._file_op(lambda files: files.read_bytes(resolved), missing_path=path)
+            except FileNotFoundError:
                 previous = b""
             data = previous + content.encode("utf-8")
             self._file_op(lambda files: files.write_file(resolved, data, mode=644))
@@ -299,6 +338,12 @@ class OpenSandboxSandbox(Sandbox):
     def update_file(self, path: str, content: bytes) -> None:
         resolved = self._resolve_path(path)
         self._file_op(lambda files: files.write_file(resolved, content, mode=644))
+
+    def _upload_skill_file(self, path: str, content: bytes, *, executable: bool) -> None:
+        resolved = self._resolve_path(path)
+        if resolved != path:
+            raise ValueError("OpenSandbox skill path contains a non-portable separator")
+        self._file_op(lambda files: files.write_file(resolved, content, mode=755 if executable else 644))
 
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         return self._download_file_bounded(path, max_bytes=download_limit(max_bytes, _MAX_DOWNLOAD_SIZE))

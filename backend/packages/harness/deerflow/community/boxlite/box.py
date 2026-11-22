@@ -64,6 +64,7 @@ class BoxliteBox(Sandbox):
     #: Every call is a fresh ``sh -lc`` exec in the box — no shell state
     #: survives into the next command.
     persistent_shell_sessions = False
+    artifact_root = "/mnt/user-data"
 
     TERMINAL_ERROR_MARKERS = (
         "vsock",
@@ -190,6 +191,8 @@ class BoxliteBox(Sandbox):
         command timeout inside the VM, and the event-loop bridge receives the
         same value so ``run_coroutine_threadsafe(...).result(timeout)`` cannot
         block the caller forever if the SDK future itself never resolves.
+        The bridge deadline produces exit code 124. SDK wait failures returned
+        as ``ExecResult(exit_code=-1)`` retain -1 if they reach us first.
         """
         _validate_extra_env(env)  # POSIX env-var key rule; raises ValueError on a bad key
         if self.is_closed:
@@ -197,6 +200,12 @@ class BoxliteBox(Sandbox):
         merged_env = {**self._default_env, **(env or {})} or None
         try:
             result = self._exec("sh", "-lc", command, env=merged_env, timeout=timeout)
+        except TimeoutError:
+            # The loop bridge raises builtin TimeoutError on its deadline.
+            # SimpleBox.exec converts SDK wait failures to exit_code=-1;
+            # those returned results use the nonzero-exit branch below.
+            # Match Local/AIO/Tenki's marker for the bridge timeout outcome.
+            return "Error: command timed out\nExit Code: 124"
         except Exception as e:
             logger.error("Failed to execute command in BoxLite box %s: %s", self.id, e)
             return f"Error: {e}"

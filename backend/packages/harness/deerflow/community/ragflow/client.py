@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import Any
 
 import httpx
@@ -77,7 +79,7 @@ class RAGFlowClient:
             client_kwargs["transport"] = self._transport
 
         try:
-            async with httpx.AsyncClient(**client_kwargs) as client:
+            async with await asyncio.to_thread(httpx.AsyncClient, **client_kwargs) as client:
                 response = await client.request(method, path, params=params, json=json)
         except httpx.TimeoutException:
             raise RAGFlowConnectionError(f"RAGFlow request timed out after {self.timeout:g} seconds.") from None
@@ -163,6 +165,11 @@ class RAGFlowClient:
         params: list[tuple[str, str]],
     ) -> dict[str, Any]:
         """Proxy one document-list request for a dataset."""
+        # Generic knowledge IDs are opaque. RAGFlow IDs must remain a single
+        # literal segment: reject traversal, URL delimiters and encoded paths
+        # here so both catalog browsing and selected-document validation agree.
+        if not isinstance(dataset_id, str) or re.fullmatch(r"[A-Za-z0-9_-]+", dataset_id) is None:
+            raise ValueError("Invalid RAGFlow dataset ID.")
         return await self._request("GET", f"/datasets/{dataset_id}/documents", params=params)
 
     async def retrieve(

@@ -1,5 +1,8 @@
 {{- if .Values.redis.enabled -}}
 {{- $password := .Values.redis.auth.password -}}
+{{- /* A user-managed Secret wins over `redis.auth.password` (see values.yaml),
+       and whether it carries `redis-password` is only knowable at runtime. */ -}}
+{{- $userSecret := include "deer-flow.redisUserSecret" . -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -43,7 +46,19 @@ spec:
           ports:
             - name: tcp-redis
               containerPort: 6379
-          {{- if $password }}
+          {{- if $userSecret }}
+          # AUTH password is read from the operator-managed Secret at runtime so
+          # it never appears in the pod spec. The key is optional there: a
+          # Secret carrying only `redis-url` keeps the bundled server
+          # unauthenticated, which is what the chart's Secret contract allows.
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.redisUrlSecret" . }}
+                  key: redis-password
+                  optional: true
+          {{- else if $password }}
           # AUTH password is read at runtime so it never appears in the pod spec
           # args. `redis-server --requirepass` + `redis-cli -a` both read it
           # from this env.
@@ -56,13 +71,13 @@ spec:
           {{- end }}
           command: ["sh", "-c"]
           args:
-            - exec redis-server --appendonly yes{{ if $password }} --requirepass "$REDIS_PASSWORD"{{ end }}
+            - {{ include "deer-flow.redisServerArgs" . | quote }}
           readinessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - {{ if $password }}redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping{{ else }}redis-cli ping{{ end }}
+                - {{ include "deer-flow.redisPingCommand" . | quote }}
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
@@ -70,7 +85,7 @@ spec:
               command:
                 - sh
                 - -c
-                - {{ if $password }}redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping{{ else }}redis-cli ping{{ end }}
+                - {{ include "deer-flow.redisPingCommand" . | quote }}
             initialDelaySeconds: 30
             periodSeconds: 20
           {{- with .Values.redis.primary.resources }}

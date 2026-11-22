@@ -142,6 +142,8 @@ def test_compose_env_files_are_optional(variant: str):
     """
     compose = yaml.safe_load(COMPOSE_PATHS[variant].read_text(encoding="utf-8"))
     for service_name, path in EXPECTED_ENV_FILES.items():
+        if variant == "prod" and service_name in {"gateway", "provisioner"}:
+            path = "${DEER_FLOW_COMPOSE_ENV_FILE:-../.env}"
         entries = compose["services"][service_name]["env_file"]
         assert entries == [{"path": path, "required": False}], f"{variant} {service_name} env_file must be optional; got: {entries!r}"
 
@@ -167,7 +169,11 @@ def _render(tmp_path: Path, variant: str) -> subprocess.CompletedProcess[str]:
         DEER_FLOW_INTERNAL_AUTH_TOKEN="test-token",
     )
     return subprocess.run(
-        [DOCKER, "compose", "-p", "deer-flow-env-file-test", "-f", str(docker_dir / COMPOSE_PATHS[variant].name), "config", "--format", "json"],
+        # Enable every profile so profile-gated services (the dev provisioner)
+        # still render: `config` omits them otherwise, and these assertions are
+        # about a present .env reaching each service, not about what `up`
+        # starts by default.
+        [DOCKER, "compose", "--profile", "*", "-p", "deer-flow-env-file-test", "-f", str(docker_dir / COMPOSE_PATHS[variant].name), "config", "--format", "json"],
         env=env,
         capture_output=True,
         text=True,

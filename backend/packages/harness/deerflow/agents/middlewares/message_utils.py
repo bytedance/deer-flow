@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.utils.messages import UNTRUSTED_INPUT_KEY
@@ -23,6 +23,31 @@ def is_genuine_user_message(message: object) -> bool:
     if message.additional_kwargs.get("hide_from_ui") and read_human_input_response(message.additional_kwargs) is None:
         return False
     return True
+
+
+def latest_genuine_user_message(messages: list[object]) -> HumanMessage | None:
+    """Return the latest user-authored message that defines the active turn."""
+    return next((message for message in reversed(messages) if is_genuine_user_message(message)), None)
+
+
+def genuine_user_turn_id(messages: list[object]) -> str | None:
+    """Return the non-empty message ID shared by turn-scoped middlewares."""
+    target = latest_genuine_user_message(messages)
+    return target.id if target is not None and isinstance(target.id, str) and target.id else None
+
+
+def has_ai_response_after_latest_user_message(messages: list[object]) -> bool:
+    """Recognize legacy in-flight turns without carrying names into a new turn.
+
+    An AI response after the latest genuine user message lets routing and the
+    deferred filter migrate pre-turn-scope checkpoints consistently. A newly
+    appended user message has no later AI response and expires legacy names.
+    """
+    target = latest_genuine_user_message(messages)
+    if target is None:
+        return False
+    target_index = next(index for index in range(len(messages) - 1, -1, -1) if messages[index] is target)
+    return any(isinstance(message, AIMessage) for message in messages[target_index + 1 :])
 
 
 def requires_input_sanitization(message: object) -> bool:

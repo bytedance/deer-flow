@@ -35,7 +35,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import threading
+import weakref
 from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
@@ -43,12 +46,27 @@ from pydantic import PrivateAttr
 # ABC contract -- the ONE allowed `from deerflow` import in this backend folder.
 from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryReadError
 
-from .client import HonchoClient
+from .client import MESSAGE_BATCH_SIZE, SOURCE_ID_KEY, HonchoClient
 from .config import HonchoConfig, sanitize_id
 
 logger = logging.getLogger(__name__)
 
 _UTC_NOW_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_CaptureKey = tuple[str, str, str]
+_capture_locks: weakref.WeakValueDictionary[_CaptureKey, threading.RLock] = weakref.WeakValueDictionary()
+_capture_locks_guard = threading.Lock()
+
+
+def _capture_lock(base_url: str, workspace: str, session_id: str) -> threading.RLock:
+    # Serialize lookup + append across managers in this process without retaining
+    # inactive sessions. Independent processes still need upstream admission.
+    key = (base_url.rstrip("/"), workspace, session_id)
+    with _capture_locks_guard:
+        lock = _capture_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _capture_locks[key] = lock
+        return lock
 
 
 def _now_iso() -> str:
@@ -89,10 +107,18 @@ def _stable_id(raw: str) -> str:
 
 
 class HonchoMemoryManager(MemoryManager):
-    """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted)."""
+    """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted).
+
+    Known limitation: ``search`` scopes ``category`` server-side to messages
+    stored with ``metadata.category``, but ``add()`` sets only source-identity
+    metadata and fact CRUD is unsupported, so nothing this backend stores ever
+    carries a category — category queries return empty results here until the
+    write path gains category support (see ``search``).
+    """
 
     _config: HonchoConfig = PrivateAttr(default=None)
     _client: Any = PrivateAttr(default=None)
+    _should_keep_hidden_message: Any = PrivateAttr(default=None)
 
     supports_search: ClassVar[bool] = True
     # Honcho's server-side deriver extracts facts/representation from add()
@@ -120,7 +146,10 @@ class HonchoMemoryManager(MemoryManager):
         Connectivity is deliberately NOT probed: a temporarily unreachable Honcho
         must not block Gateway startup; reads degrade per ``failure_policy.read``.
         """
-        return cls(backend_config=backend_config, mode=mode)
+        manager = cls(backend_config=backend_config, mode=mode)
+        hidden_filter = host_hooks.get("should_keep_hidden_message")
+        manager._should_keep_hidden_message = hidden_filter if callable(hidden_filter) else None
+        return manager
 
     @classmethod
     def read_failures_are_fatal_for_config(
@@ -174,29 +203,64 @@ class HonchoMemoryManager(MemoryManager):
             return
         user_peer = self._user_peer(user_id)
         assistant_peer = self._config.assistant_peer
-        outgoing: list[dict[str, str]] = []
+        outgoing: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for message in messages or []:
             msg_type = getattr(message, "type", None)
+            if msg_type == "human":
+                additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+                keep_hidden = self._should_keep_hidden_message
+                if additional_kwargs.get("hide_from_ui"):
+                    try:
+                        if keep_hidden is None or not keep_hidden(additional_kwargs):
+                            continue
+                    except Exception:
+                        logger.warning("honcho memory: hidden message filter failed; skipping hidden message")
+                        continue
             text = _content_to_text(getattr(message, "content", "")).strip()
             if not text:
                 continue
             if msg_type == "human":
-                outgoing.append({"peer_id": user_peer, "content": text[: self._config.message_char_limit]})
+                peer_id = user_peer
             elif msg_type in ("ai", "AIMessageChunk"):
-                outgoing.append({"peer_id": assistant_peer, "content": text[: self._config.message_char_limit]})
+                peer_id = assistant_peer
+            else:
+                continue
+            item: dict[str, Any] = {"peer_id": peer_id, "content": text[: self._config.message_char_limit]}
+            message_id = getattr(message, "id", None)
+            if isinstance(message_id, str) and message_id:
+                # Include owner and role even when operators deliberately share
+                # workspace/peer overrides; edits of the same source remain new.
+                source = json.dumps([user_id, message_id, "human" if msg_type == "human" else "ai", peer_id, text], ensure_ascii=True)
+                source_id = hashlib.sha256(source.encode("utf-8")).hexdigest()
+                if source_id in seen:
+                    continue
+                seen.add(source_id)
+                item["metadata"] = {SOURCE_ID_KEY: source_id}
+            outgoing.append(item)
         if not outgoing:
             return
         session_id = f"df-{_stable_id(thread_id)}"
+        operation = "write"
         try:
-            self._client.get_or_create_peer(workspace, user_peer)
-            self._client.get_or_create_peer(workspace, assistant_peer)
-            self._client.get_or_create_session(workspace, session_id)
-            self._client.set_session_peers(workspace, session_id, [user_peer, assistant_peer])
-            self._client.add_messages(workspace, session_id, outgoing)
+            with _capture_lock(self._config.base_url, workspace, session_id):
+                self._client.get_or_create_peer(workspace, user_peer)
+                self._client.get_or_create_peer(workspace, assistant_peer)
+                self._client.get_or_create_session(workspace, session_id)
+                self._client.set_session_peers(workspace, session_id, [user_peer, assistant_peer])
+                for offset in range(0, len(outgoing), MESSAGE_BATCH_SIZE):
+                    batch = outgoing[offset : offset + MESSAGE_BATCH_SIZE]
+                    source_ids = [item["metadata"][SOURCE_ID_KEY] for item in batch if "metadata" in item]
+                    operation = "capture lookup"
+                    existing = self._client.existing_source_ids(workspace, session_id, source_ids) if source_ids else set()
+                    operation = "write"
+                    pending = [item for item in batch if item.get("metadata", {}).get(SOURCE_ID_KEY) not in existing]
+                    if pending:
+                        self._client.add_messages(workspace, session_id, pending)
         except MemoryManagerError:
             raise
         except Exception as exc:
-            logger.warning("honcho memory: write failed for thread %s: %s", thread_id, exc)
+            logger.warning("honcho memory: %s failed for thread %s: %s", operation, thread_id, exc)
 
     # ── Tier 1: read ─────────────────────────────────────────────────────
     def get_context(
@@ -223,14 +287,26 @@ class HonchoMemoryManager(MemoryManager):
         agent_name: str | None = None,
         category: str | None = None,
     ) -> list[dict[str, Any]]:
+        """``category`` must filter, not label: it scopes the Honcho query itself
+        (a ``metadata`` filter the server applies before its ``limit``, per the
+        base-class contract), and each result is labeled from its own metadata so
+        hits are never attested to a category they do not have.
+
+        Known limitation: that filter only matches messages stored with
+        ``metadata.category``, and nothing this backend writes has it — ``add()``
+        sends source-identity metadata but no category, and
+        fact CRUD is unsupported, so no other write path can set it either. A
+        ``category`` query therefore returns empty results in this backend
+        until the write path gains category support."""
         workspace = self._workspace(user_id)
         if workspace is None:
             return []
-        results = self._read_or_fallback([], lambda: self._client.search(workspace, query, limit=top_k))
+        filters = {"metadata": {"category": category}} if category else None
+        results = self._read_or_fallback([], lambda: self._client.search(workspace, query, limit=top_k, filters=filters))
         return [
             {
                 "content": item.get("content", ""),
-                "category": category or "memory",
+                "category": (item.get("metadata") or {}).get("category") or "memory",
                 "session_id": item.get("session_id"),
                 "peer_id": item.get("peer_id"),
                 "created_at": item.get("created_at"),

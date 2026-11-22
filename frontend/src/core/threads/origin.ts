@@ -18,6 +18,7 @@ export const THREAD_ORIGIN_KINDS = [
   "im_channel",
   "mcp_notification",
   "schedule",
+  "subagent_batch",
 ] as const;
 
 export type ThreadOriginKind = (typeof THREAD_ORIGIN_KINDS)[number];
@@ -27,7 +28,8 @@ export type ThreadOrigin =
   | { kind: "im_channel"; provider: string }
   | { kind: "github"; provider: "github" }
   | { kind: "extension"; namespace: string | null }
-  | { kind: "mcp_notification" };
+  | { kind: "mcp_notification" }
+  | { kind: "subagent_batch" };
 
 export function isThreadOriginKind(value: unknown): value is ThreadOriginKind {
   return (
@@ -53,6 +55,7 @@ function originFromMetadata(value: unknown): ThreadOrigin | null {
   switch (kind) {
     case "schedule":
     case "mcp_notification":
+    case "subagent_batch":
       return { kind };
     case "github":
       return { kind, provider: "github" };
@@ -120,6 +123,7 @@ export function labelOfThreadOrigin(
     case "im_channel":
       return labels.fromProvider(labelOfChannelProvider(origin.provider, t));
     case "mcp_notification":
+    case "subagent_batch":
       return null;
   }
 }

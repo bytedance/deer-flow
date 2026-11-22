@@ -163,17 +163,17 @@ async def test_a_stopping_run_does_not_block_another_thread():
 
 @pytest.mark.asyncio
 async def test_an_interrupt_before_the_worker_starts_does_not_block_the_thread(monkeypatch):
-    # Textual may cancel a queued thread worker before its function runs; that
-    # run never touches the backend and must not hold its thread.
+    # A run interrupted before its worker thread runs never touches the
+    # backend and must not hold its thread.
     client = _GraphClient()
     app = DeerFlowTUI(Session(client=client, writer=None), LaunchPlan(mode="tui", thread_id="thread-a"))
     async with app.run_test() as pilot:
         await pilot.pause()
-        original_run_worker = app.run_worker
-        monkeypatch.setattr(app, "run_worker", lambda *args, **kwargs: None)
+        original_start = app._start_run_thread
+        monkeypatch.setattr(app, "_start_run_thread", lambda *args, **kwargs: None)
         await _submit(app, pilot, "never started")
         await pilot.press("ctrl+c")
-        monkeypatch.setattr(app, "run_worker", original_run_worker)
+        monkeypatch.setattr(app, "_start_run_thread", original_start)
 
         await _submit(app, pilot, "new question")
         await _settle(pilot, lambda: "new question" in client.finished and not app._streaming)

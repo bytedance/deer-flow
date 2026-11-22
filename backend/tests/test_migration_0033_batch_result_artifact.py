@@ -78,7 +78,7 @@ class _StopBeforeDatabase(Exception):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sslmode", [None, "disable", "allow", "prefer", "require", "verify-ca", "verify-full"])
 async def test_postgres_migration_setup_preserves_tls_policy(monkeypatch, tmp_path, sslmode):
-    uri = "postgresql://user:password@localhost:5432/test?target_session_attrs=read-write&channel_binding=prefer"
+    uri = "postgresql://user:password@localhost:5432/test?target_session_attrs=read-write"
     if sslmode is not None:
         uri += f"&sslmode={sslmode}"
     monkeypatch.setenv("TEST_POSTGRES_URI", uri)
@@ -108,4 +108,17 @@ async def test_postgres_migration_setup_rejects_conflicting_tls_policy(monkeypat
 
     monkeypatch.setitem(globals(), "create_async_engine", reject_engine_creation)
     with pytest.raises(ValueError, match="Conflicting ssl and sslmode"):
+        await test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, "postgres")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_binding", ["disable", "prefer", "require"])
+async def test_postgres_migration_setup_rejects_channel_binding_before_engine_creation(monkeypatch, tmp_path, channel_binding):
+    monkeypatch.setenv("TEST_POSTGRES_URI", f"postgresql://user:password@localhost:5432/test?sslmode=verify-full&channel_binding={channel_binding}")
+
+    def reject_engine_creation(*args, **kwargs):
+        pytest.fail("Unsupported Channel Binding must be rejected before engine creation")
+
+    monkeypatch.setitem(globals(), "create_async_engine", reject_engine_creation)
+    with pytest.raises(ValueError, match="channel_binding"):
         await test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, "postgres")

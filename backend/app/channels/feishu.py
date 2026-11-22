@@ -36,7 +36,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from app.channels.notification_groups import is_feishu_notification_group
+from app.channels.notification_groups import is_feishu_notification_group, notification_group_display_name
 from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -55,6 +55,9 @@ PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
 FEISHU_STOP_TIMEOUT_SECONDS = 5
 FEISHU_WS_CLOSE_TIMEOUT_SECONDS = 2
 _PENDING_CARD_METADATA_KEY = "_feishu_pending_card_id"
+# Number of attachments from a post's top-level ``files`` array.
+_POST_FILES_COUNT_METADATA_KEY = "_feishu_post_files_count"
+_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY = "_feishu_defer_post_file_placeholders"
 # Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
 # which also carries the SDK's websocket reads, pongs and its 120s ping loop:
 # every second the bridge blocks that loop is a second the connection cannot
@@ -107,6 +110,7 @@ class _ParsedMessage:
     chat_type: str | None
     text: str
     files: list[dict[str, Any]]
+    post_file_count: int = 0
     msg_type: InboundMessageType = InboundMessageType.CHAT
 
 
@@ -144,10 +148,164 @@ class _RoutingAttempt:
 FEISHU_INBOUND_BATCH_WINDOW_SECONDS = 0.75
 FEISHU_MAX_INBOUND_FILE_BYTES = 20_000_000
 SOURCE_PREVIEW_METADATA_KEY = "feishu_source_preview"
+# Feishu rejects a card request body over 30 KB (230025), and style tags make
+# the stored message larger than the body sent. Card text is budgeted by the
+# bytes it adds to that body, leaving room for the other fields and that growth.
+FEISHU_CARD_MAX_BYTES = 24 * 1024
+# A long final answer continues in further cards, up to this many per reply.
+FEISHU_MAX_CARDS_PER_REPLY = 10
+_CARD_TRUNCATION_MARKER = "\n\n... (truncated)"
+_CARD_CONTINUES_MARKER = "\n\n…"
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+# A markdown image marker, rewritten for the card so Feishu never sees one.
+_MARKDOWN_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]*)[^)]*\)")
+_FENCED_CODE = re.compile(r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[ \t]*$")
+# Both delimiters are complete backtick runs of the same length.
+_INLINE_CODE_SPAN = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?!`)")
+# A fence a streamed snapshot cut open: what follows its opener is still code.
+_UNCLOSED_FENCE = re.compile(r"(?m)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*$")
+
+
+def _rewrite_outside_inline_code(chunk: str, rewrite: Callable[[str], str]) -> str:
+    """Apply *rewrite* to the parts of *chunk* that are not inline code spans."""
+    out: list[str] = []
+    cursor = 0
+    for span in _INLINE_CODE_SPAN.finditer(chunk):
+        out.append(rewrite(chunk[cursor : span.start()]))
+        out.append(span.group(0))
+        cursor = span.end()
+    out.append(rewrite(chunk[cursor:]))
+    return "".join(out)
+
+
+def _card_markdown(text: str) -> str:
+    """Rewrite the markdown a Feishu card cannot render.
+
+    A card markdown element only accepts a markdown image whose target is an
+    uploaded ``image_key``. A URL target makes Feishu reject every update of that
+    card with 230099 / 11310 ("the card contains images but no imagekey is passed
+    in"), which is how a reply carrying ``![alt](url)`` loses the rest of its
+    streamed text. Dropping the marker keeps the reference, and its link, in a
+    form the card renders. Code stays literal: a fenced block renders as code
+    there, and rewriting what it shows would misreport the answer.
+    """
+    if "![" not in text:
+        return text
+
+    def as_link(chunk: str) -> str:
+        return _MARKDOWN_IMAGE.sub(lambda match: f"[{match.group('alt')}]({match.group('target')})", chunk)
+
+    out: list[str] = []
+    cursor = 0
+    for fenced in _FENCED_CODE.finditer(text):
+        out.append(_rewrite_outside_inline_code(text[cursor : fenced.start()], as_link))
+        out.append(fenced.group(0))
+        cursor = fenced.end()
+
+    tail = text[cursor:]
+    # A snapshot streamed before its closing fence arrives has an open block at the
+    # end; that content is code too, so what follows the opener stays literal.
+    open_fence = _UNCLOSED_FENCE.search(tail)
+    literal_from = open_fence.start() if open_fence else len(tail)
+    out.append(_rewrite_outside_inline_code(tail[:literal_from], as_link))
+    out.append(tail[literal_from:])
+    return "".join(out)
+
+
+# Characters JSON escapes, measured after the second escape: ``"`` is ``\\\"``.
+_ESCAPED_CARD_CHAR_BYTES = {'"': 4, "\\": 4, "\b": 3, "\f": 3, "\n": 3, "\r": 3, "\t": 3}
+
+
+def _card_char_bytes(char: str) -> int:
+    escaped = _ESCAPED_CARD_CHAR_BYTES.get(char)
+    if escaped is not None:
+        return escaped
+    code = ord(char)
+    if code < 0x20:
+        return 7  # \u00XX, whose backslash is escaped again
+    if code < 0x80:
+        return 1
+    if code < 0x800:
+        return 2
+    if code < 0x10000:
+        return 3  # a lone surrogate is sent as U+FFFD
+    return 4
+
+
+def _card_text_bytes(text: str) -> int:
+    """Bytes *text* adds to a card request body.
+
+    The text is escaped twice: once inside the card JSON, and again as the
+    request body's ``content`` string. JSON escapes each character on its own,
+    so the cost of a text is the sum of its characters' costs.
+    """
+    return sum(map(_card_char_bytes, text))
+
+
+def _card_text_budget() -> int:
+    return FEISHU_CARD_MAX_BYTES - _card_text_bytes(FeishuChannel._build_card_content(""))
+
+
+def _fitting_prefix_end(text: str, start: int, budget: int) -> tuple[int, int]:
+    """Return the end of the longest prefix of ``text[start:]`` within *budget*, and its last newline."""
+    used = 0
+    end = start
+    last_newline = -1
+    while end < len(text):
+        cost = _card_char_bytes(text[end])
+        if used + cost > budget:
+            break
+        used += cost
+        if text[end] == "\n":
+            last_newline = end
+        end += 1
+    return end, last_newline
+
+
+def _clip_card_text(text: str, marker: str = _CARD_TRUNCATION_MARKER) -> str:
+    """Clip *text* to one card, ending it with *marker* when anything was cut."""
+    budget = _card_text_budget()
+    if _card_text_bytes(text) <= budget:
+        return text
+    end, _ = _fitting_prefix_end(text, 0, budget - _card_text_bytes(marker))
+    return text[:end] + marker
+
+
+def _split_card_text(text: str) -> list[str]:
+    """Split *text* into cards, preferring line boundaries so markdown survives.
+
+    Each newline stays on the tail of its card, so the cards join back to
+    the original text. Past ``FEISHU_MAX_CARDS_PER_REPLY`` the last card is
+    clipped instead.
+    """
+    budget = _card_text_budget()
+    if _card_text_bytes(text) <= budget:
+        return [text]
+    cards: list[str] = []
+    start = 0
+    while start < len(text):
+        if len(cards) == FEISHU_MAX_CARDS_PER_REPLY - 1:
+            logger.warning("[Feishu] reply of %d characters exceeds %d cards, clipping the last one", len(text), FEISHU_MAX_CARDS_PER_REPLY)
+            cards.append(_clip_card_text(text[start:]))
+            break
+        end, last_newline = _fitting_prefix_end(text, start, budget)
+        if end < len(text) and last_newline >= start:
+            end = last_newline + 1
+        end = max(end, start + 1)  # always advance, even past an oversized character
+        cards.append(text[start:end])
+        start = end
+    return cards
 
 
 def _is_feishu_command(text: str) -> bool:
     return is_known_channel_command(text)
+
+
+def _append_post_file_placeholders(text: str, count: int) -> str:
+    paragraphs = [text] if text else []
+    paragraphs.extend(["[file]"] * count)
+    return "\n\n".join(paragraphs)
 
 
 class FeishuChannel(Channel):
@@ -186,6 +344,9 @@ class FeishuChannel(Channel):
         self._background_tasks: set[asyncio.Task] = set()
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
+        # Thread aliases (chat_id, thread_id, topic_id, user_id) already written
+        # for each in-flight reply, keyed by source message id.
+        self._remembered_thread_aliases: dict[str, set[tuple[str, str, str, str]]] = {}
         self._pending_clarifications: dict[tuple[str, str], list[dict[str, Any]]] = {}
         # Interactive clarification cards (button answers). Off by default: the
         # feature needs a one-time console subscription to card.action.trigger.
@@ -258,6 +419,18 @@ class FeishuChannel(Channel):
     @property
     def supports_streaming(self) -> bool:
         return True
+
+    def on_thread_replaced(self, old_thread_id: str) -> None:
+        """Retire pending interactive cards for a thread replaced by ``/new``."""
+        if not self._card_interaction_enabled:
+            return
+        discarded = self._card_registry.discard_thread(old_thread_id)
+        if discarded:
+            logger.info(
+                "[Feishu] retired %d pending card(s) for replaced thread: thread_id=%s",
+                discarded,
+                old_thread_id,
+            )
 
     @property
     def is_running(self) -> bool:
@@ -534,8 +707,10 @@ class FeishuChannel(Channel):
             len(msg.text),
         )
 
+        # Cards already delivered by an earlier attempt are not sent again.
+        delivered: list[str | None] = []
         await self._send_with_retry(
-            lambda: self._send_card_message(msg),
+            lambda: self._send_card_message(msg, delivered=delivered),
             max_retries=_max_retries,
             log_prefix="[Feishu]",
         )
@@ -653,9 +828,7 @@ class FeishuChannel(Channel):
     async def _upload_image(self, path) -> str:
         """Upload an image to Feishu and return the image_key."""
         response = await asyncio.to_thread(self._upload_image_sync, path)
-        if not response.success():
-            raise RuntimeError(f"Feishu image upload failed: code={response.code}, msg={response.msg}")
-        return response.data.image_key
+        return self._uploaded_key(response, "image")
 
     def _upload_file_sync(self, path, filename: str, file_type: str):
         with open(str(path), "rb") as f:
@@ -677,9 +850,17 @@ class FeishuChannel(Channel):
             file_type = "stream"
 
         response = await asyncio.to_thread(self._upload_file_sync, path, filename, file_type)
+        return self._uploaded_key(response, "file")
+
+    @staticmethod
+    def _uploaded_key(response, kind: str) -> str:
+        """Return the ``image_key``/``file_key`` of an upload response or raise with its log_id."""
         if not response.success():
-            raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
-        return response.data.file_key
+            raise RuntimeError(f"Feishu {kind} upload failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
+        key = getattr(getattr(response, "data", None), f"{kind}_key", None)
+        if not isinstance(key, str) or not key:
+            raise RuntimeError(f"Feishu {kind} upload returned no {kind}_key: log_id={response.get_log_id()}")
+        return key
 
     async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
         """Download a Feishu file into the thread uploads directory.
@@ -694,6 +875,10 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] received message with no files: %s", msg)
             return msg
         text = msg.text
+        post_file_count = msg.metadata.pop(_POST_FILES_COUNT_METADATA_KEY, 0)
+        defer_post_file_placeholders = msg.metadata.pop(_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY, False)
+        if not isinstance(post_file_count, int) or post_file_count < 0:
+            post_file_count = 0
         search_from = 0
 
         def replace_next_placeholder(placeholder: str, replacement: str) -> None:
@@ -704,14 +889,40 @@ class FeishuChannel(Channel):
             text = f"{text[:idx]}{replacement}{text[idx + len(placeholder) :]}"
             search_from = idx + len(replacement)
 
+        downloaded: list[tuple[str, str]] = []
         for file in files:
             if file.get("image_key"):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id, user_id=user_id)
-                replace_next_placeholder("[image]", virtual_path)
+                downloaded.append(("[image]", virtual_path))
             elif file.get("file_key"):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, user_id=user_id)
-                replace_next_placeholder("[file]", virtual_path)
+                downloaded.append(("[file]", virtual_path))
+
+        # Top-level post attachments append their ``[file]`` placeholders
+        # after the parsed body, so their slots are the final
+        # ``post_file_count`` ones. Fill them from the end first: a literal
+        # ``[file]`` typed by the user must not consume a top-level
+        # attachment's path. Inline rich-text attachments keep the historical
+        # left-to-right matching below; that path is deliberately unchanged.
+        post_file_count = min(post_file_count, len(downloaded))
+        if defer_post_file_placeholders is True:
+            # A command such as /goal has now entered the chat path. Add the
+            # generated slots to the chat text after its arguments were parsed.
+            text = _append_post_file_placeholders(text, post_file_count)
+        suffix_end = len(text)
+        for placeholder, virtual_path in reversed(downloaded[len(downloaded) - post_file_count :] if post_file_count else []):
+            idx = text.rfind(placeholder, 0, suffix_end)
+            if idx < 0:
+                continue
+            text = f"{text[:idx]}{virtual_path}{text[idx + len(placeholder) :]}"
+            suffix_end = idx
+
+        for placeholder, virtual_path in downloaded[: len(downloaded) - post_file_count]:
+            replace_next_placeholder(placeholder, virtual_path)
         msg.text = text
+        # Clear the descriptors so the generic URL-based _ingest_inbound_files
+        # pass does not try to re-fetch files that were downloaded by key.
+        msg.files = []
         return msg
 
     async def _receive_single_file(
@@ -843,9 +1054,11 @@ class FeishuChannel(Channel):
         """
         card = {
             "config": {"wide_screen_mode": True, "update_multi": True},
-            "elements": [{"tag": "markdown", "content": text}],
+            # Unpaired surrogates cannot be encoded as UTF-8.
+            "elements": [{"tag": "markdown", "content": _card_markdown(_LONE_SURROGATE.sub("\ufffd", text))}],
         }
-        return json.dumps(card)
+        # ASCII escapes would make each CJK character 6 bytes instead of 3.
+        return json.dumps(card, ensure_ascii=False)
 
     # -- reaction helpers --------------------------------------------------
 
@@ -925,7 +1138,7 @@ class FeishuChannel(Channel):
         metadata: dict[str, Any] | None = None,
     ) -> str | None:
         """Create the running card and cache its message ID when available."""
-        running_card_id = await self._reply_card(source_message_id, self._compose_card_text(text, metadata))
+        running_card_id = await self._reply_card(source_message_id, _clip_card_text(self._compose_card_text(text, metadata), _CARD_CONTINUES_MARKER))
         if running_card_id:
             self._running_card_ids[source_message_id] = running_card_id
             logger.info("[Feishu] running card created: source=%s card=%s", source_message_id, running_card_id)
@@ -1039,8 +1252,14 @@ class FeishuChannel(Channel):
         self._remember_pending_clarification(msg, card_message_id, topic_id=topic_id)
         await self._remember_thread_mapping(msg, msg.thread_ts, card_message_id)
 
-    async def _send_card_message(self, msg: OutboundMessage) -> None:
-        """Send or update the Feishu card tied to the current request."""
+    async def _send_card_message(self, msg: OutboundMessage, *, delivered: list[str | None] | None = None) -> None:
+        """Send or update the Feishu card tied to the current request.
+
+        A final answer over one card's budget continues in further cards replied
+        to the same source message; a streamed update shows only what fits.
+        *delivered* collects the IDs of the final answer's cards across retries.
+        """
+        delivered = [] if delivered is None else delivered
         source_message_id = msg.thread_ts
         # Option clarifications render as an interactive button card on the
         # final outbound; everything else keeps the plain markdown card.
@@ -1048,65 +1267,104 @@ class FeishuChannel(Channel):
         card_topic_id = await self._bind_card_thread(msg) if card_request else None
         if card_topic_id is None:
             card_request = None
-        card_text = build_button_card(card_request) if card_request else self._compose_card_text(msg.text, msg.metadata)
         # Button cards arrive as serialized card JSON and bypass the markdown
         # wrapper; the plain path keeps its exact historical call signature.
         raw_card_kw: dict[str, bool] = {"raw_card_content": True} if card_request else {}
         if source_message_id:
-            running_card_id = self._running_card_ids.get(source_message_id)
-            awaited_running_card_task = False
-
-            if not running_card_id:
-                running_card_task = self._running_card_tasks.get(source_message_id)
-                if running_card_task:
-                    awaited_running_card_task = True
-                    running_card_id = await running_card_task
-
-            if running_card_id:
-                try:
-                    await self._update_card(running_card_id, card_text, **raw_card_kw)
-                except Exception:
-                    if not msg.is_final:
-                        raise
-                    logger.exception(
-                        "[Feishu] failed to patch running card %s, falling back to final reply",
-                        running_card_id,
-                    )
-                    fallback_card_id = await self._reply_card(source_message_id, card_text, **raw_card_kw)
-                    await self._remember_card_delivery(msg, card_request, fallback_card_id, topic_id=card_topic_id)
-                else:
-                    await self._remember_card_delivery(msg, card_request, running_card_id, topic_id=card_topic_id)
-                    logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
+            if card_request:
+                cards = [build_button_card(card_request)]
             elif msg.is_final:
-                final_card_id = await self._reply_card(
-                    source_message_id,
-                    card_text,
-                    **raw_card_kw,
-                )
-                await self._remember_card_delivery(msg, card_request, final_card_id, topic_id=card_topic_id)
-            elif awaited_running_card_task:
-                logger.warning(
-                    "[Feishu] running card task finished without message_id for source=%s, skipping duplicate non-final creation",
-                    source_message_id,
-                )
+                cards = _split_card_text(self._compose_card_text(msg.text, msg.metadata))
             else:
-                created_card_id = await self._ensure_running_card(
-                    source_message_id,
-                    msg.text,
-                    metadata=msg.metadata,
-                )
-                await self._remember_thread_mapping(msg, source_message_id, created_card_id)
-
+                cards = [_clip_card_text(self._compose_card_text(msg.text, msg.metadata), _CARD_CONTINUES_MARKER)]
+            if not delivered:
+                await self._send_first_card(msg, cards[0], card_request=card_request, card_topic_id=card_topic_id, delivered=delivered, raw_card_kw=raw_card_kw)
             if msg.is_final:
+                for card_text in cards[len(delivered) :]:
+                    delivered.append(await self._reply_card(source_message_id, card_text))
+                if len(delivered) > 1:
+                    # A reply to any of the cards continues this thread.
+                    await self._remember_thread_mapping(msg, *delivered[1:])
                 self._running_card_ids.pop(source_message_id, None)
+                self._remembered_thread_aliases.pop(source_message_id, None)
                 await self._add_reaction(source_message_id, "DONE")
             return
 
-        await self._create_card(msg.chat_id, msg.text)
+        for card_text in _split_card_text(msg.text)[len(delivered) :]:
+            await self._create_card(msg.chat_id, card_text)
+            delivered.append(None)
+
+    async def _send_first_card(
+        self,
+        msg: OutboundMessage,
+        card_text: str,
+        *,
+        card_request: ClarificationCardRequest | None,
+        card_topic_id: str | None,
+        delivered: list[str | None],
+        raw_card_kw: dict[str, bool],
+    ) -> None:
+        """Put *card_text* on the running card, or reply with it; record it in *delivered* when final."""
+        source_message_id = msg.thread_ts
+        running_card_id = self._running_card_ids.get(source_message_id)
+        awaited_running_card_task = False
+
+        if not running_card_id:
+            running_card_task = self._running_card_tasks.get(source_message_id)
+            if running_card_task:
+                awaited_running_card_task = True
+                running_card_id = await running_card_task
+
+        if running_card_id:
+            try:
+                await self._update_card(running_card_id, card_text, **raw_card_kw)
+            except Exception:
+                if not msg.is_final:
+                    raise
+                logger.exception(
+                    "[Feishu] failed to patch running card %s, falling back to final reply",
+                    running_card_id,
+                )
+                fallback_card_id = await self._reply_card(source_message_id, card_text, **raw_card_kw)
+                delivered.append(fallback_card_id)
+                await self._remember_card_delivery(msg, card_request, fallback_card_id, topic_id=card_topic_id)
+            else:
+                if msg.is_final:
+                    delivered.append(running_card_id)
+                await self._remember_card_delivery(msg, card_request, running_card_id, topic_id=card_topic_id)
+                logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
+        elif msg.is_final:
+            final_card_id = await self._reply_card(
+                source_message_id,
+                card_text,
+                **raw_card_kw,
+            )
+            delivered.append(final_card_id)
+            await self._remember_card_delivery(msg, card_request, final_card_id, topic_id=card_topic_id)
+        elif awaited_running_card_task:
+            logger.warning(
+                "[Feishu] running card task finished without message_id for source=%s, skipping duplicate non-final creation",
+                source_message_id,
+            )
+        else:
+            created_card_id = await self._ensure_running_card(
+                source_message_id,
+                msg.text,
+                metadata=msg.metadata,
+            )
+            await self._remember_thread_mapping(msg, source_message_id, created_card_id)
 
     # -- internal ----------------------------------------------------------
 
     async def _remember_thread_mapping(self, msg: OutboundMessage, *topic_ids: str | None) -> None:
+        """Map the reply's message, card and topic ids to its DeerFlow thread.
+
+        Every streamed chunk of a reply carries the same aliases, and each write
+        is a full ``store.json`` rewrite or a database upsert, so a non-final
+        chunk only writes the aliases this reply has not stored yet. The final
+        outbound writes all of them again, leaving the store as it was when every
+        chunk wrote them.
+        """
         store = self.config.get("channel_store")
         if store is None or not msg.thread_id:
             return
@@ -1122,12 +1380,18 @@ class FeishuChannel(Channel):
         if isinstance(raw_user_id, str):
             user_id = raw_user_id
 
+        source_message_id = self._non_empty_str(msg.thread_ts)
+        remembered = self._remembered_thread_aliases.setdefault(source_message_id, set()) if source_message_id and not msg.is_final else set()
+
         seen: set[str] = set()
         for topic_id in [*topic_ids, *metadata_topic_ids]:
             topic_id = self._non_empty_str(topic_id)
             if not topic_id or topic_id in seen:
                 continue
             seen.add(topic_id)
+            alias = (msg.chat_id, msg.thread_id, topic_id, user_id)
+            if alias in remembered:
+                continue
             try:
                 await store.set_thread_id(
                     self.name,
@@ -1137,7 +1401,10 @@ class FeishuChannel(Channel):
                     user_id=user_id,
                 )
             except Exception:
+                # Not remembered, so the next chunk retries it.
                 logger.exception("[Feishu] failed to remember thread mapping for topic_id=%s", topic_id)
+            else:
+                remembered.add(alias)
 
     def _run_store_call(self, make_coroutine: Callable[[], Coroutine[Any, Any, _T]], *, name: str, msg_id: Any) -> _T:
         """Run an async ``channel_store`` call from the synchronous lark callback.
@@ -1576,6 +1843,10 @@ class FeishuChannel(Channel):
             }
             if source_preview:
                 metadata[SOURCE_PREVIEW_METADATA_KEY] = source_preview
+            if parsed.post_file_count:
+                metadata[_POST_FILES_COUNT_METADATA_KEY] = parsed.post_file_count
+                if parsed.msg_type == InboundMessageType.COMMAND:
+                    metadata[_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY] = True
             if routing.clarification_card_id:
                 metadata[_PENDING_CARD_METADATA_KEY] = routing.clarification_card_id
 
@@ -1821,11 +2092,11 @@ class FeishuChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="feishu", state=code)
         if state is None:
-            await self._reply_card(message_id, "Feishu connection code is invalid or expired.")
+            await self._reply_card(message_id, await self._connect_reply_text("invalid_code"))
             return True
 
         if not user_id or not chat_id:
-            await self._reply_card(message_id, "Feishu connection could not be completed from this message.")
+            await self._reply_card(message_id, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
             return True
 
         await self._connection_repo.upsert_connection(
@@ -1833,7 +2104,7 @@ class FeishuChannel(Channel):
             provider="feishu",
             external_account_id=user_id,
             workspace_id=chat_id,
-            workspace_name=await self._get_group_name(chat_id) if chat_type == "group" else None,
+            workspace_name=(notification_group_display_name(state.get("metadata")) or await self._get_group_name(chat_id)) if chat_type == "group" else None,
             metadata={
                 "chat_id": chat_id,
                 "message_id": message_id,
@@ -1841,7 +2112,7 @@ class FeishuChannel(Channel):
             },
             status="connected",
         )
-        await self._reply_card(message_id, "Feishu connected to DeerFlow.")
+        await self._reply_card(message_id, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
         return True
 
     def _parse_message_event(self, event) -> _ParsedMessage | None:
@@ -1914,6 +2185,26 @@ class FeishuChannel(Channel):
             text = ""
         text = text.strip()
 
+        # Feishu desktop attaches files to a message as a post whose rich-text
+        # body holds the caption and whose top-level ``files`` array holds the
+        # attachments. The body may be empty. Keep these attachments last so
+        # ``receive_file`` can match their placeholders from the end. Skip
+        # folders and attachments already represented by a rich-text element.
+        attachments = content.get("files") if isinstance(content, dict) else None
+        if not isinstance(attachments, list):
+            attachments = []
+        post_file_count = 0
+        for attachment in attachments:
+            if not isinstance(attachment, dict) or attachment.get("is_folder"):
+                continue
+            file_key = attachment.get("file_key")
+            if not isinstance(file_key, str) or not file_key:
+                continue
+            if any(existing.get("file_key") == file_key for existing in files_list):
+                continue
+            files_list.append({"file_key": file_key})
+            post_file_count += 1
+
         logger.info(
             "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, parent_id=%s, thread_id=%s, chat_type=%s, sender=%s, text_len=%d",
             chat_id,
@@ -1939,6 +2230,7 @@ class FeishuChannel(Channel):
             chat_type=chat_type,
             text=text,
             files=files_list,
+            post_file_count=post_file_count,
         )
 
     def _on_message(self, event) -> None:
@@ -1981,6 +2273,8 @@ class FeishuChannel(Channel):
             if _is_feishu_command(command_text):
                 parsed.msg_type = InboundMessageType.COMMAND
                 parsed.text = command_text
+            elif parsed.post_file_count:
+                parsed.text = _append_post_file_placeholders(text, parsed.post_file_count)
 
             # topic_id determines which LangGraph thread the message maps to.
             # P2P chats: topic_id=None so all messages share one thread (like Telegram DMs).

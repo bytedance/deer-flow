@@ -304,9 +304,20 @@ test.describe("IM channels", () => {
     await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
     await sidebar.getByRole("button", { name: "Connect" }).click();
 
+    const dialog = page.getByRole("dialog", { name: "Connect Slack" });
     await expect(
-      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+      dialog.getByText("/connect abc123", { exact: true }),
     ).toBeVisible();
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"]);
+    await dialog.getByRole("button", { name: "Copy command" }).click();
+    await expect(
+      dialog.getByRole("button", { name: "Copied", exact: true }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      "/connect abc123",
+    );
     expect(slackConnectCalls).toBe(1);
   });
 
@@ -401,9 +412,14 @@ test.describe("IM channels", () => {
     await setupDialog.getByLabel("Bot token").fill("xoxb-ui");
     await setupDialog.getByRole("button", { name: "Save and connect" }).click();
 
-    await expect(setupDialog).toBeHidden();
+    // The binding step keeps the "Connect Slack" title; the form is gone.
+    await expect(page.getByLabel("Bot token")).toBeHidden();
+    const bindingDialog = page.getByRole("dialog", { name: "Connect Slack" });
     await expect(
-      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+      bindingDialog.getByText("/connect abc123", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      bindingDialog.getByRole("button", { name: "Copy command" }),
     ).toBeVisible();
     expect(slackConnectCalls).toBe(1);
   });
@@ -838,14 +854,15 @@ for (const entry of ["sidebar", "settings"] as const) {
 test.describe("scheduled task updates per app", () => {
   const COPY = {
     en: {
-      supported: "Scheduled task updates: sent here",
+      supported:
+        "Scheduled task updates: supported; manage in Notification settings",
       unsupported: "Scheduled task updates: not available for this app yet",
       dialog: "Settings",
       wecom: "WeCom",
       feishu: "Feishu",
     },
     zh: {
-      supported: "定时任务通知：会发送到这里",
+      supported: "定时任务通知：已支持，可在通知设置中管理",
       unsupported: "定时任务通知：此应用暂不支持",
       dialog: "设置",
       wecom: "企业微信",
@@ -854,7 +871,7 @@ test.describe("scheduled task updates per app", () => {
   } as const;
 
   for (const lang of ["en", "zh"] as const) {
-    test(`WeCom says updates are sent there, Feishu says not yet (${lang})`, async ({
+    test(`WeCom shows notification capability, Feishu says not yet (${lang})`, async ({
       page,
     }) => {
       const copy = COPY[lang];
@@ -866,7 +883,7 @@ test.describe("scheduled task updates per app", () => {
           .filter(({ provider }) => ["feishu", "wecom"].includes(provider))
           .map((provider) => ({
             ...provider,
-            // Only WeCom implements proactive push today.
+            // This fixture advertises push only for WeCom.
             proactive_notifications: provider.provider === "wecom",
           })),
       );

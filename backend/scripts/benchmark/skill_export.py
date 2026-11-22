@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import shutil
 import subprocess
 import sys
@@ -18,6 +17,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows only
+    resource = None  # type: ignore[assignment]
 
 from deerflow.skills import export
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
@@ -112,7 +116,7 @@ def run(case):
             elapsed = time.perf_counter() - start
         finally:
             export.tempfile.TemporaryFile = tracker.original
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss if resource is not None else None
         print(
             json.dumps(
                 {
@@ -120,7 +124,7 @@ def run(case):
                     "outcome": outcome,
                     "wall_seconds": round(elapsed, 4),
                     "manifest_seconds": round(manifest_seconds, 4) if manifest_seconds is not None else None,
-                    "peak_rss_bytes": rss if sys.platform == "darwin" else rss * 1024,
+                    "peak_rss_bytes": (rss if sys.platform == "darwin" else rss * 1024) if rss is not None else None,
                     "peak_temp_files": tracker.peak_count,
                     "peak_temp_bytes": tracker.peak_bytes,
                     "remaining_temp_files": sum(not file.closed for file in tracker.files),

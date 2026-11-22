@@ -43,6 +43,7 @@ import math
 import re
 import time
 from collections.abc import AsyncIterable, Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 
 import httpx
@@ -55,6 +56,7 @@ from deerflow.typesafe.errors import (
     CAUSE_TRANSPORT,
     TypeSafeError,
 )
+from deerflow.utils.file_io import await_drained
 
 QUESTION_NOUL = "noul"
 QUESTION_CHOICE = "choice"
@@ -172,7 +174,7 @@ type Answer = NoulAnswer | ChoiceAnswer
 class QuestionError:
     """A question-level failure: the request was usable, this question's answer was not.
 
-    ``category`` is one of ``missing``, ``type``, ``probability`` or ``label``.
+    ``category`` is one of ``missing``, ``type``, ``probability``, ``label`` or ``refusal``.
     ``message`` names the problem without repeating the response body, which a
     malformed or hostile endpoint can fill with echoed state.
     """
@@ -216,6 +218,11 @@ class TypeSafeClient:
     never decides that two consumers' results are interchangeable (design §1.2,
     §3.1).
     """
+
+    #: Names the endpoint in every request-level message this client raises. A
+    #: dialect subclass that speaks another provider's protocol overrides it, so a
+    #: failure never reports the wrong operator's service.
+    provider_label = "TypeSafe"
 
     def __init__(self, connection: TypeSafeConnection, *, transport_factory: TransportFactory | None = None) -> None:
         self._connection = connection
@@ -285,7 +292,7 @@ class TypeSafeClient:
             async with asyncio.timeout(self._connection.deadline_seconds):
                 deadline_at = time.monotonic() + self._connection.deadline_seconds
                 transport = None if self._transport_factory is None else self._transport_factory()
-                async with httpx.AsyncClient(timeout=self._connection.timeout, transport=transport) as client:
+                async with await _open_async_client(timeout=self._connection.timeout, transport=transport) as client:
                     for attempt in range(1, self._connection.max_attempts + 1):
                         self._check_budget(deadline_at)
                         try:
@@ -333,9 +340,9 @@ class TypeSafeClient:
             # request it failed to build — for a rejected header that is the whole
             # ``Bearer <key>`` value — and the guardrail's ``logger.exception``
             # prints the cause chain. The type name below is kept for diagnosis.
-            raise _RetryableAttempt(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
+            raise _RetryableAttempt(f"{self.provider_label} request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
         except httpx.HTTPError as exc:
-            raise TypeSafeError(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
+            raise TypeSafeError(f"{self.provider_label} request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
 
     async def _attempt_async(self, client: httpx.AsyncClient, payload: dict[str, object], headers: dict[str, str], questions: Mapping[str, Question], deadline_at: float) -> AnswerSet:
         try:
@@ -352,9 +359,9 @@ class TypeSafeClient:
         except httpx.TransportError as exc:
             # ``from None`` for the same reason as the sync path: a rejected header
             # would otherwise carry the ``Bearer`` value in the printed chain.
-            raise _RetryableAttempt(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
+            raise _RetryableAttempt(f"{self.provider_label} request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
         except httpx.HTTPError as exc:
-            raise TypeSafeError(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
+            raise TypeSafeError(f"{self.provider_label} request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
 
     def _status_error(self, status_code: int) -> TypeSafeError:
         # Only the numeric status is reported. The response body *and* the HTTP
@@ -362,7 +369,7 @@ class TypeSafeClient:
         # (raw tool arguments, conversation text) in either, and this message
         # reaches middleware logs and the evaluation report.
         hint = " (check the API key configured via api_key / the API key environment variable)" if status_code == _UNAUTHORIZED_STATUS else ""
-        message = f"TypeSafe returned HTTP {status_code}{hint}"
+        message = f"{self.provider_label} returned HTTP {status_code}{hint}"
         if status_code in _RETRYABLE_STATUS_CODES:
             return _RetryableAttempt(message, cause=CAUSE_HTTP_STATUS)
         return TypeSafeError(message, cause=CAUSE_HTTP_STATUS)
@@ -378,15 +385,15 @@ class TypeSafeClient:
         # would escape this module's taxonomy and the consumer would lose the round's
         # record instead of falling back.
         except (ValueError, RecursionError) as exc:
-            raise TypeSafeError("TypeSafe response was not valid JSON", cause=CAUSE_INVALID_RESPONSE) from exc
+            raise TypeSafeError(f"{self.provider_label} response was not valid JSON", cause=CAUSE_INVALID_RESPONSE) from exc
         if not isinstance(payload, dict):
-            raise TypeSafeError("TypeSafe response must be a JSON object", cause=CAUSE_INVALID_RESPONSE)
+            raise TypeSafeError(f"{self.provider_label} response must be a JSON object", cause=CAUSE_INVALID_RESPONSE)
         model = payload.get("model")
         if not isinstance(model, str) or not model:
-            raise TypeSafeError("TypeSafe response is missing a non-empty 'model'", cause=CAUSE_INVALID_RESPONSE)
+            raise TypeSafeError(f"{self.provider_label} response is missing a non-empty 'model'", cause=CAUSE_INVALID_RESPONSE)
         answers = payload.get("answers")
         if not isinstance(answers, dict):
-            raise TypeSafeError("TypeSafe response is missing an 'answers' object", cause=CAUSE_INVALID_RESPONSE)
+            raise TypeSafeError(f"{self.provider_label} response is missing an 'answers' object", cause=CAUSE_INVALID_RESPONSE)
 
         validated: dict[str, Answer] = {}
         errors: dict[str, QuestionError] = {}
@@ -406,7 +413,7 @@ class TypeSafeClient:
             raise self._deadline_error()
 
     def _deadline_error(self) -> TypeSafeError:
-        return TypeSafeError(f"TypeSafe evaluation exceeded deadline_seconds={self._connection.deadline_seconds:g}", cause=CAUSE_DEADLINE)
+        return TypeSafeError(f"{self.provider_label} evaluation exceeded deadline_seconds={self._connection.deadline_seconds:g}", cause=CAUSE_DEADLINE)
 
     def _remaining(self, deadline_at: float) -> float:
         remaining = deadline_at - time.monotonic()
@@ -419,6 +426,23 @@ class TypeSafeClient:
 
     async def _async_sleep_before_retry(self, attempt: int, deadline_at: float) -> None:
         await asyncio.sleep(min(self._connection.retry_backoff * 2 ** (attempt - 1), self._remaining(deadline_at)))
+
+
+async def _open_async_client(*, timeout: float, transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None) -> httpx.AsyncClient:
+    """Load TLS trust off-loop and close any client built after cancellation."""
+    construction = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, timeout=timeout, transport=transport))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+
+        async def close_late_client() -> None:
+            client = await construction
+            await client.aclose()
+
+        # Preserve the original cancellation even if construction or close fails.
+        with suppress(Exception, asyncio.CancelledError):
+            await await_drained(close_late_client())
+        raise
 
 
 def _read_bounded(response: httpx.Response, check_budget: Callable[[], None]) -> bytes:
@@ -491,32 +515,49 @@ def _validate_answer(question_id: str, question: Question, raw: object) -> tuple
     return _validate_choice(question_id, question, raw)
 
 
-def _validate_noul(question_id: str, raw: dict[object, object]) -> tuple[Answer | None, QuestionError | None]:
-    raw_probability = raw.get("noul")
-    # bool is an int subclass, and json.loads parses NaN/Infinity literals, so both
-    # are rejected here rather than reaching a consumer's comparison. Only the
-    # offending type is reported, for the reason in _validate_answer.
+def validate_probability(question_id: str, raw_probability: object, *, provider_label: str, field_name: str) -> tuple[Answer | None, QuestionError | None]:
+    """One owner for the probability rules every dialect's numeric answer needs.
+
+    ``bool`` is an ``int`` subclass and ``json.loads`` accepts the ``NaN``/``Infinity``
+    literals, so both are rejected here rather than reaching a consumer's threshold
+    comparison. Only the offending type is reported, for the reason in
+    :func:`_validate_answer`. A ``QuestionError`` is returned instead of raising so a
+    bad answer cannot discard the other valid answers in the same response (design §2.3).
+    """
     if isinstance(raw_probability, bool) or not isinstance(raw_probability, (int, float)):
-        return None, QuestionError(question_id=question_id, category=CATEGORY_PROBABILITY, message=f"TypeSafe returned a non-numeric noul probability (type={type(raw_probability).__name__})")
+        return None, QuestionError(question_id=question_id, category=CATEGORY_PROBABILITY, message=f"{provider_label} returned a non-numeric {field_name} probability (type={type(raw_probability).__name__})")
     try:
         probability = float(raw_probability)
     except OverflowError:
         # A JSON integer too large for float() (e.g. 10**400) must stay a
         # per-question error: letting it escape would discard the other valid
         # answers in the same response (design §2.3).
-        return None, QuestionError(question_id=question_id, category=CATEGORY_PROBABILITY, message="TypeSafe returned a noul probability outside [0, 1]")
+        return None, QuestionError(question_id=question_id, category=CATEGORY_PROBABILITY, message=f"{provider_label} returned a {field_name} probability outside [0, 1]")
     if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
-        return None, QuestionError(question_id=question_id, category=CATEGORY_PROBABILITY, message="TypeSafe returned a noul probability outside [0, 1]")
+        return None, QuestionError(question_id=question_id, category=CATEGORY_PROBABILITY, message=f"{provider_label} returned a {field_name} probability outside [0, 1]")
     return NoulAnswer(probability=probability), None
 
 
+def _validate_noul(question_id: str, raw: dict[object, object]) -> tuple[Answer | None, QuestionError | None]:
+    return validate_probability(question_id, raw.get("noul"), provider_label="TypeSafe", field_name="noul")
+
+
+def validate_choice_label(question_id: str, question: Question, raw_label: object, *, provider_label: str) -> tuple[Answer | None, QuestionError | None]:
+    """One owner for the rule that a ``choice`` answer must be one of the labels asked for.
+
+    The label set is the question's own criteria: an answer outside it is a
+    question-level failure, never a verdict, because a consumer maps labels to
+    behaviour and an unrecognised one has no mapping to apply.
+    """
+    if not isinstance(raw_label, str) or not raw_label:
+        return None, QuestionError(question_id=question_id, category=CATEGORY_LABEL, message=f"{provider_label} returned a non-textual choice label (type={type(raw_label).__name__})")
+    if question.criteria is None or raw_label not in question.criteria:
+        return None, QuestionError(question_id=question_id, category=CATEGORY_LABEL, message=f"{provider_label} returned a choice label outside the configured criteria")
+    return ChoiceAnswer(label=raw_label), None
+
+
 def _validate_choice(question_id: str, question: Question, raw: dict[object, object]) -> tuple[Answer | None, QuestionError | None]:
-    label = raw.get("choice")
-    if not isinstance(label, str) or not label:
-        return None, QuestionError(question_id=question_id, category=CATEGORY_LABEL, message=f"TypeSafe returned a non-textual choice label (type={type(label).__name__})")
-    if question.criteria is None or label not in question.criteria:
-        return None, QuestionError(question_id=question_id, category=CATEGORY_LABEL, message="TypeSafe returned a choice label outside the configured criteria")
-    return ChoiceAnswer(label=label), None
+    return validate_choice_label(question_id, question, raw.get("choice"), provider_label="TypeSafe")
 
 
 def _factory_identity(factory: TransportFactory | None) -> str | None:
@@ -552,5 +593,7 @@ __all__ = [
     "TransportFactory",
     "TypeSafeClient",
     "recordable_model",
+    "validate_choice_label",
+    "validate_probability",
     "wire_size",
 ]

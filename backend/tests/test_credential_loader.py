@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -357,6 +358,102 @@ def test_load_claude_code_credential_ignores_blank_string_access_token(tmp_path,
     assert load_claude_code_credential() is None
 
 
+@pytest.mark.parametrize("access_token", ["   ", "\t\n", " " * 12])
+def test_blank_env_token_falls_through_to_the_credentials_file(tmp_path, monkeypatch, access_token):
+    """A present-but-blank env token must not hide a usable credential file.
+
+    ``_credential_from_direct_token`` returns None for a blank token, but the env
+    branch returned that None instead of continuing to the later sources: an empty
+    string fell through (it is falsy) while ``CLAUDE_CODE_OAUTH_TOKEN=" "`` stopped
+    the whole lookup, making an otherwise valid ``~/.claude/.credentials.json``
+    unreachable.
+    """
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    default_path = tmp_path / ".claude" / ".credentials.json"
+    default_path.parent.mkdir()
+    default_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-fallback",
+                    "refreshToken": "sk-ant-ort01-fallback",
+                    "expiresAt": 4_102_444_800_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", access_token)
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-fallback"
+    assert cred.source == "claude-cli-file"
+
+
+@pytest.mark.parametrize("access_token", ["   ", "\t\n", " " * 12])
+def test_blank_first_env_token_does_not_hide_the_second_env_var(monkeypatch, access_token):
+    """A blank ``CLAUDE_CODE_OAUTH_TOKEN`` must not hide a usable ``ANTHROPIC_AUTH_TOKEN``.
+
+    ``or`` only moves on when the first operand is falsy, so a whitespace-only first
+    variable won the lookup, produced no credential, and skipped the second variable
+    on the way to the descriptor and file sources.
+    """
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", access_token)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-ant-oat01-second")
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-second"
+    assert cred.source == "claude-cli-env"
+
+
+def test_blank_env_token_is_logged_at_debug(monkeypatch, caplog):
+    """A rejected env token must be observable by its source name, never its value."""
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "   ")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-ant-oat01-second")
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.models.credential_loader"):
+        load_claude_code_credential()
+
+    assert any(record.levelno == logging.DEBUG and "CLAUDE_CODE_OAUTH_TOKEN" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("access_token", [b"   ", b"\t\n"])
+def test_blank_file_descriptor_token_falls_through_to_the_credentials_file(tmp_path, monkeypatch, access_token):
+    """Same contract on the descriptor handoff: a blank secret is not a hit."""
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    default_path = tmp_path / ".claude" / ".credentials.json"
+    default_path.parent.mkdir()
+    default_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-fallback",
+                    "expiresAt": 4_102_444_800_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    read_fd = _pipe_with_secret(access_token)
+    try:
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", str(read_fd))
+        cred = load_claude_code_credential()
+    finally:
+        os.close(read_fd)
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-fallback"
+    assert cred.source == "claude-cli-file"
+
+
 def test_load_claude_code_credential_strips_a_padded_access_token(tmp_path, monkeypatch):
     _clear_claude_code_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -605,3 +702,50 @@ def test_codex_chat_model_reports_missing_credential_for_non_string_access_token
 
     with pytest.raises(ValueError, match="Codex CLI credential not found"):
         CodexChatModel(model="gpt-5.4")
+
+
+@pytest.mark.parametrize("unusable", ["", "   ", "\t\n", 999, {"nested": "token"}, ["token-list"]])
+def test_load_codex_cli_credential_falls_through_an_unusable_earlier_layout(tmp_path, monkeypatch, unusable):
+    """doctor.py validates this file across all three token layouts with ``any()``;
+    the loader must agree instead of stopping at the first truthy key.
+
+    A top-level ``access_token`` holding a blank or non-string value is not a
+    credential, and taking it via ``or`` and then rejecting it hid a perfectly
+    usable ``tokens.access_token``: ``make doctor`` called the file healthy while
+    every model construction failed with "Codex CLI credential not found".
+    """
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "access_token": unusable,
+                "tokens": {"access_token": "sk-ant-nested", "account_id": "acct-nested"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    cred = load_codex_cli_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-nested"
+    assert cred.account_id == "acct-nested"
+
+
+@pytest.mark.parametrize(
+    "layouts",
+    [
+        {"access_token": "   "},
+        {"access_token": {"a": 1}, "token": []},
+        {"tokens": {"access_token": "\n"}},
+        {"access_token": "   ", "token": "\t", "tokens": {"access_token": ""}},
+    ],
+)
+def test_load_codex_cli_credential_returns_none_when_every_layout_is_unusable(tmp_path, monkeypatch, layouts):
+    """Falling through source to source must not invent a credential."""
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps(layouts), encoding="utf-8")
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    assert load_codex_cli_credential() is None

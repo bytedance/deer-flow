@@ -540,7 +540,16 @@ def test_pat_runs_policy_admits_exactly_the_mounted_routes():
         under_runs = route.path.startswith("/api/threads/{thread_id}/runs")
         for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
             admitted = is_pat_allowed_route(method, path)
-            if under_runs:
+            if route.path in {
+                "/api/threads/{thread_id}/runs/{run_id}/inputs",
+                "/api/threads/{thread_id}/runs/{run_id}/inputs/{input_id}",
+                "/api/threads/{thread_id}/runs/{run_id}/inputs/{input_id}/retry",
+                "/api/threads/{thread_id}/runs/{run_id}/tool-approvals/{request_id}",
+            }:
+                # Interactive controls remain session-only, without widening
+                # existing PAT scopes or their explicit route allowlist.
+                assert not admitted, f"{method} {path} must stay PAT-denied"
+            elif under_runs:
                 assert admitted, f"{method} {path} is implemented but PAT-denied"
             else:
                 # /messages, /messages/page, /token-usage sit outside the runs
@@ -597,6 +606,11 @@ def test_pat_projects_policy_admits_exactly_the_mounted_routes():
         ("GET", "/api/projects/p1/archive"),
         ("GET", "/api/projects/p1/restore"),
         ("POST", "/api/projects/p1/threads"),
+        ("POST", "/api/projects/p1/memory"),
+        ("PUT", "/api/projects/p1/memory"),
+        ("GET", "/api/projects/p1/memory/f1"),
+        ("PATCH", "/api/projects/p1/memory/f1"),
+        ("GET", "/api/projects/p1/memory/f1/promote"),
         # Document-shelf neighbors that must stay default-denied: the bare
         # item read, collection deletes, wrong-method variants of the
         # Slice C routes, and the Slice D trash routes.
@@ -739,27 +753,12 @@ def test_runs_create_only_pat_cannot_use_mutating_multitask_strategy(client):
     assert session_allowed.status_code == 200
 
 
-def test_start_run_gates_mutating_strategies_at_the_choke_point():
-    """The strategy gate lives inside start_run itself — the single choke point
-    every run-creation path (all five HTTP entrypoints plus internal
-    launchers) flows through — so no entry point can bypass it. Mirrored
-    routes prove the middleware path; this anchor proves the choke point."""
-    import inspect
-
-    from app.gateway.services import start_run
-
-    source = inspect.getsource(start_run)
-    assert "require_cancel_permission_if" in source
-    assert "multitask_strategy" in source
-
-
-def test_start_run_gate_denies_create_only_credential_behaviorally():
-    """Behavioral pin on the real start_run (the mirror route and source
-    anchor above prove wiring, but this drives the production choke point
-    itself): a create-only auth context gets 403 for a mutating strategy,
-    and the gate never misfires on "reject" — with no cancel permission at
-    all, the call proceeds past the gate (failing later on missing test
-    wiring, never with a permission 403)."""
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+def test_start_run_gate_denies_create_only_credential_behaviorally(strategy):
+    """Behavioral pin on the real start_run choke point: a create-only auth
+    context gets 403 for every mutating multitask strategy, credentials with
+    runs:cancel pass the gate, and non-cancelling strategies ("reject",
+    "enqueue") never misfire with a permission 403."""
     from fastapi import HTTPException
 
     from app.gateway.authz import AuthContext
@@ -771,22 +770,24 @@ def test_start_run_gate_denies_create_only_credential_behaviorally():
 
     async def _denied():
         with pytest.raises(HTTPException) as exc:
-            await start_run(RunCreateRequest(multitask_strategy="interrupt"), "t1", _request(["runs:create"]))
+            await start_run(RunCreateRequest(multitask_strategy=strategy), "t1", _request(["runs:create"]))
         return exc.value
 
     exc = asyncio.run(_denied())
     assert exc.status_code == 403
     assert exc.detail == "Permission denied: runs:cancel"
 
-    async def _allowed_past_gate():
+    async def _allowed_past_gate(req_body, perms):
         try:
-            await start_run(RunCreateRequest(), "t1", _request([]))
+            await start_run(req_body, "t1", _request(perms))
         except HTTPException as gate_misfire:
-            pytest.fail(f"gate misfired on reject: {gate_misfire.status_code} {gate_misfire.detail}")
+            pytest.fail(f"gate misfired: {gate_misfire.status_code} {gate_misfire.detail}")
         except Exception:
             pass  # expected wiring failure past the gate — the gate let it through
 
-    asyncio.run(_allowed_past_gate())
+    asyncio.run(_allowed_past_gate(RunCreateRequest(multitask_strategy=strategy), ["runs:create", "runs:cancel"]))
+    for non_cancelling in (RunCreateRequest(), RunCreateRequest(multitask_strategy="reject")):
+        asyncio.run(_allowed_past_gate(non_cancelling, []))
 
 
 def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):

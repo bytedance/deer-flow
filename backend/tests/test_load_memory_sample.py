@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,6 +114,41 @@ def test_load_sample_for_users_rejects_unpersisted_sample(tmp_path):
         )
 
 
+def test_target_backups_keep_both_copies_when_imports_share_a_second(monkeypatch, tmp_path):
+    source = tmp_path / "sample.json"
+    target = tmp_path / "memory.json"
+    source.write_text(json.dumps({"facts": [{"id": "sample"}]}), encoding="utf-8")
+    target.write_text(json.dumps({"facts": [{"id": "original"}]}), encoding="utf-8")
+    monkeypatch.setattr(loader, "datetime", SimpleNamespace(now=lambda: datetime(2026, 10, 24, 12, 0, 0)))
+
+    args = ["--source", str(source), "--target", str(target)]
+    assert loader.main(args) == 0
+    first_backup = next(tmp_path.glob("memory.json.bak-*"))
+    assert json.loads(first_backup.read_text(encoding="utf-8"))["facts"][0]["id"] == "original"
+
+    assert loader.main(args) == 0
+    backups = list(tmp_path.glob("memory.json.bak-*"))
+    assert len(backups) == 2
+    assert json.loads(first_backup.read_text(encoding="utf-8"))["facts"][0]["id"] == "original"
+    second_backup = next(path for path in backups if path != first_backup)
+    assert json.loads(second_backup.read_text(encoding="utf-8"))["facts"][0]["id"] == "sample"
+
+
+def test_target_backup_removes_reserved_file_if_copy_fails(monkeypatch, tmp_path):
+    target = tmp_path / "memory.json"
+    target.write_text("original", encoding="utf-8")
+
+    def fail_copy(_source, _destination):
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(loader.shutil, "copy2", fail_copy)
+    with pytest.raises(OSError, match="copy failed"):
+        loader.create_target_backup(target)
+
+    assert list(tmp_path.glob("memory.json.bak-*")) == []
+    assert target.read_text(encoding="utf-8") == "original"
+
+
 def test_load_sample_for_all_users_uses_runtime_config_resolution(monkeypatch, tmp_path):
     import asyncio
 
@@ -147,14 +183,16 @@ def test_load_sample_for_all_users_uses_configured_memory_manager(monkeypatch, t
     manager_factory_calls = 0
     loaded = []
     imported = []
+    current = {user_id: {"facts": [{"id": f"old-{user_id}"}]} for user_id in ("u1", "u2")}
 
     class FakeMemoryManager:
         def get_memory(self, *, user_id):
             loaded.append(user_id)
-            return {"facts": [{"id": f"old-{user_id}"}]}
+            return current[user_id]
 
         def import_memory(self, sample, *, user_id):
             imported.append((user_id, sample))
+            current[user_id] = sample
             return sample
 
     manager = FakeMemoryManager()
@@ -188,6 +226,7 @@ def test_load_sample_for_all_users_uses_configured_memory_manager(monkeypatch, t
     monkeypatch.setattr(persistence_engine, "init_engine_from_config", init_engine_from_config)
     monkeypatch.setattr(persistence_engine, "get_session_factory", object)
     monkeypatch.setattr(persistence_engine, "close_engine", close_engine)
+    monkeypatch.setattr(loader, "datetime", SimpleNamespace(now=lambda: datetime(2026, 10, 24, 12, 0, 0)))
 
     sample = {"facts": [{"id": "sample"}]}
     count, backup_root = asyncio.run(
@@ -201,6 +240,16 @@ def test_load_sample_for_all_users_uses_configured_memory_manager(monkeypatch, t
     assert backup_root is not None
     assert json.loads((backup_root / "u1.json").read_text())["facts"][0]["id"] == "old-u1"
     assert json.loads((backup_root / "u2.json").read_text())["facts"][0]["id"] == "old-u2"
+
+    second_count, second_backup_root = asyncio.run(
+        loader.load_sample_for_all_users(SCRIPT_PATH.parents[1], sample, no_backup=False),
+    )
+    assert second_count == 2
+    assert second_backup_root is not None and second_backup_root != backup_root
+    assert json.loads((backup_root / "u1.json").read_text())["facts"][0]["id"] == "old-u1"
+    assert json.loads((backup_root / "u2.json").read_text())["facts"][0]["id"] == "old-u2"
+    assert json.loads((second_backup_root / "u1.json").read_text())["facts"][0]["id"] == "sample"
+    assert json.loads((second_backup_root / "u2.json").read_text())["facts"][0]["id"] == "sample"
 
 
 def test_require_persistent_database_rejects_memory():

@@ -199,4 +199,17 @@ describe("briefReason", () => {
     expect(reason).toHaveLength(120);
     expect(reason.endsWith("…")).toBe(true);
   });
+
+  it("counts code points so a cut never splits an emoji", () => {
+    // 120 code points but 121 UTF-16 units: the whole summary fits.
+    const fits = `${"a".repeat(118)}😀b`;
+    expect(briefReason(fits)).toBe(fits);
+
+    // Cut lands before the extra text, after the whole emoji: no lone surrogate.
+    const overflow = `${"a".repeat(118)}😀bc`;
+    expect(briefReason(overflow)).toBe(`${"a".repeat(118)}😀…`);
+    expect(briefReason(overflow)).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/,
+    );
+  });
 });

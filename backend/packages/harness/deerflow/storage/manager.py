@@ -3,7 +3,8 @@
 Mirrors ``deerflow/agents/memory/manager.py`` (the pattern maintainers pointed
 at for issue #4189 item 2): backends live in ``storage/backends/<name>/``, each
 package's ``__init__`` exposes ``STORE_CLASS``, and ``blob_storage.backend``
-names one of them -- or a dotted import path for a backend that lives elsewhere.
+names one of them -- or an import path (``module.Class`` or ``module:Class``)
+for a backend that lives elsewhere, including a single-file module.
 
 Two accessors, so call sites cannot drift:
 
@@ -62,18 +63,18 @@ def _resolve_store_class(backend: str) -> type[BlobStore]:
 
     * a registered backend name -- a folder under ``storage/backends/`` whose
       ``__init__`` exposes ``STORE_CLASS``;
-    * a dotted import path -- ``pkg.mod.Class`` for a backend that lives
-      outside this package (an extension or a deployment-local backend).
+    * an import path -- ``module.Class`` or ``module:Class`` -- for a backend
+      outside this package, including a single-file deployment-local module.
     """
     global _backends_cache
 
-    if "." not in backend:
+    if "." not in backend and ":" not in backend:
         if _backends_cache is None:
             _backends_cache = _scan_backends()
         cls = _backends_cache.get(backend)
         if cls is None:
             available = ", ".join(sorted(_backends_cache)) or "(none)"
-            raise ValueError(f"Unknown blob store backend {backend!r}. Registered backends: {available}. Alternatively pass a dotted import path to a BlobStore subclass.")
+            raise ValueError(f"Unknown blob store backend {backend!r}. Registered backends: {available}. Alternatively pass an import path (module.Class or module:Class) to a BlobStore subclass.")
         return cls
 
     module_path, _, class_name = backend.partition(":") if ":" in backend else backend.rpartition(".")

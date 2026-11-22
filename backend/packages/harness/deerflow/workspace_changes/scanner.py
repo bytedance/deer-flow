@@ -137,7 +137,7 @@ def scan_workspace_roots(
             continue
 
         for dirpath, dirnames, filenames in os.walk(root.host_path, followlinks=False):
-            dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names and not (Path(dirpath) / dirname).is_symlink()]
+            dirnames[:] = [dirname for dirname in sorted(dirnames) if dirname not in excluded_dir_names and not (Path(dirpath) / dirname).is_symlink()]
             for filename in sorted(filenames):
                 if scanned >= resolved_limits.max_scanned_files:
                     truncated = True
@@ -219,7 +219,10 @@ def _snapshot_file(
         return None
 
     binary = host_file.suffix.lower() in BINARY_EXTENSIONS or _looks_binary(sample)
-    sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
+    try:
+        sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
+    except FileNotFoundError:
+        return None
     text: str | None = None
     text_path: str | None = None
     reason: DiffUnavailableReason | None = None
@@ -325,10 +328,17 @@ def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | No
 
 
 def _publish_text_atomically(path: Path, content: str) -> None:
-    """Publish text through a temporary file so a partial write cannot survive."""
+    """Publish text through a temporary file so a partial write cannot survive.
+
+    ``newline="\\n"`` keeps the publication byte-exact on every host: the
+    default text-mode translation would rewrite a decoded CRLF snapshot's
+    ``\\n`` characters into ``os.linesep`` on Windows, turning ``\\r\\n``
+    content into ``\\r\\r\\n`` bytes that every later reader serves verbatim
+    as the file's text.
+    """
     fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())

@@ -2,7 +2,11 @@ import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { SubagentBatch, SubagentBatchItem } from "./types";
+import type {
+  SubagentBatch,
+  SubagentBatchItem,
+  SubagentBatchItemDetail,
+} from "./types";
 
 function batchUrl(threadId: string, path = ""): string {
   return `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/subagent-batches${path}`;
@@ -41,6 +45,22 @@ export async function fetchSubagentBatchItems(
       batchUrl(threadId, `/${encodeURIComponent(batchId)}/items?${params}`),
     ),
     "Failed to load batch items",
+  );
+}
+
+export async function fetchSubagentBatchItemDetail(
+  threadId: string,
+  batchId: string,
+  position: number,
+): Promise<SubagentBatchItemDetail> {
+  return json(
+    await fetch(
+      batchUrl(
+        threadId,
+        `/${encodeURIComponent(batchId)}/items/${encodeURIComponent(String(position))}`,
+      ),
+    ),
+    "Failed to load batch result",
   );
 }
 

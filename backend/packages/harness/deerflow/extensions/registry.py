@@ -56,6 +56,9 @@ class LoadedExtensions:
     services: tuple[tuple[str, ExtensionService], ...] = ()
     routers: tuple[tuple[str, Any], ...] = ()
     plugins: tuple[tuple[str, PluginContribution], ...] = ()
+    knowledge_providers: tuple[tuple[str, tuple[str, Any]], ...] = ()
+    workspace_search_providers: tuple[tuple[str, Any], ...] = ()
+    documentation: tuple[tuple[str, dict], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
@@ -84,6 +87,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._services: list[_Entry] = []
         self._routers: list[_Entry] = []
         self._plugins: list[_Entry] = []
+        self._knowledge_providers: list[_Entry] = []
+        self._workspace_search_providers: list[_Entry] = []
         self._current_source: str | None = None
         self._model_access: ModelInvocationScope | None = None
 
@@ -114,6 +119,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
 
         tool_names = set()
         for tool in contribution.tools:
+            if tool.response_format not in ("content", "content_and_artifact"):
+                raise ValueError("Unsupported plugin tool response format")
             if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool.name) or tool.name in tool_names or not tool.description or not inspect.iscoroutinefunction(tool.handler):
                 raise ValueError("Model tools require unique names, descriptions and async handlers")
             validate_schema(tool.input_schema, tool=True)
@@ -144,8 +151,27 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._plugins.append((self._source(), contribution))
         return True
 
+    def workspace_search(self, provider: Any) -> bool:
+        if self._workspace_search_providers:
+            raise ValueError("Only one workspace search provider may be installed")
+        if not inspect.iscoroutinefunction(getattr(provider, "search", None)):
+            raise ValueError("Workspace search requires an async search method")
+        self._workspace_search_providers.append((self._source(), provider))
+        return True
+
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
+
+    def knowledge_provider(self, name: str, provider: Any) -> bool:
+        from deerflow.knowledge.providers import validate_provider
+
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name) or name in {"ragflow", "lightrag"}:
+            raise ValueError("Invalid or reserved knowledge provider name")
+        validate_provider(provider)
+        if any(existing == name for _, (existing, _) in self._knowledge_providers):
+            raise ValueError("Duplicate knowledge provider name")
+        self._knowledge_providers.append((self._source(), (name, provider)))
+        return True
 
     def task_lifecycle(self, contributor: TaskLifecycleContributor) -> None:
         self._task_lifecycle.append((self._source(), contributor))
@@ -190,6 +216,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
             self._services,
             self._routers,
             self._plugins,
+            self._knowledge_providers,
+            self._workspace_search_providers,
         ):
             bucket[:] = [entry for entry in bucket if entry[0] != source]
 
@@ -204,6 +232,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._services),
             len(self._routers),
             len(self._plugins),
+            len(self._knowledge_providers),
+            len(self._workspace_search_providers),
         )
 
     def rollback_to(self, mark: tuple[int, ...]) -> None:
@@ -223,6 +253,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 self._services,
                 self._routers,
                 self._plugins,
+                self._knowledge_providers,
+                self._workspace_search_providers,
             ),
             mark,
             strict=True,
@@ -240,6 +272,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
             services=tuple(self._services),
             routers=tuple(self._routers),
             plugins=tuple(self._plugins),
+            knowledge_providers=tuple(self._knowledge_providers),
+            workspace_search_providers=tuple(self._workspace_search_providers),
             has_middleware_contributors=bool(self._middlewares),
             has_task_lifecycle=bool(self._task_lifecycle),
             has_system_model_observers=bool(self._system_model_observers),

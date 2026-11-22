@@ -119,6 +119,18 @@ class TestMergeArtifacts:
     def test_none_existing_accepts_new(self):
         assert merge_artifacts(None, ["a"]) == ["a"]
 
+    def test_poisoned_existing_value_is_ignored(self):
+        """A non-list value persisted through the state route must not fail the
+        next artifact write with ``TypeError``."""
+        assert merge_artifacts("oops", ["a"]) == ["a"]
+
+    def test_non_list_new_value_is_ignored(self):
+        assert merge_artifacts(["a"], "oops") == ["a"]
+
+    def test_non_string_entries_are_dropped(self):
+        """Unhashable entries from a poisoned list must not break deduplication."""
+        assert merge_artifacts(["a", ["b"]], ["c", {"d": 1}]) == ["a", "c"]
+
 
 class TestMergeViewedImages:
     """Sanity check for the existing viewed_images reducer."""
@@ -129,9 +141,33 @@ class TestMergeViewedImages:
         merged = merge_viewed_images(existing, new)
         assert set(merged.keys()) == {"k1", "k2"}
 
+    def test_updated_key_moves_to_end(self):
+        """Re-viewing an existing path must make it the newest entry (#6829 review)."""
+        existing = {
+            "k1": {"mime_type": "image/png", "size": 1, "actual_path": "/a"},
+            "k2": {"mime_type": "image/png", "size": 2, "actual_path": "/b"},
+        }
+        new = {"k1": {"mime_type": "image/png", "size": 3, "actual_path": "/a"}}
+        merged = merge_viewed_images(existing, new)
+        assert list(merged.keys()) == ["k2", "k1"]
+        assert merged["k1"]["size"] == 3
+
+    def test_new_keys_append_after_untouched(self):
+        existing = {"k1": {"mime_type": "image/png", "size": 1, "actual_path": "/a"}}
+        new = {"k2": {"mime_type": "image/png", "size": 2, "actual_path": "/b"}}
+        merged = merge_viewed_images(existing, new)
+        assert list(merged.keys()) == ["k1", "k2"]
+
     def test_empty_dict_clears(self):
         existing = {"k1": {"mime_type": "image/png", "size": 1, "actual_path": "/a"}}
         assert merge_viewed_images(existing, {}) == {}
+
+    def test_revisited_path_becomes_most_recent(self):
+        existing = {"old": {"size": 1}, "recent": {"size": 2}}
+        merged = merge_viewed_images(existing, {"old": {"size": 3}})
+        assert list(merged) == ["recent", "old"]
+        assert merged["old"]["size"] == 3
+        assert list(existing) == ["old", "recent"]
 
 
 class TestMergeDelegations:

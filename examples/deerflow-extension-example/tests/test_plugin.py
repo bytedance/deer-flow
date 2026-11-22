@@ -26,10 +26,10 @@ from deerflow_extension_example import install
 
 
 class FakeRegistry:
-    def plugin(self, contribution: Any) -> bool:
-        return False
-
     def __init__(self) -> None:
+        self.plugins: list[Any] = []
+        self.knowledge_providers: list[tuple[str, Any]] = []
+        self.workspace_search_providers: list[Any] = []
         self.middleware_contributors: list[Any] = []
         self.task_lifecycle_contributors: list[Any] = []
         self.system_model_observers: list[Any] = []
@@ -37,6 +37,18 @@ class FakeRegistry:
         self.context_compaction_observers: list[Any] = []
         self.services: list[Any] = []
         self.contributed_routers: list[Any] = []
+
+    def plugin(self, contribution: Any) -> bool:
+        self.plugins.append(contribution)
+        return True
+
+    def knowledge_provider(self, name: str, provider: Any) -> bool:
+        self.knowledge_providers.append((name, provider))
+        return True
+
+    def workspace_search(self, provider: Any) -> bool:
+        self.workspace_search_providers.append(provider)
+        return True
 
     def middlewares(self, contributor: Any) -> None:
         self.middleware_contributors.append(contributor)
@@ -84,6 +96,9 @@ def test_install_registers_the_five_demonstrated_contribution_kinds() -> None:
     # The README names these as not demonstrated here.
     assert registry.agent_assembly_observers == []
     assert registry.context_compaction_observers == []
+    assert registry.knowledge_providers == []
+    assert registry.workspace_search_providers == []
+    assert registry.plugins == []
     assert [route.path for route in registry.contributed_routers[0].routes] == ["/api/extension-example/stats"]
     assert install.__deerflow_api__ == "0.2.0"
     assert install.__deerflow_name__ == "example"

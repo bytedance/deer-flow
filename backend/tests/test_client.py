@@ -9,6 +9,7 @@ import stat
 import tempfile
 import threading
 import zipfile
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
@@ -61,8 +63,7 @@ def mock_app_config():
     config.skills.deferred_discovery = False
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
-    config.database.checkpoint_channel_mode = "full"
-    config.database.checkpoint_delta.snapshot_frequency = 10
+    config.database = DatabaseConfig(backend="memory")
     config.authorization = AuthorizationConfig(enabled=False)
     return config
 
@@ -811,6 +812,28 @@ class TestStream:
 
         assert [event.data["content"] for event in _ai_events(events)] == ["Checking again.", "\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit."]
 
+    @pytest.mark.parametrize("snapshot_text, expected_delta", [("Hello\n\n附加说明", "\n\n附加说明"), ("Hello", ""), ("Rewritten answer", "")])
+    def test_first_streamed_snapshot_preserves_text_and_metadata_once(self, client, snapshot_text, expected_delta):
+        call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
+        message = AIMessage(content=snapshot_text, id="ai-1", tool_calls=[call], additional_kwargs={"note": "added"})
+        agent = _make_agent_mock(
+            [
+                ("messages", (AIMessageChunk(content="Hello", id="ai-1"), {})),
+                ("messages", (AIMessageChunk(content="", id="ai-1", tool_call_chunks=[{"name": "bash", "args": '{"command":"ls"}', "id": "call-1", "index": 0}]), {})),
+                ("values", {"messages": [message]}),
+                ("values", {"messages": [message.model_copy()]}),
+            ]
+        )
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="t-first-streamed-snapshot"))
+
+        ai_events = [event.data for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai"]
+        assert "".join(event["content"] for event in ai_events) == "Hello" + expected_delta
+        first_snapshot_index = next(index for index, event in enumerate(events) if event.type == "values")
+        assert "".join(event.data.get("content", "") for event in events[:first_snapshot_index]) == "Hello" + expected_delta
+        assert [event["additional_kwargs"] for event in ai_events if event.get("additional_kwargs")] == [{"note": "added"}]
+        assert [event["tool_calls"] for event in ai_events if event.get("tool_calls")] == [[call]]
+
     def test_stream_does_not_resend_a_replacement_that_does_not_extend_the_sent_text(self, client):
         """Only appended text is sent; a rewrite of what was already sent would duplicate output."""
         sent = AIMessage(content="Let me look.", id="ai-1")
@@ -1260,6 +1283,26 @@ class TestStream:
 
 
 class TestChat:
+    @pytest.mark.parametrize("suffix", ["", "\n\n附加说明"])
+    def test_returns_text_appended_before_the_first_values_snapshot(self, client, suffix):
+        """A model wrapper can extend streamed text before the model node commits."""
+        from langchain.agents import create_agent
+        from langchain.agents.middleware import AgentMiddleware, ModelResponse
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        class AppendTextMiddleware(AgentMiddleware):
+            def wrap_model_call(self, request, handler):
+                response = handler(request)
+                message = response.result[0]
+                return ModelResponse(result=[message.model_copy(update={"content": message.content + suffix})])
+
+        # A stable ID connects streamed text to the first committed snapshot;
+        # id-less responses would bypass reconciliation and mask a regression.
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="Hello", id="ai-1")])
+        graph = create_agent(model=model, middleware=[AppendTextMiddleware()], state_schema=ThreadState)
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", graph):
+            assert client.chat("hi", thread_id="t-first-snapshot") == "Hello" + suffix
+
     @pytest.mark.parametrize(
         ("events", "expected"),
         [
@@ -1486,7 +1529,7 @@ class TestClientMcpSelection:
             config["metadata"] = {"existing": "preserved", "mcp_plugins": ["installation-B"]}
             client._ensure_agent(config)
             keys.append(client._agent_config_key)
-            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection}
+            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection, "tool_groups": None}
 
             # Changing the saved config takes effect only after reset_agent().
             mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=["installation-B"])
@@ -1500,6 +1543,70 @@ class TestClientMcpSelection:
 
 
 class TestEnsureAgent:
+    @pytest.mark.parametrize(
+        ("groups", "expected"),
+        [(None, {"read_file", "write_file"}), ([], set()), (["file:read"], {"read_file"})],
+    )
+    def test_named_agent_tool_groups_reach_model_and_delegation(self, client, tmp_path, monkeypatch, groups, expected):
+        import httpx
+        from langchain_openai import ChatOpenAI
+
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths._paths", paths)
+        agent_dir = paths.user_agent_dir("test-user", "researcher")
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "config.yaml").write_text(json.dumps({"name": "researcher", "tool_groups": groups}), encoding="utf-8")
+        app_config = AppConfig(
+            models=[],
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            tools=[
+                {"name": "read_file", "group": "file:read", "use": "deerflow.sandbox.tools:read_file_tool"},
+                {"name": "write_file", "group": "file:write", "use": "deerflow.sandbox.tools:write_file_tool"},
+            ],
+        )
+        app_config.tool_search.enabled = False
+        monkeypatch.setattr("deerflow.config.app_config._app_config", app_config)
+        monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
+        client._app_config = app_config
+        client._agent_name = "researcher"
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            chunk = {"id": "chatcmpl-groups", "choices": [{"index": 0, "delta": {"content": "Done"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+        # Retain saved config loading, tool assembly, graph execution and SDK
+        # serialization. Prompt/middleware assembly is unrelated to selection.
+        with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+            model = ChatOpenAI(model="offline", api_key="offline-placeholder", http_client=transport, use_responses_api=False)
+            with (
+                patch("deerflow.client.create_chat_model", return_value=model),
+                patch("deerflow.client.build_middlewares", return_value=[]),
+                patch("deerflow.client.apply_prompt_template", return_value="Answer briefly."),
+                patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+                patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()),
+                patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            ):
+                client._ensure_agent(client._get_runnable_config("group-test"), context={"user_id": "test-user"})
+                with patch.object(client._agent, "stream", wraps=client._agent.stream) as stream:
+                    assert client.chat("Hello", thread_id="group-test", user_id="test-user") == "Done"
+                    assert client.chat("Again", thread_id="group-test", user_id="test-user") == "Done"
+                (agent_dir / "config.yaml").write_text(json.dumps({"name": "researcher", "tool_groups": ["file:write"]}), encoding="utf-8")
+                client.reset_agent()
+                assert client.chat("Refresh", thread_id="group-test", user_id="test-user") == "Done"
+
+        assert len(requests) == 3
+        for request, selected in zip(requests, [expected, expected, {"write_file"}], strict=True):
+            names = {item["function"]["name"] for item in request["tools"]}
+            assert names & {"read_file", "write_file"} == selected
+            assert "present_files" in names  # Built-ins retain their existing policy.
+        for call in stream.call_args_list:
+            assert call.kwargs["config"]["metadata"]["tool_groups"] == groups
+
     @pytest.mark.parametrize(
         ("agent_name", "agent_config", "expected_memory_enabled"),
         [
@@ -1933,6 +2040,7 @@ class TestEnsureAgent:
             True,
             None,
             None,
+            None,
             "full",
             10,
             get_effective_user_id(),
@@ -2113,7 +2221,7 @@ class TestEnsureAgent:
 
         routing_arg = mock_build_middlewares.call_args.kwargs.get("mcp_routing_middleware")
         assert isinstance(routing_arg, McpRoutingMiddleware)
-        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == ["postgres_query"]
+        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == []
 
     def test_mcp_routing_middleware_absent_when_tool_search_disabled(self, client, mock_app_config):
         """No routing middleware is built on the embedded path when tool_search is off."""
@@ -2744,6 +2852,46 @@ class TestSkillsManagement:
         finally:
             tmp_path.unlink()
 
+    def test_update_public_skill_enters_managed_write_before_projection(self, client, tmp_path):
+        from deerflow.skills import projection
+        from deerflow.skills.mutations import guard
+
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text('{"skills": {}}', encoding="utf-8")
+        events = []
+
+        @contextmanager
+        def record_managed_write(*_args, **_kwargs):
+            events.append("managed-enter")
+            try:
+                yield
+            finally:
+                events.append("managed-exit")
+
+        @contextmanager
+        def record_projection(*_args, **_kwargs):
+            events.append("projection-enter")
+            try:
+                yield
+            finally:
+                events.append("projection-exit")
+
+        with (
+            patch(
+                "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+            ),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config"),
+            patch.object(guard, "managed_global_state_write", record_managed_write),
+            patch.object(projection, "skill_projection_mutation", record_projection),
+        ):
+            client.update_skill("test-skill", enabled=False)
+
+        assert events == ["managed-enter", "projection-enter", "projection-exit", "managed-exit"]
+
     def test_update_skill_persists_state_when_source_omits_skills(self, client):
         skill = self._make_skill(enabled=True)
         updated_skill = self._make_skill(enabled=False)
@@ -2791,6 +2939,7 @@ class TestSkillsManagement:
         skill = self._make_skill(enabled=True)
         skill.category = category
         storage = MagicMock()
+        storage._app_config = client._app_config
         storage.load_skills.side_effect = [[skill], [self._make_skill(enabled=False)]]
 
         with (
@@ -3002,6 +3151,147 @@ class TestMemoryManagement:
         assert "data" in result
 
 
+class TestNamedAgentMemoryManagement:
+    """A named client must manage the same bucket its agent reads and writes.
+
+    ``MemoryMiddleware`` and the memory tools both pass ``agent_name``, so
+    leaving it out of the management calls wrote facts to the user's default
+    bucket while the agent looked in its own — the fact was stored but never
+    recalled (#8142).
+    """
+
+    @pytest.fixture
+    def named_client(self, client):
+        client._agent_name = "buyer"
+        return client
+
+    def test_get_memory_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.get_memory()
+        assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_reload_memory_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.reload_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.reload_memory()
+        assert mock_mgr.reload_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_reload_memory_fallback_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.reload_memory.side_effect = NotImplementedError("reload not supported")
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.reload_memory()
+        assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_import_memory_writes_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.import_memory.return_value = {"version": "1.0", "facts": []}
+        imported = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.import_memory(imported)
+        assert mock_mgr.import_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_clear_memory_clears_only_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.clear_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.clear_memory()
+        assert mock_mgr.clear_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_create_memory_fact_writes_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.create_fact.return_value = ({"version": "1.0", "facts": []}, "fact_new")
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.create_memory_fact("My preferred office paper size is A5.", category="preference")
+        assert mock_mgr.create_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_delete_memory_fact_targets_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.delete_fact.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.delete_memory_fact("fact_123")
+        assert mock_mgr.delete_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_update_memory_fact_targets_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.update_fact.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.update_memory_fact("fact_123", "Use A4")
+        assert mock_mgr.update_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_backend_that_ignores_agent_scope_refuses_the_call(self, named_client):
+        """Noop-style backends accept ``agent_name`` and return normally while
+        ignoring it, so forwarding the scope alone would report success while
+        editing the user's default bucket. The capability flag must stop the
+        call before the backend sees it."""
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = False
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError):
+                named_client.get_memory()
+            with pytest.raises(NotImplementedError):
+                named_client.create_memory_fact("anything")
+        mock_mgr.get_memory.assert_not_called()
+        mock_mgr.create_fact.assert_not_called()
+
+    def test_backend_without_the_flag_refuses_the_call(self, named_client):
+        """A backend that predates the capability flag never advertises it."""
+        mock_mgr = MagicMock(spec=["get_memory", "create_fact"])
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError):
+                named_client.reload_memory()
+        mock_mgr.get_memory.assert_not_called()
+
+    def test_unnamed_client_keeps_the_default_bucket(self, client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            client.get_memory()
+        assert "agent_name" not in mock_mgr.get_memory.call_args.kwargs
+
+
+class TestNamedAgentMemoryScopeEndToEnd:
+    """Write through a named client, read back through the agent's own path."""
+
+    def test_fact_written_by_named_client_is_in_the_agents_bucket(self, mock_app_config, tmp_path):
+        from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+        token = set_current_user(SimpleNamespace(id="alice"))
+        try:
+            with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+                named = DeerFlowClient(agent_name="buyer")
+            with patch("deerflow.agents.memory.get_memory_manager", return_value=manager):
+                named.create_memory_fact("My preferred office paper size is A5.", category="preference")
+
+                # The agent's own path: MemoryMiddleware injects through
+                # get_context(agent_name=...), so a fact it cannot see there is
+                # never recalled.
+                agent_context = manager.get_context("alice", agent_name="buyer")
+                default_bucket = manager.get_memory(user_id="alice")
+
+            assert "A5" in agent_context
+            assert default_bucket["facts"] == []
+        finally:
+            reset_current_user(token)
+            manager.close()
+
+
 # ---------------------------------------------------------------------------
 # Uploads
 # ---------------------------------------------------------------------------
@@ -3151,13 +3441,20 @@ class TestUploads:
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
             ):
-                client.upload_files("thread-1", [authored])
+                result = client.upload_files("thread-1", [authored])
 
             from deerflow.utils.file_outline import extract_outline_for_file
 
-            assert resolve_companion(uploads_dir / "a.pdf") is None
-            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], [])
-            assert extract_outline_for_file(uploads_dir / "a_1.md")[0] == [{"title": "My notes", "line": 1}]
+            # Same-name uploads can no longer clobber an earlier file in place
+            # (issue #3750): the authored copy lands under the next free
+            # suffix, and the a.pdf companion record stays valid because its
+            # markdown was never destroyed.
+            assert result["files"][0]["filename"] == "a_1_1.md"
+            assert resolve_companion(uploads_dir / "a.pdf") == uploads_dir / "a_1.md"
+            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            assert (uploads_dir / "a_1_1.md").read_text(encoding="utf-8") == "# My notes"
+            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], ["FROM:a.pdf"])
+            assert extract_outline_for_file(uploads_dir / "a_1_1.md")[0] == [{"title": "My notes", "line": 1}]
 
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.
@@ -5294,7 +5591,7 @@ class TestUploadDuplicateFilenames:
             assert companion.read_bytes() == source.read_bytes()
         assert len(list(uploads_dir.iterdir())) == 4
 
-    def test_sequential_upload_keeps_replacement_behavior(self, client, tmp_path):
+    def test_sequential_upload_preserves_existing_file_and_reports_claimed_name(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
         first = tmp_path / "first" / "data.txt"
@@ -5308,9 +5605,14 @@ class TestUploadDuplicateFilenames:
             client.upload_files("t-dup", [first])
             result = client.upload_files("t-dup", [second])
 
-        assert result["files"][0]["filename"] == "data.txt"
-        assert (uploads_dir / "data.txt").read_bytes() == b"second"
-        assert len(list(uploads_dir.iterdir())) == 1
+        info = result["files"][0]
+        assert info["filename"] == "data_1.txt"
+        assert info["original_filename"] == "data.txt"
+        assert info["virtual_path"] == "/mnt/user-data/uploads/data_1.txt"
+        assert info["artifact_url"].endswith("/uploads/data_1.txt")
+        assert (uploads_dir / "data.txt").read_bytes() == b"first"
+        assert (uploads_dir / "data_1.txt").read_bytes() == b"second"
+        assert len(list(uploads_dir.iterdir())) == 2
 
     def test_duplicate_filenames_auto_renamed(self, client):
         """Two files with same basename → second gets _1 suffix."""

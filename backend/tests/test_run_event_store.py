@@ -646,6 +646,7 @@ class TestDbRunEventStore:
         class FakeSession:
             def __init__(self):
                 self.dialect = postgresql.dialect()
+                self.bind = self
                 self.execute_calls = []
 
             def get_bind(self):
@@ -675,8 +676,13 @@ class TestDbRunEventStore:
 
         assert count == 3
         assert session.execute_calls
-        assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
-        assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
+        # The shared changed-run clock precedes every run-row mutation.
+        assert "run_change_clock" in str(session.execute_calls[0][0])
+        assert "pg_advisory_xact_lock" in str(session.execute_calls[1][0])
+        assert session.execute_calls[1][1] == {"thread_id": "thread-1"}
+        assert "UPDATE runs" in str(session.execute_calls[2][0])
+        assert "DELETE FROM completed_run_snapshots" in str(session.execute_calls[3][0])
+        assert "DELETE FROM run_events" in str(session.execute_calls[4][0])
 
     @pytest.mark.anyio
     async def test_delete_by_run_takes_postgres_advisory_lock(self):
@@ -688,6 +694,7 @@ class TestDbRunEventStore:
         class FakeSession:
             def __init__(self):
                 self.dialect = postgresql.dialect()
+                self.bind = self
                 self.execute_calls = []
 
             def get_bind(self):
@@ -723,8 +730,12 @@ class TestDbRunEventStore:
 
         assert count == 2
         assert session.execute_calls
-        assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
-        assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
+        assert "run_change_clock" in str(session.execute_calls[0][0])
+        assert "pg_advisory_xact_lock" in str(session.execute_calls[1][0])
+        assert session.execute_calls[1][1] == {"thread_id": "thread-1"}
+        assert "UPDATE runs" in str(session.execute_calls[2][0])
+        assert "DELETE FROM completed_run_snapshots" in str(session.execute_calls[3][0])
+        assert "DELETE FROM run_events" in str(session.execute_calls[4][0])
         assert sum("pg_advisory_xact_lock" in str(call[0]) for call in session.execute_calls) == 1
 
     @pytest.mark.anyio
@@ -1557,7 +1568,7 @@ class TestGetMessageSeqs:
         assert await store.get_message_seqs("t1", ["message:u1"]) == {"message:u1": 1}
 
     @pytest.mark.anyio
-    async def test_a_tool_message_is_identified_by_its_tool_call_id(self, store):
+    async def test_a_tool_message_is_identified_by_its_message_id(self, store):
         await store.put(
             thread_id="t1",
             run_id="r1",
@@ -1566,7 +1577,7 @@ class TestGetMessageSeqs:
             content={"type": "tool", "id": "lc-abc", "tool_call_id": "call_1", "content": "OK"},
         )
 
-        assert await store.get_message_seqs("t1", ["tool:call_1"]) == {"tool:call_1": 1}
+        assert await store.get_message_seqs("t1", ["message:lc-abc"]) == {"message:lc-abc": 1}
 
     @pytest.mark.anyio
     async def test_the_injected_user_suffix_collapses_to_one_identity(self, store):
@@ -1687,12 +1698,12 @@ class TestGetMessageSeqs:
             run_id="r1",
             event_type="llm.tool.result",
             category="message",
-            content={"type": "tool", "tool_call_id": "call_1", "content": "OK"},
+            content={"type": "tool", "id": "result-1", "tool_call_id": "call_1", "content": "OK"},
         )
 
-        assert await s.get_message_seqs("t1", ["message:u1", "tool:call_1"]) == {
+        assert await s.get_message_seqs("t1", ["message:u1", "message:result-1"]) == {
             "message:u1": 1,
-            "tool:call_1": 2,
+            "message:result-1": 2,
         }
 
     @pytest.mark.anyio
@@ -1716,7 +1727,7 @@ class TestGetMessageSeqs:
                 run_id="r1",
                 event_type="llm.tool.result",
                 category="message",
-                content={"type": "tool", "tool_call_id": "call_1", "content": "OK"},
+                content={"type": "tool", "id": "result-1", "tool_call_id": "call_1", "content": "OK"},
             )
             await s.put(
                 thread_id="t1",
@@ -1726,9 +1737,9 @@ class TestGetMessageSeqs:
                 content={"type": "human", "id": "ignored"},
             )
 
-            assert await s.get_message_seqs("t1", ["message:u1", "tool:call_1", "message:ignored"]) == {
+            assert await s.get_message_seqs("t1", ["message:u1", "message:result-1", "message:ignored"]) == {
                 "message:u1": 1,
-                "tool:call_1": 2,
+                "message:result-1": 2,
             }
         finally:
             await close_engine()

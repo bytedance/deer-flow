@@ -137,11 +137,22 @@ providers:
     issuer: "https://provider.example.com"
     client_id: "..."
     client_secret: $SECRET
-    authorization_endpoint: "https://provider.example.com/oauth2/authorize"
+    authorization_endpoint: "https://provider.example.com/oauth2/authorize?prompt=login"
     token_endpoint: "https://provider.example.com/oauth2/token"
     userinfo_endpoint: "https://provider.example.com/oauth2/userinfo"
     jwks_uri: "https://provider.example.com/oauth2/jwks"
 ```
+
+Authorization endpoints may include provider query parameters, such as
+`prompt=login` in the example above. DeerFlow preserves existing encoded query
+values, blank values and repeated parameters when appending the login request
+parameters. This applies to both discovered endpoints and configured overrides.
+
+Do not include DeerFlow-generated parameters (`response_type`, `client_id`,
+`redirect_uri`, `scope`, `state`, `nonce`, `code_challenge` or
+`code_challenge_method`) in the endpoint query. Appending does not replace
+existing keys, and the identity provider decides how duplicate parameters are
+resolved.
 
 ## Local Keycloak Example
 
@@ -260,6 +271,21 @@ The backend also rejects password change requests for OAuth users:
 | `GET /api/v1/auth/oauth/{provider}` | Initiates SSO login, redirects to the OIDC provider |
 | `GET /api/v1/auth/callback/{provider}` | OIDC callback — exchanges code, creates session, redirects to frontend |
 
+### Provider failures
+
+An unreachable provider, an HTTP error, and a response body that is not the
+expected JSON object (for example a `200` maintenance page) all fail the same
+way. `GET /api/v1/auth/oauth/{provider}` answers `502`, and the callback
+redirects to `/login?error=sso_failed`. A discovery document without a usable
+authorization, token or JWKS endpoint counts as failed unless the provider
+config overrides that endpoint, and it is not cached. A malformed UserInfo body
+is skipped like a failed UserInfo request: the login continues with the ID
+token claims. The cause stays in the Gateway log. A UserInfo response whose
+`sub` is missing or differs from the ID token's is skipped the same way, since
+OIDC Core requires the two to match. With a provider that omits `sub` from
+UserInfo and sends the email only there, a first login gets `403` because no
+email reaches provisioning. Users already linked by subject still sign in.
+
 ## Frontend Callback Flow
 
 The frontend handles the post-SSO flow at `/auth/callback`:
@@ -274,7 +300,7 @@ The frontend handles the post-SSO flow at `/auth/callback`:
 - **State cookies** are HttpOnly, SameSite=Lax, Max-Age=300 seconds, and signed with the JWT secret
 - **PKCE** prevents authorization code interception attacks
 - **Nonce** prevents ID token replay attacks
-- **UserInfo sub check** ensures the UserInfo response matches the ID token subject
+- **UserInfo sub check** — UserInfo claims are used only when the response's `sub` equals the ID token subject; a response without a `sub` counts as a mismatch
 - **Reject alg=none** — ID tokens with algorithm "none" are always rejected
 - **No email auto-linking** — SSO accounts are always separate from email/password accounts. An email collision with an existing local account blocks the SSO login (409) rather than merging the two.
 - **Verified email requirement** — SSO users must have verified emails by default

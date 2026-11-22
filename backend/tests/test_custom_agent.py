@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -320,6 +322,37 @@ class TestLoadAgentSoul:
 
             cfg = AgentConfig(name="code-reviewer")
             soul = load_agent_soul(cfg.name)
+
+        assert soul == expected_soul
+
+    def test_strips_a_leading_bom_from_named_agent_soul(self, tmp_path):
+        """A SOUL.md saved by a Windows editor keeps a UTF-8 BOM.
+
+        ``str.strip()`` does not remove U+FEFF, so without normalization the mark
+        becomes the first character of the text injected into the lead agent's
+        ``<soul>`` block. SOUL.md is edited outside DeerFlow (Notepad, PowerShell
+        5.1), which is exactly where a BOM comes from.
+        """
+        expected_soul = "You are a specialized code review expert."
+        _write_agent(tmp_path, "code-reviewer", {"name": "code-reviewer"}, soul="\ufeff" + expected_soul)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import AgentConfig, load_agent_soul
+
+            cfg = AgentConfig(name="code-reviewer")
+            soul = load_agent_soul(cfg.name)
+
+        assert soul == expected_soul
+
+    def test_strips_a_leading_bom_from_the_default_agent_soul(self, tmp_path):
+        """The default agent reads ``{base_dir}/SOUL.md`` directly — a second read site."""
+        expected_soul = "You are the default agent."
+        (tmp_path / "SOUL.md").write_text("\ufeff" + expected_soul, encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul(None)
 
         assert soul == expected_soul
 
@@ -885,6 +918,40 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
+    def test_update_agent_description_null_resets_to_empty(self, agent_client):
+        """An explicit null description stores the default, not a null the loader rejects.
+
+        ``AgentUpdateRequest.description`` accepts null but ``AgentConfig.description``
+        is a ``str``: the route used to persist ``description: null`` and then fail
+        to read it back, so the PUT, every later GET and repair PUT returned 500.
+        """
+        agent_client.post("/api/agents", json={"name": "desc-agent", "description": "old desc", "soul": "p"})
+
+        response = agent_client.put("/api/agents/desc-agent", json={"description": None})
+        assert response.status_code == 200, response.text
+        assert response.json()["description"] == ""
+
+        tmp_path: Path = agent_client._tmp_path  # type: ignore[attr-defined]
+        stored = yaml.safe_load((tmp_path / "users" / "test-user-autouse" / "agents" / "desc-agent" / "config.yaml").read_text(encoding="utf-8"))
+        assert stored["description"] == ""
+        assert agent_client.get("/api/agents/desc-agent").json()["description"] == ""
+        assert [agent["name"] for agent in agent_client.get("/api/agents").json()["agents"]] == ["desc-agent"]
+
+    def test_stored_null_description_loads_as_empty_and_can_be_repaired(self, agent_client):
+        """A null already in storage (this bug, or a bare ``description:`` in YAML) reads as empty."""
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        FileAgentStore().create("reviewer", {"description": None}, "Soul")
+
+        response = agent_client.get("/api/agents/reviewer")
+        assert response.status_code == 200, response.text
+        assert response.json()["description"] == ""
+        assert [agent["name"] for agent in agent_client.get("/api/agents").json()["agents"]] == ["reviewer"]
+        response = agent_client.put("/api/agents/reviewer", json={"description": "repaired"})
+        assert response.status_code == 200, response.text
+        assert response.json()["description"] == "repaired"
+        assert response.json()["soul"] == "Soul"
+
     def test_update_agent_preserves_hand_authored_non_managed_fields(self, agent_client):
         """Hand-authored ``github:`` and ``memory_enabled`` fields must survive PATCH.
 
@@ -1098,6 +1165,94 @@ class TestUserProfileAPI:
         response = agent_client.put("/api/user-profile", json={"content": ""})
         assert response.status_code == 200
         assert response.json()["content"] is None
+
+
+class TestAgentsAPIErrorDetail:
+    """Unexpected-failure responses must not echo the exception text.
+
+    Agent config parse errors and filesystem ``OSError``s name absolute host
+    paths under ``users/<user_id>/``; they belong in the server log only.
+    """
+
+    def _user_dir(self, tmp_path: Path) -> Path:
+        return tmp_path / "users" / "test-user-autouse"
+
+    def _break_agent_config(self, agent_client, tmp_path: Path) -> Path:
+        assert agent_client.post("/api/agents", json={"name": "broken", "soul": "x"}).status_code == 201
+        config_file = self._user_dir(tmp_path) / "agents" / "broken" / "config.yaml"
+        config_file.write_text("name: broken\n  bad: [\n", encoding="utf-8")
+        return config_file
+
+    def test_get_agent_with_unparsable_config_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        config_file = self._break_agent_config(agent_client, tmp_path)
+
+        response = agent_client.get("/api/agents/broken")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to get agent"}
+        assert str(config_file) in caplog.text
+
+    def test_update_agent_with_unparsable_config_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        config_file = self._break_agent_config(agent_client, tmp_path)
+
+        response = agent_client.put("/api/agents/broken", json={"description": "new"})
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to update agent"}
+        assert str(config_file) in caplog.text
+
+    def test_list_agents_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        agents_root = self._user_dir(tmp_path) / "agents"
+        agents_root.parent.mkdir(parents=True)
+        agents_root.write_text("not a directory", encoding="utf-8")
+
+        response = agent_client.get("/api/agents")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to list agents"}
+        assert str(agents_root) in caplog.text
+
+    def test_create_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        agents_root = self._user_dir(tmp_path) / "agents"
+        agents_root.parent.mkdir(parents=True)
+        agents_root.write_text("not a directory", encoding="utf-8")
+
+        response = agent_client.post("/api/agents", json={"name": "fresh", "soul": "x"})
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to create agent"}
+        assert str(agents_root) in caplog.text
+
+    def test_delete_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        assert agent_client.post("/api/agents", json={"name": "locked", "soul": "x"}).status_code == 201
+        agent_dir = self._user_dir(tmp_path) / "agents" / "locked"
+        denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(agent_dir))
+
+        with patch.object(FileAgentStore, "delete", side_effect=denied):
+            response = agent_client.delete("/api/agents/locked")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to delete agent"}
+        assert str(agent_dir) in caplog.text
+
+    @pytest.mark.parametrize(
+        ("method", "kwargs", "detail"),
+        [
+            ("get", {}, "Failed to read user profile"),
+            ("put", {"json": {"content": "hi"}}, "Failed to update user profile"),
+        ],
+    )
+    def test_user_profile_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog, method, kwargs, detail):
+        user_md = self._user_dir(tmp_path) / "USER.md"
+        user_md.mkdir(parents=True)
+
+        response = getattr(agent_client, method)("/api/user-profile", **kwargs)
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": detail}
+        assert str(user_md) in caplog.text
 
 
 class TestAgentsApiDisabled:

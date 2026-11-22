@@ -168,6 +168,67 @@ class TestCrawl4AiClient:
             assert result.startswith("Error: Crawl4AI returned a non-JSON 200 response")
             assert "text/html" in result
 
+    @pytest.mark.parametrize(
+        "payload",
+        [[{"markdown": "# ok"}], "maintenance window", 42, None, True],
+        ids=["payload-is-a-list", "payload-is-a-string", "payload-is-an-int", "payload-is-null", "payload-is-a-bool"],
+    )
+    async def test_fetch_markdown_non_object_200_reports_a_format_error(self, payload):
+        """A JSON 200 that is not an object is a format error, not a Python traceback.
+
+        Crawl4AI answers with a JSON object on success. A reverse proxy, a
+        version-skewed server or an error document delivered with HTTP 200 can
+        return a list or a bare scalar instead; indexing it directly raised
+        ``'list' object has no attribute 'get'`` and the generic handler echoed
+        that Python text to the agent. Sibling providers (tavily's
+        ``_response_objects``) report a format error instead.
+        """
+        with patch("deerflow.community.crawl4ai.crawl4ai_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = payload
+            mock_resp.headers = {"content-type": "application/json"}
+            mock_resp.text = json.dumps(payload)[:200]
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            client = Crawl4AiClient(base_url="http://crawl4ai:11235")
+            result = await client.fetch_markdown("https://example.com")
+
+        assert result.startswith("Error: Crawl4AI returned an unexpected response format"), result
+        assert "object has no attribute" not in result
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [["# heading"], 123, {"text": "# heading"}],
+        ids=["markdown-is-a-list", "markdown-is-an-int", "markdown-is-an-object"],
+    )
+    async def test_fetch_markdown_non_string_payload_reports_a_format_error(self, markdown):
+        """A non-string ``markdown`` field is the same format error, one level in.
+
+        ``data.get("markdown") or ""`` passes a list/dict/int straight through to
+        ``.strip()``, which raised ``'list' object has no attribute 'strip'`` --
+        the container guard above does not cover this field.
+        """
+        with patch("deerflow.community.crawl4ai.crawl4ai_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"success": True, "markdown": markdown}
+            mock_resp.headers = {"content-type": "application/json"}
+            mock_resp.text = "{}"
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            client = Crawl4AiClient(base_url="http://crawl4ai:11235")
+            result = await client.fetch_markdown("https://example.com")
+
+        assert result.startswith("Error: Crawl4AI returned an unexpected response format"), result
+        assert "object has no attribute" not in result
+
 
 @pytest.mark.asyncio
 class TestCrawl4AiTools:

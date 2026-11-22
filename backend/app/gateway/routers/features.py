@@ -7,16 +7,18 @@ request, while startup-scoped capabilities report the runtime that actually
 started.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
-from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from app.gateway.routers.thread_activity import thread_activity_available
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
+from deerflow.knowledge.providers import get_knowledge_capabilities
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.subagents.capacity import configured_subagent_max_running
 
@@ -58,11 +60,11 @@ class ConversationReferencesFeature(BaseModel):
 
 
 class KnowledgeBaseFeature(BaseModel):
-    """Availability of RAGFlow retrieval scope selection in chat."""
+    """Availability of capability-driven retrieval scope selection in chat."""
 
     scope_selection_enabled: bool = Field(
         ...,
-        description="Whether chat may select a per-message RAGFlow retrieval scope",
+        description="Whether chat may select a per-message knowledge retrieval scope",
     )
 
 
@@ -73,13 +75,25 @@ class ScheduledTasksFeature(BaseModel):
     running: bool = Field(..., description="Whether this process's scheduler poller is running, so tasks run on schedule and new tasks can be created")
     tool_enabled: bool = Field(..., description="Whether chats can create and manage tasks and scheduled runs can stop their own schedule")
     min_interval_seconds: int = Field(..., description="Shortest interval and earliest one-time delay, in seconds")
-    group_notifications: bool = Field(..., description="Whether scheduled tasks support explicitly selected Feishu group notifications")
+    group_notifications: bool = Field(..., description="Whether scheduled tasks support explicitly selected group notifications")
 
 
 class ThreadActivityFeature(BaseModel):
     """Availability of the activity feed and per-user read markers."""
 
     available: bool = Field(..., description="Whether GET /api/thread-activity, POST /api/threads/{thread_id}/read and the thread search `unread` field work (SQL persistence)")
+
+
+class ToolApprovalFeature(BaseModel):
+    enabled: bool = False
+    default_mode: Literal["ask", "auto", "full"] = "ask"
+    allowed_modes: list[Literal["ask", "auto", "full"]] = Field(default_factory=list)
+
+
+class VoiceInputFeature(BaseModel):
+    enabled: bool = False
+    max_audio_bytes: int = 0
+    max_duration_seconds: int = 0
 
 
 class FeaturesResponse(BaseModel):
@@ -93,6 +107,9 @@ class FeaturesResponse(BaseModel):
     knowledge_base: KnowledgeBaseFeature
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
+    run_inputs: bool = False
+    voice_input: VoiceInputFeature = Field(default_factory=VoiceInputFeature)
+    tool_approval: ToolApprovalFeature = Field(default_factory=ToolApprovalFeature)
 
 
 @router.get(
@@ -104,8 +121,13 @@ class FeaturesResponse(BaseModel):
 async def list_features(request: Request, config: AppConfig = Depends(get_config)) -> FeaturesResponse:
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
+    approval = getattr(config, "hitl_approval", None)
+    voice = getattr(config, "voice_input", None)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     return FeaturesResponse(
+        voice_input=VoiceInputFeature(enabled=True, max_audio_bytes=voice.max_audio_bytes, max_duration_seconds=voice.max_duration_seconds) if voice is not None else VoiceInputFeature(),
+        tool_approval=ToolApprovalFeature(enabled=approval.enabled, default_mode=approval.default_mode, allowed_modes=approval.allowed_modes) if approval is not None else ToolApprovalFeature(),
+        run_inputs=getattr(getattr(request.app.state, "run_manager", None), "input_store", None) is not None,
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
         # MCP task bindings and the submitter are startup-scoped. Report the
@@ -129,7 +151,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             max_references=MAX_CONVERSATION_REFERENCES,
         ),
         knowledge_base=KnowledgeBaseFeature(
-            scope_selection_enabled=_knowledge_scope_selection_enabled(config),
+            scope_selection_enabled=_knowledge_scope_selection_enabled(config, getattr(request.app.state, "extensions", None)),
         ),
         scheduled_tasks=_scheduled_tasks_feature(request, config),
         # Startup-scoped: the read repository exists only with SQL persistence.
@@ -154,10 +176,10 @@ def _scheduled_tasks_feature(request: Request, config: AppConfig) -> ScheduledTa
     )
 
 
-def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:
-    """Fail closed unless the effective knowledge_search entry is RAGFlow."""
+def _knowledge_scope_selection_enabled(config: AppConfig, extensions=None) -> bool:
+    """Selection UI requires both a catalog and dataset filtering."""
     settings = config.knowledge_base
     if not settings.enabled or not settings.scope_selection_enabled:
         return False
-    tool = config.get_tool_config("knowledge_search")
-    return tool is not None and tool.use == RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+    capabilities = get_knowledge_capabilities(config, extensions=extensions)
+    return capabilities.supports("catalog") and capabilities.supports("dataset_filter")

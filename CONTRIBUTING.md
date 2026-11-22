@@ -51,11 +51,14 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    version, creates the missing `.env` files, and exports `DEER_FLOW_ROOT`.
 
    If you do run Compose directly, run it **from the repository root** and set
-   `DEER_FLOW_ROOT` to the absolute path of your checkout. Compose interpolates
-   that variable into host-side paths (`DEER_FLOW_HOST_BASE_DIR`,
-   `THREADS_HOST_PATH`) that the AIO and provisioner sandbox modes bind-mount;
-   leaving it unset renders them as `/backend/.deer-flow`, so those mounts
-   silently miss your checkout instead of failing:
+   `DEER_FLOW_ROOT` to the absolute path of your checkout. The default command
+   starts the local/AIO development stack without Kubernetes; add
+   `--profile provisioner` only when you need provisioner/Kubernetes sandbox
+   mode. Compose interpolates `DEER_FLOW_ROOT` into host-side paths
+   (`DEER_FLOW_HOST_BASE_DIR`, `THREADS_HOST_PATH`) that the AIO and provisioner
+   sandbox modes bind-mount; leaving it unset renders them as
+   `/backend/.deer-flow`, so those mounts silently miss your checkout instead of
+   failing:
 
    ```bash
    # macOS / Linux
@@ -104,6 +107,8 @@ If Docker builds are slow in your network, you can override the default package 
 export UV_INDEX_URL=https://pypi.org/simple
 export NPM_REGISTRY=https://registry.npmjs.org
 ```
+
+Keep `UV_INDEX_URL` at `https://pypi.org/simple`: the gateway image installs with `uv sync --locked`, and `uv.lock` is locked to that index, so a mirror makes the build fail with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided``.
 
 #### Recommended host resources
 
@@ -315,6 +320,14 @@ Nginx (port 2026) ← Unified entry point
    git push origin feature/your-feature-name
    ```
 
+Please don't include changes to `CHANGELOG.md` or `CHANGELOG_zh.md` in your
+pull request. Maintainers add the changelog entry at merge time: this keeps
+the Unreleased section's structure and entry ordering consistent and its
+English and Chinese files in sync, and it avoids conflicts with other
+in-flight merges, where the Unreleased section changes frequently. If your
+PR touches the changelog, a reviewer will ask you to drop that hunk — the
+rest of the PR is unaffected.
+
 ## AI assistance disclosure
 
 DeerFlow is an AI project and we welcome AI-assisted contributions. To help
@@ -333,7 +346,11 @@ before review.
 ## Testing
 
 ```bash
-# Default backend tests (four parallel shards; excludes live and blocking-I/O tests)
+# Public skill scripts (from the repository root)
+python -m pip install -r tests/skills/requirements.txt
+python -m pytest tests/skills -q
+
+# Default backend tests (six parallel shards matching CI; excludes live, blocking-I/O and bundled-extension tests)
 cd backend
 make test
 
@@ -342,6 +359,9 @@ make test TEST_JOBS=1
 
 # Strict blocking-I/O tests
 make test-blocking-io
+
+# Behavior suites of the bundled extension examples
+make test-bundled-extensions
 
 # Live DeerFlowClient integration tests (explicit opt-in)
 # Requires a valid root config.yaml and API credentials.
@@ -356,6 +376,11 @@ cd frontend
 make test-e2e
 ```
 
+If a host-configured uv package mirror blocks dependencies while running the
+config upgrade tests, run `make test-config-version` from the repository root.
+That command uses public PyPI for this suite and its subprocesses without
+changing the host's uv settings or the normal config upgrade command.
+
 `make test-live` calls real external APIs and may incur API costs or create
 local sandboxes, artifacts, and files. It is never run by the default backend
 test command or CI. Direct pytest invocations of `tests/test_client_live.py`
@@ -363,11 +388,68 @@ must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks
 
-Every pull request triggers the following CI workflows:
+Pull requests trigger the following CI workflows:
 
-- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
-- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
+- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml) (skipped only when every changed file is one the backend suite never reads)
+- **Bundled extension tests** — [.github/workflows/bundled-extension-tests.yml](.github/workflows/bundled-extension-tests.yml) (triggered by example packages, `backend/packages/**`, `backend/app/gateway/**` and the marked test modules)
+- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml) (run when `frontend/` or a file it reads changes)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+
+[scripts/ci_changed_scopes.py](scripts/ci_changed_scopes.py) holds the path rules
+for the unit test and lint workflows. Pushes to `main` and changes under
+`.github/` run every scope. When a test starts reading a file outside its own
+tree, add that path to the script. On every pull request, the
+`frontend-scope-reads` lint job flags literal references outside the frontend
+scope, including paths based on `import.meta.url`. The backend guard in
+`backend/tests/test_ci_changed_scopes.py` flags frontend paths that would skip
+the backend suite, including paths built from module-level Python constants.
+
+The browser E2E and full-stack replay jobs use the official Playwright image,
+which includes Chromium and its system libraries. When upgrading the locked
+Playwright version, update the image tags in both browser workflows to match.
+Each job launches Chromium before running tests; auth recovery tests run only
+after that browser readiness check succeeds.
+These containers use uv-managed Python instead of the host's Python tool cache,
+so the interpreter's OpenSSL libraries match its runtime. Backend dependency
+setup also verifies SSL and SQLite imports before launching fixture gateways.
+
+### Test and diagnostics notes
+
+Backend `make test` runs six duration-balanced shards concurrently (matching CI) and reports
+failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
+It excludes live external-API, blocking-I/O and bundled-extension coverage.
+Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.
+Maintainers can run the real `DeerFlowClient` suite with `cd backend && make test-live`.
+This command requires a valid root `config.yaml` and API credentials.
+It can incur API costs and create local sandboxes, artifacts, or files.
+Direct pytest runs additionally require `DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+Bundled extension examples keep their behavior suites in `backend/tests/` under
+the `bundled_extension` pytest marker. The core shards exclude them so an
+optional example cannot fail an unrelated core PR, and a separate CI workflow
+runs them when an example, the public extension contract or the bundled tests
+change. Run `cd backend && make test-bundled-extensions` to exercise them
+locally. Tests that validate a host mechanism — loading, registration, the
+public extension API and authorization — stay in the core shards even when an
+example package is the payload. The host/extension compatibility checks (an
+extension requiring a newer API than the host provides, authorization of
+contributed routes) live in `backend/tests/test_extension_host_contracts.py` so
+a broken compatibility guarantee fails core CI.
+
+Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
+Backend blocking-IO diagnostics are available from the repository root with
+`make detect-blocking-io`: it statically scans backend business code for
+blocking IO that may run on the backend event loop, prints a concise summary,
+and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
+The JSON includes compact review records with `priority`, `location`,
+`blocking_call`, `event_loop_exposure`, `reason`, and `code`.
+Gateway artifact serving now forces active web content types (`text/html` and XML documents such as `.xml`, `.xhtml`, and `.svg`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
+
+Frontend route asset budgets can be checked with `cd frontend && pnpm
+perf:check`. The command measures `/login` from a normal production build, then
+performs a production static-demo build for the fixture-backed workspace routes.
+It measures the unique JavaScript and CSS referenced by representative routes
+and writes the detailed result to `.next/performance-results.json`.
 
 ## Code Style
 

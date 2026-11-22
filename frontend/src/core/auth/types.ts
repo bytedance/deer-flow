@@ -4,7 +4,12 @@ import { z } from "zod";
 
 export const userSchema = z.object({
   id: z.string(),
-  email: z.string().email(),
+  // Plain string: the backend owns address validation (pydantic EmailStr at
+  // registration, the IdP for OIDC) and accepts forms zod's email() rejects,
+  // such as `a&b@example.com`, `a@b.c` and Unicode addresses. Re-checking them
+  // here turned those accounts' sessions into gateway_unavailable and failed
+  // the admin user list. Empty is invalid backend-side.
+  email: z.string().min(1),
   // Plain string, kept in lockstep with the backend User model (RFC #4063
   // gap 2): custom roles configured in the authorization provider are
   // assignable via the admin API and arrive here verbatim. Empty is invalid

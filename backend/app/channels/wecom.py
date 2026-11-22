@@ -5,11 +5,11 @@ import base64
 import hashlib
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
-from app.channels.base import Channel, ChannelUnavailable
-from app.channels.commands import is_known_channel_command
+from app.channels.base import Channel, ChannelUnavailable, attachment_delivery_text
+from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     InboundMessage,
@@ -18,6 +18,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.notification_groups import notification_group_display_name, wecom_notification_group_chat_id
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ else:
 # raises ``RuntimeError`` for a closed socket. The prefix is what tells a
 # verdict about the message apart from a transport failure.
 _WECOM_ACK_REJECTION_PREFIX = "Reply ack error"
+
+
+def _group_workspace_id(aibotid: str | None, chatid: str) -> str:
+    return f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
 
 
 def _file_md5(path: str) -> str:
@@ -381,32 +386,58 @@ class WeComChannel(Channel):
             raise RuntimeError(f"WeCom send_message rejected with errcode={errcode}")
         self._ws_transport_up = True
 
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Deliver to an explicit WeCom group connection owned by ``owner_user_id``."""
+        if not owner_user_id or self._connection_repo is None:
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable")
+        target_id = target.strip() if isinstance(target, str) else ""
+        if not target_id or target_id != target:
+            raise RuntimeError("WeCom group notification target is empty")
+        try:
+            connections = await self._connection_repo.list_connections(owner_user_id)
+        except Exception as exc:
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable") from exc
+        if not isinstance(connections, (list, tuple)):
+            raise ChannelUnavailable("WeCom notification binding lookup is unavailable")
+        bot_id = self._bot_id or (str(self.config.get("bot_id") or "").strip() or None)
+        for connection in connections:
+            if connection.get("id") != target_id or connection.get("owner_user_id") != owner_user_id:
+                continue
+            chatid = wecom_notification_group_chat_id(
+                provider=connection.get("provider"),
+                status=connection.get("status"),
+                workspace_id=connection.get("workspace_id"),
+                metadata=connection.get("metadata"),
+                bot_id=bot_id,
+            )
+            if chatid is not None:
+                await self.send_notification(target=chatid, text_markdown=text_markdown)
+                return
+        raise RuntimeError("WeCom group notification destination is no longer connected")
+
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         if msg.channel_name != self.name:
             return
 
-        try:
-            await self.send(msg)
-        except Exception:
-            logger.exception("Failed to send outbound message on channel %s", self.name)
-            if msg.is_final:
-                self._clear_ws_context(msg.thread_ts)
-            return
-
-        for attachment in msg.attachments:
-            try:
-                success = await self.send_file(msg, attachment)
-                if not success:
-                    logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
-            except Exception:
-                logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
-
+        await super()._on_outbound(msg)
         if msg.is_final:
             self._clear_ws_context(msg.thread_ts)
 
+    async def _send_attachment_feedback(self, msg: OutboundMessage, failed: list[ResolvedAttachment]) -> None:
+        if not msg.thread_ts or msg.thread_ts not in self._ws_frames:
+            # send() without a frame uses the proactive API. A failed upload
+            # must not silently switch from the original reply to that path.
+            logger.warning("[WeCom] attachment feedback unavailable: reply context expired")
+            return
+        # The final stream is already finished. Reply with text on the same
+        # inbound frame instead of reopening that stream or pushing elsewhere.
+        try:
+            text = _clip_to_byte_limit(attachment_delivery_text(msg, failed), _WECOM_MAX_CONTENT_BYTES)
+            await self._ws_client.reply(self._ws_frames[msg.thread_ts], {"msgtype": "text", "text": {"content": text}})
+        except Exception:
+            logger.exception("[WeCom] failed to send attachment delivery feedback")
+
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
-        if not msg.is_final:
-            return True
         if not self._ws_client:
             return False
         if not msg.thread_ts:
@@ -416,7 +447,11 @@ class WeComChannel(Channel):
             return False
 
         media_type = "image" if attachment.is_image else "file"
-        size_limit = 2 * 1024 * 1024 if attachment.is_image else 20 * 1024 * 1024
+        # aibot media upload limits: image 10 MB, voice 2 MB, video 10 MB,
+        # file 20 MB (https://developer.work.weixin.qq.com/document/path/101917).
+        # The image cap used to be 2 MB — the voice limit — which dropped every
+        # 2-10 MB image before it was uploaded.
+        size_limit = 10 * 1024 * 1024 if attachment.is_image else 20 * 1024 * 1024
         if attachment.size > size_limit:
             logger.warning(
                 "[WeCom] %s too large (%d bytes), skipping: %s",
@@ -552,21 +587,43 @@ class WeComChannel(Channel):
             if handled:
                 return
 
-        inbound_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
+        # WeCom group chats deliver "@bot /new" with the mention left in the text
+        # (Slack/Discord strip their own bot mention upstream). Skip a leading
+        # mention only for the command path so ordinary chat keeps any @mentions
+        # intact for the agent; the stripped form also flows into the inbound so
+        # ChannelManager._handle_command parses the bare command. Mirrors
+        # DingTalkChannel / FeishuChannel.
+        #
+        # This drops *any* leading mention, not only the bot's: WeCom text
+        # mentions carry display names, so the frame's `aibotid` cannot be
+        # matched against them and "@alice /status" is indistinguishable from
+        # "@bot /status". Feishu and DingTalk accept the same tradeoff;
+        # test_member_mention_before_a_command_also_classifies pins it.
+        command_text = strip_leading_mentions(text)
+        inbound_type = InboundMessageType.COMMAND if is_known_channel_command(command_text) else InboundMessageType.CHAT
+        if inbound_type is InboundMessageType.COMMAND:
+            text = command_text
+        inbound_metadata: dict[str, Any] = {
+            "aibotid": body.get("aibotid"),
+            "chattype": body.get("chattype"),
+            "message_id": msg_id,
+        }
+        if body.get("chatid") is not None:
+            inbound_metadata["chatid"] = body.get("chatid")
+        # A group's conversation is the group, a private chat's the sender.
+        # Keyed by sender alone, a member's private chat and every group they
+        # wrote in shared one thread wherever no group connection kept them apart.
+        group_chatid = str(body.get("chatid") or "").strip() if body.get("chattype") == "group" else ""
         inbound = self._make_inbound(
-            chat_id=user_id,  # keep user's conversation in memory
+            chat_id=group_chatid or user_id,
             user_id=user_id,
             text=text,
             msg_type=inbound_type,
             thread_ts=msg_id,
             files=files or [],
-            metadata={
-                "aibotid": body.get("aibotid"),
-                "chattype": body.get("chattype"),
-                "message_id": msg_id,
-            },
+            metadata=inbound_metadata,
         )
-        inbound.topic_id = user_id  # keep the same thread
+        inbound.topic_id = user_id  # one thread per member in each conversation
 
         stream_id = generate_req_id("stream")
         self._ws_frames[msg_id] = frame
@@ -584,17 +641,68 @@ class WeComChannel(Channel):
                 pass
 
             inbound = await self._attach_connection_identity(inbound)
+            if group_chatid:
+                await self._carry_over_sender_keyed_group_thread(inbound, group_chatid)
             self._commit_reserved_inbound(reservation, inbound)
         finally:
             reservation.release()
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        aibotid = str(inbound.metadata.get("aibotid") or "").strip() or None
+        chattype = inbound.metadata.get("chattype")
+        chatid = str(inbound.metadata.get("chatid") or "").strip() or None
+        if chattype == "group":
+            if not chatid or self._connection_repo is None:
+                return inbound
+            workspace_id = _group_workspace_id(aibotid, chatid)
+            inbound = await attach_connection_identity(inbound, repo=self._connection_repo, provider="wecom", workspace_id=workspace_id, fallback_without_workspace=False)
+            if inbound.connection_id:
+                return inbound
+            # Pre-group-target versions stored group bindings under the bot ID,
+            # without chatid. Preserve that existing chat identity, but never
+            # let a new private binding authorize an unbound group.
+            legacy = await self._connection_repo.find_connection_by_external_identity(provider="wecom", external_account_id=inbound.user_id, workspace_id=aibotid)
+            metadata = legacy.get("metadata") if isinstance(legacy, Mapping) else None
+            if isinstance(metadata, Mapping) and metadata.get("chattype") == "group" and "chatid" not in metadata and metadata.get("aibotid") == aibotid:
+                inbound.connection_id = legacy["id"]
+                inbound.owner_user_id = legacy["owner_user_id"]
+                inbound.workspace_id = legacy.get("workspace_id")
+            return inbound
         return await attach_connection_identity(
             inbound,
             repo=self._connection_repo,
             provider="wecom",
-            workspace_id=str(inbound.metadata.get("aibotid") or "") or None,
+            workspace_id=aibotid,
             fallback_without_workspace=True,
+        )
+
+    async def _carry_over_sender_keyed_group_thread(self, inbound: InboundMessage, chatid: str) -> None:
+        """Rebind a group connection's thread from the sender key it used to have.
+
+        Group messages were once keyed like private ones (``userid``, ``userid``).
+        A group connection belongs to one group, so its thread under that key is
+        this group's and moves to the group key once. A legacy group binding
+        spans every group of the bot; its old thread is left behind rather than
+        continued in whichever group writes first.
+        """
+        repo = self._connection_repo
+        if repo is None or not inbound.connection_id or not inbound.owner_user_id:
+            return
+        aibotid = str(inbound.metadata.get("aibotid") or "").strip() or None
+        if inbound.workspace_id != _group_workspace_id(aibotid, chatid):
+            return
+        if await repo.get_thread_id(inbound.connection_id, inbound.chat_id, inbound.topic_id) is not None:
+            return
+        previous = await repo.get_thread_id(inbound.connection_id, inbound.user_id, inbound.user_id)
+        if previous is None:
+            return
+        await repo.claim_thread_id(
+            connection_id=inbound.connection_id,
+            owner_user_id=inbound.owner_user_id,
+            provider=self.name,
+            external_conversation_id=inbound.chat_id,
+            external_topic_id=inbound.topic_id,
+            thread_id=previous,
         )
 
     async def _bind_connection_from_connect_code(self, *, frame: dict[str, Any], user_id: str, code: str) -> bool:
@@ -603,27 +711,46 @@ class WeComChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="wecom", state=code)
         if state is None:
-            await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
+            await self._send_connection_reply(frame, await self._connect_reply_text("invalid_code"))
             return True
 
         if not user_id:
-            await self._send_connection_reply(frame, "WeCom connection could not be completed from this message.")
+            await self._send_connection_reply(frame, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
             return True
 
         body = frame.get("body", {}) or {}
-        workspace_id = str(body.get("aibotid") or "") or None
+        aibotid = str(body.get("aibotid") or "").strip() or None
+        chattype = body.get("chattype")
+        workspace_name: str | None = None
+        if chattype == "group":
+            chatid = str(body.get("chatid") or "").strip()
+            if not chatid:
+                await self._send_connection_reply(frame, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
+                return True
+            workspace_id = _group_workspace_id(aibotid, chatid)
+            raw_group_name = str(body.get("chatname") or body.get("group_name") or "").strip()
+            workspace_name = notification_group_display_name(state.get("metadata")) or raw_group_name[:256] or None
+            metadata: dict[str, Any] = {
+                "aibotid": aibotid,
+                "chattype": "group",
+                "chatid": chatid,
+            }
+        else:
+            workspace_id = aibotid
+            metadata = {
+                "aibotid": workspace_id,
+                "chattype": chattype,
+            }
         await self._connection_repo.upsert_connection(
             owner_user_id=state["owner_user_id"],
             provider="wecom",
             external_account_id=user_id,
             workspace_id=workspace_id,
-            metadata={
-                "aibotid": workspace_id,
-                "chattype": body.get("chattype"),
-            },
+            workspace_name=workspace_name,
+            metadata=metadata,
             status="connected",
         )
-        await self._send_connection_reply(frame, "WeCom connected to DeerFlow.")
+        await self._send_connection_reply(frame, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
         return True
 
     async def _send_connection_reply(self, frame: dict[str, Any], text: str) -> None:

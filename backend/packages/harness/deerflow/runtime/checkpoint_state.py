@@ -34,6 +34,28 @@ def _finish_state_mutation(_state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def validate_state_mutation_node(as_node: str) -> str:
+    """Return *as_node*, or raise ``ValueError`` when LangGraph refuses it as a node name.
+
+    :func:`build_state_mutation_graph` registers ``as_node`` as the graph's
+    only node, and LangGraph refuses ``__start__``, ``__end__``, its other
+    reserved names and any name containing a namespace separator (``|``) or
+    task separator (``:``). Callers that take the name from a client check it
+    here first, so a bad name is an input error and not a failed compile.
+    The reserved set is private to LangGraph; recheck this import when
+    upgrading LangGraph (verified against 1.2.9 and 1.2.14).
+    """
+    from langgraph._internal._constants import NS_END, NS_SEP, RESERVED
+    from langgraph.constants import END, START
+
+    if as_node in (START, END) or as_node in RESERVED:
+        raise ValueError(f"Node name {as_node!r} is reserved by LangGraph")
+    for character in (NS_SEP, NS_END):
+        if character in as_node:
+            raise ValueError(f"Node name must not contain {character!r}")
+    return as_node
+
+
 def build_state_mutation_graph(
     as_node: str,
     mode: CheckpointChannelMode,
@@ -114,6 +136,7 @@ class CheckpointStateAccessor:
     graph: Any
     checkpointer: Any
     mode: CheckpointChannelMode
+    direct_namespace: bool = False
 
     @classmethod
     def bind(
@@ -123,11 +146,12 @@ class CheckpointStateAccessor:
         *,
         store: Any | None = None,
         mode: CheckpointChannelMode = "full",
+        direct_namespace: bool = False,
     ) -> CheckpointStateAccessor:
         graph.checkpointer = checkpointer
         if store is not None:
             graph.store = store
-        return cls(graph=graph, checkpointer=checkpointer, mode=mode)
+        return cls(graph=graph, checkpointer=checkpointer, mode=mode, direct_namespace=direct_namespace)
 
     def _prepare_config(self, config: dict[str, Any]) -> dict[str, Any]:
         prepared = {
@@ -135,6 +159,15 @@ class CheckpointStateAccessor:
             "configurable": dict(config.get("configurable", {})),
             "metadata": dict(config.get("metadata", {})),
         }
+        if self.direct_namespace and prepared["configurable"].get("checkpoint_ns"):
+            # A state-only mutation graph has no subgraphs to delegate to. Bind
+            # the saver explicitly so LangGraph reads/writes this namespace on
+            # the graph itself, including when reading back an updated config.
+            # This private key is verified against LangGraph 1.2.9; recheck it
+            # when upgrading LangGraph because its internal location may move.
+            from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
+
+            prepared["configurable"][CONFIG_KEY_CHECKPOINTER] = self.checkpointer
         inject_checkpoint_mode(prepared, self.mode)
         return prepared
 
@@ -148,6 +181,20 @@ class CheckpointStateAccessor:
         prepared = self._prepare_config(config)
         snapshot = await self.graph.aget_state(prepared)
         raise_if_snapshot_incompatible(snapshot, self.mode)
+        # Delta materialization may perform a second saver read after LangGraph
+        # has resolved the latest checkpoint. Retention can remove a trailing
+        # metadata-only leaf in that interval. CachedHistorySaver then cannot
+        # walk the vanished target's parent chain and the first materialization
+        # can contain an empty messages channel. For an unpinned latest-state
+        # read, verify that the resolved target still exists and retry once from
+        # the new head when it does not. Explicit historical selections remain
+        # fail-closed instead of silently moving to another checkpoint.
+        if self.mode == "delta" and not prepared["configurable"].get("checkpoint_id"):
+            snapshot_config = getattr(snapshot, "config", None)
+            checkpoint_id = (snapshot_config or {}).get("configurable", {}).get("checkpoint_id")
+            if checkpoint_id and await self.checkpointer.aget_tuple(snapshot_config) is None:
+                snapshot = await self.graph.aget_state(prepared)
+                raise_if_snapshot_incompatible(snapshot, self.mode)
         return snapshot
 
     def get_tuple(self, config: dict[str, Any]) -> Any | None:
@@ -189,7 +236,22 @@ class CheckpointStateAccessor:
         if limit is not None and limit <= 0:
             return []
         result = []
-        async for snapshot in self.graph.aget_state_history(prepared, limit=limit):
+        walk_config = prepared
+        before = None
+        if prepared["configurable"].get("checkpoint_id"):
+            # Savers match config.checkpoint_id exactly in ``list``, so
+            # get_state_history would return only the anchor. Treat it as the
+            # inclusive start of the walk, like the Gateway's raw accessor.
+            async for anchor in self.graph.aget_state_history(prepared, limit=1):
+                raise_if_snapshot_incompatible(anchor, self.mode)
+                result.append(anchor)
+            before = prepared
+            walk_config = {**prepared, "configurable": {k: v for k, v in prepared["configurable"].items() if k != "checkpoint_id"}}
+            if limit is not None and len(result) >= limit:
+                return result
+        remaining = None if limit is None else limit - len(result)
+        walk_kwargs = {"before": before} if before is not None else {}
+        async for snapshot in self.graph.aget_state_history(walk_config, limit=remaining, **walk_kwargs):
             raise_if_snapshot_incompatible(snapshot, self.mode)
             result.append(snapshot)
             if limit is not None and len(result) >= limit:

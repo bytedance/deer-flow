@@ -263,6 +263,90 @@ def test_secret_on_the_first_line_is_redacted():
     assert "Result: token=[redacted]" in text
 
 
+def test_redact_egress_text_scrubs_url_user_info():
+    redacted = redact_egress_text("deployed with postgres://admin:hunter2@db.internal:5432/deerflow")
+
+    assert "hunter2" not in redacted
+    assert redacted == "deployed with postgres://[redacted]@db.internal:5432/deerflow"
+
+
+def test_redact_egress_text_leaves_a_url_without_credentials_alone():
+    text = "opened http://127.0.0.1:2026/workspace?tab=runs and ssh://github.com/bytedance/deer-flow.git"
+
+    assert redact_egress_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("header", "secret"),
+    [
+        ("Authorization: Bearer 1234567890abcdef", "1234567890abcdef"),
+        ("authorization=Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+        ("Cookie: session=8f14e45fceea167a5a36dedd4bea2543", "8f14e45fceea167a5a36dedd4bea2543"),
+        # Every pair of a canonical multi-cookie header, not only the first one.
+        ("Cookie: theme=dark; session=8f14e45fceea167a5a36dedd4bea2543", "8f14e45fceea167a5a36dedd4bea2543"),
+        # A quoted value keeps the scheme outside the quotes.
+        ('Authorization: "Bearer 8f14e45fceea167a5a36dedd4bea2543"', "8f14e45fceea167a5a36dedd4bea2543"),
+        ("Authorization: 'Bearer 8f14e45fceea167a5a36dedd4bea2543'", "8f14e45fceea167a5a36dedd4bea2543"),
+        # A comma joins several tokens into one header value.
+        ("Authorization: Bearer aaa111,bbb222", "bbb222"),
+    ],
+)
+def test_redact_egress_text_scrubs_header_credentials(header: str, secret: str):
+    redacted = redact_egress_text(f"sent the request with {header} to the service")
+
+    assert secret not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_redact_egress_text_scrubs_the_aws_signature_field():
+    # SigV4 keeps the signature as a `name=value` field after the scheme, so the
+    # header rule alone only redacts the scheme token.
+    signature = "8f14e45fceea167a5a36dedd4bea2543f7a1b2c3d4e5f60718293a4b5c6d7e8"
+    header = f"Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261115/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature={signature}"
+
+    redacted = redact_egress_text(f"sent the request with {header} to the bucket")
+
+    assert signature not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_redact_egress_text_scrubs_the_whole_digest_credential():
+    # Digest writes every credential as its own `name=value` field after the
+    # scheme, so only redacting the first field leaves the nonce and response
+    # visible.
+    nonce = "8f14e45fceea167a5a36dedd4bea2543"
+    response = "c0ffee1234567890abcdef0123456789"
+    header = f'Authorization: Digest username="someone", realm="api", nonce="{nonce}", uri="/v1/export", qop=auth, response="{response}"'
+
+    redacted = redact_egress_text(f"sent {header} to the service")
+
+    assert nonce not in redacted
+    assert response not in redacted
+    # The Digest rule runs to the end of the line, so the prose after the header
+    # goes with it; the guide and changelog describe that.
+    assert redacted == "sent Authorization: Digest [redacted]"
+
+
+def test_redact_egress_text_scrubs_a_pem_block_behind_a_header_name():
+    # A header rule that runs first would consume the `BEGIN` line and leave the
+    # block rule without a start marker, so the body would survive.
+    pem_body = "ABCDEFSECRETKEYBODY"
+    pem = "-----BEGIN RSA PRIVATE KEY-----\n" + pem_body + "\n-----END RSA PRIVATE KEY-----"
+
+    redacted = redact_egress_text(f"Cookie: {pem}\nafter the key")
+
+    assert pem_body not in redacted
+    assert "PRIVATE KEY" not in redacted
+    assert "after the key" in redacted
+
+
+def test_result_summary_never_forwards_url_credentials():
+    text = render_notification_text(notice("run_completed", run_status="success", result_summary="Connected to postgres://admin:hunter2@db.internal:5432/deerflow"))
+
+    assert "hunter2" not in text
+    assert "postgres://[redacted]@db.internal:5432/deerflow" in text
+
+
 def test_stop_condition_is_redacted_and_truncated():
     secret = "sk-" + ("S" * 40)
     condition = f"stop when {secret} rotates " + "z" * 400
@@ -306,3 +390,107 @@ def test_locale_falls_back_to_the_configured_default():
     assert render_notification_text(notice("run_failed", locale="zh-CN", run_status="failed"), default_locale="en-US").splitlines()[-1] == CLOSING["zh-CN"]
     assert render_notification_text(notice("run_failed", locale="fr-FR", run_status="failed"), default_locale="zh-CN").splitlines()[-1] == CLOSING["zh-CN"]
     assert render_notification_text(delivery, default_locale="fr-FR").splitlines()[-1] == CLOSING["en-US"]
+
+
+def runtime_notice(event, *, source_kind="run", locale="en-US", run_id=RUN_ID, **payload):
+    base = {
+        "payload_version": 2,
+        "source_kind": source_kind,
+        "task_title": "Ship release notes",
+        "locale": locale,
+    }
+    return {
+        "id": "delivery-rt-1",
+        "source_kind": source_kind,
+        "source_key": run_id or "req-1",
+        "task_id": None,
+        "task_run_id": None,
+        "run_id": run_id,
+        "event": event,
+        "provider": "feishu",
+        "target": "ou_123",
+        "payload": {**base, **payload},
+    }
+
+
+@pytest.mark.parametrize("locale", NOTIFICATION_LOCALES)
+def test_runtime_notices_render_localized_without_ids_or_links(locale):
+    completed = render_notification_text(
+        runtime_notice(
+            "run_completed",
+            locale=locale,
+            run_status="success",
+            relied_on_assumption=True,
+            result_summary="Drafted the changelog and verified links.",
+        )
+    )
+    failed = render_notification_text(
+        runtime_notice(
+            "run_failed",
+            locale=locale,
+            run_status="failed",
+        )
+    )
+    input_needed = render_notification_text(
+        runtime_notice(
+            "human_input_requested",
+            source_kind="human_input_request",
+            locale=locale,
+            run_status="success",
+            question="Which target branch should we tag?",
+            result_summary="Should not appear on human_input_requested",
+        )
+    )
+    for text in (completed, failed, input_needed):
+        assert_no_raw_identifiers(text)
+        assert RUN_ID not in text
+        assert "http" not in text
+    if locale == "en-US":
+        assert completed.splitlines() == [
+            "Task “Ship release notes”",
+            "Completed. Goal met, with an assumption.",
+            "Result: Drafted the changelog and verified links.",
+            "Open DeerFlow → Conversations for details.",
+        ]
+        assert failed.splitlines() == [
+            "Task “Ship release notes”",
+            "Failed to complete.",
+            "Open DeerFlow → Conversations for details.",
+        ]
+        assert input_needed.splitlines() == [
+            "Task “Ship release notes”",
+            "Waiting for your input in the conversation.",
+            "Question: Which target branch should we tag?",
+            "Open DeerFlow → Conversations to continue.",
+        ]
+    else:
+        assert completed.splitlines() == [
+            "任务“Ship release notes”",
+            "已完成。目标已达成（含假设）。",
+            "结果：Drafted the changelog and verified links.",
+            "在 DeerFlow 的对话页查看详情。",
+        ]
+        assert failed.splitlines() == [
+            "任务“Ship release notes”",
+            "运行失败，未能完成。",
+            "在 DeerFlow 的对话页查看详情。",
+        ]
+        assert input_needed.splitlines() == [
+            "任务“Ship release notes”",
+            "正在等待你在对话中确认或补充信息。",
+            "待确认：Which target branch should we tag?",
+            "在 DeerFlow 的对话页继续处理。",
+        ]
+
+
+def test_runtime_human_input_question_redacts_secrets_and_skips_result_summary():
+    secret = "sk-" + ("S" * 40)
+    delivery = runtime_notice(
+        "human_input_requested",
+        source_kind="human_input_request",
+        question=f"Should we rotate {secret} now?",
+    )
+    assert not wants_result_summary(delivery)
+    text = render_notification_text(delivery)
+    assert secret not in text
+    assert "Question: Should we rotate [redacted] now?" in text

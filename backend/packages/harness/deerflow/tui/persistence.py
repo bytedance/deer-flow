@@ -39,7 +39,15 @@ class _LoopThread:
 
     def run(self, coro: Awaitable[Any], *, timeout: float = 15.0) -> Any:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout)
+        try:
+            return future.result(timeout)
+        except TimeoutError:
+            # A bridge deadline must not leave pending DB work running after
+            # the caller has given up. A coroutine's own TimeoutError already
+            # completed the future and should propagate unchanged.
+            if not future.done():
+                future.cancel()
+            raise
 
     def close(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)

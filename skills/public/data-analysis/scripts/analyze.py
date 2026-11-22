@@ -11,9 +11,14 @@ import json
 import logging
 import os
 import re
-import subprocess
+import shutil
 import sys
 import tempfile
+import uuid
+from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -21,62 +26,187 @@ logger = logging.getLogger(__name__)
 try:
     import duckdb
 except ImportError:
-    logger.error("duckdb is not installed. Installing...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "openpyxl", "-q"], check=True)
-    import duckdb
+    raise SystemExit(
+        "Missing duckdb. Prepare this Python environment with: python -m pip install duckdb openpyxl"
+    ) from None
 
 try:
     import openpyxl  # noqa: F401
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
+    raise SystemExit(
+        "Missing openpyxl. Prepare this Python environment with: python -m pip install duckdb openpyxl"
+    ) from None
 
 # Cache directory for persistent DuckDB databases
 CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
-TABLE_MAP_SUFFIX = ".table_map.json"
 
 
 def compute_files_hash(files: list[str]) -> str:
-    """Compute a combined SHA256 hash of all input files for cache key."""
-    hasher = hashlib.sha256()
-    for file_path in sorted(files):
+    """Hash the ordered names and contents that determine the loaded table map."""
+    # A new namespace also prevents reuse of maps built by the old allocator.
+    hasher = hashlib.sha256(b"data-analysis-inputs-v2\0")
+    for file_path in files:
+        name = os.fsencode(os.path.basename(file_path))
+        hasher.update(len(name).to_bytes(8, "big"))
+        hasher.update(name)
+        if os.path.splitext(file_path)[1].lower() == ".xls":
+            # Rebuild legacy caches that might have dropped a mixed-type sheet.
+            hasher.update(b"legacy-xls-v2\0")
+        file_hasher = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
                 while chunk := f.read(8192):
-                    hasher.update(chunk)
+                    file_hasher.update(chunk)
         except OSError:
-            # Include path as fallback if file can't be read
-            hasher.update(file_path.encode())
+            # Keep unreadable paths distinct, including POSIX surrogate escapes.
+            hasher.update(b"missing\0")
+            file_hasher = hashlib.sha256(os.fsencode(file_path))
+        else:
+            hasher.update(b"readable\0")
+        # Fixed-width digests preserve file boundaries, even for empty files.
+        hasher.update(file_hasher.digest())
     return hasher.hexdigest()
 
 
-def get_cache_db_path(files_hash: str) -> str:
-    """Get the path to the cached DuckDB database file."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    return os.path.join(CACHE_DIR, f"{files_hash}.duckdb")
-
-
-def get_table_map_path(files_hash: str) -> str:
-    """Get the path to the cached table map JSON file."""
-    return os.path.join(CACHE_DIR, f"{files_hash}{TABLE_MAP_SUFFIX}")
-
-
-def save_table_map(files_hash: str, table_map: dict[str, str]) -> None:
-    """Save table map to a JSON file alongside the cached DB."""
-    path = get_table_map_path(files_hash)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(table_map, f, ensure_ascii=False)
-
-
-def load_table_map(files_hash: str) -> dict[str, str] | None:
-    """Load table map from cache. Returns None if not found."""
-    path = get_table_map_path(files_hash)
-    if not os.path.exists(path):
-        return None
+def _open_cached_generation(root: Path, files_hash: str):
+    """Open one complete generation; invalid cache entries are ordinary misses."""
+    con = None
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+        manifest = json.loads((root / f"{files_hash}.json").read_text(encoding="utf-8"))
+        if (
+            not isinstance(manifest, dict)
+            or type(manifest.get("format")) is not int
+            or manifest["format"] != 1
+        ):
+            return None
+        generation = manifest.get("generation")
+        table_map = manifest.get("table_map")
+        if not isinstance(generation, str) or not re.fullmatch(
+            rf"{files_hash}\.[0-9a-f]{{32}}", generation
+        ):
+            return None
+        if (
+            not isinstance(table_map, dict)
+            or not table_map
+            or not all(
+                isinstance(k, str) and isinstance(v, str) and k and v
+                for k, v in table_map.items()
+            )
+        ):
+            return None
+        aliases = {name.casefold() for name in table_map}
+        targets = {name.casefold() for name in table_map.values()}
+        if len(aliases) != len(table_map) or len(targets) != len(table_map):
+            return None
+        if any(
+            alias.casefold() in targets and alias.casefold() != target.casefold()
+            for alias, target in table_map.items()
+        ):
+            return None
+        directory = root / generation
+        database = directory / "data.duckdb"
+        if directory.is_symlink() or database.is_symlink():
+            return None
+        con = duckdb.connect(str(database), read_only=True)
+        physical_tables = {
+            row[0].casefold()
+            for row in con.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' AND table_type = 'BASE TABLE' "
+                "AND table_catalog = current_database()"
+            ).fetchall()
+        }
+        if targets != physical_tables:
+            raise ValueError("Cached table map does not match its database")
+        for table in table_map.values():
+            quoted = '"' + table.replace('"', '""') + '"'
+            con.execute(f"SELECT * FROM main.{quoted} LIMIT 0")
+        return con, table_map
+    except (OSError, ValueError, duckdb.Error):
+        if con is not None:
+            con.close()
+        logger.debug("Ignoring unreadable analysis cache", exc_info=True)
         return None
+    except BaseException:
+        if con is not None:
+            con.close()
+        raise
+
+
+@contextmanager
+def _prepare_cache_manifest(
+    root: Path, generation: str, table_map: dict[str, str]
+) -> Iterator[str]:
+    """Write and flush a private manifest before its atomic publication."""
+    fd, temporary = tempfile.mkstemp(prefix=".manifest-", suffix=".tmp", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"format": 1, "generation": generation, "table_map": table_map},
+                handle,
+                ensure_ascii=False,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        yield temporary
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@contextmanager
+def open_analysis_cache(files: list[str]):
+    """Own a read-only analysis connection backed by an immutable generation."""
+    files_hash = compute_files_hash(files)
+    root = Path(CACHE_DIR) / "generations-v1"
+    root.mkdir(parents=True, exist_ok=True)
+    cached = _open_cached_generation(root, files_hash)
+    if cached is not None:
+        con, table_map = cached
+        logger.info("Cache hit! Using complete cached generation")
+        try:
+            yield con, table_map
+        finally:
+            con.close()
+        return
+
+    generation = f"{files_hash}.{uuid.uuid4().hex}"
+    directory = root / generation
+    directory.mkdir(mode=0o700)
+    database = directory / "data.duckdb"
+    con = None
+    possibly_published = False
+    try:
+        logger.info("Loading files into a private cache generation...")
+        con = duckdb.connect(str(database))
+        table_map = load_files(con, files)
+        if not table_map:
+            logger.error("No tables were loaded. Check file paths and formats.")
+            raise SystemExit(1)
+        con.close()
+        con = None
+        # Never expose a database still owned by a writer, including the first
+        # invocation's analysis action. Other processes may already be readers.
+        con = duckdb.connect(str(database), read_only=True)
+        destination = root / f"{files_hash}.json"
+        with _prepare_cache_manifest(root, generation, table_map) as temporary:
+            # Replacement may succeed before an interruption reaches Python.
+            possibly_published = True
+            try:
+                os.replace(temporary, destination)
+            except BaseException:
+                # A successful replacement consumes this unique source even
+                # if a concurrent builder has since replaced the destination.
+                if os.path.exists(temporary):
+                    possibly_published = False
+                raise
+        logger.info("Loaded %s table(s): %s", len(table_map), ", ".join(table_map))
+        yield con, table_map
+    finally:
+        if con is not None:
+            con.close()
+        if not possibly_published:
+            shutil.rmtree(directory)
 
 
 def sanitize_table_name(name: str) -> str:
@@ -87,13 +217,31 @@ def sanitize_table_name(name: str) -> str:
     return sanitized
 
 
+def _quote_identifier(name: str) -> str:
+    """Quote a SQL identifier, including embedded double quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _allocate_table_names(name: str, table_map: dict[str, str]) -> tuple[str, str]:
+    """Keep lookup aliases and SQL names unique, including case-only collisions."""
+    reserved = {n.casefold() for n in (*table_map.keys(), *table_map.values())}
+    base = sanitize_table_name(name)
+    table_name = base
+    counter = 1
+    while table_name.casefold() in reserved:
+        table_name = f"{base}_{counter}"
+        counter += 1
+    # An original name must never redirect an earlier canonical SQL name.
+    alias = table_name if name.casefold() in reserved else name
+    return alias, table_name
+
+
 def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, str]:
     """
     Load Excel/CSV files into DuckDB tables.
 
-    Returns a mapping of original_name -> sanitized_table_name.
+    Returns unique lookup aliases mapped to their canonical SQL table names.
     """
-    con.execute("INSTALL spatial; LOAD spatial;")
     table_map: dict[str, str] = {}
 
     for file_path in files:
@@ -117,6 +265,11 @@ def _load_excel(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
     """Load all sheets from an Excel file into DuckDB tables."""
+    if os.path.splitext(file_path)[1].lower() == ".xls":
+        _load_legacy_excel(con, file_path, table_map)
+        return
+
+    con.execute("INSTALL spatial; LOAD spatial;")
     import openpyxl
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -124,30 +277,24 @@ def _load_excel(
     wb.close()
 
     for sheet_name in sheet_names:
-        table_name = sanitize_table_name(sheet_name)
-
-        # Handle duplicate table names
-        original_table_name = table_name
-        counter = 1
-        while table_name in table_map.values():
-            table_name = f"{original_table_name}_{counter}"
-            counter += 1
+        alias, table_name = _allocate_table_names(sheet_name, table_map)
 
         try:
             con.execute(
                 f"""
-                CREATE TABLE "{table_name}" AS
+                CREATE TABLE {_quote_identifier(table_name)} AS
                 SELECT * FROM st_read(
-                    '{file_path}',
-                    layer = '{sheet_name}',
+                    ?,
+                    layer = ?,
                     open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO']
                 )
-            """
+            """,
+                [file_path, sheet_name],
             )
-            table_map[sheet_name] = table_name
-            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
-                0
-            ]
+            table_map[alias] = table_name
+            row_count = con.execute(
+                f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+            ).fetchone()[0]
             logger.info(
                 f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({row_count} rows)"
             )
@@ -155,29 +302,82 @@ def _load_excel(
             logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
 
 
+def _load_legacy_excel(
+    con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
+) -> None:
+    """Read BIFF workbooks with xlrd through pandas, preserving inferred types."""
+    try:
+        import pandas
+        import xlrd  # noqa: F401 -- check the optional engine before opening a file
+    except ImportError:
+        raise SystemExit(
+            "Legacy .xls analysis requires pandas and xlrd. Prepare this Python "
+            "environment with: python -m pip install pandas xlrd"
+        ) from None
+
+    try:
+        workbook = pandas.ExcelFile(file_path, engine="xlrd")
+    except Exception as exc:
+        logger.warning(f"  Failed to load workbook '{file_path}': {exc}")
+        return
+
+    with workbook:
+        for sheet_name in workbook.sheet_names:
+            alias, table_name = _allocate_table_names(sheet_name, table_map)
+            try:
+                # Preserve literal strings such as "NA" and "00123"; only
+                # empty cells become nulls before DuckDB infers column types.
+                frame = workbook.parse(
+                    sheet_name, dtype=object, keep_default_na=False, na_values=[""]
+                )
+                if frame.columns.empty:
+                    logger.warning(f"  Skipping empty sheet '{sheet_name}'")
+                    continue
+                for column_name, column in frame.items():
+                    # Excel permits unrelated cell types in the same column.
+                    # Normalize those columns before DuckDB chooses a SQL type.
+                    kind = pandas.api.types.infer_dtype(column, skipna=True)
+                    if kind in ("mixed", "mixed-integer"):
+                        frame[column_name] = column.map(str, na_action="ignore")
+                original_sample = con.execute(
+                    "SELECT current_setting('pandas_analyze_sample')"
+                ).fetchone()[0]
+                try:
+                    # Infer compatible types from all rows, including rare values.
+                    con.execute(
+                        "SET pandas_analyze_sample = ?",
+                        [max(original_sample, len(frame))],
+                    )
+                    con.from_df(frame).create(table_name)
+                finally:
+                    con.execute("SET pandas_analyze_sample = ?", [original_sample])
+                table_map[alias] = table_name
+                logger.info(
+                    f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({len(frame)} rows)"
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
+
+
 def _load_csv(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
     """Load a CSV file into a DuckDB table."""
     base_name = os.path.splitext(os.path.basename(file_path))[0]
-    table_name = sanitize_table_name(base_name)
-
-    # Handle duplicate table names
-    original_table_name = table_name
-    counter = 1
-    while table_name in table_map.values():
-        table_name = f"{original_table_name}_{counter}"
-        counter += 1
+    alias, table_name = _allocate_table_names(base_name, table_map)
 
     try:
         con.execute(
             f"""
-            CREATE TABLE "{table_name}" AS
-            SELECT * FROM read_csv_auto('{file_path}')
-        """
+            CREATE TABLE {_quote_identifier(table_name)} AS
+            SELECT * FROM read_csv_auto(?)
+        """,
+            [file_path],
         )
-        table_map[base_name] = table_name
-        row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        table_map[alias] = table_name
+        row_count = con.execute(
+            f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+        ).fetchone()[0]
         logger.info(
             f"  Loaded CSV '{base_name}' -> table '{table_name}' ({row_count} rows)"
         )
@@ -195,11 +395,13 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         output_parts.append(f"{'=' * 60}")
 
         # Get row count
-        row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        row_count = con.execute(
+            f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+        ).fetchone()[0]
         output_parts.append(f"Rows: {row_count}")
 
         # Get column info
-        columns = con.execute(f'DESCRIBE "{table_name}"').fetchall()
+        columns = con.execute(f"DESCRIBE {_quote_identifier(table_name)}").fetchall()
         output_parts.append(f"\nColumns ({len(columns)}):")
         output_parts.append(f"{'Name':<30} {'Type':<15} {'Nullable'}")
         output_parts.append(f"{'-' * 30} {'-' * 15} {'-' * 8}")
@@ -211,8 +413,10 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         col_names = [col[0] for col in columns]
         non_null_parts = []
         for c in col_names:
-            non_null_parts.append(f'COUNT("{c}") as "{c}"')
-        non_null_sql = f'SELECT {", ".join(non_null_parts)} FROM "{table_name}"'
+            non_null_parts.append(f"COUNT({_quote_identifier(c)})")
+        non_null_sql = (
+            f"SELECT {', '.join(non_null_parts)} FROM {_quote_identifier(table_name)}"
+        )
         try:
             non_null_counts = con.execute(non_null_sql).fetchone()
             output_parts.append("\nNon-null counts:")
@@ -224,10 +428,14 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         # Sample data (first 5 rows)
         output_parts.append("\nSample data (first 5 rows):")
         try:
-            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 5').fetchdf()
+            sample = con.execute(
+                f"SELECT * FROM {_quote_identifier(table_name)} LIMIT 5"
+            ).fetchdf()
             output_parts.append(sample.to_string(index=False))
         except Exception:
-            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 5').fetchall()
+            sample = con.execute(
+                f"SELECT * FROM {_quote_identifier(table_name)} LIMIT 5"
+            ).fetchall()
             header = [col[0] for col in columns]
             output_parts.append("  " + " | ".join(header))
             for row in sample:
@@ -245,27 +453,22 @@ def action_query(
     output_file: str | None = None,
 ) -> str:
     """Execute a SQL query and return/export results."""
-    # Replace original sheet/file names with sanitized table names in SQL
-    modified_sql = sql
-    for original_name, table_name in sorted(
-        table_map.items(), key=lambda x: len(x[0]), reverse=True
-    ):
-        if original_name != table_name:
-            # Replace occurrences not already quoted
-            modified_sql = re.sub(
-                rf"\b{re.escape(original_name)}\b",
-                f'"{table_name}"',
-                modified_sql,
-            )
-
     try:
-        result = con.execute(modified_sql)
+        # Let DuckDB resolve identifiers without rewriting SQL literals, column
+        # names, comments, or CTEs. Temporary views also work on read-only caches.
+        for original_name, table_name in table_map.items():
+            if original_name != table_name:
+                con.execute(
+                    f"CREATE OR REPLACE TEMP VIEW {_quote_identifier(original_name)} "
+                    f"AS SELECT * FROM main.{_quote_identifier(table_name)}"
+                )
+        result = con.execute(sql)
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()
     except Exception as e:
         error_msg = f"SQL Error: {e}\n\nAvailable tables:\n"
         for orig, tbl in table_map.items():
-            cols = con.execute(f'DESCRIBE "{tbl}"').fetchall()
+            cols = con.execute(f"DESCRIBE {_quote_identifier(tbl)}").fetchall()
             col_names = [c[0] for c in cols]
             error_msg += f'  "{tbl}" ({orig}): {", ".join(col_names)}\n'
         print(error_msg)
@@ -314,9 +517,21 @@ def _format_table(columns: list[str], rows: list[tuple]) -> str:
     return result
 
 
+def _markdown_cell(value: object) -> str:
+    """Keep table delimiters and line breaks inside a single Markdown cell."""
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "<br>")
+    )
+
+
 def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> str:
     """Export query results to a file (CSV, JSON, or Markdown)."""
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     ext = os.path.splitext(output_file)[1].lower()
 
     if ext == ".csv":
@@ -328,6 +543,13 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             writer.writerows(rows)
 
     elif ext == ".json":
+        duplicates = [name for name, count in Counter(columns).items() if count > 1]
+        if duplicates:
+            raise ValueError(
+                "JSON export requires unique column names; duplicates: "
+                + ", ".join(repr(name) for name in duplicates)
+                + ". Use SQL aliases (AS) to give each result column a distinct name."
+            )
         records = []
         for row in rows:
             record = {}
@@ -340,19 +562,22 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
                     val = val.hex()
                 record[col] = val
             records.append(record)
+        # Reject non-JSON numbers, including nested values, before touching the
+        # destination so a failed export cannot overwrite an existing result.
+        serialized = json.dumps(
+            records, indent=2, ensure_ascii=False, default=str, allow_nan=False
+        )
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(records, f, indent=2, ensure_ascii=False, default=str)
+            f.write(serialized)
 
     elif ext == ".md":
         with open(output_file, "w", encoding="utf-8") as f:
             # Header
-            f.write("| " + " | ".join(columns) + " |\n")
+            f.write("| " + " | ".join(_markdown_cell(c) for c in columns) + " |\n")
             f.write("| " + " | ".join("---" for _ in columns) + " |\n")
             # Rows
             for row in rows:
-                f.write(
-                    "| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |\n"
-                )
+                f.write("| " + " | ".join(_markdown_cell(v) for v in row) + " |\n")
     else:
         msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
         print(msg)
@@ -370,17 +595,17 @@ def action_summary(
 ) -> str:
     """Generate statistical summary for a table."""
     # Resolve table name
-    resolved = table_map.get(table_name, table_name)
+    resolved = _quote_identifier(table_map.get(table_name, table_name))
 
     try:
-        columns = con.execute(f'DESCRIBE "{resolved}"').fetchall()
+        columns = con.execute(f"DESCRIBE {resolved}").fetchall()
     except Exception:
         available = ", ".join(f'"{t}" ({o})' for o, t in table_map.items())
         msg = f"Table '{table_name}' not found. Available tables: {available}"
         print(msg)
         return msg
 
-    row_count = con.execute(f'SELECT COUNT(*) FROM "{resolved}"').fetchone()[0]
+    row_count = con.execute(f"SELECT COUNT(*) FROM {resolved}").fetchone()[0]
 
     output_parts = []
     output_parts.append(f"\nStatistical Summary: {table_name}")
@@ -402,6 +627,7 @@ def action_summary(
 
     for col in columns:
         col_name, col_type = col[0], col[1].upper()
+        quoted_col = _quote_identifier(col_name)
         output_parts.append(f"\n--- {col_name} ({col[1]}) ---")
 
         # Check base type (strip parameterized parts)
@@ -411,16 +637,16 @@ def action_summary(
             try:
                 stats = con.execute(f"""
                     SELECT
-                        COUNT("{col_name}") as count,
-                        AVG("{col_name}")::DOUBLE as mean,
-                        STDDEV("{col_name}")::DOUBLE as std,
-                        MIN("{col_name}") as min,
-                        QUANTILE_CONT("{col_name}", 0.25) as q25,
-                        MEDIAN("{col_name}") as median,
-                        QUANTILE_CONT("{col_name}", 0.75) as q75,
-                        MAX("{col_name}") as max,
-                        COUNT(*) - COUNT("{col_name}") as null_count
-                    FROM "{resolved}"
+                        COUNT({quoted_col}) as count,
+                        AVG({quoted_col})::DOUBLE as mean,
+                        STDDEV({quoted_col})::DOUBLE as std,
+                        MIN({quoted_col}) as min,
+                        QUANTILE_CONT({quoted_col}, 0.25) as q25,
+                        MEDIAN({quoted_col}) as median,
+                        QUANTILE_CONT({quoted_col}, 0.75) as q75,
+                        MAX({quoted_col}) as max,
+                        COUNT(*) - COUNT({quoted_col}) as null_count
+                    FROM {resolved}
                 """).fetchone()
                 labels = [
                     "count",
@@ -444,11 +670,11 @@ def action_summary(
             try:
                 stats = con.execute(f"""
                     SELECT
-                        COUNT("{col_name}") as count,
-                        COUNT(DISTINCT "{col_name}") as unique_count,
-                        MODE("{col_name}") as mode_val,
-                        COUNT(*) - COUNT("{col_name}") as null_count
-                    FROM "{resolved}"
+                        COUNT({quoted_col}) as count,
+                        COUNT(DISTINCT {quoted_col}) as unique_count,
+                        MODE({quoted_col}) as mode_val,
+                        COUNT(*) - COUNT({quoted_col}) as null_count
+                    FROM {resolved}
                 """).fetchone()
                 output_parts.append(f"  count   : {stats[0]}")
                 output_parts.append(f"  unique  : {stats[1]}")
@@ -457,10 +683,10 @@ def action_summary(
 
                 # Show top 5 values
                 top_vals = con.execute(f"""
-                    SELECT "{col_name}", COUNT(*) as freq
-                    FROM "{resolved}"
-                    WHERE "{col_name}" IS NOT NULL
-                    GROUP BY "{col_name}"
+                    SELECT {quoted_col}, COUNT(*) as freq
+                    FROM {resolved}
+                    WHERE {quoted_col} IS NOT NULL
+                    GROUP BY {quoted_col}
                     ORDER BY freq DESC
                     LIMIT 5
                 """).fetchall()
@@ -517,49 +743,16 @@ def main():
     if args.action == "summary" and not args.table:
         parser.error("--table is required for 'summary' action")
 
-    # Compute file hash for caching
-    files_hash = compute_files_hash(args.files)
-    db_path = get_cache_db_path(files_hash)
-    cached_table_map = load_table_map(files_hash)
-
-    if cached_table_map and os.path.exists(db_path):
-        # Cache hit: connect to existing DB
-        logger.info(f"Cache hit! Using cached database: {db_path}")
-        con = duckdb.connect(db_path, read_only=True)
-        table_map = cached_table_map
-        logger.info(
-            f"Loaded {len(table_map)} table(s) from cache: {', '.join(table_map.keys())}"
-        )
-    else:
-        # Cache miss: load files and persist to DB
-        logger.info("Loading files (first time, will cache for future use)...")
-        con = duckdb.connect(db_path)
-        table_map = load_files(con, args.files)
-
-        if not table_map:
-            logger.error("No tables were loaded. Check file paths and formats.")
-            # Clean up empty DB file
-            con.close()
-            if os.path.exists(db_path):
-                os.remove(db_path)
-            sys.exit(1)
-
-        # Save table map for future cache lookups
-        save_table_map(files_hash, table_map)
-        logger.info(
-            f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}"
-        )
-        logger.info(f"Cached database saved to: {db_path}")
-
-    # Perform action
-    if args.action == "inspect":
-        action_inspect(con, table_map)
-    elif args.action == "query":
-        action_query(con, args.sql, table_map, args.output_file)
-    elif args.action == "summary":
-        action_summary(con, args.table, table_map)
-
-    con.close()
+    try:
+        with open_analysis_cache(args.files) as (con, table_map):
+            if args.action == "inspect":
+                action_inspect(con, table_map)
+            elif args.action == "query":
+                action_query(con, args.sql, table_map, args.output_file)
+            elif args.action == "summary":
+                action_summary(con, args.table, table_map)
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
 
 
 if __name__ == "__main__":

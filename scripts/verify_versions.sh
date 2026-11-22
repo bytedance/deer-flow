@@ -2,10 +2,11 @@
 # Verify that every project version source agrees.
 #
 # Sources checked:
-#   deploy/helm/deer-flow/Chart.yaml   — version + appVersion
-#   backend/pyproject.toml             — version
-#   frontend/package.json              — version
-#   backend/uv.lock                    — root package version, via `uv lock --check`
+#   deploy/helm/deer-flow/Chart.yaml             — version + appVersion
+#   backend/pyproject.toml                       — version
+#   backend/packages/harness/pyproject.toml      — deerflow-harness version
+#   frontend/package.json                        — version
+#   backend/uv.lock                              — root + harness entries, via `uv lock --check`
 #
 # Usage:
 #   scripts/verify_versions.sh             # all sources must be mutually equal
@@ -22,10 +23,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CHART="$ROOT/deploy/helm/deer-flow/Chart.yaml"
 PYPROJECT="$ROOT/backend/pyproject.toml"
+HARNESS_PYPROJECT="$ROOT/backend/packages/harness/pyproject.toml"
 PACKAGE="$ROOT/frontend/package.json"
 UV_LOCK="$ROOT/backend/uv.lock"
 
-for f in "$CHART" "$PYPROJECT" "$PACKAGE" "$UV_LOCK"; do
+for f in "$CHART" "$PYPROJECT" "$HARNESS_PYPROJECT" "$PACKAGE" "$UV_LOCK"; do
   if [ ! -f "$f" ]; then
     echo "::error::missing version file: $f" >&2
     exit 1
@@ -35,6 +37,7 @@ done
 CHART_VERSION=$(awk '/^version:/ {print $2; exit}' "$CHART")
 APP_VERSION=$(awk '/^appVersion:/ {gsub(/"/, ""); print $2; exit}' "$CHART")
 PY_VERSION=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' "$PYPROJECT")
+HARNESS_VERSION=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' "$HARNESS_PYPROJECT")
 JS_VERSION=$(grep -m1 '"version"' "$PACKAGE" | awk -F'"' '{print $4}')
 PY_NAME=$(awk -F'"' '/^name[[:space:]]*=/ {print $2; exit}' "$PYPROJECT")
 LOCK_VERSION=$(awk -v name="$PY_NAME" '
@@ -48,6 +51,7 @@ LOCK_VERSION=$(awk -v name="$PY_NAME" '
 printf 'Chart.yaml version:     %s\n' "$CHART_VERSION"
 printf 'Chart.yaml appVersion:  %s\n' "$APP_VERSION"
 printf 'backend/pyproject.toml: %s\n' "$PY_VERSION"
+printf 'harness/pyproject.toml: %s\n' "$HARNESS_VERSION"
 printf 'frontend/package.json:  %s\n' "$JS_VERSION"
 printf 'backend/uv.lock:        %s\n' "$LOCK_VERSION"
 
@@ -69,11 +73,13 @@ if [ -n "$EXPECTED" ]; then
   mismatch "Chart.yaml version"     "$CHART_VERSION" "$EXPECTED" || status=1
   mismatch "Chart.yaml appVersion"  "$APP_VERSION"   "$EXPECTED" || status=1
   mismatch "backend/pyproject.toml" "$PY_VERSION"    "$EXPECTED" || status=1
+  mismatch "backend/packages/harness/pyproject.toml" "$HARNESS_VERSION" "$EXPECTED" || status=1
   mismatch "frontend/package.json"  "$JS_VERSION"    "$EXPECTED" || status=1
 else
   echo
   mismatch "Chart.yaml appVersion"  "$APP_VERSION"  "$CHART_VERSION" || status=1
   mismatch "backend/pyproject.toml" "$PY_VERSION"   "$CHART_VERSION" || status=1
+  mismatch "backend/packages/harness/pyproject.toml" "$HARNESS_VERSION" "$CHART_VERSION" || status=1
   mismatch "frontend/package.json"  "$JS_VERSION"   "$CHART_VERSION" || status=1
 fi
 

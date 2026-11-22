@@ -29,8 +29,10 @@ from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
     run_sync_lifecycle_operation,
     sandbox_lease_owner,
+    sandbox_prewarm_cleanup_registered,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
+from deerflow.sandbox.prewarm import close_sandbox_prewarm, start_sandbox_prewarm
 from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
 from deerflow.utils.file_io import await_drained
 
@@ -125,6 +127,21 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     def _require_projection_support(provider, projection) -> None:
         if projection is not None and not provider.supports_agent_skill_isolation:
             raise SandboxRuntimeError(f"Sandbox provider {provider.__class__.__name__} cannot enforce per-Agent skill filesystem isolation")
+
+    def _can_defer_sandbox_acquisition(self, state: SandboxMiddlewareState, runtime: Runtime, projection) -> bool:
+        if not self._lazy_init:
+            return False
+        if projection is None:
+            return True
+        # Existing or fork-restored state must still be rebound before tools
+        # can reuse a sandbox that had a different Agent skill policy.
+        if state.get("sandbox") is not None or (runtime.context or {}).get("sandbox_id") is not None:
+            return False
+        provider = get_sandbox_provider()
+        self._require_projection_support(provider, projection)
+        # AIO mounts the stable projection roots during canonical acquisition.
+        # Upload-based providers still need eager acquire + strict skill sync.
+        return provider.supports_lazy_agent_skill_isolation
 
     def _acquire_sandbox(
         self,
@@ -236,10 +253,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id)
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
-        # Preserve lazy initialization for threads that use the shared view.
-        # A policy-scoped view is acquired eagerly so an old shared-view
-        # sandbox cannot survive into this run through checkpoint state.
-        if self._lazy_init and projection is None:
+        if self._can_defer_sandbox_acquisition(state, runtime, projection):
             # Bind the execution lease only when a sandbox-backed tool actually
             # touches the persisted sandbox. Runs that only answer or return a
             # terminal Command must not leave an unused owner behind when the
@@ -363,7 +377,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         )
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
-        if self._lazy_init and projection is None:
+        if self._can_defer_sandbox_acquisition(state, runtime, projection):
             return await super().abefore_agent(state, runtime)
 
         existing_sandbox_id = self._read_sandbox_id_from_state(state)
@@ -429,6 +443,22 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         return await super().abefore_agent(state, runtime)
 
     @override
+    def before_model(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        # LangChain registers both halves of this hook as one graph node. An
+        # async-only override would make compiled invoke()/stream() fail even
+        # with prewarm disabled. Sync runs retain ordinary lazy acquisition.
+        return super().before_model(state, runtime)
+
+    @override
+    async def abefore_model(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        # This deliberately starts but does not await acquisition. The model's
+        # first response then overlaps Docker startup; the first sandbox tool
+        # claims the same task through ensure_sandbox_initialized_async().
+        if self._lazy_init and state.get("sandbox") is None:
+            start_sandbox_prewarm(state, runtime)
+        return await super().abefore_model(state, runtime)
+
+    @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
@@ -463,6 +493,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        await close_sandbox_prewarm(runtime)
+        if sandbox_prewarm_cleanup_registered(runtime.context):
+            # The existing outer execution fence retains this holder through
+            # cancellation and finalization, then performs the ordinary release.
+            return await super().aafter_agent(state, runtime)
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]

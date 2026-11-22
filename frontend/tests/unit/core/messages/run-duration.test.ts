@@ -6,6 +6,7 @@ import { zhCN } from "@/core/i18n/locales/zh-CN";
 import {
   formatRunDuration,
   getRunDurationDisplaysByGroupIndex,
+  parseRunStartTime,
 } from "@/core/messages/run-duration";
 import { getMessageGroups } from "@/core/messages/utils";
 
@@ -134,5 +135,28 @@ describe("run duration formatting", () => {
     expect(formatRunDuration(Infinity, enUS.runDuration)).toBeNull();
     expect(formatRunDuration(Number.NaN, enUS.runDuration)).toBeNull();
     expect(formatRunDuration(61.9, enUS.runDuration)).toBe("1m 1s");
+  });
+});
+
+describe("run start time parsing", () => {
+  test("reads offset timestamps with microsecond precision", () => {
+    const expected = Date.UTC(2026, 10, 4, 8, 51, 37, 123);
+    expect(parseRunStartTime("2026-11-04T08:51:37.123456+00:00")).toBe(
+      expected,
+    );
+    expect(parseRunStartTime("2026-11-04T08:51:37.123456Z")).toBe(expected);
+    expect(parseRunStartTime("2026-11-04T16:51:37.123+08:00")).toBe(expected);
+  });
+
+  test("reads offset-less timestamps as UTC like the backend", () => {
+    expect(parseRunStartTime("2026-11-04T08:51:37.123456")).toBe(
+      Date.UTC(2026, 10, 4, 8, 51, 37, 123),
+    );
+  });
+
+  test("rejects missing or malformed timestamps", () => {
+    expect(parseRunStartTime(undefined)).toBeNull();
+    expect(parseRunStartTime("")).toBeNull();
+    expect(parseRunStartTime("not a time")).toBeNull();
   });
 });

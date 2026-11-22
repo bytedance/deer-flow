@@ -22,6 +22,13 @@ image:
   gatewayImage: deer-flow-backend
   frontendImage: deer-flow-frontend
   provisionerImage: deer-flow-provisioner
+  # Optional per-image tags; empty uses `tag`. For an image you rebuild on top
+  # of a release (e.g. a backend with extra packages) while the others stay on
+  # the published release tag. Tags must be strings: quote a numeric tag in
+  # YAML ("20261118") or set it with --set-string.
+  gatewayTag: ""
+  frontendTag: ""
+  provisionerTag: ""
 
 # -- Gateway (backend) deployment.
 gateway:
@@ -32,13 +39,12 @@ gateway:
   # Redis stream bridge (sandbox ownership leases are inferred from it). The
   # chart also exports DEER_FLOW_MULTI_INSTANCE=true when replicas > 1 so the
   # Gateway's startup gate enforces those prerequisites instead of staying
-  # inert (its worker count only sees one Pod). Still single-instance: IM
-  # channels (every Pod connects to every platform -- keep replicas at 1
-  # while channels are enabled), the WeChat QR login, and browser tools.
-  # `channels.leader_lease` in `config` (default `auto`) is reserved for the
-  # per-provider leader lease that will give one Pod each platform connection;
-  # until it ships the setting only drives the startup gate, which refuses
-  # `enabled: false` while channels are enabled (see the chart README).
+  # inert (its worker count only sees one Pod). IM channels follow
+  # `channels.leader_lease` in `config` (default `auto`, on with replicas > 1):
+  # one Pod holds each platform connection and another takes over when it
+  # dies; the startup gate refuses `enabled: false` while channels are enabled
+  # (see the chart README). Still single-instance: the WeChat QR login and
+  # browser tools.
   # Multi-node clusters also need `persistence.home.accessMode: ReadWriteMany`,
   # and `agent_storage.backend: db` keeps custom agents visible on every Pod.
   # Memory stays on that shared volume, but DeerMem's SQLite retrieval index is
@@ -62,6 +68,9 @@ gateway:
   # Rollout strategy. Surge-then-drain keeps one Pod serving while a peer
   # starts; with run-ownership heartbeats the new Pod leaves the old Pod's live
   # runs alone (their leases keep renewing) while the old Pod drains them.
+  # `type: Recreate` (e.g. a single gateway on a ReadWriteOnce home PVC that
+  # can't attach to two nodes) drops `rollingUpdate`, so setting the type alone
+  # is enough, also from a parent chart.
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -105,6 +114,20 @@ gateway:
     limits:
       cpu: "2"
       memory: 2Gi
+  # Init containers (init-home, init-extensions) that prepare the home volume
+  # before the gateway starts. Point `image` at a mirror if your nodes cannot
+  # pull from Docker Hub.
+  initContainers:
+    image:
+      repository: busybox
+      tag: "1.36"
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
 
 # -- Frontend (Next.js) deployment.
 frontend:
@@ -168,6 +191,7 @@ provisioner:
   # Rollout strategy. Surge-then-drain keeps one Pod answering sandbox calls
   # while a peer starts; a replica has nothing to hand over beyond its
   # in-flight requests, so the default termination grace period is enough.
+  # `type: Recreate` drops `rollingUpdate`, as for the gateway.
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -368,7 +392,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 60
+  config_version: 67
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000
@@ -394,6 +418,9 @@ config: |
 
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
+    prewarm: false
+    # Pending/ready-unused speculation per provider instance in each process.
+    prewarm_max_concurrent: 1
     provisioner_url: http://provisioner:8002
     # Sent as X-API-Key on every provisioner request. The chart injects the
     # generated `<release>-app` key into the gateway and provisioner Pods as

@@ -183,14 +183,32 @@ describe("tool access and default knowledge", () => {
   );
 
   it("loads the catalog after knowledge access is persisted", async () => {
-    const fetch = rs.spyOn(globalThis, "fetch").mockImplementation(() =>
+    const fetch = rs.spyOn(globalThis, "fetch").mockImplementation((input) =>
       Promise.resolve(
-        Response.json({
-          items: [{ id: "policies", name: "Policies", selectable: true }],
-          page: 1,
-          page_size: 100,
-          total: 1,
-        }),
+        Response.json(
+          (typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url
+          ).includes("/capabilities?")
+            ? {
+                operations: [
+                  "search",
+                  "catalog",
+                  "documents",
+                  "dataset_filter",
+                  "document_filter",
+                ],
+                scope_selection_enabled: true,
+              }
+            : {
+                items: [{ id: "policies", name: "Policies", selectable: true }],
+                page: 1,
+                page_size: 100,
+                total: 1,
+              },
+        ),
       ),
     );
     const { rerender } = renderSettings({
@@ -210,6 +228,13 @@ describe("tool access and default knowledge", () => {
     const trigger = screen.getByTestId("knowledge-scope-trigger");
     expect((trigger as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(trigger);
+    await waitFor(() =>
+      expect(
+        screen.getByRole<HTMLInputElement>("radio", {
+          name: "Selected knowledge bases",
+        }).disabled,
+      ).toBe(false),
+    );
     fireEvent.click(
       screen.getByRole("radio", { name: "Selected knowledge bases" }),
     );

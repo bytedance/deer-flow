@@ -3,7 +3,7 @@
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
-import { SidebarTrigger } from "@/components/ui/sidebar";
+import { WorkspaceSidebarTrigger } from "@/components/workspace/workspace-sidebar-trigger";
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { pluginPages, pluginPageTitle } from "@/core/extensions/pages";
 import { useI18n } from "@/core/i18n/hooks";
@@ -29,7 +29,7 @@ export function PluginPage({
   return (
     <div className="bg-background flex h-full min-h-0 flex-col">
       <div className="text-muted-foreground flex h-14 shrink-0 items-center gap-3 border-b px-4 text-xs md:px-8">
-        <SidebarTrigger className="md:hidden" />
+        <WorkspaceSidebarTrigger className="md:hidden" />
         <span>{t.breadcrumb.workspace}</span>
         <span>/</span>
         <span>{title}</span>

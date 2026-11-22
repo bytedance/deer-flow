@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -77,6 +77,31 @@ def test_confidence_policy_coerces_non_float_confidence() -> None:
     )
 
     assert [fact["id"] for fact in decision.kept] == ["b", "c"]
+
+
+def test_confidence_policy_scores_duplicate_fact_ids_per_record() -> None:
+    """Duplicate ids must not collide: rank and audit each record by its own score."""
+    facts = [
+        _fact("dup", confidence=0.9),
+        _fact("dup", confidence=0.1),
+        _fact("other", confidence=0.5),
+    ]
+
+    decision = select_facts_for_capacity(
+        facts,
+        max_facts=1,
+        policy=EVICTION_POLICY_CONFIDENCE,
+        now=NOW,
+    )
+
+    # The highest-confidence record wins even though its id repeats.
+    assert [fact["id"] for fact in decision.kept] == ["dup"]
+    assert decision.kept[0]["confidence"] == 0.9
+    assert [item.fact_id for item in decision.evicted] == ["dup", "other"]
+    assert [item.score for item in decision.evicted] == [0.1, 0.5]
+    # Public contract unchanged: scores stays keyed by fact_id (last write wins).
+    assert decision.scores["dup"].value == pytest.approx(0.1)
+    assert set(decision.scores) == {"dup", "other"}
 
 
 @pytest.mark.parametrize(
@@ -188,6 +213,72 @@ def test_hybrid_policy_releases_unused_correction_slots() -> None:
 
     assert len(decision.kept) == 10
     assert decision.reserved_correction_slots == 0
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_hybrid_expanded_reserve_preserves_corrections_and_audit(tmp_path, confirmed: bool) -> None:
+    old_timestamp = (NOW - timedelta(days=90)).isoformat()
+    facts = [
+        *[_fact(f"preference_{index}", confidence=0.85, created_at=old_timestamp) for index in range(12)],
+        *[
+            _fact(
+                f"correction_{index}",
+                confidence=0.85,
+                category=category,
+                created_at=old_timestamp,
+                confirmed_at=old_timestamp if confirmed else None,
+            )
+            for index, category in enumerate(("correction", " CORRECTION "))
+        ],
+        *[_fact(f"context_{index}", confidence=0.90, category="context", created_at=NOW.isoformat()) for index in range(90)],
+    ]
+    decision = select_facts_for_capacity(
+        facts,
+        max_facts=100,
+        policy=EVICTION_POLICY_HYBRID_V1,
+        reserved_categories=["preference", "correction"],
+        decay_exempt_categories=["preference"],
+        now=NOW,
+    )
+
+    assert len(decision.kept) == 100
+    assert {"correction_0", "correction_1"} <= {fact["id"] for fact in decision.kept}
+    assert sum(fact["category"] == "preference" for fact in decision.kept) == 8
+    assert decision.reserved_correction_slots == 2
+
+    storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path), retrieval_adapter=""))
+    storage.record_capacity_eviction(decision, max_facts=100, agent_name="default", user_id="u", occurred_at=NOW)
+    memory_path = storage._get_memory_file_path("default", user_id="u")
+    events = json.loads(agent_eviction_audit_path(memory_path, "default").read_text(encoding="utf-8"))
+    assert events[0]["reservedCorrectionSlots"] == 2
+
+
+@pytest.mark.parametrize("reserved_categories", [[], ["preference"]])
+def test_hybrid_reserve_honors_explicit_correction_exclusion(reserved_categories: list[str]) -> None:
+    facts = [
+        *[_fact(f"context_{index}", confidence=0.99, category="context") for index in range(10)],
+        _fact("preference", confidence=0.20),
+        _fact("correction", confidence=0.10, category="correction"),
+    ]
+    decision = select_facts_for_capacity(
+        facts,
+        max_facts=10,
+        policy=EVICTION_POLICY_HYBRID_V1,
+        reserved_categories=reserved_categories,
+        now=NOW,
+    )
+
+    kept_ids = {fact["id"] for fact in decision.kept}
+    assert len(kept_ids) == 10
+    assert "correction" not in kept_ids
+    assert ("preference" in kept_ids) == bool(reserved_categories)
+    assert decision.reserved_correction_slots == 0
+
+
+@pytest.mark.parametrize("argument", ["reserved_categories", "decay_exempt_categories"])
+def test_eviction_rejects_bare_string_category_arguments(argument: str) -> None:
+    with pytest.raises(TypeError, match=argument):
+        select_facts_for_capacity([], max_facts=10, policy=EVICTION_POLICY_HYBRID_V1, **{argument: "preference"})
 
 
 def test_hybrid_policy_handles_malformed_timestamps() -> None:

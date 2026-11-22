@@ -17,6 +17,7 @@ READ_FILE_NO_CONTENT_RESULTS = frozenset(
     }
 )
 READ_FILE_TRUNCATION_PREFIX = "... [truncated:"
+READ_FILE_NUMBERED_MAX_LINES = 40
 
 
 def count_file_lines(content: str) -> int:

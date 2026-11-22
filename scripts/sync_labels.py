@@ -56,7 +56,9 @@ def sync_label(label: dict[str, str], repo: str | None, dry_run: bool) -> bool:
         print(f"[dry-run] {' '.join(cmd)}")
         return True
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # gh emits UTF-8; decoding with the host locale mangles (or crashes on)
+    # failure messages containing non-ASCII on cp1252/cp936/C-locale hosts.
+    result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         print(f"  ✗ {name}: {result.stderr.strip()}", file=sys.stderr)
         return False
@@ -65,6 +67,18 @@ def sync_label(label: dict[str, str], repo: str | None, dry_run: bool) -> bool:
 
 
 def main() -> int:
+    # The status glyphs (✓ / ✗) must survive hosts whose stdio encoding cannot
+    # represent them (Windows code pages, POSIX C locale): the crash happens
+    # after `gh label create --force` has already run, leaving a half-applied
+    # sync and a traceback instead of a status line.
+    for stream in (sys.stdout, sys.stderr):
+        if not hasattr(stream, "reconfigure"):
+            continue
+        if stream.isatty():
+            stream.reconfigure(errors="backslashreplace")
+        else:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", help="Target repository as OWNER/NAME")
     parser.add_argument(

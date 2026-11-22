@@ -12,6 +12,8 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -234,6 +236,49 @@ class ChannelConnectionRepository:
             await session.execute(delete(ChannelCredentialRow).where(ChannelCredentialRow.connection_id.in_(connection_ids)))
             await session.commit()
             return len(connection_ids)
+
+    async def store_connection_context(
+        self,
+        connection_id: str,
+        *,
+        owner_user_id: str,
+        provider: str,
+        external_account_id: str,
+        workspace_id: str | None,
+        extra: dict[str, Any],
+    ) -> bool:
+        """Merge private context only while the captured binding is still connected."""
+        if self._cipher is None:
+            raise RuntimeError("channel connection encryption key is required")
+        async with self.session_factory() as session:
+            # The guarded write locks the parent on both SQLite and PostgreSQL.
+            # Transfer/disconnect must finish before this check or wait until
+            # our credential write commits, then revoke and delete it normally.
+            result = await session.execute(
+                update(ChannelConnectionRow)
+                .where(
+                    ChannelConnectionRow.id == connection_id,
+                    ChannelConnectionRow.owner_user_id == owner_user_id,
+                    ChannelConnectionRow.provider == provider,
+                    ChannelConnectionRow.external_account_id == self._normalize_optional_identity(external_account_id),
+                    ChannelConnectionRow.workspace_id == self._normalize_optional_identity(workspace_id),
+                    ChannelConnectionRow.status == "connected",
+                )
+                .values(updated_at=ChannelConnectionRow.updated_at)
+            )
+            if result.rowcount != 1:
+                return False
+            row = await session.get(ChannelCredentialRow, connection_id)
+            if row is None:
+                row = ChannelCredentialRow(connection_id=connection_id)
+                session.add(row)
+            previous = self._decrypt_optional_secret(row.encrypted_extra_json)
+            merged = json.loads(previous) if previous else {}
+            merged.update(extra)
+            row.encrypted_extra_json = self._encrypt_optional_secret(json.dumps(merged, ensure_ascii=False))
+            row.version = (row.version or 0) + 1
+            await session.commit()
+            return True
 
     async def store_credentials(
         self,
@@ -517,16 +562,73 @@ class ChannelConnectionRepository:
         thread_id: str,
         external_topic_id: str | None = None,
     ) -> None:
+        """Bind a conversation to ``thread_id``, creating or updating its row.
+
+        Two writers binding a new conversation (a first message racing ``/new``
+        on another task, or two Gateway instances) can both miss the SELECT;
+        the later INSERT then violates
+        ``uq_channel_conversation_connection_external``. Like
+        ``upsert_connection``, that writer rolls back and retries as an update.
+        """
+        topic_id = external_topic_id or ""
+        stmt = select(ChannelConversationRow).where(
+            ChannelConversationRow.connection_id == connection_id,
+            ChannelConversationRow.external_conversation_id == external_conversation_id,
+            ChannelConversationRow.external_topic_id == topic_id,
+        )
+        async with self.session_factory() as session:
+            last_error: IntegrityError | None = None
+            for _ in range(_UPSERT_MAX_ATTEMPTS):
+                try:
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is None:
+                        row = ChannelConversationRow(
+                            id=self._new_id(),
+                            connection_id=connection_id,
+                            owner_user_id=owner_user_id,
+                            provider=provider,
+                            external_conversation_id=external_conversation_id,
+                            external_topic_id=topic_id,
+                            thread_id=thread_id,
+                        )
+                        session.add(row)
+                    else:
+                        row.thread_id = thread_id
+                        row.owner_user_id = owner_user_id
+                        row.provider = provider
+                    await session.commit()
+                    return
+                except IntegrityError as exc:
+                    last_error = exc
+                    await session.rollback()
+            raise last_error  # type: ignore[misc]  # loop runs at least once
+
+    async def claim_thread_id(
+        self,
+        *,
+        connection_id: str,
+        owner_user_id: str,
+        provider: str,
+        external_conversation_id: str,
+        thread_id: str,
+        external_topic_id: str | None = None,
+    ) -> str:
+        """Bind a conversation to ``thread_id`` unless it is bound already; return its thread.
+
+        The first binding of a conversation, unlike ``set_thread_id``'s
+        rebinding (``/new``): two Gateway instances that both created a thread
+        for one new conversation must converge on one of them. A single
+        ``INSERT ... ON CONFLICT DO NOTHING`` lets the first writer win, and
+        the SELECT in the same transaction returns whichever row won (Postgres
+        READ COMMITTED reads the peer's committed row; SQLite serializes
+        writers).
+        """
         topic_id = external_topic_id or ""
         async with self.session_factory() as session:
-            stmt = select(ChannelConversationRow).where(
-                ChannelConversationRow.connection_id == connection_id,
-                ChannelConversationRow.external_conversation_id == external_conversation_id,
-                ChannelConversationRow.external_topic_id == topic_id,
-            )
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
-                row = ChannelConversationRow(
+            insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+            await session.execute(
+                insert(ChannelConversationRow)
+                .values(
                     id=self._new_id(),
                     connection_id=connection_id,
                     owner_user_id=owner_user_id,
@@ -535,12 +637,19 @@ class ChannelConnectionRepository:
                     external_topic_id=topic_id,
                     thread_id=thread_id,
                 )
-                session.add(row)
-            else:
-                row.thread_id = thread_id
-                row.owner_user_id = owner_user_id
-                row.provider = provider
+                .on_conflict_do_nothing(index_elements=["connection_id", "external_conversation_id", "external_topic_id"])
+            )
+            bound = (
+                await session.execute(
+                    select(ChannelConversationRow.thread_id).where(
+                        ChannelConversationRow.connection_id == connection_id,
+                        ChannelConversationRow.external_conversation_id == external_conversation_id,
+                        ChannelConversationRow.external_topic_id == topic_id,
+                    )
+                )
+            ).scalar_one()
             await session.commit()
+            return bound
 
     async def get_thread_id(
         self,

@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import logging
 import os
 import sys
 import time
@@ -26,12 +27,29 @@ from deerflow.tools.builtins.invoke_acp_agent_tool import (
 from deerflow.tools.tools import get_available_tools
 
 
+class _LiveAgentProcess:
+    """Process double for an agent that stays alive for the whole ACP exchange."""
+
+    stderr = None
+    returncode = None
+
+    async def wait(self) -> int:
+        await asyncio.Event().wait()
+
+
 def test_build_mcp_servers_filters_disabled_and_maps_transports():
     set_extensions_config(ExtensionsConfig(mcp_servers={"stale": McpServerConfig(enabled=True, type="stdio", command="echo")}, skills={}))
     fresh_config = ExtensionsConfig(
         mcp_servers={
             "stdio": McpServerConfig(enabled=True, type="stdio", command="npx", args=["srv"]),
             "http": McpServerConfig(enabled=True, type="http", url="https://example.com/mcp"),
+            "browser": McpServerConfig.model_validate(
+                {
+                    "type": "http",
+                    "url": "https://browser.example.com/mcp",
+                    "user_oauth": {"issuer": "https://id.example.com", "client_id": "deerflow", "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback"},
+                }
+            ),
             "disabled": McpServerConfig(enabled=False, type="stdio", command="echo"),
         },
         skills={},
@@ -58,6 +76,13 @@ def test_build_acp_mcp_servers_formats_list_payload():
         mcp_servers={
             "stdio": McpServerConfig(enabled=True, type="stdio", command="npx", args=["srv"], env={"FOO": "bar"}),
             "http": McpServerConfig(enabled=True, type="http", url="https://example.com/mcp", headers={"Authorization": "Bearer token"}),
+            "browser": McpServerConfig.model_validate(
+                {
+                    "type": "http",
+                    "url": "https://browser.example.com/mcp",
+                    "user_oauth": {"issuer": "https://id.example.com", "client_id": "deerflow", "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback"},
+                }
+            ),
             "disabled": McpServerConfig(enabled=False, type="stdio", command="echo"),
         },
         skills={},
@@ -134,6 +159,47 @@ def test_missing_mcode_command_returns_install_and_login_guidance():
     assert "npm install --global @minimax-ai/code" in result
     assert "mcode login" in result
     assert "restart DeerFlow" in result
+
+
+@pytest.mark.parametrize("agent", ["pi", "pi_coding"])
+def test_missing_pi_command_returns_adapter_install_guidance(agent):
+    result = _format_invocation_error(agent, "pi-acp", FileNotFoundError())
+
+    assert "npm install --global pi-acp" in result
+    assert "npx -y pi-acp" in result
+    assert "Gateway PATH" in result
+
+
+def test_missing_npx_for_pi_returns_node_install_guidance():
+    result = _format_invocation_error("pi", "npx", FileNotFoundError())
+
+    assert "Command 'npx' was not found" in result
+    assert "Install Node.js" in result
+    assert "npm" in result
+    assert "Gateway PATH" in result
+    assert "container" in result
+    assert "npm install --global pi-acp" not in result
+
+
+@pytest.mark.anyio
+async def test_pi_invocation_reports_missing_npx(monkeypatch, tmp_path):
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    tool = build_invoke_acp_agent_tool({"pi": ACPAgentConfig(command="npx", args=["-y", "pi-acp"], description="Pi coding agent")})
+
+    result = await tool.coroutine(agent="pi", prompt="Inspect the repository")
+
+    assert "Command 'npx' was not found" in result
+    assert "Install Node.js" in result
+    assert "npm install --global pi-acp" not in result
 
 
 @pytest.mark.anyio
@@ -259,7 +325,7 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
             captured["spawn"] = {"cmd": cmd, "args": list(args), "cwd": cwd}
 
         async def __aenter__(self):
-            return DummyConn(), object()
+            return DummyConn(), _LiveAgentProcess()
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
@@ -384,7 +450,7 @@ async def test_invoke_acp_agent_uses_per_thread_workspace_when_thread_id_in_conf
             captured["cwd"] = cwd
 
         async def __aenter__(self):
-            return DummyConn(), object()
+            return DummyConn(), _LiveAgentProcess()
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
@@ -477,7 +543,7 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
             captured["env"] = env
 
         async def __aenter__(self):
-            return DummyConn(), object()
+            return DummyConn(), _LiveAgentProcess()
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
@@ -570,7 +636,7 @@ async def test_invoke_acp_agent_skips_invalid_mcp_servers(monkeypatch, tmp_path,
             captured["spawn"] = {"cmd": cmd, "args": list(args), "env": env, "cwd": cwd}
 
         async def __aenter__(self):
-            return DummyConn(), object()
+            return DummyConn(), _LiveAgentProcess()
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
@@ -657,7 +723,7 @@ async def test_invoke_acp_agent_passes_none_env_when_not_configured(monkeypatch,
             captured["env"] = env
 
         async def __aenter__(self):
-            return DummyConn(), object()
+            return DummyConn(), _LiveAgentProcess()
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
@@ -770,7 +836,7 @@ def test_get_available_tools_sync_invoke_acp_agent_preserves_thread_workspace(mo
             captured["cwd"] = cwd
 
         async def __aenter__(self):
-            return DummyConn(), object()
+            return DummyConn(), _LiveAgentProcess()
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
@@ -1001,6 +1067,118 @@ async def test_invoke_acp_agent_preserves_sdk_timeout_errors(acp_subprocess_tool
     assert result == "Error invoking ACP agent 'test': SDK transport timed out"
     assert "timeout_seconds" not in result
     assert acp_subprocess_tool.captured["proc"].returncode is not None
+
+
+_STDERR_ACP_AGENT_SCRIPT = """\
+import asyncio
+import os
+import sys
+import time
+
+import acp
+from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
+
+# argv: <phase to stop in, or ""> <stderr bytes to write per phase> <"exit" or "hang">
+
+
+class _TestAgent:
+    def on_connect(self, conn):
+        self._conn = conn
+
+    def _enter_phase(self, phase):
+        line = f"{phase}: " + "x" * 200 + "\\n"
+        for _ in range(int(sys.argv[2]) // len(line) + 1):
+            sys.stderr.write(line)
+        if phase == sys.argv[1] and sys.argv[3] == "exit":
+            sys.stderr.write(f"fatal: cannot {phase} without credentials\\n")
+            sys.stderr.flush()
+            os._exit(3)
+        if phase == sys.argv[1]:
+            sys.stderr.write(f"stalled: waiting for {phase} login\\n")
+            sys.stderr.flush()
+            time.sleep(3600)
+        sys.stderr.flush()
+
+    async def initialize(self, protocol_version, client_capabilities=None, client_info=None, **kwargs):
+        self._enter_phase("initialize")
+        return InitializeResponse(protocol_version=protocol_version)
+
+    async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kwargs):
+        self._enter_phase("new_session")
+        return NewSessionResponse(session_id="test-session")
+
+    async def prompt(self, session_id, prompt, **kwargs):
+        self._enter_phase("prompt")
+        await self._conn.session_update(session_id=session_id, update=acp.update_agent_message_text("done"))
+        return PromptResponse(stop_reason="end_turn")
+
+
+asyncio.run(acp.run_agent(_TestAgent()))
+"""
+
+
+@pytest.fixture
+def acp_stderr_tool(monkeypatch, tmp_path):
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+    script_path = tmp_path / "stderr_acp_agent.py"
+    script_path.write_text(_STDERR_ACP_AGENT_SCRIPT, encoding="utf-8")
+
+    def build_tool(stop_phase="", stderr_bytes=0, stop="exit", timeout_seconds=60):
+        return build_invoke_acp_agent_tool(
+            {
+                "test": ACPAgentConfig(
+                    command=sys.executable,
+                    args=[str(script_path), stop_phase, str(stderr_bytes), stop],
+                    description="Test ACP agent",
+                    timeout_seconds=timeout_seconds,
+                )
+            }
+        )
+
+    return build_tool
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["initialize", "new_session", "prompt"])
+async def test_invoke_acp_agent_reports_an_agent_that_exits_mid_invocation(acp_stderr_tool, caplog, phase):
+    # More stderr than the retained tail, so the fatal line (written last) is
+    # only logged if the tail keeps the end of the stream rather than its start.
+    tool = acp_stderr_tool(stop_phase=phase, stderr_bytes=40 * 1024)
+    start = time.monotonic()
+    with caplog.at_level(logging.ERROR, logger="deerflow.tools.builtins.invoke_acp_agent_tool"):
+        # The tool's own 60s budget must not be what ends the call.
+        result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=30)
+    assert time.monotonic() - start < 15
+    assert result.startswith("Error: ACP agent 'test' exited with code 3 before completing the ACP invocation.")
+    assert "timeout_seconds" not in result
+    # The agent's diagnostics reach the operator log, not the model.
+    assert f"fatal: cannot {phase} without credentials" in caplog.text
+    assert "credentials" not in result
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_logs_the_stderr_of_a_stalled_agent(acp_stderr_tool, caplog):
+    tool = acp_stderr_tool(stop_phase="prompt", stderr_bytes=40 * 1024, stop="hang", timeout_seconds=3)
+    with caplog.at_level(logging.ERROR, logger="deerflow.tools.builtins.invoke_acp_agent_tool"):
+        result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=30)
+    assert "timed out after 3 seconds" in result
+    # The last line the agent wrote before stalling is the one an operator needs.
+    assert "stalled: waiting for prompt login" in caplog.text
+    assert "login" not in result
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_drains_verbose_stderr(acp_stderr_tool):
+    # Far beyond what an unread stderr pipe absorbs before the agent's writes block.
+    tool = acp_stderr_tool(stderr_bytes=1024 * 1024, timeout_seconds=20)
+    result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=40)
+    assert result == "done"
 
 
 def _write_launcher_shim(directory: Path, name: str, command: str) -> Path:

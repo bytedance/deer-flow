@@ -13,10 +13,9 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 import tomllib
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,10 +24,12 @@ from typing import Any
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
 
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+from deerflow.utils.file_lock import retry_until_locked as _retry_until_locked
+
 logger = logging.getLogger(__name__)
 
 _ENTRY_POINT_GROUP = "deerflow.extensions"
-_LOCK_RETRY_INTERVAL_SECONDS = 0.2
 _SNAPSHOT_IGNORES = (".git", ".venv", "venv", "__pycache__", "*.pyc")
 _DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _SENSITIVE_FILENAMES = {".npmrc", ".pypirc", "credentials.json"}
@@ -103,11 +104,15 @@ def _write_bytes_atomically(path: Path, content: bytes, mode: int | None) -> Non
     ``Path.write_bytes`` opens with ``O_TRUNC``, so a rollback that dies midway
     leaves pyproject.toml / uv.lock / config.yaml half written — the failed
     install would then take the checkout with it. The rest of the codebase
-    already publishes through a temporary file plus ``os.replace``.
+    already publishes through a temporary file plus ``os.replace``. Cleanup of
+    that temporary must not replace the publication error.
     """
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    fd, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(temporary_name)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        handle = os.fdopen(fd, "wb")
+        fd = None  # The file object now owns the descriptor.
+        with handle:
             handle.write(content)
             handle.flush()
             if mode is not None:
@@ -115,7 +120,7 @@ def _write_bytes_atomically(path: Path, content: bytes, mode: int | None) -> Non
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        cleanup_failed_atomic_write(temporary, fd)
         raise
 
 
@@ -134,7 +139,9 @@ class _FileSnapshot:
 
     def restore(self) -> None:
         if self.content is None:
-            self.path.unlink(missing_ok=True)
+            # Rollback loops call this for every snapshot. A bare unlink can
+            # replace the original operation error and skip later restores.
+            cleanup_failed_atomic_write(self.path)
         else:
             _write_bytes_atomically(self.path, self.content, self.mode)
 
@@ -529,22 +536,6 @@ def _normalize_distribution(name: str) -> str:
     if not _DISTRIBUTION_NAME.fullmatch(name):
         raise ValueError(f"invalid extension distribution name: {name!r}")
     return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def _retry_until_locked(acquire: Callable[[], None], *, sleep: Callable[[float], None] = time.sleep) -> None:
-    """Retry a non-blocking lock acquisition until the region is free.
-
-    Windows' blocking mode (``msvcrt.LK_LOCK``) gives up after roughly ten
-    seconds. A real install holds this lock across ``uv add`` plus a full
-    ``uv sync``, so blocking mode reports contention as ``Permission denied``
-    instead of serializing the two operations.
-    """
-    while True:
-        try:
-            acquire()
-            return
-        except OSError:
-            sleep(_LOCK_RETRY_INTERVAL_SECONDS)
 
 
 @contextmanager
@@ -1009,14 +1000,14 @@ def _write_plugins_block(path: Path, original: str, plugins: list[Any]) -> None:
             prefix=f".{path.name}.",
             delete=False,
         ) as stream:
-            stream.write(updated)
             temporary = Path(stream.name)
+            stream.write(updated)
         os.chmod(temporary, mode)
         os.replace(temporary, path)
         temporary = None
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            cleanup_failed_atomic_write(temporary)
 
 
 def _plugins_block_span(original: str) -> tuple[int, int] | None:

@@ -2,7 +2,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   Code2Icon,
   CopyIcon,
-  DownloadIcon,
   EyeIcon,
   LoaderIcon,
   PackageIcon,
@@ -47,6 +46,7 @@ import { useArtifactContent } from "@/core/artifacts/hooks";
 import {
   getArtifactViewState,
   getTabularDelimiter,
+  parseWriteFileArtifact,
 } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import {
@@ -55,6 +55,7 @@ import {
 } from "@/core/artifacts/viewer";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { writeTextToClipboard } from "@/core/clipboard";
+import { useArtifactPreviewRenderer } from "@/core/extensions/artifact-previews";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
@@ -67,16 +68,19 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+import { FileTypeIcon } from "../file-type-icon";
 import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
+import { ArtifactDownloadButton } from "./artifact-download-button";
 import {
-  ArtifactDownloadFallback,
   ArtifactFilePreview,
   ArtifactPreviewError,
   formatArtifactBytes,
 } from "./artifact-file-preview";
 import { useArtifacts } from "./context";
+import { PluginArtifactPreview } from "./plugin-artifact-preview";
+import { useArtifactSelection } from "./use-artifact-selection";
 
 const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
 
@@ -106,13 +110,16 @@ export function ArtifactFileDetail({
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
   }, [filepathFromProps]);
-  const filepath = useMemo(() => {
-    if (isWriteFile) {
-      const url = new URL(filepathFromProps);
-      return decodeURIComponent(url.pathname);
-    }
-    return filepathFromProps;
-  }, [filepathFromProps, isWriteFile]);
+  // `write-file:` URLs come from messages and from the panel's persisted
+  // selection, so parse them through the guarded helper instead of `new URL`
+  // + `decodeURIComponent` directly: a malformed value must degrade to the
+  // raw string, not throw during render.
+  const parsedWriteFile = useMemo(
+    () => (isWriteFile ? parseWriteFileArtifact(filepathFromProps) : undefined),
+    [filepathFromProps, isWriteFile],
+  );
+  const filepath = parsedWriteFile?.path ?? filepathFromProps;
+  const { match: pluginPreview } = useArtifactPreviewRenderer(filepath);
   // Keep these local because ChatBox replaces context artifacts with thread state.
   const [openedPresentedFilepaths, setOpenedPresentedFilepaths] = useState<
     string[]
@@ -178,15 +185,15 @@ export function ArtifactFileDetail({
   const isSupportPreview =
     language === "html" || language === "markdown" || isTabular;
   const toolResult = (() => {
-    if (!isWriteFile) {
-      return undefined;
-    }
-    const url = new URL(filepathFromProps);
-    const toolCallId = url.searchParams.get("tool_call_id");
+    const toolCallId = parsedWriteFile?.toolCallId;
     if (!toolCallId) {
       return undefined;
     }
-    return findToolCallResult(toolCallId, thread.messages);
+    return findToolCallResult(
+      toolCallId,
+      thread.messages,
+      parsedWriteFile?.messageId,
+    );
   })();
   const artifactViewState = getArtifactViewState({
     filepath: filepathFromProps,
@@ -265,15 +272,38 @@ export function ArtifactFileDetail({
   }, [content, filepath, isWriteFile, setDrafts, sha256, truncated]);
 
   const [viewMode, setViewMode] = useState<"code" | "preview">(
-    artifactViewState.initialViewMode,
+    isEditing ? "code" : artifactViewState.initialViewMode,
   );
   const [isInstalling, setIsInstalling] = useState(false);
   const isLoadingFullContent = fullContentRequested && isLoading;
   const effectiveViewMode =
     truncated && language === "html" ? "code" : viewMode;
+  const selection = useArtifactSelection({
+    filepath,
+    threadId,
+    ownerId: user?.id,
+    source: editorContent,
+    revision: activeDraft.baselineSha256,
+    enabled:
+      isCodeFile &&
+      !isWriteFile &&
+      !isSkillFile &&
+      !isMock &&
+      !isLoading &&
+      !error &&
+      !thread.isLoading &&
+      !isSaving &&
+      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true",
+    editable:
+      canEdit &&
+      !thread.isLoading &&
+      !isSaving &&
+      !activeDraft.conflict &&
+      activeDraft.baselineSha256 === sha256,
+  });
   useEffect(() => {
-    setViewMode(artifactViewState.initialViewMode);
-  }, [artifactViewState.initialViewMode, filepathFromProps]);
+    setViewMode(isEditing ? "code" : artifactViewState.initialViewMode);
+  }, [artifactViewState.initialViewMode, filepathFromProps, isEditing]);
 
   const confirmDiscard = useCallback(() => {
     return !isDirty || window.confirm(t.artifactEditing.discardChanges);
@@ -330,6 +360,11 @@ export function ArtifactFileDetail({
         filepath,
         content: submittedDraftContent,
         expectedSha256: submittedBaselineSha256,
+      });
+      // A refetch started before or during the save can still return old bytes.
+      // Cancel both preview and full reads before publishing the saved revision.
+      await queryClient.cancelQueries({
+        queryKey: ["artifact", filepathFromProps, threadId, isMock],
       });
       setDrafts((current) => ({
         ...current,
@@ -429,7 +464,8 @@ export function ArtifactFileDetail({
   return (
     <Artifact className={cn(className)}>
       <ArtifactHeader className="px-2">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-1">
+          <FileTypeIcon filename={filepath} compact />
           <ArtifactTitle>
             {isWriteFile ? (
               <div className="px-2">{getFileName(filepath)}</div>
@@ -594,7 +630,12 @@ export function ArtifactFileDetail({
                 }
                 onClick={() => {
                   const w = window.open(
-                    resolveArtifactOpenURL({ filepath, threadId, isMock }),
+                    resolveArtifactOpenURL({
+                      filepath,
+                      threadId,
+                      isMock,
+                      hasPluginPreview: !!pluginPreview,
+                    }),
                     "_blank",
                     "noopener,noreferrer",
                   );
@@ -626,27 +667,11 @@ export function ArtifactFileDetail({
               />
             )}
             {!isEditing && !isWriteFile && (
-              <ArtifactAction
-                icon={DownloadIcon}
-                label={t.common.download}
-                tooltip={
-                  isTabular && isDirty
-                    ? t.artifactTable.savedVersion
-                    : t.common.download
-                }
-                onClick={() => {
-                  const w = window.open(
-                    urlOfArtifact({
-                      filepath,
-                      threadId,
-                      download: true,
-                      isMock,
-                    }),
-                    "_blank",
-                    "noopener,noreferrer",
-                  );
-                  if (w) w.opener = null;
-                }}
+              <ArtifactDownloadButton
+                filepath={filepath}
+                threadId={threadId}
+                isMock={isMock}
+                compact
               />
             )}
             <ArtifactAction
@@ -668,6 +693,7 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="flex flex-col p-0">
+        {selection.toolbar}
         {truncated && !(isTabular && effectiveViewMode === "preview") && (
           <div className="border-border bg-muted/40 flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2 text-sm">
             <span className="text-muted-foreground">
@@ -707,9 +733,11 @@ export function ArtifactFileDetail({
                 content={editorContent}
                 language={language ?? "text"}
                 scrollKey={`${threadId}:${filepathFromProps}`}
+                artifact={{ filepath, threadId, isMock }}
                 url={url}
                 truncated={truncated}
                 active={effectiveViewMode === "preview" && !isLoading}
+                onTextSelection={selection.onTextSelection}
               />
             )}
           {isCodeFile &&
@@ -733,6 +761,7 @@ export function ArtifactFileDetail({
                   }));
                 }}
                 onSave={() => void handleSave()}
+                onSelectionChange={selection.onSourceSelection}
                 language={language}
               />
             )}
@@ -763,10 +792,11 @@ export function ArtifactFileDetail({
             />
           )}
           {!isCodeFile && !canPreviewInBrowser && (
-            <ArtifactDownloadFallback
+            <PluginArtifactPreview
               filepath={filepath}
               threadId={threadId}
               isMock={isMock}
+              isRunning={thread.isLoading}
             />
           )}
         </div>

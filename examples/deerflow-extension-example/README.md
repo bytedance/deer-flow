@@ -4,14 +4,15 @@ For the shared edit → test → packaging check → install workflow, see the
 [existing-example guide](../README.md).
 
 This directory is a compact, standalone Python package showing five of the
-eight DeerFlow extension contribution kinds: middleware, task lifecycle,
+nine DeerFlow extension contribution kinds: middleware, task lifecycle,
 system-model observer, service, and router. It depends on the public
 `deerflow-extension-api` contract and never imports `deerflow.*` or `app.*`.
 
 It does not register an agent-assembly observer, a context-compaction observer,
-or a full-stack plugin. The observers are covered in the
+a knowledge provider, or a full-stack plugin. The observers are covered in the
 [Lifecycle and Observers](../../frontend/src/content/en/harness/extensions/observers.mdx)
-guide, and [`deerflow-extension-bookmarks`](../deerflow-extension-bookmarks/)
+guide, [`deerflow-extension-knowledge`](../deerflow-extension-knowledge/) shows
+a knowledge provider, and [`deerflow-extension-bookmarks`](../deerflow-extension-bookmarks/)
 shows a plugin.
 
 The contract package intentionally has no framework dependencies. An extension
@@ -92,7 +93,9 @@ uv run --no-project ruff format --check .
 ```
 
 The tests use only the public contract plus this package's declared dependencies;
-the DeerFlow harness and Gateway application are not imported.
+the DeerFlow harness and Gateway application are not imported. CI runs these
+commands whenever this package or `deerflow-extension-api` changes, so a contract
+addition that the test registry does not implement fails the pull request.
 
 ## Install and load it in DeerFlow
 

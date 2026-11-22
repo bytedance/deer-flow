@@ -87,7 +87,7 @@ test("selecting and clearing an additional group preserves the schedule and disp
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   const form = page.getByTestId("scheduled-task-form");
   const select = form.getByRole("combobox", {
-    name: "Also notify a Feishu group (optional)",
+    name: "Also notify a group (optional)",
   });
   await expect(select).toHaveText("No additional group");
   await select.click();
@@ -112,7 +112,7 @@ test("selecting and clearing an additional group preserves the schedule and disp
   ).toContainText("Planning team");
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   await form
-    .getByRole("combobox", { name: "Also notify a Feishu group (optional)" })
+    .getByRole("combobox", { name: "Also notify a group (optional)" })
     .click();
   await page
     .getByRole("option", { name: "No additional group", exact: true })
@@ -147,7 +147,7 @@ test("a connection-list failure does not clear an existing group when saving ano
   ).toBeVisible({ timeout: 15_000 });
   await expect(
     form.getByRole("combobox", {
-      name: "Also notify a Feishu group (optional)",
+      name: "Also notify a group (optional)",
     }),
   ).toHaveText("Selected group unavailable");
   await expect(form).not.toContainText("missing-group-binding");
@@ -176,7 +176,7 @@ test("duplicating a task copies its selected group", async ({ page }) => {
   const form = page.getByTestId("scheduled-task-form");
   await expect(
     form.getByRole("combobox", {
-      name: "Also notify a Feishu group (optional)",
+      name: "Also notify a group (optional)",
     }),
   ).toHaveText("Planning team");
   const request = page.waitForRequest(
@@ -259,7 +259,7 @@ test("the task form provides a persistent group binding command and refreshes th
   groupBound = true;
   await form.getByRole("button", { name: "Refresh group list" }).click();
   const selector = form.getByRole("combobox", {
-    name: "Also notify a Feishu group (optional)",
+    name: "Also notify a group (optional)",
   });
   await expect(selector).toHaveText("No additional group");
   await selector.click();
@@ -279,7 +279,7 @@ test("a backend without the group capability does not offer a group destination"
   ).toHaveCount(0);
   await expect(
     form.getByRole("combobox", {
-      name: "Also notify a Feishu group (optional)",
+      name: "Also notify a group (optional)",
     }),
   ).toHaveCount(0);
 });

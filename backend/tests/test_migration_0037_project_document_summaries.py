@@ -20,16 +20,25 @@ REVISION = "0037_project_document_summaries"
 PREVIOUS = "0036_run_idempotency_request"
 CHANNEL_BINDINGS = "0038_channel_thread_bindings"
 USER_DISABLED = "0039_user_disabled"
-CURRENT_HEAD = "0040_scheduled_group_notice"
+GROUP_NOTICE = "0040_scheduled_group_notice"
+IM_NOTICE_PREFERENCES = "0041_im_notice_preferences"
+CHANNEL_LEASES = "0042_channel_leases"
+RUNTIME_IM_NOTICES = "0043_runtime_im_notices"
+CHANNEL_RUNTIME_CONFIGS = "0044_channel_runtime_configs"
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0037_chains_after_0036_and_is_single_head():
+async def test_0037_chains_after_0036_in_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [CURRENT_HEAD]
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(CHANNEL_BINDINGS).down_revision == REVISION
     assert script.get_revision(USER_DISABLED).down_revision == CHANNEL_BINDINGS
-    assert script.get_revision(CURRENT_HEAD).down_revision == USER_DISABLED
+    assert script.get_revision(GROUP_NOTICE).down_revision == USER_DISABLED
+    assert script.get_revision(IM_NOTICE_PREFERENCES).down_revision == GROUP_NOTICE
+    assert script.get_revision(CHANNEL_LEASES).down_revision == IM_NOTICE_PREFERENCES
+    assert script.get_revision(RUNTIME_IM_NOTICES).down_revision == CHANNEL_LEASES
+    assert script.get_revision(CHANNEL_RUNTIME_CONFIGS).down_revision == RUNTIME_IM_NOTICES
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32
@@ -94,7 +103,7 @@ async def test_0037_upgrade_keeps_rows_and_downgrade_drops_summary(tmp_path, bac
 
 def test_postgres_uri_tls_policy_is_preserved(tmp_path, monkeypatch):
     """The fixture must translate, never drop, an explicit sslmode (tests/AGENTS.md)."""
-    monkeypatch.setenv("TEST_POSTGRES_URI", "postgresql://u:p@db:5432/deerflow?sslmode=verify-full&channel_binding=require")
+    monkeypatch.setenv("TEST_POSTGRES_URI", "postgresql://u:p@db:5432/deerflow?sslmode=verify-full")
     captured = {}
 
     def capture_engine(url, **kwargs):
@@ -113,4 +122,16 @@ def test_postgres_uri_conflicting_ssl_settings_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_POSTGRES_URI", "postgresql://u:p@db:5432/deerflow?sslmode=require&ssl=disable")
     monkeypatch.setitem(globals(), "create_async_engine", lambda *a, **k: None)
     with pytest.raises(ValueError, match="Conflicting ssl and sslmode"):
+        _engine(tmp_path, "postgres")
+
+
+@pytest.mark.parametrize("channel_binding", ["disable", "prefer", "require"])
+async def test_postgres_uri_channel_binding_rejected_before_engine_creation(tmp_path, monkeypatch, channel_binding):
+    monkeypatch.setenv("TEST_POSTGRES_URI", f"postgresql://u:p@db:5432/deerflow?sslmode=verify-full&channel_binding={channel_binding}")
+
+    def reject_engine_creation(*args, **kwargs):
+        pytest.fail("Unsupported Channel Binding must be rejected before engine creation")
+
+    monkeypatch.setitem(globals(), "create_async_engine", reject_engine_creation)
+    with pytest.raises(ValueError, match="channel_binding"):
         _engine(tmp_path, "postgres")

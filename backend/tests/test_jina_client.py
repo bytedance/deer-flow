@@ -2,6 +2,8 @@
 
 import json
 import logging
+from functools import partial
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -152,7 +154,7 @@ async def test_crawl_transient_failure_logs_without_traceback(jina_client, monke
     with caplog.at_level(logging.DEBUG, logger="deerflow.community.jina_ai.jina_client"):
         result = await jina_client.crawl("https://example.com")
 
-    jina_records = [r for r in caplog.records if r.name == "deerflow.community.jina_ai.jina_client"]
+    jina_records = [r for r in caplog.records if r.name == "deerflow.community.jina_ai.jina_client" and r.levelno >= logging.WARNING]
     assert len(jina_records) == 1, f"expected exactly one log record, got {len(jina_records)}"
     record = jina_records[0]
     assert record.levelno == logging.WARNING, f"expected WARNING, got {record.levelname}"
@@ -247,6 +249,21 @@ async def test_crawl_includes_api_key_when_set(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_crawl_uses_the_anonymous_tier_when_env_holds_the_template_placeholder(jina_client, monkeypatch):
+    """A fresh ``make config`` leaves ``JINA_API_KEY=your-jina-api-key``; sending it makes every fetch a 401."""
+    captured_headers = {}
+
+    async def mock_post(self, url, **kwargs):
+        captured_headers.update(kwargs.get("headers", {}))
+        return httpx.Response(200, text="ok", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    monkeypatch.setenv("JINA_API_KEY", "your-jina-api-key")
+    assert await jina_client.crawl("https://example.com") == "ok"
+    assert "Authorization" not in captured_headers
+
+
+@pytest.mark.anyio
 async def test_crawl_warns_once_when_api_key_missing(jina_client, monkeypatch, caplog):
     """Test that the missing API key warning is logged only once."""
     jina_client_module._api_key_warned = False
@@ -279,6 +296,32 @@ async def test_crawl_no_auth_header_without_api_key(jina_client, monkeypatch):
     monkeypatch.delenv("JINA_API_KEY", raising=False)
     await jina_client.crawl("https://example.com")
     assert "Authorization" not in captured_headers
+
+
+@pytest.mark.anyio
+async def test_web_fetch_screens_target_before_post(monkeypatch, caplog):
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content)["url"])
+        return httpx.Response(200, text="<html><body><p>Public article.</p></body></html>")
+
+    client = partial(httpx.AsyncClient, transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(jina_client_module, "httpx", SimpleNamespace(AsyncClient=client))
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _: None))
+    monkeypatch.setattr("socket.getaddrinfo", lambda *args, **kwargs: pytest.fail("Hosted fetch must leave DNS to the provider"))
+    monkeypatch.setenv("JINA_API_KEY", "synthetic-test-key")
+    caplog.set_level(logging.DEBUG, logger="deerflow.community.jina_ai")
+
+    result = await web_fetch_tool.ainvoke({"url": "https://jina-test-marker.localhost/article"})
+    assert requests == []
+    assert result.startswith("Error:")
+    assert "jina-test-marker" not in result
+    assert "jina-test-marker" not in caplog.text
+
+    url = "https://reader.example.com/articles/a%2Fb?view=full&tag=a%20b"
+    assert "Public article." in await web_fetch_tool.ainvoke({"url": url})
+    assert requests == [url]
 
 
 @pytest.mark.anyio

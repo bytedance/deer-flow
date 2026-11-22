@@ -211,8 +211,9 @@ for (const lang of LOCALES) {
         .last()
         .evaluate(
           (card, other) =>
+            other !== null &&
             Boolean(
-              card.compareDocumentPosition(other!) &
+              card.compareDocumentPosition(other) &
               Node.DOCUMENT_POSITION_FOLLOWING,
             ),
           await line.elementHandle(),

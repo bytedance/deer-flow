@@ -1848,7 +1848,7 @@ class TestTestsPassedLeaf:
         assert verdict["leaves"][0]["checked"] is False
 
     def test_bare_criterion_exact_run_still_holds(self):
-        executions = [_bash_execution("python -m unittest", output_tail="Ran 12 tests\n\nOK")]
+        executions = [_bash_execution("python -m unittest", output_tail="Ran 12 tests in 0.001s\n\nOK")]
         verdict = check_acceptance_criteria(["tests_passed:python -m unittest"], bash_executions=executions)
 
         assert verdict["leaves"][0]["holds"] is True
@@ -2500,10 +2500,10 @@ class TestTestsPassedLeaf:
     @pytest.mark.parametrize(
         "output",
         [
-            ".....\nOK\n",
+            ".....\nRan 5 tests in 0.001s\n\nOK\n",
             "test result: ok. 5 passed; 0 failed",
             "ok  \tgithub.com/example/pkg\t0.5s",
-            "BUILD SUCCESSFUL",
+            "3 tests completed, 0 failed\nBUILD SUCCESSFUL",
             "All tests passed!",
         ],
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -66,7 +66,8 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 # references may be absolute paths, ``file://`` URIs, or paths relative to the
 # server process cwd (e.g. ``temp/page.yml``, ``./shot.png``). Each match is
 # only rewritten when it resolves to an existing file inside the thread's
-# user-data tree, so an over-eager match is harmless (left untouched).
+# user-data tree. URL spans are excluded before applying the path matchers so
+# a URL query/fragment cannot be mistaken for a generated local file.
 _LOCAL_PATH_IN_TEXT_RE = re.compile(
     r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
     r"|file://[A-Za-z]:[^\s'\"<>|*?]+"  # file://C:/… — some Windows tools skip the third slash
@@ -76,6 +77,10 @@ _LOCAL_PATH_IN_TEXT_RE = re.compile(
     # path relative to the server cwd (Windows servers print "\" separators)
     r"|(?:\.{0,2}[\\/]|[\w.-]+[\\/])[^\s'\"<>|*?]+"
 )
+
+# Require :// so labels such as "Saved:temp/page.yml" remain local references.
+# At least two scheme characters leave Windows drive paths to local handling.
+_URL_SCHEME_IN_TEXT_RE = re.compile(r"(?<![\w.+/\\-])(?P<scheme>[A-Za-z][A-Za-z0-9+.-]+)://")
 
 # Trailing characters that are punctuation/markup rather than part of a path.
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
@@ -249,6 +254,51 @@ def _result_has_text_content(call_tool_result: Any) -> bool:
     return False
 
 
+def _sub_outside_remote_urls(pattern: re.Pattern[str], replacement: Callable[[re.Match[str]], str], text: str) -> tuple[str, int]:
+    """Apply a local-file substitution outside explicit non-file URLs."""
+    parts: list[str] = []
+    previous_end = 0
+    count = 0
+    search_from = 0
+    while match := _URL_SCHEME_IN_TEXT_RE.search(text, search_from):
+        end = match.end()
+        prefix_start = match.start()
+        single_quoted = prefix_start > 0 and text[prefix_start - 1] == "'"
+        while prefix_start > 0 and text[prefix_start - 1].isspace():
+            prefix_start -= 1
+        in_markdown_link = text[max(0, prefix_start - 2) : prefix_start] == "]("
+        depth = 0
+        escaped = False
+        while end < len(text):
+            char = text[end]
+            if char.isspace() or (char in '<>"`|' and not escaped):
+                break
+            # An apostrophe is a delimiter only for a single-quoted URL.
+            if single_quoted and char == "'" and not escaped:
+                break
+            # Stop at the Markdown destination's closing paren, not at balanced
+            # or escaped parentheses inside the URL. Adjacent links stay local.
+            if in_markdown_link and not escaped:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    if depth == 0:
+                        break
+                    depth -= 1
+            escaped = char == "\\" and not escaped
+            end += 1
+        search_from = end
+        if match.group("scheme").lower() == "file":
+            continue
+        rewritten, substitutions = pattern.subn(replacement, text[previous_end : match.start()])
+        parts.extend((rewritten, text[match.start() : end]))
+        count += substitutions
+        previous_end = end
+    rewritten, substitutions = pattern.subn(replacement, text[previous_end:])
+    parts.append(rewritten)
+    return "".join(parts), count + substitutions
+
+
 def _rewrite_unique_bare_filenames(
     text: str,
     *,
@@ -292,7 +342,7 @@ def _rewrite_unique_bare_filenames(
         # A callable replacement, not a template: the virtual path is built from
         # the real file's relative path, where a backslash is an ordinary
         # character, so it must never be read as a regex escape.
-        rewritten_text, count = pattern.subn(lambda _match: unique[name], rewritten)
+        rewritten_text, count = _sub_outside_remote_urls(pattern, lambda _match: unique[name], rewritten)
         if count:
             logger.debug("MCP bare filename rewrite: %s -> %s", name, unique[name])
         rewritten = rewritten_text
@@ -339,7 +389,7 @@ def _rewrite_changed_paths_with_spaces(
         # Require punctuation or the end of the text instead of rewriting a prefix.
         pattern = re.compile(rf"(?<![\w./\\-]){re.escape(spelling)}(?!(?:[\w\s/\\-]|\.[\w]))")
         replacement = next(iter(destinations))
-        rewritten = pattern.sub(lambda _match: replacement, rewritten)
+        rewritten, _ = _sub_outside_remote_urls(pattern, lambda _match: replacement, rewritten)
     return rewritten
 
 
@@ -360,7 +410,8 @@ def _rewrite_local_paths_in_text(
     token is handed to :func:`_local_uri_to_virtual_path`, which only rewrites
     it when it resolves to an existing file inside this thread's user-data tree.
     Tokens that are not real paths (or point elsewhere) are left exactly as they
-    were, so an over-eager regex match has no harmful effect.
+    were. Explicit non-file URLs are preserved in every pass, even if a query or
+    fragment happens to contain a path or filename that exists locally.
     """
     translated_by_source: dict[str, str | None] = {}
 
@@ -392,7 +443,7 @@ def _rewrite_local_paths_in_text(
             source_base_dir=source_base_dir,
         )
 
-    rewritten = _LOCAL_PATH_IN_TEXT_RE.sub(_replace, text)
+    rewritten, _ = _sub_outside_remote_urls(_LOCAL_PATH_IN_TEXT_RE, _replace, text)
     if changed_files is None:
         return rewritten
     return _rewrite_unique_bare_filenames(
@@ -420,6 +471,23 @@ def _extract_thread_id(runtime: Runtime | None) -> str:
         return str(tid) if tid is not None else "default"
     except RuntimeError:
         return "default"
+
+
+def _describe_non_text_result(blocks: list[dict[str, Any]]) -> str:
+    """Name the non-text blocks of an error result without their payloads.
+
+    The tool error reported to the model is built from the result's text
+    blocks. An error result that carries only images or files has none, and
+    stringifying the blocks instead would put their base64 payload into the
+    model-visible message (and into the checkpointed ToolMessage). Report the
+    block kinds and MIME types, which is all the model can act on anyway.
+    """
+    parts: list[str] = []
+    for block in blocks:
+        kind = block.get("type", "unknown")
+        mime_type = block.get("mime_type")
+        parts.append(f"{kind} ({mime_type})" if mime_type else str(kind))
+    return ", ".join(parts)
 
 
 def _convert_call_tool_result(
@@ -459,7 +527,7 @@ def _convert_call_tool_result(
     from langchain_core.messages import ToolMessage
     from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
     from langchain_core.tools import ToolException
-    from mcp.types import EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
+    from mcp.types import AudioContent, EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
 
     # Pass ToolMessage through directly (interceptor short-circuit).
     if isinstance(call_tool_result, ToolMessage):
@@ -498,11 +566,21 @@ def _convert_call_tool_result(
     # Convert MCP content blocks to LangChain content blocks.
     lc_content = []
     resource_links: list[dict[str, Any]] = []
+    is_error = bool(call_tool_result.isError)
+    # Empty binary payloads cannot become LangChain blocks (``create_file_block``
+    # rejects an empty base64 string). On an error result that would hide the
+    # server's diagnostics, so name the shape in the fallback message instead.
+    empty_binary_shapes: list[str] = []
     for item in call_tool_result.content:
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
+            if is_error and not item.data:
+                empty_binary_shapes.append(f"image ({item.mimeType})")
+                continue
             lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
+        elif isinstance(item, AudioContent):
+            raise NotImplementedError(f"AudioContent conversion to LangChain content blocks is not yet supported. Received audio with mime type: {item.mimeType}")
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))
@@ -548,10 +626,24 @@ def _convert_call_tool_result(
                 lc_content.append(create_text_block(text=_resolve_text(res.text)))
             elif isinstance(res, BlobResourceContents):
                 mime = res.mimeType or None
+                if is_error and not res.blob:
+                    kind = "image" if mime and mime.startswith("image/") else "file"
+                    empty_binary_shapes.append(f"{kind} ({mime or 'application/octet-stream'})")
+                    continue
                 if mime and mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
                 else:
-                    lc_content.append(create_file_block(base64=res.blob, mime_type=mime))
+                    # ``BlobResourceContents.mimeType`` is optional in the MCP spec, but
+                    # langchain-core refuses a base64 block without one. Degrade to a
+                    # generic binary type instead of raising, so the rest of the result —
+                    # including the text blocks the server returned — survives. The
+                    # sibling ``ResourceLink`` branch already degrades the same way.
+                    lc_content.append(
+                        create_file_block(
+                            base64=res.blob,
+                            mime_type=mime or "application/octet-stream",
+                        )
+                    )
             else:
                 lc_content.append(create_text_block(text=str(res)))
         else:
@@ -559,7 +651,18 @@ def _convert_call_tool_result(
 
     if call_tool_result.isError:
         error_parts = [item["text"] for item in lc_content if isinstance(item, dict) and item.get("type") == "text"]
-        raise ToolException("\n".join(error_parts) if error_parts else str(lc_content))
+        if error_parts:
+            raise ToolException("\n".join(error_parts))
+        # No text block to report: describe the payload shapes instead of
+        # stringifying the blocks, which would put image/file base64 into the
+        # model-visible error message.
+        described = _describe_non_text_result(lc_content)
+        if empty_binary_shapes:
+            described = ", ".join(filter(None, [described, ", ".join(empty_binary_shapes)]))
+        message = "MCP tool returned an error result without text content"
+        if described:
+            message += f" ({described}); the payload is not shown"
+        raise ToolException(message + ".")
 
     artifact = None
     if call_tool_result.structuredContent is not None:
@@ -630,15 +733,15 @@ def _make_session_pool_tool(
     effective_domain = binding.domain if binding is not None else ownership_domain
 
     async def call_with_persistent_session(
-        runtime: Runtime | None = None,
+        deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> Any:
-        thread_id = _extract_thread_id(runtime)
-        user_id = resolve_runtime_user_id(runtime)
+        thread_id = _extract_thread_id(deerflow_runtime)
+        user_id = resolve_runtime_user_id(deerflow_runtime)
         # Scope the pooled session by user *and* thread. Filesystem isolation is
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
-        thread_incarnation = runtime_thread_incarnation(runtime)
+        thread_incarnation = runtime_thread_incarnation(deerflow_runtime)
         scope_key = mcp_session_scope_key(
             user_id=user_id,
             thread_id=thread_id,
@@ -757,7 +860,7 @@ def _make_session_pool_tool(
                 name=original_name,
                 args=arguments,
                 server_name=server_name,
-                runtime=runtime,
+                runtime=deerflow_runtime,
             )
             call_tool_result = await handler(request)
         else:
@@ -820,20 +923,24 @@ def _make_background_submit_tool(
     status_tool: str,
     cancel_tool: str,
     connection_scope: str,
+    agent_auth: bool = False,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
     async def submit_in_background(
-        runtime: Runtime | None = None,
+        deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> dict[str, Any]:
         submitter = get_mcp_task_submitter()
-        thread_id = _extract_thread_id(runtime)
-        user_id = resolve_runtime_user_id(runtime)
-        thread_incarnation = runtime_thread_incarnation(runtime)
-        context = runtime.context if runtime is not None and runtime.context else {}
+        thread_id = _extract_thread_id(deerflow_runtime)
+        user_id = resolve_runtime_user_id(deerflow_runtime)
+        thread_incarnation = runtime_thread_incarnation(deerflow_runtime)
+        context = deerflow_runtime.context if deerflow_runtime is not None and deerflow_runtime.context else {}
         run_id = context.get("run_id")
-        tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
+        tool_call_id = getattr(deerflow_runtime, "tool_call_id", None) if deerflow_runtime is not None else None
+        from deerflow.mcp.agent_auth import task_agent_reference
+
+        agent_reference = task_agent_reference(deerflow_runtime, server_name, required=agent_auth)
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
@@ -850,6 +957,7 @@ def _make_background_submit_tool(
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
                     "connection_scope": connection_scope,
+                    **({"agent_auth": agent_reference} if agent_reference is not None else {}),
                 },
             ),
         )
@@ -926,6 +1034,7 @@ def _configure_task_tools_for_server(
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
                 connection_scope=connection_scope,
+                agent_auth=server_config.agent_auth,
             )
         )
     return configured
@@ -951,8 +1060,52 @@ def _flatten_server_tool_groups(
     enabled_order: Collection[str],
     groups: Mapping[str, ServerDiscoveryResult],
 ) -> list[BaseTool]:
-    """Flatten grouped results in enabled-server declaration order."""
-    return [tool for name in enabled_order if name in groups for tool in groups[name].tools]
+    """Flatten grouped results in enabled-server declaration order.
+
+    A tool whose bound name duplicates an earlier one is dropped with a
+    warning naming the server whose tool survived. Server prefixes do not
+    make bound names unique across servers (server ``a`` exposing ``b_x`` and
+    server ``a_b`` exposing ``x`` both bind ``a_b_x``), and a duplicate name
+    would reach the model as two same-named declarations, where the provider
+    silently keeps only one. The surviving server is stable only while its
+    discovery keeps succeeding: when the winner's discovery fails, its group
+    is absent from both this flatten and the cache initializer's reuse path,
+    so the later duplicate becomes served again and the implementation behind
+    a bound name can alternate across cache generations with transient server
+    health.
+
+    The string checks below only cover a directly constructed
+    ``ServerDiscoveryResult`` in tests: production tools always pass through
+    ``_wrap_discovered_server_tools``, which guarantees a validated non-empty
+    string name before a group can exist.
+    """
+    flattened: list[BaseTool] = []
+    serving_server: dict[str, str] = {}
+    dropped = 0
+    for name in enabled_order:
+        if name not in groups:
+            continue
+        for tool in groups[name].tools:
+            bound_name = getattr(tool, "name", None)
+            if isinstance(bound_name, str) and bound_name in serving_server:
+                logger.warning(
+                    "Dropping MCP tool %r from server '%s': its bound name is already served by server '%s'; publishing both would hand the model two same-named declarations.",
+                    bound_name,
+                    name,
+                    serving_server[bound_name],
+                )
+                dropped += 1
+                continue
+            if isinstance(bound_name, str):
+                serving_server[bound_name] = name
+            flattened.append(tool)
+    if dropped:
+        logger.info(
+            "Publishing %d MCP tool(s) after dropping %d duplicate bound name(s)",
+            len(flattened),
+            dropped,
+        )
+    return flattened
 
 
 def _load_mcp_adapter_symbols() -> tuple[Any, Any] | None:
@@ -990,7 +1143,8 @@ class _PreparedServerDiscovery:
     pool: MCPSessionPool
     bindings: dict[str, ServerBinding]
     ownership_domain: MCPPoolDomain
-    connection_scope: str
+    connection_scope: MCPPoolDomain
+    personal_user_id: str | None = None
 
 
 def _prepare_server_client(
@@ -1001,6 +1155,7 @@ def _prepare_server_client(
     client_cls: Any,
     initial_oauth_header: str | None,
     oauth_token_manager: OAuthTokenManager,
+    connection_scope: MCPPoolDomain = "deployment",
 ) -> _PreparedServerClient:
     """Build the client/interceptors for one selected server."""
     server_cfg = extensions_config.mcp_servers.get(server_name)
@@ -1012,6 +1167,7 @@ def _prepare_server_client(
     )
     tool_interceptors = build_mcp_tool_interceptors(
         server_view,
+        connection_scope=connection_scope,
         oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
         resolver=resolve_variable,
         target_logger=logger,
@@ -1086,9 +1242,14 @@ async def _discover_server_tools(
     except (asyncio.CancelledError, StaleMCPBindingError, McpTaskConfigurationError):
         raise
     except Exception as e:
+        # Never interpolate ``e`` nor attach its traceback: ``ExtensionsConfig``
+        # resolves ``$VAR`` before validation, so a discovery error message can
+        # embed a resolved-credential request URL. Keep the server name and the
+        # exception type for diagnosis.
         logger.warning(
-            f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
-            exc_info=True,
+            "Skipping MCP server '%s' after tool discovery failed (%s)",
+            server_name,
+            type(e).__name__,
         )
         return server_name, None
 
@@ -1168,6 +1329,14 @@ def _wrap_discovered_server_tools(
     # Grouped results are directly usable by the cache/adapters that consume
     # them, so sync invocation is patched inside each server's group.
     for tool in current_server_tools:
+        if server_cfg is not None:
+            from deerflow.approvals.policy import digest
+            from deerflow.mcp.config_normalization import normalize_mcp_server_config
+
+            tool.metadata = {
+                **(tool.metadata or {}),
+                "deerflow_approval_binding": digest({"scope": connection_scope, "server": server_name, "config": normalize_mcp_server_config(server_cfg)}),
+            }
         if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
             tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
 
@@ -1218,7 +1387,7 @@ def _prepare_server_discovery(
     session_pool: MCPSessionPool | None,
 ) -> _PreparedServerDiscovery | None:
     """Build selected connections and capture bindings before discovery."""
-    all_enabled = extensions_config.get_enabled_mcp_servers()
+    all_enabled = extensions_config.get_discoverable_mcp_servers()
     requested = set(all_enabled) if server_names is None else set(server_names) & set(all_enabled)
     selected_names = [name for name in all_enabled if name in requested]
     if not selected_names:
@@ -1265,6 +1434,7 @@ def _prepare_server_discovery(
         bindings=server_bindings,
         ownership_domain=ownership_domain,
         connection_scope="personal" if personal_user_id is not None else "deployment",
+        personal_user_id=personal_user_id,
     )
 
 
@@ -1275,7 +1445,7 @@ async def _discover_and_wrap_prepared(
     """Run the OAuth/discovery phase, then wrap successful results in order."""
     client_cls, load_mcp_tools_fn = adapter_symbols
     extensions_config = prepared.config
-    oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if prepared.connection_scope == "personal" else get_mcp_task_oauth_token_manager(extensions_config)
+    oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config, owner_user_id=prepared.personal_user_id) if prepared.connection_scope == "personal" else get_mcp_task_oauth_token_manager(extensions_config)
 
     # Only selected, valid connections reach this point. Selected-but-invalid
     # servers are intentionally not contacted for OAuth headers (F1 contract).
@@ -1293,6 +1463,7 @@ async def _discover_and_wrap_prepared(
             client_cls=client_cls,
             initial_oauth_header=initial_oauth_headers.get(server_name),
             oauth_token_manager=oauth_token_manager,
+            connection_scope=prepared.connection_scope,
         )
         for server_name in prepared.server_names
     ]
@@ -1334,6 +1505,100 @@ async def _discover_and_wrap_prepared(
         len(groups),
     )
     return groups
+
+
+async def get_browser_mcp_tools(config: ExtensionsConfig, owner: str, selected: set[str] | None = None) -> list[BaseTool]:
+    """Discover as the signed-in lead agent, without publishing to the shared cache."""
+    import httpx
+    from langchain_core.tools import ToolException
+
+    from deerflow.approvals.policy import digest
+    from deerflow.mcp.browser_oauth import browser_grant_fingerprint, get_browser_oauth_server, get_call_token, mcp_client_factory
+    from deerflow.mcp.client import build_server_params
+    from deerflow.runtime.context_keys import MCP_BROWSER_USER_CONTEXT_KEY
+
+    adapter = _load_mcp_adapter_symbols()
+    if adapter is None:
+        return []
+    client_cls, load_tools = adapter
+    redirect_hint = "Connect or reconnect this MCP server in Capability Center."
+
+    async def discover(name: str, server: McpServerConfig) -> tuple[BaseTool, ...]:
+        fingerprint = browser_grant_fingerprint(server)
+
+        async def check_current():
+            try:
+                current = await asyncio.to_thread(get_browser_oauth_server, name)
+            except Exception:
+                raise ToolException("MCP credential policy is unavailable") from None
+            if current is None or browser_grant_fingerprint(current) != fingerprint:
+                raise ToolException(redirect_hint)
+            return current
+
+        try:
+            await check_current()
+            _, epoch = await get_call_token(name, server, owner)
+        except ToolException:
+            return ()
+
+        class CurrentGrant(httpx.Auth):
+            async def async_auth_flow(self, request):
+                current = await check_current()
+                token, _ = await get_call_token(name, current, owner, expected_epoch=epoch)
+                await check_current()
+                request.headers["Authorization"] = f"Bearer {token}"
+                response = yield request
+                if response.status_code == 401:
+                    # Do not replay remote calls. A later request can use the rotated token.
+                    await get_call_token(name, current, owner, expected_epoch=epoch, rejected_token=token)
+
+        async def require_current_grant(request, handler):
+            runtime = getattr(request, "runtime", None)
+            context = getattr(runtime, "context", None)
+            if not isinstance(context, Mapping) or context.get(MCP_BROWSER_USER_CONTEXT_KEY) != owner:
+                raise ToolException(redirect_hint)
+            current = await check_current()
+            await get_call_token(name, current, owner, expected_epoch=epoch)
+            return await handler(request)
+
+        connection = build_server_params(name, server)
+        connection.update(auth=CurrentGrant(), httpx_client_factory=mcp_client_factory(server))
+        view = config.model_copy(update={"mcp_servers": {name: server}})
+        interceptors = [
+            require_current_grant,
+            *build_mcp_tool_interceptors(view, connection_scope="personal"),
+        ]
+        client = client_cls({name: connection}, tool_interceptors=interceptors, tool_name_prefix=True)
+        prepared = _PreparedServerClient(name, connection, client, interceptors, server.tool_name_prefix, _resolve_session_init_timeout(server))
+        _, raw = await _discover_server_tools(prepared, load_mcp_tools_fn=load_tools)
+        if raw is None:
+            return ()
+        tools = _wrap_discovered_server_tools(
+            config,
+            name,
+            connection,
+            raw,
+            tool_name_prefix=server.tool_name_prefix,
+            session_init_timeout=prepared.session_init_timeout,
+            pool=None,
+            binding=None,
+            ownership_domain="deployment",
+            connection_scope="deployment",
+        ).tools
+        for tool in tools:
+            metadata = tool.metadata or {}
+            tool.metadata = {**metadata, "deerflow_approval_binding": digest([metadata.get("deerflow_approval_binding"), owner, epoch])}
+        return tools
+
+    async def discover_safely(name, server):
+        try:
+            return await discover(name, server)
+        except Exception as exc:
+            logger.warning("Skipping browser MCP discovery for '%s' (%s)", name, type(exc).__name__)
+            return ()
+
+    groups = await asyncio.gather(*(discover_safely(name, server) for name, server in config.get_enabled_mcp_servers().items() if server.uses_browser_oauth and (selected is None or name in selected)))
+    return [tool for group in groups for tool in group]
 
 
 async def get_mcp_tools_by_server(
@@ -1432,5 +1697,7 @@ async def get_mcp_tools(
     except (McpTaskConfigurationError, StaleMCPBindingError):
         raise
     except Exception as e:
-        logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
+        # Only the exception type is logged: the message/traceback can carry a
+        # resolved-credential request URL (see ``_discover_server_tools``).
+        logger.error("Failed to load MCP tools (%s)", type(e).__name__)
         return []

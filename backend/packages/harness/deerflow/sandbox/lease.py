@@ -27,11 +27,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+SANDBOX_PREWARM_CONTEXT_KEY = "__deerflow_sandbox_prewarm"
+SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY = "__deerflow_sandbox_prewarm_cleanup"
+_PREWARM_CLEANUP_MARKER = object()
 SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
 SANDBOX_SERVER_OWNED_CONTEXT_KEYS = frozenset(
     {
         SANDBOX_LEASE_OWNER_CONTEXT_KEY,
+        SANDBOX_PREWARM_CONTEXT_KEY,
+        SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY,
         SANDBOX_COMMAND_SCOPE_CONTEXT_KEY,
     }
 )
@@ -52,7 +57,7 @@ async def _drain_task_after_cancellation[T](task: asyncio.Task[T]) -> T:
                 return task.result()
 
 
-async def run_sync_lifecycle_operation[T](func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+async def run_sync_lifecycle_operation[T](func: Callable[..., T], /, *args: Any, _on_cancel: Callable[[], None] | None = None, **kwargs: Any) -> T:
     """Run blocking client work without letting cancellation outlive it.
 
     ``asyncio.to_thread`` cannot stop its worker when the awaiting task is
@@ -66,6 +71,11 @@ async def run_sync_lifecycle_operation[T](func: Callable[..., T], /, *args: Any,
     try:
         return await asyncio.shield(operation_task)
     except asyncio.CancelledError as cancellation:
+        if _on_cancel is not None:
+            try:
+                _on_cancel()
+            except Exception:
+                logger.warning("Could not signal cancelled sandbox command", exc_info=True)
         try:
             await _drain_task_after_cancellation(operation_task)
         except Exception:
@@ -643,6 +653,28 @@ class SandboxLeaseManager:
                 release_on_last=acquire_release_on_last,
             )
 
+    def cancel(self, owner_id: str, *, reset: bool = False) -> None:
+        """Stop one execution while retaining its existing sandbox holder."""
+        with self._metadata_lock:
+            binding = self._bindings_by_owner.get(owner_id)
+        if binding is None:
+            return
+        with self._serializer.hold(binding.thread_key):
+            with self._metadata_lock:
+                if self._bindings_by_owner.get(owner_id) is not binding:
+                    return
+            sandbox = self._provider.get(binding.sandbox_id)
+            if sandbox is None:
+                raise SandboxNotFoundError("Sandbox unavailable during cancellation", sandbox_id=binding.sandbox_id)
+            cancel = getattr(sandbox, "cancel_command_scope", None)
+            if callable(cancel):
+                cancel(owner_id)
+            if reset:
+                sandbox.release_command_scope(owner_id)
+
+    async def cancel_async(self, owner_id: str, *, reset: bool = False) -> None:
+        await run_sync_lifecycle_operation(self.cancel, owner_id, reset=reset)
+
     def release(self, owner_id: str) -> None:
         """Release one execution and park the sandbox only after the last user."""
         with self._metadata_lock:
@@ -734,6 +766,17 @@ def discard_sandbox_lease_manager(provider: SandboxProvider) -> None:
         manager.close()
 
 
+def register_sandbox_prewarm_cleanup(context: dict[str, Any]) -> None:
+    """Admit prewarm only inside an unconditional async lease-release finally."""
+    context[SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY] = _PREWARM_CLEANUP_MARKER
+    ensure_sandbox_lease_owner(context)
+
+
+def sandbox_prewarm_cleanup_registered(context: Any) -> bool:
+    """Do not accept a serialized caller flag as an execution cleanup boundary."""
+    return isinstance(context, dict) and context.get(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY) is _PREWARM_CLEANUP_MARKER
+
+
 def ensure_sandbox_lease_owner(context: Any) -> str | None:
     """Create one ephemeral owner id in a mutable runtime context."""
     if not isinstance(context, dict):
@@ -773,6 +816,17 @@ def _sandbox_execution_lease(context: Any) -> tuple[str, str] | None:
     return owner_id, sandbox_id
 
 
+async def cancel_sandbox_execution_lease_async(context: Any, *, reset: bool = False) -> None:
+    """Cancel only the currently bound execution; never initialize a sandbox."""
+    lease = _sandbox_execution_lease(context)
+    if lease is None:
+        return
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+    owner_id, _sandbox_id = lease
+    await get_sandbox_lease_manager(get_sandbox_provider()).cancel_async(owner_id, reset=reset)
+
+
 def release_sandbox_execution_lease(context: Any) -> None:
     """Release a lead/embedded execution lease at its outer lifecycle fence."""
     lease = _sandbox_execution_lease(context)
@@ -789,13 +843,22 @@ def release_sandbox_execution_lease(context: Any) -> None:
 
 
 async def release_sandbox_execution_lease_async(context: Any) -> None:
-    """Async counterpart to :func:`release_sandbox_execution_lease`."""
-    lease = _sandbox_execution_lease(context)
-    if lease is None:
-        return
+    """Drain speculative work before releasing the ordinary execution lease."""
+    from deerflow.sandbox.prewarm import close_sandbox_prewarm_context
 
-    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+    if isinstance(context, dict):
+        context.pop(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY, None)
+    try:
+        await close_sandbox_prewarm_context(context)
+    finally:
+        # Disabled/skipped speculation may own no lease while a later real tool
+        # does. Its cleanup can re-raise cancellation after draining, or fail;
+        # neither may bypass that ordinary execution's release. Do not return
+        # from this finally: cancellation must survive even without a binding.
+        lease = _sandbox_execution_lease(context)
+        if lease is not None:
+            from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
-    owner_id, _sandbox_id = lease
-    provider = get_sandbox_provider()
-    await get_sandbox_lease_manager(provider).release_async(owner_id)
+            owner_id, _sandbox_id = lease
+            provider = get_sandbox_provider()
+            await get_sandbox_lease_manager(provider).release_async(owner_id)

@@ -74,7 +74,7 @@ async def test_memory_event_store_defensively_rechecks_message_category():
         content={"type": "ai", "content": "visible"},
         metadata={"caller": "lead_agent"},
     )
-    mutated = await store.put(
+    await store.put(
         thread_id="t1",
         run_id="r1",
         event_type="llm.ai.response",
@@ -82,10 +82,9 @@ async def test_memory_event_store_defensively_rechecks_message_category():
         content={"type": "ai", "content": "no longer a message"},
         metadata={"caller": "lead_agent"},
     )
-    # Memory projections intentionally share their row dictionaries. Recheck
-    # category at read time so an accidental mutation cannot violate the same
-    # contract that the DB and JSONL stores enforce explicitly.
-    mutated["category"] = "trace"
+    # Receipts are detached snapshots now. Corrupt the private shared row
+    # deliberately so this test still exercises the defensive category recheck.
+    store._messages_by_run["t1"]["r1"][1]["category"] = "trace"
 
     assert await store.get_last_visible_ai_seq_by_run("t1", {"r1"}) == {"r1": expected["seq"]}
 
@@ -432,10 +431,15 @@ async def test_run_manager_computes_edit_replay_visibility_by_latest_attempt():
         metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-retry-success"},
     )
     newer_success_after_failure.status = RunStatus.success
+    paused = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-paused"},
+    )
+    paused.status = RunStatus.waiting_for_input
 
     visibility = await manager.list_edit_replay_visibility("t1", user_id=None)
 
     assert visibility == EditReplayVisibility(
-        hidden_source_run_ids={"source-running", "source-success", "source-retry-success"},
+        hidden_source_run_ids={"source-running", "source-success", "source-retry-success", "source-paused"},
         hidden_attempt_run_ids={failed.run_id, newer_failed.run_id, older_failed_then_success.run_id},
     )
