@@ -27,6 +27,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.agents.middlewares.model_length_termination_detectors import OllamaLengthDetector, default_detectors
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.todo_middleware import TODO_REMINDER_MESSAGE_NAME
 from deerflow.config.app_config import get_app_config
@@ -46,6 +47,9 @@ _COMPACTION_TRANSFORM_VERSION = "2"
 _UNSET = object()
 _NOOP_CACHE_MAX_ENTRIES = 128
 _MAX_SUMMARY_CHUNKS = 64
+# Keep native Ollama detection local to compaction; the shared defaults also
+# drive tool-call suppression and project document summaries.
+_SUMMARY_LENGTH_DETECTORS = (*default_detectors(), OllamaLengthDetector())
 _SUMMARY_CHUNK_RETRY_SECONDS = 300
 _SUMMARY_CHUNK_RETRY_MAX_ENTRIES = 128
 _SUMMARY_CHUNK_RETRY_CACHE: OrderedDict[str, tuple[float, int]] = OrderedDict()
@@ -274,6 +278,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             "chunk_limit_retry_seconds": _SUMMARY_CHUNK_RETRY_SECONDS,
             "chunk_limit_retry_max_entries": _SUMMARY_CHUNK_RETRY_MAX_ENTRIES,
             "summary_carry_budget_fraction": 0.5,
+            "reject_length_capped_summary": True,
+            "summary_length_detectors": [detector.name for detector in _SUMMARY_LENGTH_DETECTORS],
             "summary_prompt_hash": canonical_hash(self.summary_prompt),
             # Model objects are not JSON-serialisable. Keep generation and context
             # budget ownership distinct in the identity: changing either can alter
@@ -539,7 +545,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             logger.warning("Summarization no-op cache store failed", exc_info=True)
 
     def _invoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
-        """Invoke ``model`` for a summary; ``None`` on error or a blank response.
+        """Invoke ``model`` for a summary and return ``None`` on generation failure.
 
         Text extraction / non-empty validation runs *inside* the try: reading the
         response's ``.text`` is part of consuming the provider result, so a failing
@@ -599,6 +605,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
     def _checked_summary(self, response: Any, last: bool) -> str | None:
+        if any(detector.detect(response) is not None for detector in _SUMMARY_LENGTH_DETECTORS):
+            action = "skipping compaction this turn" if last else "falling back to the run model"
+            logger.warning("Summary model reached its output token limit; %s", action)
+            return None
         summary = self._nonempty_summary(getattr(response, "text", None))
         if summary is None:
             self._log_summary_empty(last)
