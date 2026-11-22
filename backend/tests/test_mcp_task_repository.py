@@ -2728,12 +2728,19 @@ async def test_control_lease_clock_uses_database_time_not_worker_clock(tmp_path,
         )
 
     claim = repo.claim_due_tasks if phase == "poll" else repo.claim_cancel_requests
-    claimed = await claim(now=slow_worker_now, lease_owner="slow-worker", lease_seconds=120, limit=1)
+    claimed = await claim(
+        now=slow_worker_now,
+        lease_owner="slow-worker",
+        lease_seconds=120,
+        limit=1,
+    )
     assert [row["id"] for row in claimed] == [task_id]
     lease_expires_at = datetime.fromisoformat(claimed[0]["lease_expires_at"])
     if lease_expires_at.tzinfo is None:
         lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
-    assert lease_expires_at >= database_now + timedelta(seconds=100), "lease expiry must use the database clock"
+    assert (
+        lease_expires_at >= database_now + timedelta(seconds=100)
+    ), "lease expiry must use the database clock"
 
     # A worker whose clock is ahead must not steal a lease that is still live
     # according to the database.
@@ -2798,7 +2805,12 @@ async def test_control_lease_clock_uses_database_time_not_worker_clock(tmp_path,
     assert applied is False
 
     stored = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
-    assert stored is not None
+    stored = await repo.get(
+        task_id,
+        user_id="user-1",
+        thread_id="thread-1",
+        thread_incarnation=None,
+    )
     assert stored["status"] == "working"
     assert stored["lease_owner"] == "slow-worker"
     assert stored["lease_token"] == token
