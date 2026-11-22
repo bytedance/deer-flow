@@ -957,3 +957,24 @@ def test_lifespan_detaches_the_outbox_when_the_delivery_worker_cannot_start() ->
 
     # Startup survives, and nothing keeps enqueueing rows that no worker would send.
     scheduled_service.detach_notification_outbox.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_delegated_restore_waits_for_agent_runs_host_installation(monkeypatch):
+    from app.gateway.deps import _agent_runs_host_after_install
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    installed = asyncio.Event()
+    # Extension services start before the AgentRuns host exists, so a restore
+    # issued during that window waits for the installation signal instead of
+    # failing the unattended recovery scan outright.
+    waiter = asyncio.create_task(_agent_runs_host_after_install(app, installed))
+    assert not waiter.done()
+    app.state.agent_runs_host = object()
+    installed.set()
+    assert await asyncio.wait_for(waiter, 1) is app.state.agent_runs_host
+    # A startup that never installs the host fails closed per record within
+    # the bounded budget; manual recovery stays available.
+    monkeypatch.setattr("app.gateway.deps._EXTENSION_RESTORE_READY_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(RuntimeError, match="Agent run host unavailable"):
+        await _agent_runs_host_after_install(SimpleNamespace(state=SimpleNamespace()), asyncio.Event())

@@ -2,13 +2,14 @@
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.sandbox.tools import bash_tool, replace_virtual_paths_in_command
+from deerflow.sandbox.tools import _apply_cwd_prefix, bash_tool, replace_virtual_paths_in_command
 
 
 @pytest.fixture
@@ -207,3 +208,135 @@ def test_public_bash_tool_preserves_thread_path_argument(powershell, tmp_path, m
     assert "needle" in result
     assert "Exit Code:" not in result
     assert not result.startswith("Error:"), result
+
+
+def _workspace_runtime(workspace, monkeypatch, *, filename="marker.txt"):
+    workspace.mkdir()
+    (workspace / filename).write_text("workspace-marker", encoding="utf-8")
+    sandbox = LocalSandbox("local", [PathMapping("/mnt/user-data/workspace", str(workspace))])
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+    return SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": {"workspace_path": str(workspace)}, "thread_directories_created": True},
+        context={"thread_id": "workspace-test"},
+    )
+
+
+@pytest.mark.parametrize("apostrophe", ["\u2018", "\u2019"])
+def test_public_bash_tool_enters_powershell_workspace_with_curly_apostrophe(powershell, tmp_path, monkeypatch, apostrophe):
+    runtime = _workspace_runtime(tmp_path / f"O{apostrophe}Brien workspace", monkeypatch)
+    assert bash_tool.func(runtime=runtime, command="Get-Content marker.txt").strip() == "workspace-marker"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows cmd.exe execution")
+def test_public_bash_tool_enters_cmd_workspace_with_spaces(tmp_path, monkeypatch):
+    shell = shutil.which("cmd.exe")
+    assert shell is not None
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: shell))
+    workspace = tmp_path / "workspace with spaces"
+    runtime = _workspace_runtime(workspace, monkeypatch, filename="marker file.txt")
+    command = 'type "marker file.txt"'
+    assert bash_tool.func(runtime=runtime, command=command).strip() == "workspace-marker"
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "marker file.txt").write_text("inherited-directory-marker", encoding="utf-8")
+    workspace.rename(tmp_path / "renamed workspace")
+    result = bash_tool.func(runtime=runtime, command=command)
+    assert result.startswith("Error:"), result
+    assert "inherited-directory-marker" not in result
+
+
+def test_public_bash_tool_passes_cmd_workspace_to_process_launch(tmp_path, monkeypatch):
+    from deerflow.sandbox.local import local_sandbox
+
+    workspace = tmp_path / "workspace with spaces"
+    runtime = _workspace_runtime(workspace, monkeypatch)
+    monkeypatch.setattr("deerflow.sandbox.tools._is_windows", lambda: True)
+    monkeypatch.setattr(local_sandbox, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "cmd.exe"))
+    calls = []
+
+    def run(args, timeout, env, **kwargs):
+        calls.append((args, kwargs.get("cwd")))
+        return "workspace-marker", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(run))
+    assert bash_tool.func(runtime=runtime, command='type "marker file.txt"') == "workspace-marker"
+    assert calls == [('cmd.exe /d /s /c "type "marker file.txt""', str(workspace))]
+
+
+@pytest.mark.parametrize(
+    ("shell", "expected_prefix"),
+    [
+        ("/bin/bash", "cd '/tmp/thread data/workspace' && "),
+        ("/bin/sh", "cd '/tmp/thread data/workspace' && "),
+        # Git Bash/MSYS on Windows reports as sh.exe and speaks POSIX.
+        ("C:/Program Files/Git/bin/bash.exe", "cd '/tmp/thread data/workspace' && "),
+        # PowerShell 7 and Windows PowerShell 5.1: the 5.1 parser has no `&&`.
+        ("/usr/local/bin/pwsh", "Set-Location -LiteralPath '/tmp/thread data/workspace' -ErrorAction Stop; "),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "Set-Location -LiteralPath '/tmp/thread data/workspace' -ErrorAction Stop; "),
+        # cmd.exe keeps single quotes as literal characters, so `cd '<path>'` looks
+        # for a directory whose name includes them.
+        ("C:\\Windows\\System32\\cmd.exe", 'cd /d "/tmp/thread data/workspace" && '),
+    ],
+)
+def test_cwd_prefix_uses_syntax_the_selected_shell_can_parse(shell, expected_prefix):
+    workspace = "/tmp/thread data/workspace"
+    assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell=shell) == f"{expected_prefix}echo hi"
+
+
+def test_cwd_prefix_quotes_a_workspace_with_an_apostrophe():
+    workspace = "/tmp/O'Brien's thread/workspace"
+    assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="/bin/bash") == "cd '/tmp/O'\"'\"'Brien'\"'\"'s thread/workspace' && echo hi"
+    # PowerShell escapes a literal quote by doubling it inside a single-quoted string.
+    assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="pwsh") == "Set-Location -LiteralPath '/tmp/O''Brien''s thread/workspace' -ErrorAction Stop; echo hi"
+
+
+@pytest.mark.parametrize("apostrophe", ["\u2018", "\u2019"])
+def test_cwd_prefix_quotes_a_workspace_with_a_curly_apostrophe(apostrophe):
+    workspace = f"/tmp/O{apostrophe}Brien workspace"
+    prefix = _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="powershell.exe")
+    assert prefix == f"Set-Location -LiteralPath '/tmp/O{apostrophe * 2}Brien workspace' -ErrorAction Stop; echo hi"
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "pwsh", "C:\\Windows\\System32\\cmd.exe"])
+def test_cwd_prefix_leaves_the_command_alone_without_a_workspace(shell):
+    assert _apply_cwd_prefix("echo hi", None, shell=shell) == "echo hi"
+    assert _apply_cwd_prefix("echo hi", {}, shell=shell) == "echo hi"
+
+
+def test_powershell_prefix_skips_the_command_when_the_workspace_is_gone(powershell, tmp_path):
+    """A vanished workspace must abort the command, not run it from the inherited cwd.
+
+    ``Set-Location`` reports a missing directory as a non-terminating error, so
+    without ``-ErrorAction Stop`` the ``;``-separated command still runs — from
+    whatever directory the gateway was started in.
+    """
+    missing = tmp_path / "workspace-that-was-removed"
+    command = _apply_cwd_prefix('Write-Output "SHOULD_NOT_RUN"', {"workspace_path": str(missing)}, shell=powershell)
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    assert completed.returncode != 0, completed.stdout
+    assert "SHOULD_NOT_RUN" not in completed.stdout
+
+    # Control: the same prefix does run the command once the workspace exists,
+    # so the assertion above cannot pass by the command never running at all.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ok_command = _apply_cwd_prefix('Write-Output "RAN"', {"workspace_path": str(workspace)}, shell=powershell)
+    ran = subprocess.run(
+        [powershell, "-NoProfile", "-Command", ok_command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    assert ran.returncode == 0, ran.stderr
+    assert "RAN" in ran.stdout

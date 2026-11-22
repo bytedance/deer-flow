@@ -253,6 +253,7 @@ async def test_initialization_keeps_renewing_for_other_workers(repository, monke
     started, release = threading.Event(), threading.Event()
     setup_executor(monkeypatch, started, release)
     service = make_service(repository)
+    service._config = SubagentBatchesConfig.model_construct(lease_seconds=3)
     renewals, twice = [], asyncio.Event()
     original = repository.renew_item_lease
 
@@ -274,8 +275,8 @@ async def test_initialization_keeps_renewing_for_other_workers(repository, monke
         except TimeoutError:
             pytest.fail("a blocked tool assembly received no periodic lease heartbeat")
         # Just beyond the first renewal's expiry, but before the second one's.
-        peer_time = renewals[0] + timedelta(seconds=10, milliseconds=1)
-        assert await repository.claim_items(now=peer_time, lease_owner="peer", lease_seconds=10, limit=1) == []
+        peer_time = renewals[0] + timedelta(seconds=3, milliseconds=1)
+        assert await repository.claim_items(now=peer_time, lease_owner="peer", lease_seconds=3, limit=1) == []
     finally:
         release.set()
         await asyncio.wait_for(asyncio.gather(*tasks), 3)
@@ -358,7 +359,7 @@ async def test_lost_heartbeat_cancels_execution_before_a_long_poll_interval(repo
     release.set()
     setup_executor(monkeypatch, started, release)
     service = make_service(repository)
-    service._config = SubagentBatchesConfig(lease_seconds=10, poll_interval_seconds=60)
+    service._config = SubagentBatchesConfig.model_construct(lease_seconds=3, poll_interval_seconds=60)
     running, cancelled = asyncio.Event(), asyncio.Event()
     mark_running = repository.mark_item_running
 

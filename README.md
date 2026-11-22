@@ -109,8 +109,10 @@ Each guide is the full reference for its topic. Open the one you need.
 | Topic | Guide |
 | --- | --- |
 | Models, providers, `config.yaml`, environment variables | [Configuration](docs/guide/configuration.md) |
+| DeepSeek web search, thinking mode and citation excerpts | [DeepSeek Web Search](backend/docs/CONFIGURATION.md#deepseek-web-search) |
 | Docker, local development, upgrades, production deployment | [Running the Application](docs/guide/deployment.md) |
-| Sandbox modes, file system, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
+| Sandbox modes, Windows local execution, file system, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
+| boxd machines, bounded output copies and cleanup retries | [boxd sandbox provider](backend/packages/harness/deerflow/community/boxd_sandbox/README.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
 | Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
@@ -121,6 +123,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Projects, instructions, document shelf | [Projects](docs/guide/projects.md) |
 | Scheduled tasks | [Scheduled Tasks](docs/guide/scheduled-tasks.md) |
 | Feishu, Slack, Telegram, Discord, DingTalk and other IM channels | [IM Channels](docs/guide/im-channels.md) |
+| GitHub webhooks and tool setup | [GitHub Event-Driven Agents](backend/docs/GITHUB_AGENTS.md) |
 | File attachments, downloads and Office previews | [File Previews](docs/guide/file-previews.md) |
 | Token usage dashboard, workspace, chat archive | [Workspace UI](docs/guide/workspace.md) |
 | Terminal workbench | [Terminal Workbench (TUI)](docs/guide/tui.md) |

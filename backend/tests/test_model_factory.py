@@ -1,4 +1,4 @@
-"""Tests for deerflow.models.factory.create_chat_model."""
+"""Tests for model configuration and deerflow.models.factory.create_chat_model."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ import copy
 import pytest
 from langchain.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
+from pydantic import ValidationError
 
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, LlmCallConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
@@ -127,6 +128,34 @@ def test_uses_first_model_when_name_is_none(monkeypatch):
 
     # resolve_class is called — if we reach here without ValueError, the correct model was used
     assert FakeChatModel.captured_kwargs.get("model") == "alpha"
+
+
+def test_fallback_models_default_to_empty_and_round_trip():
+    default_model = ModelConfig(name="primary", use="langchain_openai:ChatOpenAI", model="gpt-5")
+    assert default_model.fallback_models == []
+    assert _make_model("primary", fallback_models=["backup"]).model_dump()["fallback_models"] == ["backup"]
+
+
+def test_fallback_model_names_must_be_unique():
+    with pytest.raises(ValidationError, match="fallback_models must not contain duplicates"):
+        _make_model("primary", fallback_models=["backup", "backup"])
+
+
+def test_app_config_rejects_unknown_fallback_model():
+    primary = _make_model("primary", fallback_models=["missing"])
+    with pytest.raises(ValidationError, match="unknown fallback model"):
+        _make_app_config([primary])
+
+
+def test_app_config_rejects_fallback_chain_over_attempt_limit():
+    primary = _make_model("primary", fallback_models=["backup"])
+    backup = _make_model("backup")
+    with pytest.raises(ValidationError, match="retry_max_attempts"):
+        AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            llm_call=LlmCallConfig(retry_max_attempts=1),
+            models=[primary, backup],
+        )
 
 
 def test_fallback_model_build_disables_provider_retries_and_strips_profile_metadata(monkeypatch):

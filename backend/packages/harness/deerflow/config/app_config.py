@@ -67,6 +67,7 @@ from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
 from deerflow.config.verification_config import VerificationConfig
+from deerflow.config.voice_input_config import VoiceInputConfig
 from deerflow.env import load_selected_env_file
 from deerflow.extensions.loader import ExtensionSpec
 
@@ -325,6 +326,7 @@ class AppConfig(BaseModel):
     )
     authorization: AuthorizationConfig = Field(default_factory=AuthorizationConfig, description="Fine-grained resource authorization configuration (RBAC and beyond)")
     input_polish: InputPolishConfig = Field(default_factory=InputPolishConfig, description="Pre-send input polishing configuration.")
+    voice_input: VoiceInputConfig | None = Field(default=None, description="Optional composer transcription service. Omit to hide voice input.")
     suggestions: SuggestionsConfig = Field(default_factory=SuggestionsConfig, description="Follow-up suggestions configuration.")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     llm_call: LlmCallConfig = Field(default_factory=LlmCallConfig, description="LLM call execution configuration (concurrency / rate shaping)")
@@ -345,7 +347,8 @@ class AppConfig(BaseModel):
     pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
-    model_config = ConfigDict(extra="allow")
+    # Validation errors are logged at startup and on reload. Resolved inputs can contain secrets.
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
     database: DatabaseConfig = Field(
         default_factory=DatabaseConfig,
         description=format_field_description(

@@ -18,9 +18,10 @@ import logging
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from app.gateway.routers import mcp as mcp_router
+from app.gateway.routers import mcp_user_oauth
 from app.gateway.routers.mcp import (
     McpConfigUpdateRequest,
     McpServerConfigResponse,
@@ -122,3 +123,26 @@ async def test_update_mcp_server_state_hides_the_host_path(written_config, faili
 
     _assert_fixed_detail(excinfo.value, "Failed to update MCP server state")
     assert HOST_PATH in caplog.text
+
+
+async def test_user_oauth_callback_logs_only_the_failure_type(monkeypatch, caplog) -> None:
+    def failing_store():
+        raise ConnectionError("private storage details")
+
+    monkeypatch.setattr(mcp_user_oauth, "_store", failing_store)
+    state = "s" * 43
+    request = Request(
+        {
+            "type": "http",
+            "path": "/api/mcp/user-oauth/callback",
+            "query_string": f"state={state}&code=private-code".encode(),
+            "headers": [(b"cookie", f"df_mcp_{state}=browser-nonce".encode())],
+        }
+    )
+
+    response = await mcp_user_oauth.callback(request, owner="alice")
+
+    assert response.status_code == 303
+    assert "mcp_oauth=failed" in response.headers["location"]
+    assert "ConnectionError" in caplog.text
+    assert all(value not in caplog.text for value in ("private storage details", "private-code", state, "browser-nonce"))

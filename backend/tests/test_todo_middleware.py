@@ -14,6 +14,7 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain.tools import tool
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 
@@ -24,6 +25,7 @@ from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFi
 from deerflow.agents.middlewares.todo_middleware import (
     TODO_REMINDER_MESSAGE_NAME,
     TodoMiddleware,
+    _format_completion_reminder,
     _format_todos,
     _has_tool_call_intent_or_error,
     _reminder_in_messages,
@@ -138,10 +140,10 @@ class TestFormatTodos:
         assert _format_todos([]) == ""
 
     def test_missing_fields_use_defaults(self):
-        todos = [{"content": "No status"}, {"status": "done"}]
+        todos = [{"content": "No status"}, {"status": "completed"}]
         result = _format_todos(todos)
         assert "- [pending] No status" in result
-        assert "- [done] " in result
+        assert "- [completed] " in result
 
 
 class TestBeforeModel:
@@ -449,6 +451,39 @@ class TestAfterModel:
         }
         assert mw.after_model(state, _make_runtime()) is None
 
+    @pytest.mark.parametrize("status", ["blocked", "waiting"])
+    def test_returns_none_when_todos_are_terminal_for_this_run(self, status):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [_ai_no_tool_calls()],
+            "todos": [{"status": status, "content": "Cannot continue here"}],
+        }
+        assert mw.after_model(state, _make_runtime()) is None
+
+    def test_reminder_skips_blocked_and_waiting_items(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {
+            "messages": [_ai_no_tool_calls()],
+            "todos": [
+                {"status": "blocked", "content": "Blocked dependency"},
+                {"status": "waiting", "content": "User approval"},
+                {"status": "pending", "content": "Continue implementation"},
+            ],
+        }
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+        seen: list[ModelRequest] = []
+        mw.wrap_model_call(
+            _make_model_request(state["messages"], runtime=runtime),
+            lambda request: seen.append(request) or "response",
+        )
+
+        reminder = seen[0].messages[-1].content
+        assert "Blocked dependency" not in reminder
+        assert "User approval" not in reminder
+        assert "Continue implementation" in reminder
+
     def test_returns_none_when_no_messages(self):
         mw = TodoMiddleware()
         state = {
@@ -653,12 +688,13 @@ class TestWrapModelCall:
 
         request = _make_model_request(state["messages"], runtime=runtime)
         seen: list[ModelRequest] = []
+        answer = AIMessage(content="response")
 
         def handler(model_request: ModelRequest):
             seen.append(model_request)
-            return "response"
+            return answer
 
-        assert mw.wrap_model_call(request, handler) == "response"
+        assert mw.wrap_model_call(request, handler) is answer
         assert len(seen) == 1
         sent = seen[0]
         assert sent.system_message is not None
@@ -670,12 +706,13 @@ class TestWrapModelCall:
         # Second call: the reminder was drained, so only the system prompt is
         # injected and the original messages pass through untouched.
         seen.clear()
-        assert mw.wrap_model_call(request, handler) == "response"
+        assert mw.wrap_model_call(request, handler) is answer
         assert len(seen) == 1
         assert seen[0].messages == state["messages"]
 
-    def test_pending_reminder_survives_a_failed_model_call(self):
-        """A call that raises is retried by LLMErrorHandlingMiddleware through this wrap; the reminder must still be sent."""
+    @pytest.mark.parametrize("failure", ["provider-error", "empty-response"])
+    def test_pending_reminder_survives_a_failed_model_call(self, failure):
+        """A call that raises or returns an empty stop response is retried by LLMErrorHandlingMiddleware through this wrap; the reminder must still be sent."""
         mw = TodoMiddleware()
         runtime = _make_runtime()
         state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
@@ -683,16 +720,22 @@ class TestWrapModelCall:
 
         request = _make_model_request(state["messages"], runtime=runtime)
         sent: list[list[Any]] = []
+        answer = AIMessage(content="response")
 
         def flaky_handler(model_request: ModelRequest):
             sent.append(model_request.messages)
             if len(sent) == 1:
+                if failure == "empty-response":
+                    return AIMessage(content="", response_metadata={"finish_reason": "stop"})
                 raise RuntimeError("503 Service Unavailable")
-            return "response"
+            return answer
 
-        with pytest.raises(RuntimeError):
+        if failure == "empty-response":
             mw.wrap_model_call(request, flaky_handler)
-        assert mw.wrap_model_call(request, flaky_handler) == "response"
+        else:
+            with pytest.raises(RuntimeError):
+                mw.wrap_model_call(request, flaky_handler)
+        assert mw.wrap_model_call(request, flaky_handler) is answer
 
         assert [len(_todo_completion_reminders(messages)) for messages in sent] == [1, 1]
         # Restoring is not a new reminder: the retry must not spend the cap.
@@ -979,8 +1022,10 @@ class TestTodoMiddlewareAgentGraphIntegration:
         assert mw._pending_completion_reminders == {}
         assert mw._completion_reminder_counts == {}
 
-    def test_completion_reminder_survives_a_retried_model_call_in_real_agent_graph(self):
-        """LLMErrorHandlingMiddleware retries a failed call by running the inner wraps again; the retry must still carry the reminder."""
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("failure", ["provider-error", "empty-response"])
+    def test_completion_reminder_survives_a_retried_model_call_in_real_agent_graph(self, failure, invoke_async):
+        """LLMErrorHandlingMiddleware retries a failed call or an empty stop response by running the inner wraps again; the retry must still carry the reminder."""
         from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
         from deerflow.config.app_config import AppConfig, LlmCallConfig
         from deerflow.config.sandbox_config import SandboxConfig
@@ -998,6 +1043,8 @@ class TestTodoMiddlewareAgentGraphIntegration:
                 if not self._failed and _todo_completion_reminders(messages):
                     self._failed = True
                     self._seen_messages.append(list(messages))
+                    if failure == "empty-response":
+                        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", response_metadata={"finish_reason": "stop"}))])
                     raise ProviderUnavailable()
                 return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
@@ -1029,10 +1076,9 @@ class TestTodoMiddlewareAgentGraphIntegration:
             state_schema=ThreadState,
         )
 
-        result = graph.invoke(
-            {"messages": [("user", "finish all todos")]},
-            context={"thread_id": "retry-thread", "run_id": "retry-run"},
-        )
+        invoke_args = ({"messages": [("user", "finish all todos")]},)
+        invoke_kwargs = {"context": {"thread_id": "retry-thread", "run_id": "retry-run"}}
+        result = asyncio.run(graph.ainvoke(*invoke_args, **invoke_kwargs)) if invoke_async else graph.invoke(*invoke_args, **invoke_kwargs)
 
         # write_todos, the premature exit, the failed attempt and its retry, then
         # the second reminder: the retry did not spend the two-reminder cap.
@@ -1276,6 +1322,43 @@ class TestMalformedStoredTodos:
         mw = TodoMiddleware()
         state = {"messages": [AIMessage(content="final")], "todos": [{"content": "Done", "status": "completed"}, "junk"]}
         assert mw.after_model(state, _make_runtime()) is None
+
+    @pytest.mark.parametrize("status", [[], {}, None, "unknown"])
+    def test_invalid_stored_status_remains_pending(self, status):
+        todos = [{"content": "Recover me", "status": status}, {"content": "Finished", "status": "completed"}]
+        mw = TodoMiddleware()
+        assert mw.after_model({"messages": [AIMessage(content="final")], "todos": todos}, _make_runtime()) == {"jump_to": "model"}
+        assert "- [pending] Recover me" in _format_todos(todos)
+        reminder = _format_completion_reminder(todos)
+        assert "- [pending] Recover me" in reminder
+        assert "Finished" not in reminder
+
+    def test_completion_reminder_describes_the_guard_terminal_statuses(self):
+        """The reminder must offer blocked/waiting, which the guard also accepts.
+
+        The old text asked the model to finish everything and only mark items
+        completed. This test checks the instruction the model receives, not how a
+        particular model responds to it.
+        """
+        reminder = _format_completion_reminder([{"content": "Needs input", "status": "in_progress"}])
+
+        assert "`blocked`" in reminder
+        assert "`waiting`" in reminder
+        assert "every item is completed, blocked, or waiting" in reminder
+        assert "only respond when all items are done" not in reminder
+        assert "must be finished" not in reminder
+
+    @pytest.mark.parametrize("status", ["blocked", "waiting"])
+    def test_completion_reminder_excludes_terminal_non_completed_items(self, status):
+        reminder = _format_completion_reminder(
+            [
+                {"content": "Needs input", "status": status},
+                {"content": "Still pending", "status": "pending"},
+            ]
+        )
+
+        assert "Needs input" not in reminder
+        assert "Still pending" in reminder
 
     @pytest.mark.parametrize("todos", [{"content": "x"}, "oops", 5])
     def test_todos_that_are_not_a_list_allow_a_clean_exit(self, todos):
