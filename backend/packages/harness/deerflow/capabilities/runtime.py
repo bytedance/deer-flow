@@ -29,10 +29,14 @@ def ambiguous_installation_ids(servers: Mapping[str, Mapping[str, Any]]) -> set[
     return ambiguous
 
 
+def selected_mcp_server_names(selected: list[str], config: ExtensionsConfig) -> set[str]:
+    ambiguous = ambiguous_installation_ids({name: server.model_dump() for name, server in config.mcp_servers.items()})
+    wanted = set(selected) - ambiguous
+    return {name for name, server in config.get_enabled_mcp_servers().items() if installation_id(name, server.model_dump()) in wanted}
+
+
 def filter_mcp_plugins(tools: list[Any], selected: list[str] | None, config: ExtensionsConfig) -> list[Any]:
     if selected is None:
         return tools
-    ambiguous = ambiguous_installation_ids({name: server.model_dump() for name, server in config.mcp_servers.items()})
-    wanted = set(selected) - ambiguous
-    servers = {name for name, server in config.get_enabled_mcp_servers().items() if installation_id(name, server.model_dump()) in wanted}
+    servers = selected_mcp_server_names(selected, config)
     return [tool for tool in tools if not is_mcp_tool(tool) or (get_mcp_source(tool) or {}).get("server_name") in servers]

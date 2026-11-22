@@ -222,9 +222,10 @@ are observability metrics: they are emitted as INFO logs with
 Task-tool subagents forward the append to the parent loop because `RunJournal`
 and its event store must not cross the isolated-loop boundary. Durable batch
 subagents have no parent run journal and do not emit these events. The event's
-`action` is `warn` or `hard_stop`. The `changes` object identifies the detection
-layer, affected tool names, observed count, effective threshold, whether the
-producer was a subagent, and its agent id when applicable. Tool arguments,
+`action` is `warn` or `hard_stop`. Historical runs can contain `reject_excess`
+actions and the `tool_frequency` detection layer. The `changes` object
+identifies the detection layer, affected tool names, observed count, effective
+threshold, whether the producer was a subagent, and its agent id when applicable. Tool arguments,
 prompts, message content, tool results, and argument-derived hashes are not
 persisted in this event.
 

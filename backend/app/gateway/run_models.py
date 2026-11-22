@@ -40,7 +40,7 @@ class RunCreateRequest(BaseModel):
     conversation_references: list[ConversationReference] = Field(
         default_factory=list,
         max_length=MAX_CONVERSATION_REFERENCES,
-        description="Explicit thread IDs or same-origin chat URLs readable only during this run (opt-in read_conversation tool); SDK clients may send the same list as context.conversation_references",
+        description="Explicit thread IDs or chat URLs on this DeerFlow host readable only during this run (opt-in read_conversation tool); SDK clients may send the same list as context.conversation_references",
     )
     webhook: None = Field(default=None, description="Compatibility placeholder; completion callbacks are not supported")
     checkpoint_id: str | None = Field(default=None, description="Resume from checkpoint")

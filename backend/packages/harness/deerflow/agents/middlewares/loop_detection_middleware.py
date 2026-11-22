@@ -71,6 +71,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import posixpath
 import threading
 import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
@@ -89,6 +90,7 @@ from deerflow.agents.middlewares.audit_context import (
     LOOP_DETECTION_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.model_response import is_empty_stop_response
 from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
@@ -98,6 +100,9 @@ if TYPE_CHECKING:
     from deerflow.config.loop_detection_config import LoopDetectionConfig
 
 logger = logging.getLogger(__name__)
+
+# Reserved by the Gateway for checkpoints written by the frequency-cap policy.
+LOOP_CAP_STATE_KEY = "loop_cap"
 
 # Defaults — can be overridden via constructor
 _DEFAULT_WARN_THRESHOLD = 3  # inject warning after 3 identical calls
@@ -115,6 +120,8 @@ _OPEN_ENDED_READ = "end"
 # payload (``update_agent``/``setup_agent`` persist it; MCP tools such as
 # ``create_issue`` send it), so it stays in the key.
 _UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
+_FILE_WRITE_TOOLS = frozenset({"write_file", "str_replace"})
+_ERROR_RESULT_HASH = "error"
 
 type _RunScopeKey = tuple[str, str | None]
 type _ObservationKey = tuple[str, str | None]
@@ -260,6 +267,7 @@ class _CallObservation:
     call_hash: str
     message_id: str | None
     result_hash: str | None = None
+    written_paths: frozenset[str] = frozenset()
 
     @property
     def key(self) -> _ObservationKey:
@@ -273,7 +281,7 @@ def _tool_result_hash(result: ToolMessage) -> str | None:
     # Repeated failures are not progress, even if diagnostics or classifications
     # change. Read structured producer status, never infer errors from prose.
     if result.status == "error" or (isinstance(meta, dict) and meta.get("status") == "error"):
-        return "error"
+        return _ERROR_RESULT_HASH
 
     # Ranged reads may return identical lines while the rest of a file changes.
     # Consume the gate's existing full-file version without importing its I/O code.
@@ -288,6 +296,12 @@ def _tool_result_hash(result: ToolMessage) -> str | None:
     except (TypeError, ValueError, RecursionError):
         return None
     return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _tool_file_path(tool_call: dict) -> str | None:
+    args, _ = _normalize_tool_call_args(tool_call.get("args", {}))
+    path = args.get("path")
+    return posixpath.normpath(path) if isinstance(path, str) and path else None
 
 
 def _previous_observation(messages: Sequence) -> _CallObservation | None:
@@ -305,13 +319,33 @@ def _previous_observation(messages: Sequence) -> _CallObservation | None:
         if len(occurrences) != len(ids) or any(not isinstance(call_id, str) or not call_id for call_id in ids) or len(set(ids)) != len(ids):
             return observation
         outcomes = []
+        written_paths: set[str] = set()
         for occurrence in occurrences:
-            result_hash = _tool_result_hash(occurrence.result) if occurrence.result is not None else None
+            result = occurrence.result
+            if result is None:
+                continue
+            result_hash = _tool_result_hash(result)
             if result_hash is None:
-                return observation
-            outcomes.append((_hash_tool_calls([occurrence.tool_call]), result_hash))
-        blob = json.dumps(sorted(outcomes))
-        return replace(observation, result_hash=hashlib.sha256(blob.encode()).hexdigest())
+                continue
+            call = occurrence.tool_call
+            outcomes.append((_hash_tool_calls([call]), result_hash))
+            if result.status == "success" and result_hash != _ERROR_RESULT_HASH and call.get("name") in _FILE_WRITE_TOOLS:
+                path = _tool_file_path(call)
+                if path is not None:
+                    written_paths.add(path)
+        result_hash = hashlib.sha256(json.dumps(sorted(outcomes)).encode()).hexdigest() if len(outcomes) == len(ids) else None
+        return replace(observation, result_hash=result_hash, written_paths=frozenset(written_paths))
+    return None
+
+
+def _predict_result_hash(history: Sequence[_CallObservation], call_hash: str, read_paths: set[str]) -> str | None:
+    for entry in reversed(history):
+        # A completed write can invalidate an older read result. Let the next
+        # read see the file and keep the completed observations for counting.
+        if not read_paths.isdisjoint(entry.written_paths):
+            return None
+        if entry.call_hash == call_hash:
+            return entry.result_hash
     return None
 
 
@@ -462,6 +496,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     def release_policy_parameters(self) -> dict[str, object]:
         return {
             "repetition_key": "call_and_result_v1",
+            "read_prediction": "refresh_after_successful_write",
             "warn_threshold": self.warn_threshold,
             "hard_limit": self.hard_limit,
             "window_size": self.window_size,
@@ -661,6 +696,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         previous = _previous_observation(messages)
         tool_calls = getattr(last_msg, "tool_calls", None)
         call_hash = _hash_tool_calls(tool_calls) if tool_calls else ""
+        read_paths = {path for call in tool_calls or () if call.get("name") == "read_file" and (path := _tool_file_path(call)) is not None}
 
         with self._lock:
             history = self._history.get(scope_key)
@@ -682,7 +718,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # This preserves warning/stop timing for stagnant calls while a new
             # successful outcome separates prior observations instead of resetting
             # the entire budget (so repeated result cycles still accumulate).
-            result_hash = next((entry.result_hash for entry in reversed(history) if entry.call_hash == call_hash), None)
+            result_hash = _predict_result_hash(history, call_hash, read_paths)
             message_id = last_msg.id if isinstance(last_msg.id, str) and last_msg.id else None
             observation = _CallObservation(call_hash, message_id, result_hash)
             history.append(observation)
@@ -949,11 +985,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         return warnings
 
     def _restore_pending_warnings(self, runtime: Runtime, warnings: list[str]) -> None:
-        """Requeue warnings taken for a model call that raised.
+        """Requeue warnings taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the warning. It would not be queued again: it is already marked warned.
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the warning. It would not be queued again: it
+        is already marked warned.
         """
         if not warnings:
             return
@@ -992,10 +1029,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return handler(self._inject_warnings(request, warnings))
+            response = handler(self._inject_warnings(request, warnings))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     @override
     async def awrap_model_call(
@@ -1005,10 +1045,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return await handler(self._inject_warnings(request, warnings))
+            response = await handler(self._inject_warnings(request, warnings))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""

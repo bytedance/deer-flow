@@ -48,6 +48,10 @@ transport, so they check the payload that DeerFlow sends.
   Unpaced models keep their own retry policy.
 - **`Retry-After` goes through `utils.retry_after`.** HTTP dates are read as UTC,
   a past date means zero, and the delay is bounded.
+- **HTTP 429 hints extend the opted-in group's admission schedule**, including
+  on the last middleware attempt. Shorter hints never shorten a pause. Keep
+  FIFO, cancellation and deadlines intact; unrelated groups stay independent.
+  Cover provider feedback in `tests/test_model_request_admission.py`.
 
 ## Provider wire rules
 
@@ -62,8 +66,7 @@ transport, so they check the payload that DeerFlow sends.
 - **Cancelling a Codex async call closes its HTTP stream.** Async generation owns
   an HTTPX async stream, not an executor-backed sync request. Load TLS trust
   off-loop, keep retry sleeps cancellable, and drain the client close across
-  repeated cancellation. `test_codex_cancellation.py` observes real loopback EOF
-  before fixture release.
+  repeated cancellation.
 - **MindIE requests `stream=False` and simulates streaming**, and its XML tool
   calls and numeric arguments are parsed in the adapter.
 - **Claude prompt caching copies before it marks.** The request payload shares

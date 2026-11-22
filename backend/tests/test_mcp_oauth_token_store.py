@@ -31,6 +31,8 @@ from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp import oauth_store
 from deerflow.mcp.oauth import McpOAuthReauthorizationRequired, OAuthTokenManager
 from deerflow.mcp.oauth_store import (
+    DelegatedOAuthContext,
+    McpOAuthTokenKey,
     McpOAuthTokenStore,
     McpOAuthTokenStoreUnavailable,
     StoredTokenLookup,
@@ -39,7 +41,7 @@ from deerflow.mcp.oauth_store import (
     set_mcp_oauth_token_store,
 )
 from deerflow.persistence.base import Base
-from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow, SqlMcpOAuthTokenRepository
+from deerflow.persistence.mcp_oauth_tokens import McpOAuthAttemptRow, McpOAuthTokenRow, SqlMcpOAuthTokenRepository
 from deerflow.persistence.postgres_schema import dsn_with_search_path
 
 SERVER = "reports"
@@ -119,7 +121,7 @@ def session_factory(request, tmp_path) -> sessionmaker[Session]:
             conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
         admin.dispose()
         engine = sa.create_engine(make_url(dsn_with_search_path(uri, schema)).set(drivername="postgresql+psycopg"))
-    Base.metadata.create_all(engine, tables=[McpOAuthTokenRow.__table__])
+    Base.metadata.create_all(engine, tables=[McpOAuthTokenRow.__table__, McpOAuthAttemptRow.__table__])
     yield sessionmaker(engine, expire_on_commit=False)
     if schema is not None:
         with engine.begin() as conn:
@@ -154,6 +156,103 @@ def _rows(session_factory) -> list[McpOAuthTokenRow]:
 
 def _expire_access_tokens() -> None:
     _Clock.current = _Clock.current + timedelta(seconds=300)
+
+
+def _delegated_attempt(store, key, state, *, ttl_seconds=300):
+    return store.begin_delegated(
+        key,
+        fingerprint=REQUEST,
+        state=state,
+        browser_binding="browser",
+        code_verifier="verifier",
+        context=DelegatedOAuthContext("https://issuer.example", "https://reports.example/mcp", "https://issuer.example/token", "reports:read"),
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def test_browser_state_is_single_use_across_replicas_and_bound_to_owner_and_browser(session_factory, cipher):
+    a = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=cipher)
+    b = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=cipher)
+    key = McpOAuthTokenKey.for_delegated(SERVER, "alice")
+    _delegated_attempt(a, key, "expired", ttl_seconds=0)
+    assert b.consume_delegated("expired", owner_user_id="alice", browser_binding="browser") is None
+    begin_epoch = _delegated_attempt(a, key, "latest")
+    assert b.consume_delegated("latest", owner_user_id="bob", browser_binding="browser") is None
+    assert b.consume_delegated("latest", owner_user_id="alice", browser_binding="another-browser") is None
+    with session_factory() as session:
+        row = session.get(McpOAuthAttemptRow, ("alice", SERVER))
+        assert row.state_digest != "latest"
+        assert row.browser_digest != "browser"
+        assert row.verifier_enc != "verifier"
+    barrier = threading.Barrier(2)
+
+    def finish(store):
+        barrier.wait(timeout=5)
+        return store.consume_delegated("latest", owner_user_id="alice", browser_binding="browser")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        (attempt,) = [item for item in pool.map(finish, (a, b)) if item is not None]
+    assert attempt.key == key
+    assert attempt.grant_epoch == begin_epoch
+    assert attempt.code_verifier == "verifier"
+    assert b.complete_delegated(attempt, access_token="alice-access-only", expires_at=_Clock.current)
+    grant = a.get_delegated(key, fingerprint=REQUEST)
+    assert grant.token.access_token == "alice-access-only"
+    assert grant.token.expires_at == _Clock.current
+    assert grant.token.refresh_token is None
+    assert a.get_delegated(key, fingerprint="replacement") is None
+    assert a.claim(key, fingerprint=REQUEST, expected_version=grant.version, grant_epoch=grant.grant_epoch) is None
+    assert not a.mark_delegated_reconnect(key, expected_epoch=grant.grant_epoch, expected_version=grant.version - 1)
+    assert a.mark_delegated_reconnect(key, expected_epoch=grant.grant_epoch, expected_version=grant.version)
+    assert b.delegated_needs_reconnect(key, fingerprint=REQUEST)
+    assert b.get_delegated(key, fingerprint=REQUEST) is None
+
+
+def test_disconnect_fences_late_callback_and_refresh_and_preserves_the_other_user(session_factory, cipher):
+    a = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=cipher)
+    b = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=cipher)
+    alice = McpOAuthTokenKey.for_delegated(SERVER, "alice")
+    bob = McpOAuthTokenKey.for_delegated(SERVER, "bob")
+
+    for key in (alice, bob):
+        _delegated_attempt(a, key, key.owner_user_id)
+        callback = b.consume_delegated(key.owner_user_id, owner_user_id=key.owner_user_id, browser_binding="browser")
+        assert a.complete_delegated(callback, access_token=key.owner_user_id, expires_at=None, refresh_token="seed")
+    bob_grant = b.get_delegated(bob, fingerprint=REQUEST)
+    old_alice = b.get_delegated(alice, fingerprint=REQUEST)
+    old_lease = b.claim(alice, fingerprint=REQUEST, expected_version=old_alice.version, grant_epoch=old_alice.grant_epoch)
+    assert old_lease
+    assert a.disconnect_delegated(alice)
+    assert a.get_delegated(alice, fingerprint=REQUEST) is None
+    assert b.get_delegated(bob, fingerprint=REQUEST) == bob_grant
+
+    _delegated_attempt(a, alice, "stale")
+    stale = b.consume_delegated("stale", owner_user_id="alice", browser_binding="browser")
+    _delegated_attempt(a, alice, "current")
+    assert not b.complete_delegated(stale, access_token="stale", expires_at=None)
+    current = b.consume_delegated("current", owner_user_id="alice", browser_binding="browser")
+    assert b.complete_delegated(current, access_token="new", expires_at=None, refresh_token="new-refresh")
+    assert not b.disconnect_delegated(alice, expected_epoch=old_alice.grant_epoch, lease_owner=old_lease)
+    assert not b.save(
+        alice,
+        lease_owner=old_lease,
+        grant_epoch=old_alice.grant_epoch,
+        fingerprint=REQUEST,
+        request_fingerprint=REQUEST,
+        access_token="late",
+        expires_at=None,
+        refresh_token="late-refresh",
+        token_type="Bearer",
+        rotated=True,
+    )
+    current_grant = a.get_delegated(alice, fingerprint=REQUEST)
+    assert current_grant.token.access_token == "new"
+    lease = b.claim(alice, fingerprint=REQUEST, expected_version=current_grant.version, grant_epoch=current_grant.grant_epoch)
+    assert lease
+    assert b.disconnect_delegated(alice, expected_epoch=current_grant.grant_epoch, lease_owner=lease)
+    assert a.delegated_needs_reconnect(alice, fingerprint=REQUEST)
+    assert a.get_delegated(alice, fingerprint=REQUEST) is None
+    assert a.get_delegated(bob, fingerprint=REQUEST) == bob_grant
 
 
 @pytest.mark.asyncio
@@ -673,3 +772,41 @@ def test_request_fingerprint_follows_token_request_parameters_not_the_chain():
         assert oauth_token_request_fingerprint(changed) != fingerprint, update
         assert oauth_config_fingerprint(changed) == oauth_config_fingerprint(base), "the refresh-token chain is unaffected"
     assert oauth_token_request_fingerprint(base.model_copy(update={"extra_token_params": {"resource": "https://api"}})) == fingerprint
+
+
+@pytest.mark.asyncio
+async def test_removed_server_grants_can_be_listed_and_disconnected_by_their_owner(session_factory, cipher, tmp_path, monkeypatch):
+    from fastapi import Response
+
+    from app.gateway.routers import mcp_user_oauth as router
+
+    path = tmp_path / "extensions_config.json"
+    path.write_text('{"mcpServers": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(path))
+    store = McpOAuthTokenStore(SqlMcpOAuthTokenRepository(session_factory), cipher=cipher)
+    set_mcp_oauth_token_store(store)
+    alice = McpOAuthTokenKey.for_delegated(SERVER, "alice")
+    bob = McpOAuthTokenKey.for_delegated(SERVER, "bob")
+    bob_only = McpOAuthTokenKey.for_delegated("bob-only", "bob")
+    for key in (alice, bob, bob_only):
+        state = f"{key.owner_user_id}:{key.server_key}"
+        _delegated_attempt(store, key, state)
+        attempt = store.consume_delegated(state, owner_user_id=key.owner_user_id, browser_binding="browser")
+        assert store.complete_delegated(attempt, access_token="access", refresh_token="refresh", expires_at=None)
+
+    rows = (await router.list_connections(Response(), owner="alice")).connections
+    assert [(row.server_key, row.status) for row in rows] == [(SERVER, "removed")]
+    assert (await router.disconnect(SERVER, owner="alice")).status_code == 204
+    assert (await router.list_connections(Response(), owner="alice")).connections == []
+    with session_factory() as session:
+        row = session.get(McpOAuthTokenRow, ("delegated", "alice", SERVER))
+        assert row.access_token_enc is None and row.refresh_token_enc is None
+    assert store.get_delegated(bob, fingerprint=REQUEST) is not None
+
+    # Revocation also fences a callback already exchanging its code.
+    _delegated_attempt(store, alice, "in-flight")
+    in_flight = store.consume_delegated("in-flight", owner_user_id="alice", browser_binding="browser")
+    assert (await router.disconnect(SERVER, owner="alice")).status_code == 204
+    assert not store.complete_delegated(in_flight, access_token="late", expires_at=None)
+    assert (await router.disconnect("unknown", owner="alice")).status_code == 204
+    assert all(row.server_key != "unknown" for row in _rows(session_factory))

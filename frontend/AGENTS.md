@@ -46,6 +46,10 @@ through `scripts/pnpm.py`.
 
 ## Conventions the tools do not enforce
 
+- **Public shares stay outside the workspace auth layout.** Read snapshots
+  without session credentials, rewrite file links through their manifest, and
+  authenticate only when importing into a workspace. See
+  [sharing](../docs/guide/sharing.md).
 - **`src/components/ui/` and `src/components/ai-elements/` are generated** from
   component registries. Change them by regenerating, because a manual edit is
   lost on the next update.

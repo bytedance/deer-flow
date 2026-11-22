@@ -576,6 +576,13 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     model_class = resolve_class(model_config.use, BaseChatModel)
     if model_config.use == "langchain_openai:ChatOpenAI" and model_class is ChatOpenAI:
         model_class = GuardedChatOpenAI
+    if model_config.use == "langchain_deepseek:ChatDeepSeek":
+        from langchain_deepseek import ChatDeepSeek
+
+        from deerflow.models.patched_deepseek import GuardedChatDeepSeek
+
+        if model_class is ChatDeepSeek:
+            model_class = GuardedChatDeepSeek
     model_settings_from_config = model_config.model_dump(exclude_none=True, exclude=set(_MODEL_METADATA_FIELDS))
     if isinstance(model_config.reasoning, bool | str):
         # Before the capability contract, ``reasoning`` was an unrestricted

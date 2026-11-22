@@ -17,8 +17,8 @@
 | 8 | TitleMiddleware | | | ✓ | | | | ✓ | ✗ | `auto_title` |
 | 9 | MemoryMiddleware | | | | ✓ | | | ✓ | ✗ | `memory` |
 | 10 | ViewImageMiddleware | | | | | ✓ | | ✓ | ✗ | `vision` |
-| 11 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
-| 12 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
+| 11 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
+| 12 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
 | 13 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
 
 主 agent **14 个** middleware（`make_lead_agent`），subagent **4 个**（ThreadData、Sandbox、Guardrail、ToolErrorHandling）。`create_deerflow_agent` Phase 1 实现 **13 个**（Guardrail 仅支持自定义实例，无内置默认）。
@@ -118,17 +118,17 @@ sequenceDiagram
     Note right of LD: wrap_model_call drain 当前 run warning 并追加到末尾
     LD ->> M: messages + tools
     activate M
-    M -->> LD: AI response
+    M -->> SL: AI response
     deactivate M
-
-    Note right of LD: after_model 检测循环；warning 入队，hard-stop 清 tool_calls
-    LD -->> SL: after_model
-    deactivate LD
 
     activate SL
     Note right of SL: after_model 截断多余 task
-    SL -->> TI: after_model
+    SL -->> LD: after_model
     deactivate SL
+
+    Note right of LD: after_model 检测已准入批次；warning 入队，hard-stop 清 tool_calls
+    LD -->> TI: after_model
+    deactivate LD
 
     activate TI
     Note right of TI: after_model 生成标题
@@ -301,4 +301,4 @@ sequenceDiagram
 
 重复判定以整批调用的参数和结果指纹为依据，忽略批内执行顺序、调用 ID、回执等临时元数据。每轮先按 AIMessage 的调用实例配对上一批结果，再用同参调用最近的结果估计当前尚未执行的批次；结果返回后修正这次记录。成功结果不同会分别计数，所以正常的读取、修改、重新读取不会仅因参数相同而被拦截。范围读取还使用读写门禁附带的完整文件哈希，能识别未显示部分的版本变化。无效版本标记会被忽略。
 
-相同成功结果仍会累计；结构化错误忽略变化的诊断文本，缺失、无法配对或无法序列化的结果退回调用模式保护。结果循环变化也会在最近窗口内累计各自的重复次数，而不是每次变化都清空历史。结果指纹只保留在有界的进程内历史中，不写入检查点或日志。默认仍在第 3 次重复请求警告、第 5 次强停；当前请求执行前只能依据已有结果判断。结果变化并不保证任务取得实质进展，因此每种工具的独立频率预算继续生效，默认第 30 次警告、第 50 次强停。
+相同成功结果仍会累计；结构化错误忽略变化的诊断文本，缺失、无法配对或无法序列化的结果退回调用模式保护。结果循环变化也会在最近窗口内累计各自的重复次数，而不是每次变化都清空历史。结果指纹只保留在有界的进程内历史中，不写入检查点或日志。默认仍在第 3 次重复请求警告、第 5 次强停；当前请求执行前只能依据已有结果判断。结果变化并不保证任务取得实质进展，因此每种工具的独立频率预算仅作为 INFO 指标观测（`action=observe_only`），不会触发 warning 或强停；只有基于参数/结果哈希的重复检测会产生警告并在阈值下硬停。

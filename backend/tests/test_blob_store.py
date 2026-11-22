@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import re
 import sys
 import threading
 from pathlib import Path
@@ -69,7 +70,7 @@ def test_blob_ref_validates_digest_shape():
 
 
 def test_blob_ref_kind_is_path_safe():
-    for bad in ("../etc", "a/b", "Aupper", "", "-lead", "trailing-", "has space", "x" * 65):
+    for bad in ("../etc", "a/b", "Aupper", "", "-lead", "trailing-", "has space", "x" * 65, "tool\n", "a" * 64 + "\n"):
         with pytest.raises(ValidationError):
             BlobRef(sha256=hashlib.sha256(b"x").hexdigest(), size=1, kind=bad)
     for good in ("viewed-image", "tool-output", "a", "0", "a" * 64):
@@ -133,14 +134,19 @@ def test_dedup_records_only_the_first_writer_as_advisory_provenance(store: Local
 def test_kind_rejection_quotes_the_enforced_grammar():
     """One validator, one message: the pattern a producer is shown must be the
     pattern that is enforced (it was not, before this was centralised)."""
-    assert validate_blob_kind("tool-output") == "tool-output"
-    for bad in ("trailing-", "a--", "-lead", "Aupper", "a/b", "", "x" * 65):
+    valid_kind = "tool-output"
+    assert validate_blob_kind(valid_kind) == valid_kind
+    for bad in ("trailing-", "a--", "-lead", "Aupper", "a/b", "", "x" * 65, "tool\n", "a" * 64 + "\n"):
         with pytest.raises(ValueError) as caught:
             validate_blob_kind(bad)
         message = str(caught.value)
-        assert "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" in message, message
-        assert "1-64 chars" in message, message
-        assert "no leading or trailing hyphen" in message, message
+        prefix = "kind must match "
+        assert message.startswith(prefix), message
+        pattern, _, description = message.removeprefix(prefix).partition(" ")
+        assert re.match(pattern, valid_kind)
+        assert not re.match(pattern, bad), message
+        assert "1-64 chars" in description, message
+        assert "no leading or trailing hyphen" in description, message
     assert validate_blob_kind is contract_module.validate_blob_kind
 
 
