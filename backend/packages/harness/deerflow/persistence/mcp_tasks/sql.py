@@ -431,7 +431,7 @@ class McpTaskRepository:
                     McpTaskRow.cancel_requested_at.is_(None) if phase == "poll" else McpTaskRow.cancel_requested_at.is_not(None),
                 )
                 .values(
-                    # A backward wall-clock correction must not shorten a lease.
+                    # A backward database-clock correction must not shorten a lease.
                     lease_expires_at=case((McpTaskRow.lease_expires_at > expires_at, McpTaskRow.lease_expires_at), else_=expires_at),
                     updated_at=McpTaskRow.updated_at,
                 )
