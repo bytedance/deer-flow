@@ -3184,3 +3184,80 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
     routing = dict(routed)
     assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
     assert routing["web_open"] == "web"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
+    """A stuck owner exit cannot hold a disconnected tool call indefinitely."""
+    pool = MCPSessionPool()
+    pool.SESSION_CLOSE_TIMEOUT = 0.01
+    tracked_teardown_targets = []
+    track_owner_teardown = pool._track_owner_teardown
+
+    def record_owner_teardown(task):
+        tracked_teardown_targets.append(task)
+        track_owner_teardown(task)
+
+    pool._track_owner_teardown = record_owner_teardown
+    exit_started = asyncio.Event()
+    release_exit = asyncio.Event()
+    session = AsyncMock()
+    session.initialize = AsyncMock()
+    session.call_tool = AsyncMock(side_effect=anyio.EndOfStream())
+
+    class Cm:
+        owner: asyncio.Task | None = None
+
+        async def __aenter__(self):
+            self.owner = asyncio.current_task()
+            return session
+
+        async def __aexit__(self, *_args):
+            assert asyncio.current_task() is self.owner
+            exit_started.set()
+            await release_exit.wait()
+            return False
+
+    cm = Cm()
+    connection = {"transport": "stdio", "command": "x", "args": []}
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
+        pooled = await pool.get_session("srv", "scope", connection)
+        call = asyncio.create_task(call_pooled_session_tool(pooled, pool, server_name="srv", scope_key="scope", tool_name="act", arguments={}, call_kwargs={}))
+        try:
+            await asyncio.wait_for(exit_started.wait(), timeout=0.5)
+
+            # asyncio.wait() observes the deadline without cancelling the caller.
+            # wait_for(call) would wait for cancellation to propagate and could
+            # hang here if the cleanup path regressed to an unbounded wait.
+            done, _pending = await asyncio.wait({call}, timeout=1.0)
+            assert call in done, "disconnected tool call exceeded the cleanup deadline"
+            with pytest.raises(anyio.EndOfStream):
+                await call
+
+            # The caller has returned, but __aexit__ is deliberately still blocked.
+            # Wait for the cleanup waiter itself to finish before checking owner
+            # tracking; otherwise its own reaper could satisfy a set-nonempty check.
+            cleanup_waiter = next(
+                (task for task in tracked_teardown_targets if task.get_name() == "mcp-disconnect-cleanup:srv"),
+                None,
+            )
+            assert cleanup_waiter is not None
+            await asyncio.wait_for(asyncio.gather(cleanup_waiter, return_exceptions=True), timeout=0.5)
+            assert cleanup_waiter.done()
+
+            # The pool must have handed off this exact owner, and its reaper must
+            # remain retained until the blocked __aexit__ is released.
+            assert cm.owner is not None and not cm.owner.done()
+            assert cm.owner in tracked_teardown_targets
+            owner_reaper = f"mcp-session-owner-reap:{cm.owner.get_name()}"
+            assert any(task.get_name() == owner_reaper for task in pool._teardown_tasks)
+        finally:
+            # Always release the owner, including when the deadline assertion fails.
+            release_exit.set()
+            await asyncio.gather(call, return_exceptions=True)
+            if cm.owner is not None:
+                await asyncio.gather(cm.owner, return_exceptions=True)
+            while pool._teardown_tasks:
+                await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
+
+    assert not pool._teardown_tasks
