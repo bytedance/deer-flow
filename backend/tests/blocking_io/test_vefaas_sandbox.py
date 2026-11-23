@@ -17,7 +17,7 @@ import httpx
 import pytest
 from blockbuster import BlockingError
 from langchain_core.messages import HumanMessage
-from test_vefaas_sandbox_provider import _FakeVeFaaSServer, _install_provider, _make_app_config
+from support.vefaas_sandbox import FakeVeFaaSServer, install_vefaas_provider, make_vefaas_app_config
 
 from deerflow.community.aio_sandbox.ownership import RenewOutcome
 from deerflow.community.vefaas_sandbox import VeFaaSClient
@@ -73,7 +73,7 @@ class _BlockingProbeOwnershipStore:
         pass
 
 
-class _FileIOProbingVeFaaSServer(_FakeVeFaaSServer):
+class _FileIOProbingVeFaaSServer(FakeVeFaaSServer):
     """Fake veFaaS control plane that performs real blocking file I/O on every request."""
 
     def __init__(self, probe_dir: Path) -> None:
@@ -87,7 +87,7 @@ class _FileIOProbingVeFaaSServer(_FakeVeFaaSServer):
 
 
 async def test_get_and_get_scoped_do_no_blocking_io_on_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    provider, _server, _aio = _install_provider(monkeypatch, tmp_path)
+    provider, _server, _aio = install_vefaas_provider(monkeypatch, tmp_path)
     probe_store = await asyncio.to_thread(_BlockingProbeOwnershipStore, tmp_path / "ownership-probe")
     provider._ownership = probe_store
     try:
@@ -107,7 +107,7 @@ async def test_get_and_get_scoped_do_no_blocking_io_on_event_loop(tmp_path: Path
 
 async def test_contended_acquire_async_stays_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     probing_server = _FileIOProbingVeFaaSServer(tmp_path)
-    provider, _server, _aio = _install_provider(monkeypatch, tmp_path, server=probing_server)
+    provider, _server, _aio = install_vefaas_provider(monkeypatch, tmp_path, server=probing_server)
     provider._ownership = await asyncio.to_thread(_BlockingProbeOwnershipStore, tmp_path / "ownership-probe-2")
     try:
         first, second = await asyncio.gather(
@@ -139,7 +139,7 @@ async def test_prewarm_acquire_and_claim_stay_off_event_loop(tmp_path: Path, mon
     """Speculative veFaaS prewarm, tool claim, and lease cleanup must stay off the event loop."""
     probing_server = _FileIOProbingVeFaaSServer(tmp_path)
     provider, _server, _aio = await asyncio.to_thread(
-        lambda: _install_provider(
+        lambda: install_vefaas_provider(
             monkeypatch,
             tmp_path,
             server=probing_server,
@@ -148,7 +148,7 @@ async def test_prewarm_acquire_and_claim_stay_off_event_loop(tmp_path: Path, mon
     )
     provider._ownership = await asyncio.to_thread(_BlockingProbeOwnershipStore, tmp_path / "ownership-probe-prewarm")
     app_cfg = await asyncio.to_thread(
-        lambda: _make_app_config(
+        lambda: make_vefaas_app_config(
             tmp_path,
             sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 0},
         )
