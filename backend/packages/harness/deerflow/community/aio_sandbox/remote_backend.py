@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import re
 from pathlib import PurePosixPath
 
 import requests
@@ -63,6 +64,29 @@ _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 # the provisioner's entry budget on values it already owns, so the map trimmed
 # here leaves the published 32-entry limit entirely to the operator.
 _PROVISIONER_OWNED_ENVIRONMENT_KEYS = frozenset({"AIO_BASH_MAX_SESSIONS", "MAX_SHELL_SESSIONS", "DEERFLOW_LARK_BROKER_URL"})
+# The provisioner's own limits for the forwarded map. Checked here so a config
+# that cannot be delivered fails at Gateway start-up with the setting named,
+# instead of surfacing later as a bare 422 on every sandbox create.
+_PROVISIONER_ENVIRONMENT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_PROVISIONER_MAX_ENVIRONMENT_ENTRIES = 32
+_PROVISIONER_MAX_ENVIRONMENT_VALUE_CHARS = 1024
+
+
+def _check_provisioner_environment(environment: dict[str, str]) -> None:
+    """Raise ``ValueError`` when the provisioner would reject ``sandbox.environment``.
+
+    Messages name the setting and the offending key but never echo a value,
+    because these entries commonly carry credentials.
+    """
+    if len(environment) > _PROVISIONER_MAX_ENVIRONMENT_ENTRIES:
+        raise ValueError(f"sandbox.environment carries {len(environment)} entries; the provisioner applies at most {_PROVISIONER_MAX_ENVIRONMENT_ENTRIES}")
+    for name, value in environment.items():
+        if not _PROVISIONER_ENVIRONMENT_KEY.fullmatch(name):
+            raise ValueError(f"sandbox.environment key {name!r} must match [A-Za-z_][A-Za-z0-9_]* and be at most 64 characters")
+        if "\x00" in value:
+            raise ValueError(f"sandbox.environment value for {name!r} contains a NUL byte")
+        if len(value) > _PROVISIONER_MAX_ENVIRONMENT_VALUE_CHARS:
+            raise ValueError(f"sandbox.environment value for {name!r} exceeds {_PROVISIONER_MAX_ENVIRONMENT_VALUE_CHARS} characters")
 
 
 def _normalize_skills_container_path(container_path: str) -> str:
@@ -183,6 +207,7 @@ class RemoteSandboxBackend(SandboxBackend):
         self._max_bash_sessions = max_bash_sessions
         self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
         self._environment = {name: value for name, value in (environment or {}).items() if name not in _PROVISIONER_OWNED_ENVIRONMENT_KEYS}
+        _check_provisioner_environment(self._environment)
 
     @property
     def provisioner_url(self) -> str:

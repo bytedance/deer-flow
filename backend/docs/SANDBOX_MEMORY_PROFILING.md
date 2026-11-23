@@ -102,7 +102,10 @@ values from `docker stats`. Compare profiles in the same cluster; the relative
 reduction is what decides whether the lean profile fits the deployment.
 
 Deployments set these through `sandbox.environment`, which reaches local Docker
-containers and, through the provisioner, Kubernetes sandbox Pods:
+containers and, through the provisioner, Kubernetes sandbox Pods. The Kubernetes
+path needs a provisioner that forwards that map: older provisioners ignore it
+and start the Pod with image defaults, so upgrade them first. Pods that already
+exist keep the environment they were created with until they are recreated.
 
 ```yaml
 sandbox:

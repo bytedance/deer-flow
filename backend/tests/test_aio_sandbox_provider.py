@@ -238,6 +238,27 @@ def test_backend_generated_capacity_stays_out_of_the_forwarded_map(monkeypatch, 
         assert backend._environment["AIO_BASH_MAX_SESSIONS"] == "50"
 
 
+def test_provisioner_backend_rejects_an_unusable_environment_at_startup(monkeypatch):
+    """A map the provisioner would refuse must fail where the operator can see the setting name."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    app_config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.community.aio_sandbox:AioSandboxProvider",
+            container_prefix="sandbox",
+            provisioner_url="http://provisioner:8002",
+            environment={f"OPERATOR_{index}": "true" for index in range(33)},
+        ),
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=3),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = provider._load_config()
+
+    with pytest.raises(ValueError, match=r"sandbox\.environment carries 33 entries; the provisioner applies at most 32"):
+        provider._create_backend()
+
+
 def test_load_config_rejects_shell_capacity_below_subagent_runtime(monkeypatch):
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     sandbox_config = SandboxConfig(

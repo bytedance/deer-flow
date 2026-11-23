@@ -198,8 +198,14 @@ setting. All 32 entries a request may carry are therefore the operator's own,
 keys must match `[A-Za-z_][A-Za-z0-9_]*` within 64 characters, and a value is
 limited to 1024 characters. Values are written literally: a `$` is escaped so
 Kubernetes does not expand `$(NAME)` or collapse `$$` before the container reads
-the value. Requests from older Gateways omit the map and produce the same Pods
-as before.
+the value.
+
+Both directions of a version skew drop the profile silently, so upgrade the
+provisioner before you rely on it. A request from a Gateway older than this
+change carries no map and produces the same Pods as before; a new Gateway
+talking to a provisioner from before this change gets a successful create whose
+Pod ignores the map. Existing Pods also keep the environment they were created
+with until they are recreated.
 
 ### Custom sandbox image
 
