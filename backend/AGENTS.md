@@ -24,6 +24,9 @@ Read the guide for an area before you change it.
 | Gateway, routers, IM channels | [gateway](app/gateway/AGENTS.md), [routers](app/gateway/routers/AGENTS.md), [channels](app/channels/AGENTS.md) |
 | Tests, benchmarks | [tests](tests/AGENTS.md), [benchmarks](scripts/benchmark/AGENTS.md) |
 
+Keep the [child history inventory](../docs/guide/subagents.md#inspect-one-threads-child-history)
+read-only. Read identities and both row counts from one SQLite snapshot.
+
 ## Verify
 
 ```bash
