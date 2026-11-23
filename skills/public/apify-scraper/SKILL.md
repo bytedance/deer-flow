@@ -13,6 +13,8 @@ description: >-
 
 ## Core Rule
 
+This skill needs the `apify_actor_start` and `apify_actor_await` tools. If they are not available, do not try other tools: tell the user to enable the Apify Actor tools in `config.yaml` (see the Apify blocks in `config.example.yaml`) and set `APIFY_API_TOKEN`, then stop.
+
 For tasks in the routing table below, use the listed Actor ID and do not call `apify_actor_discover`.
 Read the reference file to get the input template before calling `apify_actor_start`.
 
