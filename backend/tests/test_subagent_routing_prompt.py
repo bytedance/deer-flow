@@ -1,5 +1,7 @@
 """Prompt-contract tests for benefit-based subagent routing."""
 
+from types import SimpleNamespace
+
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.subagents.builtins.bash_agent import BASH_AGENT_CONFIG
 from deerflow.subagents.builtins.general_purpose import GENERAL_PURPOSE_CONFIG
@@ -39,11 +41,20 @@ def test_incognito_prompt_hides_durable_batch_guidance(monkeypatch) -> None:
     """Incognito runs do not bind the batch tools, so the prompt must not advertise them."""
     import deerflow.subagents.batch_runtime as batch_runtime
 
+    # Render without an ambient config.yaml or skill storage: CI has no config
+    # file, and this test only exercises the subagent/incognito wiring.
+    config = SimpleNamespace()
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda *args, **kwargs: "")
     monkeypatch.setattr(batch_runtime, "is_subagent_batch_runtime_available", lambda: True)
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
 
-    ordinary = prompt_module.apply_prompt_template(subagent_enabled=True)
-    incognito = prompt_module.apply_prompt_template(subagent_enabled=True, incognito=True)
+    ordinary = prompt_module.apply_prompt_template(subagent_enabled=True, app_config=config)
+    incognito = prompt_module.apply_prompt_template(subagent_enabled=True, app_config=config, incognito=True)
 
     assert "Explicit durable batch mode" in ordinary
     assert "Explicit durable batch mode" not in incognito
