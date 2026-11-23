@@ -66,7 +66,6 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
     build_thread_checkpoint_state_accessor,
-    resolve_gateway_max_recursion_limit,
     serialize_wait_run_status,
     sse_consumer,
     start_run,
@@ -141,6 +140,7 @@ REGENERATE_HISTORY_SCAN_LIMIT = 200
 # Doubled to keep ~200 effective checkpoints when duration-only checkpoints
 # (one per successful run in steady state) consume roughly half of history.
 REGENERATE_HISTORY_RAW_SCAN_LIMIT = REGENERATE_HISTORY_SCAN_LIMIT * 2
+REGENERATE_LINEAGE_LOOKUP_TIMEOUT_SECONDS = 30
 THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
 _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
@@ -759,15 +759,15 @@ async def _find_base_checkpoint_before_human(
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     if head_checkpoint is not None:
         try:
-            # A single admitted turn can exceed the legacy history window.
-            # Allow its graph steps plus headroom for input and metadata checkpoints.
-            max_steps = await asyncio.to_thread(resolve_gateway_max_recursion_limit)
-            return await find_checkpoint_before_message(
-                accessor,
-                head_checkpoint,
-                human_message_id,
-                max_depth=max_steps + REGENERATE_HISTORY_RAW_SCAN_LIMIT,
-            )
+            async with asyncio.timeout(REGENERATE_LINEAGE_LOOKUP_TIMEOUT_SECONDS):
+                return await find_checkpoint_before_message(
+                    accessor,
+                    head_checkpoint,
+                    human_message_id,
+                    max_depth=None,
+                )
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="Timed out resolving the checkpoint before the target user message") from exc
         except CheckpointParentMissingError:
             # Old checkpoints and imported histories may not have parent links.
             # Preserve the bounded chronological fallback for those records.

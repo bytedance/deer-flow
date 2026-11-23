@@ -1066,12 +1066,13 @@ def test_prepare_edit_regenerate_payload_skips_mid_run_replay_base_on_first_turn
     assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
 
 
-def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn(monkeypatch):
-    """A valid turn can write more checkpoints than the legacy history scan allows."""
+@pytest.mark.parametrize("max_recursion_limit", [1000, 50])
+def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn(monkeypatch, max_recursion_limit):
+    """A completed turn stays replayable after the operator lowers the run limit."""
     from app.gateway import services
     from app.gateway.routers import thread_runs
 
-    monkeypatch.setattr(services, "get_app_config", lambda: SimpleNamespace(max_recursion_limit=600))
+    monkeypatch.setattr(services, "get_app_config", lambda: SimpleNamespace(max_recursion_limit=max_recursion_limit))
     event_store, run_manager = _answer_run_fixtures()
     checkpointer = _first_turn_checkpointer()
     messages = checkpointer.history[1].checkpoint["channel_values"]["messages"]
@@ -1090,6 +1091,28 @@ def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn(monkeypatch)
 
     assert response.checkpoint["checkpoint_id"] == "ckpt-empty"
     assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
+    assert checkpointer.alist_limits == []
+
+
+def test_replay_lineage_timeout_does_not_scan_chronological_history(monkeypatch):
+    from app.gateway.routers import thread_runs
+
+    monkeypatch.setattr(thread_runs, "REGENERATE_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
+    checkpointer = _first_turn_checkpointer()
+    checkpointer.history[0].parent_config = checkpointer.history[1].config
+    head = FakeAccessor._from_raw(checkpointer.history[0])
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            thread_runs._find_base_checkpoint_before_human(
+                "thread-1",
+                "human-1__user",
+                _request(checkpointer, FakeEventStore([])),
+                head_checkpoint=head,
+            )
+        )
+
+    assert exc.value.status_code == 504
     assert checkpointer.alist_limits == []
 
 

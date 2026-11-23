@@ -25,10 +25,10 @@ edited one, and the model answered the question the edit was replacing (#4531).
 tasks; absence of evidence stays permissive there rather than failing closed.
 Edit replay resolves its base through the same lineage-first path as regenerate;
 it must pass `head_checkpoint` or it silently degrades to the chronological scan
-that cannot tell sibling branches apart. Regenerate and edit replay budget the
-linked walk for the Gateway's `max_recursion_limit` plus the existing raw
-history allowance, since one valid turn can produce hundreds of intermediate
-checkpoints. The chronological compatibility lookup keeps its smaller fixed
+that cannot tell sibling branches apart. Regenerate and edit replay bound the
+linked walk by a request deadline. Changing `max_recursion_limit` for future runs
+does not affect that lookup. A linked lookup that exceeds its deadline returns
+HTTP 504. The chronological compatibility lookup retains its fixed checkpoint
 window.
 An edit replay that pauses for tool approval stays the current attempt: the edit
 remains in thread state and replaces the source turn in history. Only a failed,

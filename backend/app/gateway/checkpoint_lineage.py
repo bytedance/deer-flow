@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
+from itertools import count
 from typing import Any
 
 
@@ -377,7 +379,7 @@ async def find_checkpoint_before_message(
     head_checkpoint: Any,
     message_id: str,
     *,
-    max_depth: int,
+    max_depth: int | None,
 ) -> Any:
     """Walk one parent lineage and return the first checkpoint before ``message_id``.
 
@@ -386,6 +388,7 @@ async def find_checkpoint_before_message(
     a checkpoint from the wrong branch. Duration-only metadata checkpoints do not
     represent an addressable conversation state and are skipped, and so are
     checkpoints that still have pending tasks (see :func:`has_pending_tasks`).
+    Callers that pass ``max_depth=None`` bound the lookup with a deadline.
     """
 
     if message_id not in {_message_id(message) for message in checkpoint_messages(head_checkpoint)}:
@@ -412,7 +415,11 @@ async def find_checkpoint_before_message(
             read_cache[identity] = checkpoint_tuple
         return checkpoint_tuple
 
-    for _ in range(max_depth):
+    depths = count() if max_depth is None else range(max_depth)
+    for depth in depths:
+        if max_depth is None and depth % 64 == 0:
+            # In-memory reads can finish inline. Yield so the deadline can fire.
+            await asyncio.sleep(0)
         parent_config = getattr(current, "parent_config", None)
         if not isinstance(parent_config, dict):
             raise CheckpointParentMissingError("Checkpoint lineage ended before the target message")
