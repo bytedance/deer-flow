@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -186,8 +187,10 @@ class TestTokenBudgetWarning:
         assert sent[2].name == "budget_warning"
         assert "TOKEN BUDGET WARNING" in sent[2].content
 
-    def test_warning_survives_a_failed_model_call(self):
-        """A call that raises is retried by LLMErrorHandlingMiddleware through this wrap; the warning must still be sent."""
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("failure", ["provider-error", "empty-response"])
+    def test_warning_survives_a_failed_model_call(self, failure, invoke_async):
+        """A call that raises or returns an empty stop response is retried by LLMErrorHandlingMiddleware through this wrap; the warning must still be sent."""
         config = TokenBudgetConfig(max_tokens=100000, warn_threshold=0.8, enabled=True)
         mw = TokenBudgetMiddleware.from_config(config)
         runtime = _make_runtime()
@@ -199,14 +202,30 @@ class TestTokenBudgetWarning:
         def flaky_handler(req):
             sent.append(req.messages)
             if len(sent) == 1:
+                if failure == "empty-response":
+                    return AIMessage(content="", response_metadata={"finish_reason": "stop"})
                 raise RuntimeError("503 Service Unavailable")
-            return MagicMock()
+            return AIMessage(content="answer")
 
-        with pytest.raises(RuntimeError):
-            mw.wrap_model_call(request, flaky_handler)
-        mw.wrap_model_call(request, flaky_handler)
+        def call():
+            if not invoke_async:
+                return mw.wrap_model_call(request, flaky_handler)
 
-        assert [any(getattr(message, "name", None) == "budget_warning" for message in messages) for messages in sent] == [True, True]
+            async def async_handler(req):
+                return flaky_handler(req)
+
+            return asyncio.run(mw.awrap_model_call(request, async_handler))
+
+        if failure == "empty-response":
+            call()
+        else:
+            with pytest.raises(RuntimeError):
+                call()
+        call()
+        call()
+
+        # The answered call spends the warning; a later call goes out without it.
+        assert [any(getattr(message, "name", None) == "budget_warning" for message in messages) for messages in sent] == [True, True, False]
 
     def test_warn_only_once_per_run(self):
         config = TokenBudgetConfig(max_tokens=100000, warn_threshold=0.8, enabled=True)

@@ -191,7 +191,10 @@ def _get_route_authorization_config() -> AuthorizationConfig:
     environments without a config.yaml), preserving legacy all-permissions behavior.
     ``get_app_config()`` stats and hashes ``config.yaml`` and
     ``extensions_config.json`` on every call, so async request paths use
-    :func:`_route_authorization_config_async`.
+    :func:`_route_authorization_config_async`, and call the synchronous
+    helpers that read it (``resolve_model_authorization``,
+    ``resolve_skill_authorization``, ``authorize_model_use``,
+    ``authorize_sandbox_for_request``) through ``asyncio.to_thread``.
     """
     from deerflow.config.app_config import get_app_config
 
@@ -820,7 +823,7 @@ async def try_acquire_sandbox_for_request(
 
         user = await get_optional_user_from_request(request) if request is not None else None
         if user is not None:
-            authorize_sandbox_for_request(user, is_internal=_is_internal_caller(request, user), app_config=app_config)
+            await asyncio.to_thread(authorize_sandbox_for_request, user, is_internal=_is_internal_caller(request, user), app_config=app_config)
     except SandboxAuthorizationError:
         logger.info("Sandbox sync skipped: sandbox execution not permitted for this caller (thread_id=%s)", thread_id)
         return SandboxRequestLease(

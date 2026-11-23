@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
@@ -110,6 +111,7 @@ def _assert_collection_skipped(result: subprocess.CompletedProcess[str], reason:
     assert all(node_id not in output for node_id in REPRESENTATIVE_LIVE_NODE_IDS)
 
 
+@functools.cache
 def _dry_run_make_target(target: str, *extra: str) -> str:
     result = subprocess.run(
         ["make", "-n", target, *extra],
@@ -204,7 +206,7 @@ def test_make_targets_keep_default_tests_offline_and_support_live_opt_in() -> No
     default_command = _dry_run_make_target("test")
     live_command = _dry_run_make_target("test-live")
 
-    assert 'pytest -m "not live and not bundled_extension"' in default_command
+    assert 'pytest -m "not live and not bundled_extension and not benchmark"' in default_command
     assert "--ignore=tests/blocking_io" in default_command
     assert "tests/" in default_command
     assert LIVE_OPT_IN not in default_command
@@ -256,7 +258,7 @@ def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
 
     assert "--splits 6" in command
     assert "--group 6" in command
-    assert 'pytest -m "not live and not bundled_extension"' in command
+    assert 'pytest -m "not live and not bundled_extension and not benchmark"' in command
     assert "--ignore=tests/blocking_io" in command
     assert "--splitting-algorithm least_duration" in command
     assert "--durations-path=.test_durations" in command
@@ -267,7 +269,7 @@ def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
 
     # The full-suite entry point stays offline-only.
     full_command = _dry_run_make_target("test")
-    assert 'pytest -m "not live and not bundled_extension"' in full_command
+    assert 'pytest -m "not live and not bundled_extension and not benchmark"' in full_command
     assert "--ignore=tests/blocking_io" in full_command
     assert LIVE_OPT_IN not in full_command
 

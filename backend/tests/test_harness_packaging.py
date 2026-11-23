@@ -25,4 +25,16 @@ def test_opensandbox_is_optional_harness_dependency() -> None:
     optional_dependencies = pyproject["project"]["optional-dependencies"]
 
     assert not any(dep.startswith("opensandbox") for dep in core_dependencies)
-    assert optional_dependencies["opensandbox"] == ["opensandbox>=0.1.15,<0.2.0"]
+    assert optional_dependencies["opensandbox"] == ["opensandbox>=1.1.0,<2.0.0"]
+
+
+def test_boxd_is_optional_harness_dependency() -> None:
+    """The boxd SDK should be installed only when its provider is selected."""
+    pyproject_path = Path(__file__).resolve().parents[1] / "packages" / "harness" / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+    core_dependencies = pyproject["project"]["dependencies"]
+    optional_dependencies = pyproject["project"]["optional-dependencies"]
+
+    assert not any(dep.startswith("boxd") for dep in core_dependencies)
+    assert optional_dependencies["boxd"] == ["boxd>=0.3.2"]

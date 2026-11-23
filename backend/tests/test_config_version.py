@@ -477,6 +477,34 @@ def _merge_missing(target: dict, source: dict) -> None:
             _merge_missing(target[key], value)
 
 
+@pytest.mark.parametrize(
+    ("provider", "legacy_opt_in", "warns"),
+    [
+        ("deerflow.sandbox.local:LocalSandboxProvider", True, True),
+        ("deerflow.sandbox.local.local_sandbox_provider:LocalSandboxProvider", "$ENABLE_LEGACY_BASH", True),
+        ("deerflow.sandbox.local:LocalSandboxProvider", False, False),
+        ("deerflow.community.aio_sandbox:AioSandboxProvider", True, False),
+    ],
+)
+def test_load_config_warns_only_for_legacy_local_bash(tmp_path, monkeypatch, caplog, provider, legacy_opt_in, warns):
+    monkeypatch.setenv("ENABLE_LEGACY_BASH", "true")
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    config_path = _make_config_files(
+        tmp_path,
+        {"config_version": 67, "sandbox": {"use": provider, "allow_host_bash": legacy_opt_in}},
+        _load_repo_example(),
+    )
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.sandbox.use == provider
+    assert ("allow_host_bash" in caplog.text) is warns
+    assert ("isolated sandbox provider" in caplog.text) is warns
+    assert "outdated" in caplog.text
+
+
 def test_security_fail_closed_bumped_config_version():
     """The example must ship security_fail_closed under a version > 26 so v26 configs upgrade."""
     example = _load_repo_example()

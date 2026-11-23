@@ -263,6 +263,90 @@ def test_secret_on_the_first_line_is_redacted():
     assert "Result: token=[redacted]" in text
 
 
+def test_redact_egress_text_scrubs_url_user_info():
+    redacted = redact_egress_text("deployed with postgres://admin:hunter2@db.internal:5432/deerflow")
+
+    assert "hunter2" not in redacted
+    assert redacted == "deployed with postgres://[redacted]@db.internal:5432/deerflow"
+
+
+def test_redact_egress_text_leaves_a_url_without_credentials_alone():
+    text = "opened http://127.0.0.1:2026/workspace?tab=runs and ssh://github.com/bytedance/deer-flow.git"
+
+    assert redact_egress_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("header", "secret"),
+    [
+        ("Authorization: Bearer 1234567890abcdef", "1234567890abcdef"),
+        ("authorization=Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+        ("Cookie: session=8f14e45fceea167a5a36dedd4bea2543", "8f14e45fceea167a5a36dedd4bea2543"),
+        # Every pair of a canonical multi-cookie header, not only the first one.
+        ("Cookie: theme=dark; session=8f14e45fceea167a5a36dedd4bea2543", "8f14e45fceea167a5a36dedd4bea2543"),
+        # A quoted value keeps the scheme outside the quotes.
+        ('Authorization: "Bearer 8f14e45fceea167a5a36dedd4bea2543"', "8f14e45fceea167a5a36dedd4bea2543"),
+        ("Authorization: 'Bearer 8f14e45fceea167a5a36dedd4bea2543'", "8f14e45fceea167a5a36dedd4bea2543"),
+        # A comma joins several tokens into one header value.
+        ("Authorization: Bearer aaa111,bbb222", "bbb222"),
+    ],
+)
+def test_redact_egress_text_scrubs_header_credentials(header: str, secret: str):
+    redacted = redact_egress_text(f"sent the request with {header} to the service")
+
+    assert secret not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_redact_egress_text_scrubs_the_aws_signature_field():
+    # SigV4 keeps the signature as a `name=value` field after the scheme, so the
+    # header rule alone only redacts the scheme token.
+    signature = "8f14e45fceea167a5a36dedd4bea2543f7a1b2c3d4e5f60718293a4b5c6d7e8"
+    header = f"Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261115/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature={signature}"
+
+    redacted = redact_egress_text(f"sent the request with {header} to the bucket")
+
+    assert signature not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_redact_egress_text_scrubs_the_whole_digest_credential():
+    # Digest writes every credential as its own `name=value` field after the
+    # scheme, so only redacting the first field leaves the nonce and response
+    # visible.
+    nonce = "8f14e45fceea167a5a36dedd4bea2543"
+    response = "c0ffee1234567890abcdef0123456789"
+    header = f'Authorization: Digest username="someone", realm="api", nonce="{nonce}", uri="/v1/export", qop=auth, response="{response}"'
+
+    redacted = redact_egress_text(f"sent {header} to the service")
+
+    assert nonce not in redacted
+    assert response not in redacted
+    # The Digest rule runs to the end of the line, so the prose after the header
+    # goes with it; the guide and changelog describe that.
+    assert redacted == "sent Authorization: Digest [redacted]"
+
+
+def test_redact_egress_text_scrubs_a_pem_block_behind_a_header_name():
+    # A header rule that runs first would consume the `BEGIN` line and leave the
+    # block rule without a start marker, so the body would survive.
+    pem_body = "ABCDEFSECRETKEYBODY"
+    pem = "-----BEGIN RSA PRIVATE KEY-----\n" + pem_body + "\n-----END RSA PRIVATE KEY-----"
+
+    redacted = redact_egress_text(f"Cookie: {pem}\nafter the key")
+
+    assert pem_body not in redacted
+    assert "PRIVATE KEY" not in redacted
+    assert "after the key" in redacted
+
+
+def test_result_summary_never_forwards_url_credentials():
+    text = render_notification_text(notice("run_completed", run_status="success", result_summary="Connected to postgres://admin:hunter2@db.internal:5432/deerflow"))
+
+    assert "hunter2" not in text
+    assert "postgres://[redacted]@db.internal:5432/deerflow" in text
+
+
 def test_stop_condition_is_redacted_and_truncated():
     secret = "sk-" + ("S" * 40)
     condition = f"stop when {secret} rotates " + "z" * 400

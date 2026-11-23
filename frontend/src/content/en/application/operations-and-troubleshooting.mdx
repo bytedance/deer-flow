@@ -103,7 +103,7 @@ Or set it in your `.env` file at the repo root.
 
 If file tools (`read_file`, `ls`, `bash`) fail with permission or path errors:
 
-1. For `LocalSandboxProvider`: check that `allow_host_bash` is set correctly and that the agent has read/write access to the thread data directory.
+1. For `LocalSandboxProvider`, check that the file tools can access the thread data directory. Switch to an isolated provider if you need Bash.
 2. For container sandboxes: verify Docker (or Apple Container) is running and the sandbox image is accessible.
 3. For K8s Provisioner: check that the provisioner service is healthy (`curl http://localhost:8002/health`) and that the K8s cluster is reachable.
 

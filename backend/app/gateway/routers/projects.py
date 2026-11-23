@@ -109,7 +109,8 @@ async def delete_project_memory(project_id: str, fact_id: str, request: Request)
 @require_permission("projects", "write")
 async def promote_project_memory(project_id: str, fact_id: str, body: ProjectMemoryPromotion, request: Request) -> ProjectMemoryPromotionResponse:
     try:
-        result = await _memory_call("promote", project_id, fact_id, max_bytes=_projects_config().instructions_max_bytes, expected_instructions=body.expected_instructions)
+        max_bytes = (await asyncio.to_thread(_projects_config)).instructions_max_bytes
+        result = await _memory_call("promote", project_id, fact_id, max_bytes=max_bytes, expected_instructions=body.expected_instructions)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ProjectMemoryPromotionResponse(instructions=result["instructions"], memory=ProjectMemoryResponse(**result["memory"]))
@@ -163,7 +164,11 @@ def _not_found() -> HTTPException:
 
 
 def _projects_config() -> ProjectsConfig:
-    """Projects config, falling back to defaults when the app config is unavailable."""
+    """Projects config, falling back to defaults when the app config is unavailable.
+
+    It reads the live config, so async routes call it, and the validator below
+    that uses it, through ``asyncio.to_thread``.
+    """
     try:
         return get_app_config().projects
     except (FileNotFoundError, RuntimeError):
@@ -186,7 +191,7 @@ def _validate_instructions_length(instructions: str | None) -> None:
 @router.post("", response_model=ProjectResponse, status_code=201)
 @require_permission("projects", "write")
 async def create_project(body: ProjectCreateRequest, request: Request) -> ProjectResponse:
-    _validate_instructions_length(body.instructions)
+    await asyncio.to_thread(_validate_instructions_length, body.instructions)
     repo = get_project_repo(request)
     return _to_response(await repo.create(name=body.name, instructions=body.instructions, presentation=body.presentation))
 
@@ -225,7 +230,7 @@ async def get_project(project_id: str, request: Request) -> ProjectResponse:
 @router.patch("/{project_id}", response_model=ProjectResponse)
 @require_permission("projects", "write")
 async def patch_project(project_id: str, body: ProjectPatchRequest, request: Request) -> ProjectResponse:
-    _validate_instructions_length(body.instructions)
+    await asyncio.to_thread(_validate_instructions_length, body.instructions)
     row = await get_project_repo(request).patch(project_id, name=body.name, instructions=body.instructions, presentation=body.presentation)
     if row is None:
         raise _not_found()

@@ -23,7 +23,9 @@ Cases marked for real Compose run only when a `docker` CLI is installed.
   `core.fileMode=false` or a non-POSIX filesystem does not keep executable bits.
 - **Host pnpm calls go through `scripts/pnpm.py`.** It chooses the launcher by
   Python's `os.name`, not by the invoking shell, so native Windows, MSYS and POSIX
-  each get the right one.
+  each get the right one. A direct pnpm with a version different from the
+  `frontend/package.json` pin falls back to Corepack; without Corepack, the
+  runner stops before running the mismatched pnpm.
 - **Shell filters stay compatible with GNU and BSD sed**, because macOS ships
   the BSD tools. `sandbox-mode.sh` uses Bash and awk only.
 - **Lookups that run before the environment exists use the standard library

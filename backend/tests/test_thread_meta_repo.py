@@ -168,6 +168,43 @@ class TestThreadMetaRepository:
         assert record["status"] == "busy"
 
     @pytest.mark.anyio
+    async def test_update_status_never_writes_a_row_that_moved_to_another_owner(self, repo, tmp_path):
+        import sqlite3
+        from contextlib import closing
+
+        from sqlalchemy import event
+
+        from deerflow.persistence.engine import get_engine
+
+        await repo.create("t1", user_id="alice")
+        moved = []
+
+        def move_owner_before_status_write(conn, cursor, statement, parameters, context, executemany):
+            # Another writer moves the thread just before the status write runs.
+            if not moved and statement.lstrip().upper().startswith("UPDATE THREADS_META"):
+                moved.append(True)
+                with closing(sqlite3.connect(tmp_path / "test.db")) as other, other:
+                    other.execute("UPDATE threads_meta SET user_id = 'bob' WHERE thread_id = 't1'")
+
+        sync_engine = get_engine().sync_engine
+        event.listen(sync_engine, "before_cursor_execute", move_owner_before_status_write)
+        try:
+            await repo.update_status("t1", "error", user_id="alice")
+        finally:
+            event.remove(sync_engine, "before_cursor_execute", move_owner_before_status_write)
+
+        assert moved == [True]
+        record = await repo.get("t1", user_id="bob")
+        assert record["status"] == "idle"
+
+        await repo.update_status("t1", "error", user_id="alice")
+        assert (await repo.get("t1", user_id="bob"))["status"] == "idle"
+        await repo.update_status("t1", "busy", user_id="bob")
+        assert (await repo.get("t1", user_id="bob"))["status"] == "busy"
+        await repo.update_status("t1", "error", user_id=None)
+        assert (await repo.get("t1", user_id="bob"))["status"] == "error"
+
+    @pytest.mark.anyio
     async def test_delete(self, repo):
         await repo.create("t1")
         await repo.delete("t1")
