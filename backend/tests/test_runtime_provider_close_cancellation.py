@@ -109,6 +109,7 @@ async def test_checkpoint_cache_redis_context_drains_close_across_repeated_cance
                 max_entries=128,
                 redis_url="redis://localhost:6379/0",
                 ttl_seconds=60,
+                key_prefix="",
             )
         )
     )

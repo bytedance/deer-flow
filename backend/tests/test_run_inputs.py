@@ -143,6 +143,49 @@ async def test_concurrent_input_retries_are_applied_once(input_store):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_distinct_inputs_are_all_stored(input_store):
+    """Concurrent appends must not overwrite each other's ``run_inputs_json``.
+
+    An append reads the row before it writes it, so the store has to serialize
+    peers itself; without that, every concurrent append starts from the same
+    state and the last commit wins.
+    """
+    inputs = RunInputs(input_store, "run", USER_ID, "worker")
+    await asyncio.gather(*(inputs.submit(f"i{n}", f"One correction {n}", "queue") for n in range(8)))
+    assert sorted(item["id"] for item in (await inputs.read())["items"]) == [f"i{n}" for n in range(8)]
+
+
+@pytest.mark.asyncio
+async def test_input_append_does_not_take_the_run_change_clock(tmp_path):
+    """An input append rewrites ``run_inputs_json`` and publishes no position.
+
+    The clock is a single global row, so bumping it without writing the value
+    onto the run row makes every queued or steering message contend for a row
+    that no changed-run cursor can observe afterwards.
+    """
+    from deerflow.persistence.run.model import RunChangeClockRow
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'clock.db'}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+        await store.put("run", thread_id="thread", user_id=USER_ID, status="running")
+
+        async def position():
+            async with engine.connect() as connection:
+                clock = await connection.scalar(sa.select(RunChangeClockRow.value).where(RunChangeClockRow.id == 1))
+            return clock, (await store.get("run", user_id=USER_ID))["change_seq"]
+
+        before = await position()
+        queued = await RunInputs(store, "run", USER_ID).submit("q", "Make a presentation", "queue")
+        assert queued["id"] == "q"
+        assert await position() == before
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_removed_steer_cannot_be_consumed_and_claimed_steer_cannot_be_removed(input_store):
     inputs = RunInputs(input_store, "run", USER_ID, "worker")
     await inputs.submit("removed", "Do not execute", "steer")

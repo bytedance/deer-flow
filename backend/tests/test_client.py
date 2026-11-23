@@ -1529,7 +1529,7 @@ class TestClientMcpSelection:
             config["metadata"] = {"existing": "preserved", "mcp_plugins": ["installation-B"]}
             client._ensure_agent(config)
             keys.append(client._agent_config_key)
-            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection}
+            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection, "tool_groups": None}
 
             # Changing the saved config takes effect only after reset_agent().
             mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=["installation-B"])
@@ -1543,6 +1543,70 @@ class TestClientMcpSelection:
 
 
 class TestEnsureAgent:
+    @pytest.mark.parametrize(
+        ("groups", "expected"),
+        [(None, {"read_file", "write_file"}), ([], set()), (["file:read"], {"read_file"})],
+    )
+    def test_named_agent_tool_groups_reach_model_and_delegation(self, client, tmp_path, monkeypatch, groups, expected):
+        import httpx
+        from langchain_openai import ChatOpenAI
+
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths._paths", paths)
+        agent_dir = paths.user_agent_dir("test-user", "researcher")
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "config.yaml").write_text(json.dumps({"name": "researcher", "tool_groups": groups}), encoding="utf-8")
+        app_config = AppConfig(
+            models=[],
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            tools=[
+                {"name": "read_file", "group": "file:read", "use": "deerflow.sandbox.tools:read_file_tool"},
+                {"name": "write_file", "group": "file:write", "use": "deerflow.sandbox.tools:write_file_tool"},
+            ],
+        )
+        app_config.tool_search.enabled = False
+        monkeypatch.setattr("deerflow.config.app_config._app_config", app_config)
+        monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
+        client._app_config = app_config
+        client._agent_name = "researcher"
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            chunk = {"id": "chatcmpl-groups", "choices": [{"index": 0, "delta": {"content": "Done"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+        # Retain saved config loading, tool assembly, graph execution and SDK
+        # serialization. Prompt/middleware assembly is unrelated to selection.
+        with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+            model = ChatOpenAI(model="offline", api_key="offline-placeholder", http_client=transport, use_responses_api=False)
+            with (
+                patch("deerflow.client.create_chat_model", return_value=model),
+                patch("deerflow.client.build_middlewares", return_value=[]),
+                patch("deerflow.client.apply_prompt_template", return_value="Answer briefly."),
+                patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+                patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()),
+                patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            ):
+                client._ensure_agent(client._get_runnable_config("group-test"), context={"user_id": "test-user"})
+                with patch.object(client._agent, "stream", wraps=client._agent.stream) as stream:
+                    assert client.chat("Hello", thread_id="group-test", user_id="test-user") == "Done"
+                    assert client.chat("Again", thread_id="group-test", user_id="test-user") == "Done"
+                (agent_dir / "config.yaml").write_text(json.dumps({"name": "researcher", "tool_groups": ["file:write"]}), encoding="utf-8")
+                client.reset_agent()
+                assert client.chat("Refresh", thread_id="group-test", user_id="test-user") == "Done"
+
+        assert len(requests) == 3
+        for request, selected in zip(requests, [expected, expected, {"write_file"}], strict=True):
+            names = {item["function"]["name"] for item in request["tools"]}
+            assert names & {"read_file", "write_file"} == selected
+            assert "present_files" in names  # Built-ins retain their existing policy.
+        for call in stream.call_args_list:
+            assert call.kwargs["config"]["metadata"]["tool_groups"] == groups
+
     @pytest.mark.parametrize(
         ("agent_name", "agent_config", "expected_memory_enabled"),
         [
@@ -1974,6 +2038,7 @@ class TestEnsureAgent:
             None,
             None,
             True,
+            None,
             None,
             None,
             "full",

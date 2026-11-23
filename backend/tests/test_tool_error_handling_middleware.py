@@ -455,6 +455,7 @@ def test_lead_runtime_middlewares_pass_agent_skills_to_sandbox(
         "lazy_init": True,
         "available_skills": {"allowed-skill"},
         "owns_agent_skill_projection": True,
+        "skill_storage": None,
     }
 
 
@@ -484,6 +485,7 @@ def test_lead_runtime_middlewares_can_delegate_skill_projection_ownership(
         "lazy_init": True,
         "available_skills": {"bootstrap"},
         "owns_agent_skill_projection": False,
+        "skill_storage": None,
     }
 
 

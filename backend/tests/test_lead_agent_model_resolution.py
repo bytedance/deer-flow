@@ -132,13 +132,15 @@ def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
     assert list(inspect.signature(lead_agent_module.make_lead_agent).parameters) == ["config"]
 
 
-def test_chat_assembly_keeps_the_agent_and_only_its_conversation_tools(monkeypatch, tmp_path):
+@pytest.mark.parametrize("inject_storage", [False, True], ids=["default-storage", "injected-storage"])
+def test_chat_assembly_keeps_the_agent_and_only_its_conversation_tools(monkeypatch, tmp_path, inject_storage):
     from langchain_core.tools import StructuredTool
 
     from deerflow.capabilities.runtime import installation_id
     from deerflow.config.tool_config import ToolConfig
     from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, AgentMcpAuthority
     from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+    from deerflow.skills.storage.skill_storage import SkillStorage
     from deerflow.tools.mcp_metadata import tag_mcp_tool
 
     default = _make_model("default", supports_thinking=False)
@@ -183,9 +185,16 @@ def test_chat_assembly_keeps_the_agent_and_only_its_conversation_tools(monkeypat
         "context": {"mode": "chat", "user_id": "alice", "agent_name": "analyst", AGENT_AUTH_CONTEXT_KEY: authority, PROJECT_CONTEXT_KEY: {}, "__conversation_reader": lambda: None},
         "configurable": {"is_plan_mode": True, "subagent_enabled": True, "is_bootstrap": True, "subagent_model_name": "default"},
     }
-    with patch.object(lead_agent_module, "apply_tool_authorization", wraps=lead_agent_module.apply_tool_authorization) as authorize:
-        result = lead_agent_module._make_lead_agent(run, app_config=config)
+    storage = create_autospec(SkillStorage, instance=True)
+    storage.get_container_root.return_value = config.skills.container_path
+    with (
+        patch.object(lead_agent_module, "apply_tool_authorization", wraps=lead_agent_module.apply_tool_authorization) as authorize,
+        patch("deerflow.agents.lead_agent.prompt.get_enabled_skills_for_config") as load_catalog,
+    ):
+        result = lead_agent_module._assemble_lead_agent(run, app_config=config, skill_storage=storage if inject_storage else None).graph
 
+    load_catalog.assert_not_called()
+    storage.load_skills.assert_not_called()
     assert result["model"] == "chosen"
     assert authority.soul in result["system_prompt"]
     assert "working_directory" not in result["system_prompt"]
@@ -284,7 +293,7 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
         captured["agent_config_user_id"] = user_id
         return AgentConfig(name=name)
 
-    def _load_skills(available_skills, *, app_config, user_id=None):
+    def _load_skills(available_skills, *, app_config, user_id=None, skill_storage=None):
         captured["skills_user_id"] = user_id
         return []
 
@@ -339,7 +348,7 @@ def test_make_lead_agent_applies_custom_agent_memory_opt_out(monkeypatch):
         "load_agent_config",
         lambda name, *, user_id=None: AgentConfig(name=name, memory_enabled=False),
     )
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None, skill_storage=None: [])
 
     def _build_middlewares(*args, **kwargs):
         captured["middleware_memory_enabled"] = kwargs.get("memory_enabled")
@@ -598,9 +607,10 @@ def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypa
 
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
 
-    def _capture(config, *, app_config):
+    def _capture(config, *, app_config, skill_storage=None):
         captured["config"] = config
         captured["app_config"] = app_config
+        captured["skill_storage"] = skill_storage
         return lead_agent_module.LeadAgentAssembly(graph=object(), descriptor=object())
 
     monkeypatch.setattr(lead_agent_module, "_assemble_lead_agent", _capture)
@@ -616,6 +626,62 @@ def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypa
 
     assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "full"
     assert captured["app_config"] is app_config
+
+
+@pytest.mark.parametrize(("is_bootstrap", "skill_name"), [(False, "request-only"), (True, "bootstrap")], ids=["ordinary", "bootstrap"])
+def test_assemble_lead_agent_threads_skill_storage_to_build_middlewares(model_control_assembly, monkeypatch, tmp_path, is_bootstrap, skill_name):
+    """The public embedding entrypoint must preserve the injected storage through
+    both assembly hops, not only in `build_middlewares`."""
+    from deerflow.runtime import checkpoint_mode
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    app_config, *_ = model_control_assembly
+    captured: dict[str, object] = {}
+
+    def _capture(*args, **kwargs):
+        captured["skill_storage"] = kwargs.get("skill_storage")
+        return []
+
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _capture)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+
+    app_config.skills.container_path = "/mnt/request-skills"
+    app_config.skills.deferred_discovery = True
+    skill_file = tmp_path / "public" / skill_name / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(f"---\nname: {skill_name}\ndescription: Request-only skill\n---\n\nSkill body.\n", encoding="utf-8")
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: ExtensionsConfig())
+    injected = LocalSkillStorage(host_path=str(tmp_path), container_path=app_config.skills.container_path)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: kwargs["skill_storage"].load_skills(enabled_only=True))
+    result = lead_agent_module.assemble_lead_agent(
+        {"context": {"model_name": "default", "is_bootstrap": is_bootstrap}},
+        app_config=app_config,
+        skill_storage=injected,
+    )
+
+    assert captured["skill_storage"] is injected
+    describe = next(tool for tool in result.graph["tools"] if tool.name == "describe_skill")
+    result = describe.invoke({"args": {"name": f"select:{skill_name}"}, "name": "describe_skill", "type": "tool_call", "id": "describe-request"})
+    assert f"/mnt/request-skills/public/{skill_name}/SKILL.md" in result.update["messages"][0].content
+
+
+@pytest.mark.parametrize("context", [{"model_name": "default"}, {"model_name": "default", "mode": "chat"}], ids=["ordinary", "chat"])
+def test_assemble_lead_agent_rejects_mismatched_skill_mount(model_control_assembly, monkeypatch, tmp_path, context):
+    from deerflow.runtime import checkpoint_mode
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    app_config, *_ = model_control_assembly
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    storage = LocalSkillStorage(host_path=str(tmp_path), container_path="/mnt/request-skills")
+
+    with pytest.raises(ValueError, match=r"skills\.container_path"):
+        lead_agent_module.assemble_lead_agent(
+            {"context": context},
+            app_config=app_config,
+            skill_storage=storage,
+        )
 
 
 def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_read(monkeypatch):
