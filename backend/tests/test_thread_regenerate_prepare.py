@@ -1066,6 +1066,33 @@ def test_prepare_edit_regenerate_payload_skips_mid_run_replay_base_on_first_turn
     assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
 
 
+def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn(monkeypatch):
+    """A valid turn can write more checkpoints than the legacy history scan allows."""
+    from app.gateway import services
+    from app.gateway.routers import thread_runs
+
+    monkeypatch.setattr(services, "get_app_config", lambda: SimpleNamespace(max_recursion_limit=600))
+    event_store, run_manager = _answer_run_fixtures()
+    checkpointer = _first_turn_checkpointer()
+    messages = checkpointer.history[1].checkpoint["channel_values"]["messages"]
+    checkpointer.history[1:1] = [_checkpoint(f"ckpt-middle-{index}", messages, next_tasks=("model",)) for index in range(468)]
+    for checkpoint, parent in zip(checkpointer.history, checkpointer.history[1:]):
+        checkpoint.parent_config = parent.config
+
+    response = asyncio.run(
+        thread_runs._prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1__user",
+            "edited question",
+            _request(checkpointer, event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-empty"
+    assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
+    assert checkpointer.alist_limits == []
+
+
 def test_prepare_edit_regenerate_payload_prefers_checkpoint_lineage():
     """Edit replay must resolve its base the same lineage-first way regenerate does.
 

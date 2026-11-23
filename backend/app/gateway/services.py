@@ -1559,7 +1559,7 @@ def _resolve_gateway_recursion_limits(app_config: AppConfig | None = None) -> tu
         return _DEFAULT_RECURSION_LIMIT, _DEFAULT_MAX_RECURSION_LIMIT
 
 
-def _resolve_max_recursion_limit() -> int:
+def resolve_gateway_max_recursion_limit() -> int:
     """Resolve the clamp ceiling from ``AppConfig.max_recursion_limit``.
 
     Falls back to ``_DEFAULT_MAX_RECURSION_LIMIT`` when the app config cannot be
@@ -1592,7 +1592,7 @@ def _resolve_scheduler_recursion_limit() -> int:
     """
     try:
         raw = get_app_config().scheduler.recursion_limit
-        max_limit = _resolve_max_recursion_limit()
+        max_limit = resolve_gateway_max_recursion_limit()
         if raw > max_limit:
             logger.warning(
                 "scheduler.recursion_limit %d exceeds max_recursion_limit %d; clamped to %d for scheduled runs",

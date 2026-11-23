@@ -397,13 +397,9 @@ async def find_checkpoint_before_message(
     if current_identity is not None:
         visited.add(current_identity)
 
-    # Each distinct ancestor is read once: a Postgres stamp candidate also
-    # needs its grandparent for the shape check, and a candidate the shape
-    # check refuses re-reads that grandparent as the next iteration's parent,
-    # so reads are memoized by config identity instead of carried by hand.
-    # Normal branch/regenerate histories cross the target boundary within
-    # 1–3 reads. Keep max_depth as a conservative safety cap for valid
-    # histories with many intermediate or duration-only checkpoints.
+    # A Postgres stamp candidate may read its grandparent for the shape
+    # check. That snapshot is the next iteration's parent, so keep the last
+    # read only. A long walk does not need to retain every materialized state.
     read_cache: dict[tuple[str, str, str], Any] = {}
 
     async def read(config: dict[str, Any]) -> Any:
@@ -412,6 +408,7 @@ async def find_checkpoint_before_message(
             return read_cache[identity]
         checkpoint_tuple = await accessor.aget(config)
         if identity is not None:
+            read_cache.clear()
             read_cache[identity] = checkpoint_tuple
         return checkpoint_tuple
 

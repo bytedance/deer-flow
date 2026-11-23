@@ -66,6 +66,7 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
     build_thread_checkpoint_state_accessor,
+    resolve_gateway_max_recursion_limit,
     serialize_wait_run_status,
     sse_consumer,
     start_run,
@@ -758,11 +759,14 @@ async def _find_base_checkpoint_before_human(
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     if head_checkpoint is not None:
         try:
+            # A single admitted turn can exceed the legacy history window.
+            # Allow its graph steps plus headroom for input and metadata checkpoints.
+            max_steps = await asyncio.to_thread(resolve_gateway_max_recursion_limit)
             return await find_checkpoint_before_message(
                 accessor,
                 head_checkpoint,
                 human_message_id,
-                max_depth=REGENERATE_HISTORY_RAW_SCAN_LIMIT,
+                max_depth=max_steps + REGENERATE_HISTORY_RAW_SCAN_LIMIT,
             )
         except CheckpointParentMissingError:
             # Old checkpoints and imported histories may not have parent links.
