@@ -7,6 +7,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+Kubernetes sandbox Service URLs under `.svc.cluster.local` bypass environment
+HTTP proxies for readiness checks and sandbox API calls. This keeps an outbound
+model/tool proxy from intercepting ClusterIP traffic. Public sandbox endpoints
+continue to honor the environment proxy settings.
+
 When a provider returns a structured exit code, Bash tool status follows that
 code, including timeout failures. Providers that return plain text, including
 AIO, use output-based status detection. A command that exits successfully can be

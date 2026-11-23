@@ -31,7 +31,7 @@ def control_plane_trust_env(url: str) -> bool:
         return True
     if not hostname:
         return True
-    if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".docker.internal") or hostname.endswith(".containers.internal"):
+    if hostname == "localhost" or hostname.endswith((".localhost", ".docker.internal", ".containers.internal", ".svc.cluster.local")):
         return False
     try:
         address = ipaddress.ip_address(hostname)

@@ -59,52 +59,62 @@ class _FakeLoop:
         ("http://host.docker.internal:8080", False),
         ("http://host.containers.internal:8080", False),
         ("http://k3s:30001", False),
+        ("http://sandbox-test-svc.deer-flow.svc.cluster.local:8080", False),
+        ("http://SANDBOX-TEST-SVC.DEER-FLOW.SVC.CLUSTER.LOCAL.:8080", False),
         ("http://10.0.0.8:8080", False),
         ("http://8.8.8.8:8080", True),
         ("http://[2606:4700:4700::1111]:8080", True),
         ("https://sandbox.example.com", True),
+        ("https://sandbox.svc.cluster.local.example.com", True),
+        ("https://sandbox.not-svc.cluster.local", True),
     ],
 )
 def test_sandbox_http_trust_env_only_uses_proxy_for_external_urls(sandbox_url: str, expected: bool) -> None:
     assert readiness.sandbox_http_trust_env(sandbox_url) is expected
 
 
-def test_wait_for_sandbox_ready_bypasses_environment_proxy_for_docker_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    sessions: list[object] = []
+@pytest.mark.parametrize(
+    ("sandbox_url", "uses_proxy"),
+    [
+        ("http://host.docker.internal:8080", False),
+        ("http://sandbox-test-svc.deer-flow.svc.cluster.local:8080", False),
+        ("https://sandbox.example.com", True),
+    ],
+)
+def test_wait_for_sandbox_ready_routes_environment_proxy(monkeypatch: pytest.MonkeyPatch, sandbox_url: str, uses_proxy: bool) -> None:
+    import requests
 
-    class FakeSession:
-        trust_env = True
+    calls = []
 
-        def __init__(self) -> None:
-            self.headers: dict[str, str] = {}
+    def send(_adapter, request, **kwargs):
+        calls.append((request, kwargs))
+        response = requests.Response()
+        response.status_code = 200
+        response.request = request
+        response._content = b"{}"
+        return response
 
-        def __enter__(self):
-            sessions.append(self)
-            return self
-
-        def __exit__(self, *_exc_info) -> None:
-            return None
-
-        def get(self, url: str, *, timeout: float):
-            assert url == "http://host.docker.internal:8080/v1/sandbox"
-            # Ample budget remains, so the per-probe timeout clamps to the 5s ceiling.
-            assert timeout == 5
-            return SimpleNamespace(status_code=200)
-
-    monkeypatch.setattr(readiness.requests, "Session", FakeSession)
+    for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(variable, "http://proxy.example:3128")
+    for variable in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(variable, "")
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
 
     headers = {"X-DeerFlow-Relay-Token": "secret-token"}
     assert (
         readiness.wait_for_sandbox_ready(
-            "http://host.docker.internal:8080",
+            sandbox_url,
             timeout=30,
             headers=headers,
         )
         is True
     )
-    assert len(sessions) == 1
-    assert sessions[0].trust_env is False
-    assert sessions[0].headers == headers
+    assert len(calls) == 1
+    request, options = calls[0]
+    assert request.url == f"{sandbox_url}/v1/sandbox"
+    assert request.headers["X-DeerFlow-Relay-Token"] == headers["X-DeerFlow-Relay-Token"]
+    assert options["timeout"] == 5
+    assert bool(options["proxies"]) is uses_proxy
 
 
 @pytest.mark.anyio
