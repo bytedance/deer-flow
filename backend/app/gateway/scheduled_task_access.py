@@ -212,7 +212,7 @@ async def _owner(owner_id: str, token_version: int, *, auth_disabled_owner: bool
         user = get_auth_disabled_user() if is_auth_disabled() and owner_id == AUTH_DISABLED_USER_ID else None
     else:
         user = await get_local_provider().get_user(owner_id)
-    if user is None or str(user.id) != owner_id or getattr(user, "token_version", 0) != token_version or getattr(user, "needs_setup", False) or getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+    if user is None or str(user.id) != owner_id or getattr(user, "disabled", False) or getattr(user, "token_version", 0) != token_version or getattr(user, "needs_setup", False) or getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
         return None
     return user
 
