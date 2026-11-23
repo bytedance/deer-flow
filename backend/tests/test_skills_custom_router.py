@@ -522,6 +522,52 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
+@pytest.mark.parametrize(
+    ("history_index", "expected_status", "expected_description"),
+    [
+        pytest.param(False, 422, "Current", id="false"),
+        pytest.param(True, 422, "Current", id="true"),
+        pytest.param("1", 200, "Previous", id="integer-string"),
+        pytest.param(1.0, 200, "Previous", id="integral-float"),
+        pytest.param(1.5, 422, "Current", id="fractional-float"),
+    ],
+)
+def test_custom_skill_rollback_validates_history_index(monkeypatch, tmp_path, history_index, expected_status, expected_description):
+    from deerflow.config.paths import Paths
+
+    skills_root = tmp_path / "skills"
+    custom_dir = _user_custom_dir(tmp_path, "default") / "demo-skill"
+    custom_dir.mkdir(parents=True)
+    current_content = _skill_content("demo-skill", "Current")
+    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", lambda _user_id: _async_scan("allow", "ok"))
+
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    history_file = storage.get_skill_history_file("demo-skill")
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    history_file.write_text(
+        "\n".join(json.dumps({"action": "human_edit", "prev_content": _skill_content("demo-skill", description), "new_content": current_content}) for description in ("Earlier", "Previous")) + "\n",
+        encoding="utf-8",
+    )
+
+    app = _make_test_app(config)
+    with TestClient(app) as client:
+        response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": history_index})
+
+    assert response.status_code == expected_status
+    assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == _skill_content("demo-skill", expected_description)
+
+
 def test_custom_skill_update_static_scan_failure_blocks_edit_before_llm(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     from deerflow.config.paths import Paths

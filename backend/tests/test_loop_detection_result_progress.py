@@ -8,12 +8,15 @@ import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages.content import create_text_block
 from langchain_core.tools import tool
 from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY, ReadBeforeWriteMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+from deerflow.agents.thread_state import ThreadState
 
 
 class _ScriptedModel(FakeMessagesListChatModel):
@@ -32,8 +35,8 @@ def _call(name, args, call_id="call_0"):
     return {"name": name, "args": args, "id": call_id}
 
 
-async def _invoke(graph, async_mode, context):
-    state = {"messages": [("user", "Continue until the requested work is complete.")]}
+async def _invoke(graph, async_mode, context, **extra_state):
+    state = {"messages": [("user", "Continue until the requested work is complete.")], **extra_state}
     if async_mode:
         return await graph.ainvoke(state, context=context, config={"recursion_limit": 100})
     return graph.invoke(state, context=context, config={"recursion_limit": 100})
@@ -247,6 +250,69 @@ async def test_unchanged_results_and_changing_errors_still_stop(async_mode, fail
     assert len(_warnings(model)) == 1
     assert not result["messages"][-1].tool_calls
     assert context["stop_reason"] == "loop_capped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_unchanged_block_results_stop_despite_fresh_block_ids(async_mode):
+    executions = []
+
+    @tool
+    def browser_snapshot() -> list[dict]:
+        """Return the same page snapshot on every call."""
+        executions.append(len(executions) + 1)
+        # MCP result conversion builds blocks with create_text_block, which
+        # stamps a fresh lc_<uuid> id on every block.
+        return [create_text_block("- button 'Next' [ref=e12]")]
+
+    responses = [AIMessage(content="", tool_calls=[_call("browser_snapshot", {}, f"call_{index}")]) for index in range(6)]
+    model = _ScriptedModel(responses=responses)
+    graph = create_agent(model=model, tools=[browser_snapshot], middleware=[LoopDetectionMiddleware()])
+    context = {"thread_id": "snapshots", "run_id": "snapshots"}
+
+    result = await _invoke(graph, async_mode, context)
+
+    tool_results = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert len({message.content[0]["id"] for message in tool_results}) == len(tool_results)
+    assert len(executions) == 4
+    assert len(_warnings(model)) == 1
+    assert not result["messages"][-1].tool_calls
+    assert context["stop_reason"] == "loop_capped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("page_changes", [False, True])
+async def test_externalized_results_compare_the_output_not_the_preview(tmp_path, async_mode, page_changes):
+    fetches = []
+
+    @tool
+    def web_fetch(url: str) -> str:
+        """Fetch a page large enough to be externalized."""
+        fetches.append(url)
+        revision = len(fetches) if page_changes else 1
+        return f"Revision {revision}\n" + "Lorem ipsum dolor sit amet.\n" * 1000
+
+    responses = [AIMessage(content="", tool_calls=[_call("web_fetch", {"url": "https://example.com"}, f"call_{index}")]) for index in range(6)]
+    model = _ScriptedModel(responses=[*responses, AIMessage(content="Done.")])
+    graph = create_agent(model=model, tools=[web_fetch], middleware=[ToolOutputBudgetMiddleware(), LoopDetectionMiddleware()], state_schema=ThreadState)
+    context = {"thread_id": "fetches", "run_id": "fetches"}
+
+    result = await _invoke(graph, async_mode, context, thread_data={"outputs_path": str(tmp_path)})
+
+    # Every preview names a per-call file, so the visible results always differ.
+    previews = [message.content for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert all("output saved to" in preview for preview in previews)
+    assert len(set(previews)) == len(previews)
+    if page_changes:
+        assert len(fetches) == 6
+        assert result["messages"][-1].content == "Done."
+        assert not _warnings(model)
+        assert context.get("stop_reason") is None
+    else:
+        assert len(fetches) == 4
+        assert len(_warnings(model)) == 1
+        assert context["stop_reason"] == "loop_capped"
 
 
 @pytest.mark.asyncio
