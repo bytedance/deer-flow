@@ -985,6 +985,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         attempt = 1
         prev_delay_ms: int | None = None
+        fallback_model_names = self.fallback_model_names
         while True:
             try:
                 response = self._bounded_model_call_sync(request, handler)
@@ -999,10 +1000,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 _share_rate_limit_cooldown(request, exc)
                 retriable, reason = self._classify_error(exc)
                 max_attempts = self._max_attempts_for(exc, reason)
-                if self.fallback_model_names and _is_safe_for_model_failover(exc):
+                if fallback_model_names and not _is_safe_for_model_failover(exc):
+                    # A later retry cannot undo output from an earlier attempt.
+                    fallback_model_names = ()
+                if fallback_model_names:
                     max_attempts = min(
                         max_attempts,
-                        max(1, self.retry_max_attempts - len(self.fallback_model_names)),
+                        max(1, self.retry_max_attempts - len(fallback_model_names)),
                     )
                 should_retry = retriable and attempt < max_attempts
                 if should_retry and reason == "empty_response":
@@ -1038,7 +1042,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                             request,
                             handler,
                             exc,
-                            self.fallback_model_names[:remaining_attempts],
+                            fallback_model_names[:remaining_attempts],
                         )
                     except GraphBubbleUp:
                         self._release_half_open_probe(admission=admission)
@@ -1096,6 +1100,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         attempt = 1
         prev_delay_ms: int | None = None
+        fallback_model_names = self.fallback_model_names
         try:
             while True:
                 try:
@@ -1111,10 +1116,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _share_rate_limit_cooldown(request, exc)
                     retriable, reason = self._classify_error(exc)
                     max_attempts = self._max_attempts_for(exc, reason)
-                    if self.fallback_model_names and _is_safe_for_model_failover(exc):
+                    if fallback_model_names and not _is_safe_for_model_failover(exc):
+                        fallback_model_names = ()
+                    if fallback_model_names:
                         max_attempts = min(
                             max_attempts,
-                            max(1, self.retry_max_attempts - len(self.fallback_model_names)),
+                            max(1, self.retry_max_attempts - len(fallback_model_names)),
                         )
                     should_retry = retriable and attempt < max_attempts
                     if should_retry and reason == "empty_response":
@@ -1150,7 +1157,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                                 request,
                                 handler,
                                 exc,
-                                self.fallback_model_names[:remaining_attempts],
+                                fallback_model_names[:remaining_attempts],
                             )
                         except GraphBubbleUp:
                             self._release_half_open_probe(admission=admission)

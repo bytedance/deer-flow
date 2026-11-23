@@ -211,7 +211,7 @@ models:
     api_key: $ANTHROPIC_API_KEY
 ```
 
-`fallback_models` applies to Lead Agent and subagent calls. After the primary profile exhausts transient retries, DeerFlow tries each authorized fallback at most once; `llm_call.retry_max_attempts` caps the total primary-plus-fallback attempts, and configuration is rejected when the chain exceeds that cap. Fallback is limited to retryable HTTP status responses and connection failures that occur before response output. It does not switch models for authentication/configuration errors, local admission denials, empty responses, or errors after stream output may have begun. Model authorization is checked again for each fallback. This setting does not affect title, summary, memory, or other standalone model calls.
+`fallback_models` applies to Lead Agent and subagent calls. After the primary profile exhausts transient retries, DeerFlow tries each authorized fallback at most once. `llm_call.retry_max_attempts` caps the total primary-plus-fallback attempts, and configuration is rejected when the chain exceeds that cap. Fallback requires retryable HTTP responses or connection failures known to precede response output. Once a primary attempt may have emitted stream output, any remaining retries stay on that model. Authentication and configuration errors, local admission denials, and empty responses do not trigger failover. Model authorization is checked again for each fallback. Title, summary, memory, and other standalone model calls keep their own retry policies.
 
 **Supported Providers**:
 - OpenAI (`langchain_openai:ChatOpenAI`)

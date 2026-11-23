@@ -739,12 +739,15 @@ def create_chat_model(
     effective_model_settings.update({key: value for key, value in kwargs.items() if value is not None})
     if disable_provider_retries:
         # Retry caps must win over thinking templates and caller-provided options.
-        effective_model_settings.pop("max_retries", None)
-        effective_model_settings.pop("retry_max_attempts", None)
-        if "max_retries" in model_class.model_fields:
-            effective_model_settings["max_retries"] = 0
-        if "retry_max_attempts" in model_class.model_fields:
-            effective_model_settings["retry_max_attempts"] = 1
+        for retry_field, limit in (("max_retries", 0), ("retry_max_attempts", 1)):
+            effective_model_settings.pop(retry_field, None)
+            field = model_class.model_fields.get(retry_field)
+            if field is None:
+                continue
+            # Pydantic prefers input aliases, such as Gemini's `retries`.
+            if isinstance(field.validation_alias, str):
+                effective_model_settings.pop(field.validation_alias, None)
+            effective_model_settings[retry_field] = limit
     if (
         issubclass(model_class, BaseChatOpenAI)
         and effective_model_settings.get("model") in OPENAI_GPT6_MODELS

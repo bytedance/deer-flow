@@ -37,6 +37,8 @@ make test-blocking-io
   that raised and a call that returned an empty stop response
   (`model_response.is_empty_stop_response`). A wrap that takes a queued hint for
   one call puts it back in both cases, or the retry goes out without it.
+- **Model failover checks every primary attempt.** A later pre-output failure
+  cannot make failover safe after an earlier attempt may have emitted output.
 
 ## Rules for a middleware that changes messages
 

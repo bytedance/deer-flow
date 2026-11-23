@@ -33,6 +33,7 @@ from deerflow.agents.middlewares.llm_error_handling_middleware import (
 from deerflow.config.app_config import AppConfig, LlmCallConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.models import create_chat_model
 
 
 @pytest.fixture(autouse=True)
@@ -426,6 +427,39 @@ def test_failover_attempts_never_exceed_configured_total(monkeypatch: pytest.Mon
 
     assert primary_attempts == 3
     assert fallback_builds == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_native_gemini_retry_alias_respects_failover_http_budget(async_mode: bool) -> None:
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.host)
+        if request.url.host == "primary.invalid":
+            return httpx.Response(503, json={"error": {"code": 503, "message": "Unavailable", "status": "UNAVAILABLE"}})
+        assert request.url.host == "backup.invalid"
+        return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [{"text": "backup answer"}]}, "finishReason": "STOP"}]})
+
+    google_settings = {"use": "langchain_google_genai:ChatGoogleGenerativeAI", "api_key": "offline-test-key", "vertexai": False}
+    config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(retry_max_attempts=2),
+        models=[
+            ModelConfig(name="primary", model="gemini-2.5-flash", base_url="https://primary.invalid", fallback_models=["backup"], retries=3, **google_settings),
+            ModelConfig(name="backup", model="gemini-2.5-flash-lite", base_url="https://backup.invalid", **google_settings),
+        ],
+    )
+    model_overrides = {"client_args": {"transport": httpx.MockTransport(respond)}}
+    primary = create_chat_model("primary", app_config=config, attach_tracing=False, model_overrides=model_overrides, disable_provider_retries=True)
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary", model_overrides=model_overrides)
+    agent = create_agent(model=primary, middleware=[middleware])
+    state = {"messages": [HumanMessage(content="hello")]}
+
+    result = await agent.ainvoke(state) if async_mode else await asyncio.to_thread(agent.invoke, state)
+
+    assert requests == ["primary.invalid", "backup.invalid"]
+    assert result["messages"][-1].text == "backup answer"
 
 
 def test_sync_call_skips_unauthorized_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3838,3 +3872,54 @@ async def test_in_stream_error_after_partial_output_is_retried_from_the_start() 
     assert result.content == "recovered"
     assert "deerflow_error_fallback" not in result.additional_kwargs
     assert "".join(streamed) == "partial answrecovered"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_failover_stays_disabled_after_an_earlier_primary_stream_error(monkeypatch: pytest.MonkeyPatch, async_mode: bool) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(retry_max_attempts=3), model_name="primary")
+    monkeypatch.setattr(middleware, "_build_retry_delay_ms", lambda *_args: 0)
+    requests: list[str] = []
+
+    def frame(text: str) -> dict[str, Any]:
+        return {
+            "id": "chatcmpl-failover",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}],
+        }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        requests.append(host)
+        if host == "primary.invalid" and len(requests) == 1:
+            events = [frame("partial answer"), {"error": {"message": "[504]: upstream timed out", "type": "server_error", "code": "gateway_timeout"}}]
+        elif host == "primary.invalid":
+            return httpx.Response(503, json={"error": {"message": "temporarily unavailable"}})
+        else:
+            assert host == "backup.invalid"
+            events = [frame("backup answer")]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    transport = httpx.MockTransport(respond)
+    with httpx.Client(transport=transport) as sync_client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            settings = {"api_key": "offline-test-key", "max_retries": 0, "http_client": sync_client, "http_async_client": async_client}
+            primary = ChatOpenAI(model="primary", base_url="https://primary.invalid/v1", **settings)
+            backup = ChatOpenAI(model="backup", base_url="https://backup.invalid/v1", **settings)
+            monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: backup)
+            agent = create_agent(model=primary, middleware=[middleware])
+            state = {"messages": [HumanMessage(content="hello")]}
+            stream_modes = ["messages", "values"]
+            if async_mode:
+                events = [event async for event in agent.astream(state, stream_mode=stream_modes)]
+            else:
+                events = await asyncio.to_thread(lambda: list(agent.stream(state, stream_mode=stream_modes)))
+
+    assert requests == ["primary.invalid"] * 3
+    assert any(mode == "messages" and data[0].text == "partial answer" for mode, data in events)
+    assert all(mode != "messages" or data[0].text != "backup answer" for mode, data in events)
+    final_state = [data for mode, data in events if mode == "values"][-1]
+    assert final_state["messages"][-1].additional_kwargs["deerflow_error_fallback"] is True
