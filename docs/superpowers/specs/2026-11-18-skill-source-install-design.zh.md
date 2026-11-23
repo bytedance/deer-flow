@@ -260,6 +260,7 @@ POST /api/skills/install/source
 2. 在临时目录构造单根目录 ZIP；临时文件名必须以 **`.skill`** 结尾，因为现有安装器硬性检查后缀。
 3. 调用 `_install_skill_archive()`；沿用其扫描、写入、缓存和 reset 语义。
 4. `finally` 清理临时文件。
+5. 若 publication 后、读取有效 `enabled` 前技能已被同用户删除，返回明确的 404 并发删除结果，不把缺失行转成 500，也不虚报安装成功。
 
 快照文件写入、ZIP 构建、文件读取和摘要计算等同步 IO/重计算必须经 `asyncio.to_thread` 或现有等量 offload；不得在 async handler 内直接执行。安装器内部再次解包沿用其现有 offload，本设计不重复修改。
 

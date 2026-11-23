@@ -217,6 +217,61 @@ def test_install_returns_effective_enabled_state(monkeypatch, tmp_path):
         assert detail.json()["enabled"] is False
 
 
+def test_delete_after_install_publication_has_defined_outcome(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = _make_skill_archive(tmp_path, "archive-skill")
+
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+    monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", lambda user_id: _async_scan("allow", "ok"))
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+
+    published = threading.Event()
+    delete_done = threading.Event()
+    original_commit = storage._commit_skill_install
+
+    def _commit_then_wait_for_delete(*args):
+        original_commit(*args)
+        published.set()
+        assert delete_done.wait(5)
+
+    monkeypatch.setattr(storage, "_commit_skill_install", _commit_then_wait_for_delete)
+    app = _make_test_app(config)
+    install_responses: list[httpx.Response] = []
+
+    with TestClient(app) as install_client, TestClient(app) as delete_client:
+
+        def _install():
+            install_responses.append(install_client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"}))
+
+        install_thread = threading.Thread(target=_install)
+        install_thread.start()
+        try:
+            assert published.wait(5)
+            delete_response = delete_client.delete("/api/skills/custom/archive-skill")
+            assert delete_response.status_code == 200
+        finally:
+            delete_done.set()
+            install_thread.join(10)
+
+    assert not install_thread.is_alive()
+    assert len(install_responses) == 1
+    assert install_responses[0].status_code == 404
+    assert "deleted concurrently" in install_responses[0].json()["detail"]
+
+
 def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp_path):
     installed_paths: list[Path] = []
     refresh_calls: list[str] = []
