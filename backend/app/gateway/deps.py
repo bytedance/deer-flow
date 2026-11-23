@@ -420,12 +420,16 @@ def _validate_provisioner_environment(config: AppConfig) -> None:
     forwards, and sandbox allocation itself stays lazy.
     """
     from app.gateway.health import resolve_provisioner_url
-    from deerflow.community.aio_sandbox.remote_backend import check_provisioner_environment, operator_provisioner_environment
 
     sandbox = getattr(config, "sandbox", None)
     if resolve_provisioner_url(config) is None or not str(getattr(sandbox, "use", "")).endswith(":AioSandboxProvider"):
         return
     environment = dict(getattr(sandbox, "environment", None) or {})
+    if not environment:
+        return
+
+    from deerflow.community.aio_sandbox.remote_backend import check_provisioner_environment, operator_provisioner_environment
+
     try:
         check_provisioner_environment(operator_provisioner_environment(environment))
     except ValueError as exc:
