@@ -1206,10 +1206,10 @@ class RunRepository(RunStore):
                 if existing is not None:
                     raise RunIdempotencyConflict(self._row_to_dict(existing))
 
-            from deerflow.persistence.coordination.workers import THREAD_PREFIX, bind_admitted_worker
+            from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, THREAD_PREFIX, bind_admitted_worker
 
             if thread_id.startswith(THREAD_PREFIX) and values["operation_kind"] == "run":
-                await bind_admitted_worker(session, thread_id, resolved_user_id, idempotency_key, run_id)
+                await bind_admitted_worker(session, thread_id, resolved_user_id, idempotency_key, run_id, grant_id=(metadata or {}).get(RUN_GRANT_METADATA))
 
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (
