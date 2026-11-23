@@ -200,6 +200,11 @@ limited to 1024 characters. Values are written literally: a `$` is escaped so
 Kubernetes does not expand `$(NAME)` or collapse `$$` before the container reads
 the value.
 
+The Gateway applies those limits to the filtered map while it starts, so a map
+this service would refuse stops the Gateway with `sandbox.environment` named
+instead of failing the first sandbox create. Sandbox allocation itself stays
+lazy.
+
 Both directions of a version skew drop the profile silently, so upgrade the
 provisioner before you rely on it. A request from a Gateway older than this
 change carries no map and produces the same Pods as before; a new Gateway
