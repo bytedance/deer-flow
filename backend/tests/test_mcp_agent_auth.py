@@ -1036,4 +1036,7 @@ def test_admin_api_routes_validate_over_http(api_env):
     assert client.put("/api/mcp/agent-auth/research-tickets/grants", json={"owners": [], "definition_digests": [], "extra": 1}).status_code == 422
     assert client.get("/api/mcp/agent-auth/-bad").status_code == 422
     assert client.get("/api/mcp/agent-auth/research-tickets/definition-digest", params={"owner": "alice"}).json()["definition_digest"] == digest
+    for owner in ("alice@example.com", "../alice"):  # file-backed storage cannot hold these owners
+        assert client.get("/api/mcp/agent-auth/research-tickets/definition-digest", params={"owner": owner}).status_code == 422
+    assert client.get("/api/mcp/agent-auth/research-tickets/definition-digest", params={"owner": "nobody"}).status_code == 404
     assert client.delete("/api/mcp/agent-auth/research-tickets/grants").status_code == 204

@@ -21,11 +21,16 @@ from app.gateway.deps import require_admin_user
 from app.gateway.persistent_writes import run_drained_write
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.mcp_agent_auth_config import BindingId, McpAgentCredentialBinding, McpAgentGrant, StoredMcpAgentGrant
+from deerflow.config.paths import get_paths
 from deerflow.mcp.agent_auth import grant_subject, runtime_grant_in_force
 from deerflow.persistence.mcp_agent_grants import make_mcp_agent_grant_store
 
 router = APIRouter(prefix="/api/mcp/agent-auth", tags=["mcp"])
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage MCP agent credentials."
+
+
+class _InvalidOwner(ValueError):
+    """An owner id that file-backed agent storage cannot hold."""
 
 
 class McpAgentBindingResponse(BaseModel):
@@ -109,7 +114,7 @@ async def list_bindings(request: Request) -> McpAgentBindingsResponse:
     """List every configured binding with the owners and digests in force; OAuth settings are never returned."""
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     config = await asyncio.to_thread(_config)
-    stored = await asyncio.to_thread(make_mcp_agent_grant_store(config).list)
+    stored = await asyncio.to_thread(lambda: make_mcp_agent_grant_store(config).list())
     return McpAgentBindingsResponse(bindings=[_response(config, binding_id, binding, stored.get(binding_id)) for binding_id, binding in sorted(config.mcp_agent_auth.items())])
 
 
@@ -118,7 +123,7 @@ async def get_binding(binding_id: BindingId, request: Request) -> McpAgentBindin
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     config = await asyncio.to_thread(_config)
     binding = _binding(config, binding_id)
-    grant = await asyncio.to_thread(make_mcp_agent_grant_store(config).get, binding_id) if binding.grants == "runtime" else None
+    grant = await asyncio.to_thread(lambda: make_mcp_agent_grant_store(config).get(binding_id)) if binding.grants == "runtime" else None
     return _response(config, binding_id, binding, grant)
 
 
@@ -143,9 +148,8 @@ async def put_grant(binding_id: BindingId, grant: McpAgentGrant, request: Reques
         overlap = await asyncio.to_thread(_overlapping_binding, config, binding_id, binding, grant)
         if overlap is not None:
             raise HTTPException(status_code=409, detail=f"Owners overlap with MCP agent binding '{overlap}' for the same server and agent")
-    store = make_mcp_agent_grant_store(config)
     try:
-        await run_drained_write("Replace MCP agent grant", store.put, (ValueError,), binding_id, stored)
+        await run_drained_write("Replace MCP agent grant", lambda: make_mcp_agent_grant_store(config).put(binding_id, stored), (ValueError,))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     return _response(config, binding_id, binding, stored)
@@ -157,8 +161,7 @@ async def delete_grant(binding_id: BindingId, request: Request) -> Response:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     config = await asyncio.to_thread(_config)
     _runtime_binding(config, binding_id)
-    store = make_mcp_agent_grant_store(config)
-    if not await run_drained_write("Delete MCP agent grant", store.delete, (), binding_id):
+    if not await run_drained_write("Delete MCP agent grant", lambda: make_mcp_agent_grant_store(config).delete(binding_id)):
         raise HTTPException(status_code=404, detail=f"MCP agent binding '{binding_id}' has no runtime grant")
     return Response(status_code=204)
 
@@ -178,13 +181,23 @@ async def definition_digest(binding_id: BindingId, request: Request, owner: str 
         from deerflow.config.agents_config import load_agent_config, load_agent_soul
         from deerflow.mcp.agent_auth import agent_definition_digest
 
+        if config.agent_storage.backend != "db":
+            # File-backed agents live under the owner's user directory, so an
+            # owner id that cannot name one (e.g. "../alice") has no agent there.
+            try:
+                get_paths().user_dir(owner)
+            except ValueError as exc:
+                raise _InvalidOwner(str(exc)) from None
         try:
             agent_config = load_agent_config(binding.agent, user_id=owner)
         except FileNotFoundError:
             return None
         return agent_definition_digest(agent_config, load_agent_soul(binding.agent, user_id=owner) or "")
 
-    digest = await asyncio.to_thread(compute)
+    try:
+        digest = await asyncio.to_thread(compute)
+    except _InvalidOwner as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid owner for file-backed agent storage: {exc}") from None
     if digest is None:
         raise HTTPException(status_code=404, detail=f"User '{owner}' has no agent '{binding.agent}'")
     return McpAgentDefinitionDigestResponse(binding=binding_id, agent=binding.agent, owner=owner, definition_digest=digest)
