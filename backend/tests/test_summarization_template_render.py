@@ -162,6 +162,24 @@ def test_render_warning_identifies_template_without_logging_content(caplog):
     assert "private history" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("template", "leaked_text", "error_type"),
+    [
+        ("private {messages.private_token}", "private_token", "AttributeError"),
+        ("private {messages:secret_spec}", "secret_spec", "ValueError"),
+    ],
+)
+def test_render_warning_logs_error_type_without_exception_text(caplog, template, leaked_text, error_type):
+    middleware = _middleware(_StaticChatModel(), template)
+
+    assert middleware._build_summary_prompt([HumanMessage(content="private history", id="h1")]) is None
+
+    assert canonical_hash(template) in caplog.text
+    assert error_type in caplog.text
+    assert leaked_text not in caplog.text
+    assert "private history" not in caplog.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary_prompt", ["{messages.foo}", "{messages[missing]}"])
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])

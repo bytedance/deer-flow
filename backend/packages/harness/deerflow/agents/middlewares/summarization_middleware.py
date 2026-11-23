@@ -794,9 +794,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return self.summary_prompt.format(messages=body).rstrip()
         except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
             logger.warning(
-                "Summarization template failed to render; keeping history. Use {messages} for history and double literal braces ({{ }}). summary_prompt_hash=%s error=%s",
+                "Summarization template failed to render; keeping history. Use {messages} for history and double literal braces ({{ }}). summary_prompt_hash=%s error_type=%s",
                 canonical_hash(self.summary_prompt),
-                exc,
+                type(exc).__name__,
             )
             return None
 
