@@ -1840,3 +1840,59 @@ def test_config_path_reports_the_resolved_selected_env_file(tmp_path, monkeypatc
     _, _, _, launcher = support_bundle.resolve_config_path(project_root)
 
     assert launcher["DEER_FLOW_ENV_FILE"] == str(backend / "profile.env")
+
+
+def test_explicit_config_reaches_the_doctor_child(tmp_path, monkeypatch):
+    # End-to-end: create_support_bundle must hand the explicit `--config` file to
+    # the doctor child, so its report describes the same file the archive
+    # summarized instead of the checkout `.env` selector `--config` overrode.
+    project_root = tmp_path / "project"
+    (project_root / "backend").mkdir(parents=True)
+    explicit = tmp_path / "explicit.yaml"
+    explicit.write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    (project_root / "alternate.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    (project_root / ".env").write_text(f"DEER_FLOW_CONFIG_PATH={project_root / 'alternate.yaml'}\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    def fake_doctor(_project_root, env=None):
+        captured.update(env or {})
+        return {"ok": True, "returncode": 0, "stdout": "DeerFlow Health Check", "stderr": ""}
+
+    monkeypatch.setattr(support_bundle, "collect_environment", lambda _project_root: {"platform": {}, "commands": []})
+    monkeypatch.setattr(support_bundle, "collect_git_summary", lambda _project_root: {})
+    monkeypatch.setattr(support_bundle, "collect_doctor_output", fake_doctor)
+
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=tmp_path / "support.zip",
+        config_path=explicit,
+        include_doctor=True,
+    )
+
+    assert captured["DEER_FLOW_CONFIG_PATH"] == str(explicit)
+
+
+def test_config_path_carries_the_launchers_dotenv_switch_with_the_selector(tmp_path, monkeypatch):
+    # `load_selected_env_file` reads `PYTHON_DOTENV_DISABLED` next to the
+    # selector, so the doctor needs the launcher's effective value. An inherited
+    # `1` with a checkout `.env` setting `0` leaves the resolved selector
+    # rejected while the bundle and the real launcher load it.
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    (backend / "profile.env").write_text("DEER_FLOW_CONFIG_PATH=./profile/active.yaml\n", encoding="utf-8")
+    (backend / "profile").mkdir()
+    (backend / "profile" / "active.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    (project_root / ".env").write_text(
+        "DEER_FLOW_ENV_FILE=$PWD/backend/profile.env\nPYTHON_DOTENV_DISABLED=0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PWD", str(project_root))
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    _, _, _, launcher = support_bundle.resolve_config_path(project_root)
+
+    assert launcher["DEER_FLOW_ENV_FILE"] == str(backend / "profile.env")
+    assert launcher["PYTHON_DOTENV_DISABLED"] == "0"

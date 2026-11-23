@@ -397,6 +397,10 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
     # would otherwise hand the harness the literal `$PWD` python-dotenv keeps.
     if resolved_env_file is not None:
         location["DEER_FLOW_ENV_FILE"] = resolved_env_file
+        # `load_selected_env_file` reads this switch alongside the selector, so
+        # forward the launcher's effective value too. A child that keeps an
+        # inherited value cannot load the file the bundle resolved.
+        location["PYTHON_DOTENV_DISABLED"] = base.get("PYTHON_DOTENV_DISABLED", "")
     # The Gateway resolves a relative runtime root and config path from its own
     # working directory, `backend/`, not from wherever the bundle was started.
     # Normalize both here so every consumer reads the same file the Gateway would.
@@ -481,10 +485,14 @@ def _doctor_environ(launcher: dict[str, str], config_path: Path, resolution_erro
     ``DEER_FLOW_LAUNCHER_VIEW_RESOLVED`` tells the doctor the selectors are
     already final, so it must not re-expand the checkout `.env` over them: doing
     so resolves ``${DEER_FLOW_PROJECT_ROOT:-profile}`` against the runtime root
-    the bundle just defaulted and picks a different file than the archive.
+    the bundle just defaulted and picks a different file than the archive. An
+    explicit ``--config`` pins that file in ``launcher`` for the same reason, so
+    the doctor reads the file the archive summarized rather than the checkout
+    selector ``--config`` overrode.
     """
     env = {**os.environ, **launcher}
-    env["DEER_FLOW_LAUNCHER_VIEW_RESOLVED"] = "1"
+    if launcher:
+        env["DEER_FLOW_LAUNCHER_VIEW_RESOLVED"] = "1"
     env.setdefault("PWD", str(config_path.parent))
     if resolution_error:
         env["DEER_FLOW_CONFIG_PATH"] = str(config_path)
@@ -1173,6 +1181,11 @@ def create_support_bundle(
         config_path = config_path.resolve()
         config_error = None
         config_error_is_resolution = False
+        # `--config` bypasses launcher resolution, so there is no dotenv view to
+        # hand the doctor. Pin the explicit file as the resolved selector
+        # instead: the doctor must read the file the archive summarized, not the
+        # checkout `.env` selector `--config` was meant to override.
+        launcher = {"DEER_FLOW_CONFIG_PATH": str(config_path)}
     else:
         config_path, config_error, config_error_is_resolution, launcher = resolve_config_path(project_root)
     extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
