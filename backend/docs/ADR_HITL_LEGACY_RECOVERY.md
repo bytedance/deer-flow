@@ -63,3 +63,20 @@ Verification must seed a version-1 checkpoint with its original node name, then
 restore production assembly before recovery. Exercise the real Gateway with
 full/delta checkpoints, configuration changes and checkpoint-only retry. Keep
 version-2 call-ID, parallel approval and edited-argument tests in the selection.
+
+## Upstream synchronization (2026-11-23)
+
+Integrate main at `76a47652fac584d05d2955bdd84e1cf87d5fa207` without
+rewriting the published PR history. Main consolidated the call-ID tests into
+`test_tool_approval.py` and deleted `test_tool_approval_call_ids.py`. Preserve
+that consolidation and move this PR's colliding-invalid-call regression into
+the owning suite instead of restoring the removed file.
+
+This synchronization retains the existing reject-only legacy contract and the
+current version-2 approval path. Verify the automatically merged assembly,
+Gateway validation and worker code against current main: caller context still
+cannot activate recovery, exact pause identity and durable answer/restore CAS
+remain mandatory, and parallel version-2 decisions retain their interrupt IDs.
+Re-run the native-message, authenticated full/delta Gateway and runtime tests,
+strict blocking-I/O checks, lint, package and compatibility checks. Record actual
+results and any unverified backend or production checks in the PR.
