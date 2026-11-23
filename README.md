@@ -88,6 +88,7 @@ Open http://localhost:2026.
 
 - All configuration options, providers and manual setup: [Configuration](docs/guide/configuration.md)
 - Docker details, sizing, upgrades, startup modes and production deployment: [Running the Application](docs/guide/deployment.md)
+- Upgrading a custom Redis checkpoint cache prefix: [Redis checkpoint history cache upgrade](docs/guide/deployment.md#redis-checkpoint-history-cache-upgrade)
 - Running on a server or exposing it beyond localhost: read the [Security Notice](docs/guide/security.md) first
 
 ## From Deep Research to Super Agent Harness
@@ -116,6 +117,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
 | Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
+| Agent teams, SQLite/PostgreSQL persistence and shutdown behavior | [Agent teams extension](examples/deerflow-extension-agent-teams/README.md) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
 | Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |

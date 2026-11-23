@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import threading
 from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
@@ -652,6 +653,103 @@ def _gateway_lifespan_patches(startup_config, *, pool=None, browser_manager=None
             )
         )
     return patches
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redis_mode", ["cluster", "standalone"])
+async def test_lifespan_warms_cluster_sandbox_provider_off_loop(monkeypatch, redis_mode):
+    from app.gateway.app import lifespan
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+    from deerflow.sandbox import sandbox_provider
+
+    config = MagicMock()
+    config.log_level = "INFO"
+    config.memory.enabled = False
+    config.sandbox.ownership = SandboxOwnershipConfig(type="redis", redis_mode=redis_mode)
+    loop_thread = threading.get_ident()
+    construction_threads = []
+    provider = MagicMock()
+
+    def build_provider():
+        construction_threads.append(threading.get_ident())
+        return provider
+
+    monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", None)
+    monkeypatch.setattr(sandbox_provider, "get_app_config", lambda: config)
+    monkeypatch.setattr(sandbox_provider, "resolve_class", lambda *_: build_provider)
+    pool = MagicMock(close_all=AsyncMock())
+    with ExitStack() as stack:
+        for patcher in _gateway_lifespan_patches(config, pool=pool):
+            stack.enter_context(patcher)
+        async with lifespan(FastAPI()):
+            if redis_mode == "cluster":
+                assert sandbox_provider.get_initialized_sandbox_provider() is provider
+                assert sandbox_provider.get_sandbox_provider() is provider
+                assert len(construction_threads) == 1
+                assert construction_threads[0] != loop_thread
+            else:
+                assert sandbox_provider.get_initialized_sandbox_provider() is None
+
+    assert provider.shutdown.call_count == (1 if redis_mode == "cluster" else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="SIGHUP is POSIX-only")
+@pytest.mark.parametrize("backend", ["aio", "e2b"])
+async def test_cluster_warmup_preserves_sighup_cleanup(monkeypatch, backend):
+    from redis import RedisCluster
+    from redis.cluster import NodesManager
+
+    from app.gateway.app import lifespan
+    from deerflow.community.aio_sandbox import AioSandboxProvider
+    from deerflow.community.e2b_sandbox import E2BSandboxProvider
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+    from deerflow.sandbox import sandbox_provider
+
+    config = MagicMock()
+    config.log_level = "INFO"
+    config.memory.enabled = False
+    config.sandbox.ownership = SandboxOwnershipConfig(type="redis", redis_mode="cluster", redis_url="redis://seed:7000/0")
+    discovery_threads = []
+
+    def discover(manager):
+        discovery_threads.append(threading.current_thread())
+        manager.default_node = next(iter(manager.startup_nodes.values()))
+
+    monkeypatch.setattr(NodesManager, "initialize", discover)
+    monkeypatch.setattr(RedisCluster, "command", lambda self: {})
+    cls = AioSandboxProvider if backend == "aio" else E2BSandboxProvider
+    monkeypatch.setattr(cls, "_load_config", lambda self: dict(ownership=config.sandbox.ownership, idle_timeout=0, replicas=1, overflow_policy="reject", reconciliation_max_seconds=1))
+    if backend == "aio":
+        monkeypatch.setattr(cls, "_create_backend", lambda self: MagicMock())
+        monkeypatch.setattr(cls, "_reconcile_orphans", lambda self: None)
+    else:
+        monkeypatch.setattr(cls, "_start_maintenance_threads", lambda self: None)
+    monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", None)
+    monkeypatch.setattr(sandbox_provider, "get_app_config", lambda: config)
+    monkeypatch.setattr(sandbox_provider, "resolve_class", lambda *_: cls)
+
+    forwarded = []
+
+    def previous(signum, frame):
+        forwarded.append(signum)
+
+    with ExitStack() as stack:
+        stack.callback(signal.signal, signal.SIGHUP, signal.signal(signal.SIGHUP, previous))
+        stop_handlers = [signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)]
+        for patcher in _gateway_lifespan_patches(config, pool=MagicMock(close_all=AsyncMock())):
+            stack.enter_context(patcher)
+        async with lifespan(FastAPI()):
+            provider = sandbox_provider.get_sandbox_provider()
+            assert discovery_threads and threading.main_thread() not in discovery_threads
+            assert [signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)] == stop_handlers
+            handler = signal.getsignal(signal.SIGHUP)
+            assert callable(handler) and handler is not previous
+            with patch.object(provider, "shutdown", wraps=provider.shutdown) as shutdown:
+                signal.raise_signal(signal.SIGHUP)
+                shutdown.assert_called_once_with()
+            assert forwarded == [signal.SIGHUP]
+        assert signal.getsignal(signal.SIGHUP) is previous
 
 
 def test_lifespan_closes_pooled_mcp_sessions_on_shutdown():
