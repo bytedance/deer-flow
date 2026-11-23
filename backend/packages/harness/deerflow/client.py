@@ -1346,7 +1346,7 @@ class DeerFlowClient:
             if no AI text was produced.
         """
         stream = self.stream
-        if getattr(stream, "__func__", None) is DeerFlowClient._default_stream:
+        if getattr(stream, "__self__", None) is self and getattr(stream, "__func__", None) is DeerFlowClient._default_stream:
             events = self._stream_with_trace(message, thread_id=thread_id, emit_values=False, overrides=kwargs)
         else:
             events = stream(message, thread_id=thread_id, **kwargs)

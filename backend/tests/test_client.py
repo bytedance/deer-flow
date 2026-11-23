@@ -1352,6 +1352,24 @@ class TestChat:
             outcome.observe(event)
         assert outcome.answer() == expected
 
+    def test_uses_stream_bound_to_another_client(self, client, mock_app_config):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            delegate = DeerFlowClient()
+
+        outer_model = FakeMessagesListChatModel(responses=[AIMessage(content="OUTER MODEL")])
+        delegate_model = FakeMessagesListChatModel(responses=[AIMessage(content="DELEGATE MODEL")])
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", create_agent(model=outer_model, state_schema=ThreadState)),
+            patch.object(delegate, "_ensure_agent"),
+            patch.object(delegate, "_agent", create_agent(model=delegate_model, state_schema=ThreadState)),
+            patch.object(client, "stream", delegate.stream),
+        ):
+            assert client.chat("q", thread_id="t-delegated-stream") == "DELEGATE MODEL"
+
     def test_returns_last_message(self, client):
         """chat() returns the last AI message text."""
         ai1 = AIMessage(content="thinking...", id="ai-1")
