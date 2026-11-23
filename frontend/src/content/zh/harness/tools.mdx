@@ -89,7 +89,7 @@ task(agent="general-purpose", task="...", context="...")
 | `grep`        | 搜索文件内容                                               |
 | `write_file`  | 向文件写入内容                                             |
 | `str_replace` | 替换文件中的字符串                                         |
-| `bash`        | 执行 Shell 命令（需要 `allow_host_bash: true` 或容器沙箱） |
+| `bash`        | 在隔离沙箱中执行 Shell 命令 |
 
 在 `config.yaml` 的 `tools:` 下配置：
 
@@ -268,9 +268,8 @@ tools:
   - name: web_fetch
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
-    api_key: $JINA_API_KEY # 可选；匿名使用有速率限制
 ```
-将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制。
+将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制；在 `.env` 中设置 `JINA_API_KEY` 可提高限额。该工具只读取这个环境变量，不读取 `api_key` 字段。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

@@ -37,6 +37,9 @@ make test-blocking-io                                  # channels share the Gate
 - **Final reply before dedupe release.** Publish the final outbound message before
   you release the inbound dedupe key. A provider redelivery can otherwise overtake
   the reply.
+- **Goal handoff pins the saved thread.** Recheck the conversation binding after
+  confirmation delivery and run preparation. Use run-admission evidence when
+  reporting a rejected start or a response lost after submission.
 - **Telegram photo fallback is narrow.** Only a photo `BadRequest` with
   `PHOTO_INVALID_DIMENSIONS` or `IMAGE_PROCESS_FAILED` is retried, once, as a
   document with the same bytes, file name and reply target. Other errors and
@@ -60,6 +63,9 @@ make test-blocking-io                                  # channels share the Gate
   `/start <code>`) is handled before `allowed_users` on purpose, so that a new user
   can bind. The code is the secret: show it only in the browser that requested it
   and never echo it to the chat.
+- **Feishu post commands use the caption.** Add placeholders for top-level post
+  attachments after command detection. For commands that enter the chat path,
+  `receive_file` adds their placeholders after the manager parses the arguments.
 - **One active owner per external identity.** A partial unique index in the
   database enforces this. Application code alone cannot, because two workers can
   bind at the same time.
@@ -74,8 +80,8 @@ make test-blocking-io                                  # channels share the Gate
 
 - The webhook route skips session auth and CSRF because the HMAC signature
   authenticates it. It is mounted only when `GITHUB_WEBHOOK_SECRET` is set.
-- Outbound is log-only by design. Each agent posts its own comment with `gh` from
-  its sandbox, so the manager starts the run and does not wait for it.
+- Outbound is log-only. The agent uses configured GitHub tools for outbound
+  actions. Webhook admission stays independent of tool authentication.
 - Follow-up buffering while a thread is busy is process-local. Read
   [the contract](../../docs/GITHUB_AGENTS.md#follow-up-buffering-while-busy-4121)
   before you change it.

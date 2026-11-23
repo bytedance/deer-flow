@@ -53,11 +53,14 @@ existing pass-through behavior.
 
 ## Bash exit marker
 
-The subagent executor reads a bash result's exit status only from its end
-(`Exit Code: N`, or a whole-output `Command exited with code N`); with no marker
-it falls back to `deerflow_tool_meta`, which reports `success` for a nonzero
-exit. A model-visible rewrite of a `bash`/`bash_tool` result must therefore keep
-the original trailing marker last: the preview re-appends it after the `Access:`
+The subagent executor prefers an integer `deerflow_tool_meta.exit_code` stamped
+by the tool producer (`source: tool_return`), so command output that prints an
+exit marker cannot override the provider's execution result. Older checkpoints
+and plain-string providers retain the fallback: a trailing `Exit Code: N` or a
+whole-output `Command exited with code N`, then metadata/native status when no
+marker exists. A model-visible rewrite of a `bash`/`bash_tool` result keeps the
+original trailing marker last for this compatibility path: the preview
+re-appends it after the `Access:`
 footer, and the storage-unavailable fallback reserves it from `max_chars` like
 sandbox truncation. The local marker regex mirrors
 `sandbox.tools._BASH_EXIT_MARKER_TAIL_RE` and a test pins them together. The

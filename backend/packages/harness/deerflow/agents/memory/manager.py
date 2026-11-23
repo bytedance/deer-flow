@@ -113,6 +113,10 @@ class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
 
 
+class MemoryDuplicateFactIdError(ValueError):
+    """A memory import contains more than one record for the same fact ID."""
+
+
 class MemoryReadError(MemoryManagerError):
     """A required memory read failed, so callers must not continue without it."""
 

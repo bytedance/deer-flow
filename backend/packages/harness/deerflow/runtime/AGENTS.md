@@ -34,14 +34,23 @@ make test-blocking-io
   would overwrite the thread view of an SDK client. Consumers that only handle the
   root run ignore namespaced frames.
 
+- **Memory writers fence the captured generation.** After waiting for the stream Condition, check `retired` and `ended` before allocating an event ID or appending; rejected writes consume no sequence number, and END is idempotent for that generation.
+
 ## Checkpoints
 
 - **The channel mode is fixed for the life of the process.** A reader in `full`
   mode rejects a `delta` checkpoint; it does not guess.
 - **Read and change state through `CheckpointStateAccessor`** with the thread's
   effective schema. It preserves mode gates, parentage and pending writes.
+- **A failed pre-run snapshot leaves no message-ID boundary.** When a
+  checkpointer exists but the pre-run capture fails, the first `values` frame
+  establishes a replay baseline; only later message IDs can decide this run's
+  LLM error fallback.
 - **Delta resume and rollback rewrite the current head.** They do not fork.
   Reject a missing tuple or pending sends before the first write.
+- **Redis history cache purges include the previous default namespace.** On
+  the v1-to-v2 upgrade, purge thread data under both prefixes for the same
+  database identity. Custom namespaces have an operator-managed migration.
 
 ## Admission and terminal commit
 
@@ -73,6 +82,16 @@ make test-blocking-io
   matches the durable row.
 - **An evidence receipt needs the worker's own final acknowledgement.** An
   unknown or cancelled write outcome yields no receipt.
+
+## Goals
+
+- **Goal synthesis is read-only.** `runtime/goal_synthesis.py` composes the
+  `/goal from-chat` objective from the recent agreement; the Gateway route owns
+  the save. It treats the conversation as data, applies the evaluator's PII
+  redaction and oneshot-LLM path, excludes evidence tool results, keeps the
+  newest turn within its own 12,000-character budget even when a single paste
+  exceeds it, and caps the compaction summary at half so recent constraints
+  retain room.
 
 ## Server-installed capabilities
 

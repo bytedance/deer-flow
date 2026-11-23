@@ -79,8 +79,41 @@ def _restore_deepseek_assistant_payload(
         payload_msg["reasoning_content"] = ""
 
 
+def _native_cache_read(usage: Any) -> int | None:
+    """Read DeepSeek's native cache count only when no standard count was sent."""
+    if isinstance(usage, openai.BaseModel):
+        usage = usage.model_dump()
+    if not isinstance(usage, Mapping):
+        return None
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, Mapping) and details.get("cached_tokens") is not None:
+        return None
+    cached = usage.get("prompt_cache_hit_tokens")
+    prompt = usage.get("prompt_tokens")
+    if type(cached) is int and type(prompt) is int and 0 <= cached <= prompt:
+        return cached
+    return None
+
+
 class GuardedChatDeepSeek(OpenAIEmptyChoicesMixin, ChatDeepSeek):
-    """DeepSeek provider base with typed handling for empty response choices."""
+    """DeepSeek response guards and native prompt-cache usage normalization."""
+
+    def _create_chat_result(self, response: dict | openai.BaseModel, generation_info: dict | None = None) -> ChatResult:
+        result = super()._create_chat_result(response, generation_info)
+        raw_usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+        cached = _native_cache_read(raw_usage)
+        if cached is not None:
+            for generation in result.generations:
+                if usage := generation.message.usage_metadata:
+                    usage.setdefault("input_token_details", {})["cache_read"] = cached
+        return result
+
+    def _convert_chunk_to_generation_chunk(self, chunk: dict, default_chunk_class: type, base_generation_info: dict | None) -> ChatGenerationChunk | None:
+        result = super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info)
+        cached = _native_cache_read(chunk.get("usage"))
+        if result is not None and cached is not None and (usage := result.message.usage_metadata):
+            usage.setdefault("input_token_details", {})["cache_read"] = cached
+        return result
 
 
 class PatchedChatDeepSeek(GuardedChatDeepSeek):

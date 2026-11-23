@@ -34,6 +34,28 @@ def _finish_state_mutation(_state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def validate_state_mutation_node(as_node: str) -> str:
+    """Return *as_node*, or raise ``ValueError`` when LangGraph refuses it as a node name.
+
+    :func:`build_state_mutation_graph` registers ``as_node`` as the graph's
+    only node, and LangGraph refuses ``__start__``, ``__end__``, its other
+    reserved names and any name containing a namespace separator (``|``) or
+    task separator (``:``). Callers that take the name from a client check it
+    here first, so a bad name is an input error and not a failed compile.
+    The reserved set is private to LangGraph; recheck this import when
+    upgrading LangGraph (verified against 1.2.9 and 1.2.14).
+    """
+    from langgraph._internal._constants import NS_END, NS_SEP, RESERVED
+    from langgraph.constants import END, START
+
+    if as_node in (START, END) or as_node in RESERVED:
+        raise ValueError(f"Node name {as_node!r} is reserved by LangGraph")
+    for character in (NS_SEP, NS_END):
+        if character in as_node:
+            raise ValueError(f"Node name must not contain {character!r}")
+    return as_node
+
+
 def build_state_mutation_graph(
     as_node: str,
     mode: CheckpointChannelMode,
@@ -214,7 +236,22 @@ class CheckpointStateAccessor:
         if limit is not None and limit <= 0:
             return []
         result = []
-        async for snapshot in self.graph.aget_state_history(prepared, limit=limit):
+        walk_config = prepared
+        before = None
+        if prepared["configurable"].get("checkpoint_id"):
+            # Savers match config.checkpoint_id exactly in ``list``, so
+            # get_state_history would return only the anchor. Treat it as the
+            # inclusive start of the walk, like the Gateway's raw accessor.
+            async for anchor in self.graph.aget_state_history(prepared, limit=1):
+                raise_if_snapshot_incompatible(anchor, self.mode)
+                result.append(anchor)
+            before = prepared
+            walk_config = {**prepared, "configurable": {k: v for k, v in prepared["configurable"].items() if k != "checkpoint_id"}}
+            if limit is not None and len(result) >= limit:
+                return result
+        remaining = None if limit is None else limit - len(result)
+        walk_kwargs = {"before": before} if before is not None else {}
+        async for snapshot in self.graph.aget_state_history(walk_config, limit=remaining, **walk_kwargs):
             raise_if_snapshot_incompatible(snapshot, self.mode)
             result.append(snapshot)
             if limit is not None and len(result) >= limit:

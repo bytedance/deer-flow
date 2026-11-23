@@ -90,6 +90,12 @@ class ToolApprovalFeature(BaseModel):
     allowed_modes: list[Literal["ask", "auto", "full"]] = Field(default_factory=list)
 
 
+class VoiceInputFeature(BaseModel):
+    enabled: bool = False
+    max_audio_bytes: int = 0
+    max_duration_seconds: int = 0
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -102,6 +108,7 @@ class FeaturesResponse(BaseModel):
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
     run_inputs: bool = False
+    voice_input: VoiceInputFeature = Field(default_factory=VoiceInputFeature)
     tool_approval: ToolApprovalFeature = Field(default_factory=ToolApprovalFeature)
 
 
@@ -115,8 +122,10 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
     approval = getattr(config, "hitl_approval", None)
+    voice = getattr(config, "voice_input", None)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     return FeaturesResponse(
+        voice_input=VoiceInputFeature(enabled=True, max_audio_bytes=voice.max_audio_bytes, max_duration_seconds=voice.max_duration_seconds) if voice is not None else VoiceInputFeature(),
         tool_approval=ToolApprovalFeature(enabled=approval.enabled, default_mode=approval.default_mode, allowed_modes=approval.allowed_modes) if approval is not None else ToolApprovalFeature(),
         run_inputs=getattr(getattr(request.app.state, "run_manager", None), "input_store", None) is not None,
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),

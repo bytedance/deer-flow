@@ -19,15 +19,15 @@ dev:
 gateway:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run --locked uvicorn app.gateway.app:app --host 127.0.0.1 --port 8001
 
-# Run all four duration-balanced shards locally; wait for every shard on failure.
-TEST_JOBS ?= 4
-TEST_SHARD_TARGETS := test-shard-1 test-shard-2 test-shard-3 test-shard-4
-.PHONY: test test-shard $(TEST_SHARD_TARGETS)
+# Run all six duration-balanced shards locally (matching CI); wait for every shard on failure.
+TEST_JOBS ?= 6
+TEST_SHARD_TARGETS := test-shard-1 test-shard-2 test-shard-3 test-shard-4 test-shard-5 test-shard-6
+.PHONY: test test-shard test-bundled-extensions test-benchmark $(TEST_SHARD_TARGETS)
 test:
 	$(MAKE) --no-print-directory -k -j$(TEST_JOBS) $(TEST_SHARD_TARGETS)
 
 $(TEST_SHARD_TARGETS):
-	$(MAKE) --no-print-directory test-shard SPLITS=4 GROUP=$(patsubst test-shard-%,%,$@)
+	$(MAKE) --no-print-directory test-shard SPLITS=6 GROUP=$(patsubst test-shard-%,%,$@)
 
 test-live:
 	DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m live tests/ -v -s
@@ -41,21 +41,35 @@ test-blocking-io:
 # read from .test_durations. Shards only READ that file (no --store-durations),
 # so concurrent CI jobs cannot race writes on it. Refresh it with
 # `make test-shard-durations` after a meaningful change to the test set.
-# `make test-shard SPLITS=4 GROUP=2` runs shard 2 of 4; a bare `make test-shard`
-# runs the whole offline suite as a single split; `make test` runs all four shards.
+# `make test-shard SPLITS=6 GROUP=2` runs shard 2 of 6; a bare `make test-shard`
+# runs the whole offline suite as a single split; `make test` runs all six shards.
 SPLITS ?= 1
 GROUP ?= 1
 DURATIONS_FILE ?= .test_durations
 test-shard:
 	@test -f "$(DURATIONS_FILE)" || \
 		(echo "error: $(DURATIONS_FILE) is missing; run 'make test-shard-durations' to regenerate the duration baseline" >&2; exit 1)
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live and not bundled_extension and not benchmark" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -q
 
-# Regenerate .test_durations from the full offline (non-live, non-blocking-I/O)
-# suite so duration-aware sharding reflects real wall-clock cost. Run locally or
-# in a periodic job, then commit the refreshed file.
+# Regenerate .test_durations from the offline core suite (non-live,
+# non-blocking-I/O, non-bundled-extension, non-benchmark) so duration-aware
+# sharding reflects real wall-clock cost. Run locally or in a periodic job, then
+# commit the refreshed file.
 test-shard-durations:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --clean-durations --durations-path=$(DURATIONS_FILE) tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live and not bundled_extension and not benchmark" --ignore=tests/blocking_io --store-durations --clean-durations --durations-path=$(DURATIONS_FILE) tests/ -q
+
+# Bundled extension examples own their behavior suites; the core shards exclude
+# them so an optional example cannot fail an unrelated core PR. The extension CI
+# workflow runs this target when an example, the extension contract or the
+# bundled tests themselves change.
+test-bundled-extensions:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "bundled_extension and not live" tests/ -q
+
+# Offline benchmark script suites carry the `benchmark` marker; the core shards
+# exclude them so benchmark harness scripts do not slow down unrelated core PRs.
+# The benchmark CI workflow runs this target when benchmark scripts or tests change.
+test-benchmark:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "benchmark and not live" tests/ -q
 
 lint:
 	uv run ruff check .

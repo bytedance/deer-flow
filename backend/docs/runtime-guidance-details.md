@@ -161,10 +161,21 @@ and after scans. Its budget is shared and consumed root by root (workspace
 before outputs), so a workspace at the limit starves outputs.
 `get_changed_output_paths()` inherits this uncertainty: newly observed outputs
 are suppressed when the before snapshot was truncated, while modifications
-observed in both snapshots remain eligible. The worker passes this list through
+observed in both snapshots remain eligible. Hidden paths are working state, not
+deliverables: any dot-prefixed segment below the outputs root (a cursor/state
+JSON, a `.work/` scratch tree) is excluded, so it never enters `produced_paths`.
+The worker passes this list through
 `_produced_output_paths()` to its delivery check; an empty list leaves
 `produced_paths` and `verification` absent from the delivery receipt, and
-`_delivery_error()` returns no error. When that empty list accompanies a truncated
+`_delivery_error()` returns no error. Delivery enforcement is required when the
+run took part in a goal: the continuation helper reports an active, expected
+goal through a participation callback before any evaluation write, a scheduled
+goal is installed, the evaluator verdict was persisted, or the goal state could
+not be read (unknown keeps delivery required). A failed verdict write therefore
+still requires delivery. An ordinary run records the same
+verdict with `enforcement: "advisory"` and stays successful, because working
+files and a local copy of a result written to an external system are not
+deliverables. When that empty list accompanies a truncated
 pre-run snapshot, the receipt includes
 `verification_skipped: "truncated_pre_run_snapshot"` on both normal completion and
 failure/cancellation cleanup. This marker explains the skipped check without
@@ -180,13 +191,18 @@ backend-owned `(change_seq, run_id)` key rather than timestamps or per-thread
 event sequence numbers. The singleton SQL clock allocates positions in the same
 transaction as each public record mutation; memory uses a process-local counter.
 The clock row serializes position-bearing SQL mutations globally until their
-transactions commit, so every mutator must acquire it before any run-row lock.
+transactions commit, so every position-bearing mutator must acquire it before
+any run-row lock.
 An atomic thread operation uses one position for its interrupted rows and new
-row, with `run_id` ordering ties. High-frequency progress snapshots and lease
-heartbeats do not advance this position: they are not lifecycle-discovery
-signals, progress evidence remains available from the event stream, and
-excluding them bounds clock contention. A later lifecycle change exposes the
-run row's latest `updated_at` and accumulated progress fields to internal readers.
+row, with `run_id` ordering ties. High-frequency progress snapshots, lease
+heartbeats and run-input appends do not advance this position: they are not
+lifecycle-discovery signals, progress evidence remains available from the event
+stream, and excluding them bounds clock contention. A run-input append writes
+only `run_inputs_json`, so no changed-run cursor could read back a position it
+took; because it reads the row before it writes it, on SQLite it takes the
+write lock up front with `BEGIN IMMEDIATE` instead. A later lifecycle change
+exposes the run row's latest `updated_at` and accumulated progress fields to
+internal readers.
 Rows from before the migration retain `change_seq=0` and page deterministically
 by run id. Because a later mutation only moves a row forward, concurrent paging
 may replay a run but cannot move an unseen run behind the committed cursor.
@@ -343,7 +359,7 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
-- `checkpoint_patches.py` (package root) — the one remaining patch: `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty channel (#4380; probe-guarded). The `InMemorySaver` delta-history patch is gone: `langgraph-checkpoint` 4.2.0 fixed that write loss upstream (#8526) while keeping its override, so the dependency floor plus the full → delta migration contract test are the gate — never re-add a version-guarded saver patch.
+- `checkpoint_patches.py` (package root) — the one remaining patch: `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty channel (#4380; probe-guarded). The `InMemorySaver` delta-history patch is gone: `langgraph-checkpoint` 4.2.0 fixed that write loss upstream (#8526) while keeping its override. The 4.3.0 floor also keeps same-superstep replay in live task-path order; SQLite 3.1.2 and Postgres 3.1.3 carry the matching saver behavior, including paged Postgres ancestor walks. Dependency floors plus the migration, ordering and pagination contract tests are the gates — never re-add version-guarded saver patches or defect-triggered skips.
 - `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `delta_messages_field` / `DELTA_MESSAGES_FIELD` (`DeltaChannel` at the configured `snapshot_frequency`, default 10), schema adaptation helpers
 - `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer). Runs stamp their effective agent into server-owned checkpoint metadata; manual compaction uses that binding—not request `agent_name`—for memory policy and bucket. Missing/invalid legacy bindings and unreadable agent configs fail closed by skipping the optional flush while compaction may continue with the default model; a missing pre-binding checkpoint emits a warning so the skipped write is observable.
 - `runtime/checkpoint_cache/` + `runtime/checkpointer/cached_saver.py` — delta-mode checkpoint history cache; checkpoint state reads MUST go through `CheckpointStateAccessor`, and the checkpointer may be a `CachedHistorySaver` wrapper — never rely on concrete saver types

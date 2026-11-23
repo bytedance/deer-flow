@@ -289,11 +289,16 @@ class NotificationDeliveryWorker:
                     event_prefs = self._resolve_notification_event_preferences(delivery.get("owner_user_id") or "")
                     if inspect.isawaitable(event_prefs):
                         event_prefs = await event_prefs
+                    if not isinstance(event_prefs, dict):
+                        raise ValueError("Invalid runtime event preference response")
+                    event_enabled = event_prefs.get(event, False)
+                    if type(event_enabled) is not bool:
+                        raise ValueError("Invalid runtime event preference value")
                 except Exception:
                     logger.warning("Could not verify runtime event preference for delivery %s; parking it", delivery["id"], exc_info=True)
                     await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error="could not verify notification preference", count_attempt=False)
                     return False
-                if isinstance(event_prefs, dict) and not event_prefs.get(event, False):
+                if not event_enabled:
                     await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error=DISABLED_BY_OWNER, count_attempt=False, terminal=True)
                     return False
             elif preferences.get(event) is False:

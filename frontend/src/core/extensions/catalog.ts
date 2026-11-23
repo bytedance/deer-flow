@@ -6,6 +6,17 @@ import type { LoadedContribution } from "./registry";
 // Discovery metadata only: catalog entries never enter the runtime module loader.
 export const extensionCatalog = [
   {
+    key: "officePreview",
+    package: "deerflow-extension-office-preview",
+    namespace: "office-preview",
+    icon: "file-text",
+  },
+  {
+    key: "workspaceSearch",
+    package: "deerflow-extension-workspace-search",
+    namespace: null,
+  },
+  {
     key: "agentTeams",
     icon: "users",
     package: "deerflow-extension-agent-teams",
@@ -66,6 +77,16 @@ export const extensionCatalog = [
     key: "knowledgeCenter",
     package: "deerflow-extension-knowledge-center",
     namespace: "knowledge-center",
+  },
+  {
+    key: "skillEvolution",
+    package: "deerflow-extension-skill-evolution",
+    namespace: null,
+  },
+  {
+    key: "runPostmortem",
+    package: "deerflow-extension-run-postmortem",
+    namespace: "community.run-postmortem",
   },
   { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
   { key: "weknora", package: "deerflow-extension-weknora", namespace: null },

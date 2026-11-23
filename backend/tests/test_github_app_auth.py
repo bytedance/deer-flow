@@ -91,6 +91,114 @@ def test_mint_app_jwt_verifies_with_its_own_key(set_github_env: None) -> None:
     jwt.decode(token, pub_pem, algorithms=["RS256"])
 
 
+def _public_pem(private_key_pem: str) -> str:
+    priv = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+    return (
+        priv.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
+
+
+def test_mint_app_jwt_parses_the_private_key_once(set_github_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parsing the PEM holds the GIL for tens of ms; repeat mints reuse the parsed key."""
+    import jwt.algorithms
+
+    parses = 0
+    load_pem_private_key = jwt.algorithms.load_pem_private_key
+
+    def counting_load(*args, **kwargs):
+        nonlocal parses
+        parses += 1
+        return load_pem_private_key(*args, **kwargs)
+
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", counting_load)
+    public_pem = _public_pem(load_app_private_key())
+
+    tokens = [mint_app_jwt(now=1700000000.0 + i) for i in range(3)]
+
+    assert parses == 1
+    for token in tokens:
+        jwt.decode(token, public_pem, algorithms=["RS256"], options={"verify_exp": False, "verify_iat": False})
+
+
+def test_concurrent_mint_app_jwt_calls_parse_the_key_once(set_github_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async mints run ``mint_app_jwt`` in worker threads; a cold race still parses once."""
+    import threading
+
+    import jwt.algorithms
+
+    parses = 0
+    second_parse = threading.Event()
+    load_pem_private_key = jwt.algorithms.load_pem_private_key
+
+    def slow_counting_load(*args, **kwargs):
+        nonlocal parses
+        parses += 1
+        if parses == 1:
+            # Hold the first parse open long enough for the other thread to
+            # start its own parse, which only the lock prevents.
+            second_parse.wait(timeout=0.5)
+        else:
+            second_parse.set()
+        return load_pem_private_key(*args, **kwargs)
+
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", slow_counting_load)
+    barrier = threading.Barrier(2)
+    tokens: list[str] = []
+
+    def mint() -> None:
+        barrier.wait()
+        tokens.append(mint_app_jwt())
+
+    threads = [threading.Thread(target=mint) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert len(tokens) == 2
+    assert parses == 1
+
+
+def test_mint_app_jwt_uses_a_rotated_inline_key(set_github_env: None, monkeypatch: pytest.MonkeyPatch, private_key_pem: str) -> None:
+    import jwt
+
+    first = mint_app_jwt()
+    rotated_pem = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", rotated_pem)
+
+    second = mint_app_jwt()
+
+    jwt.decode(first, _public_pem(private_key_pem), algorithms=["RS256"])
+    jwt.decode(second, _public_pem(rotated_pem), algorithms=["RS256"])
+    with pytest.raises(jwt.InvalidSignatureError):
+        jwt.decode(second, _public_pem(private_key_pem), algorithms=["RS256"])
+
+
+def test_mint_app_jwt_rejects_an_invalid_key_every_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bad key is not cached: each mint raises, as before."""
+    import jwt
+
+    monkeypatch.setenv("GITHUB_APP_ID", "123456")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "not a pem")
+
+    for _ in range(2):
+        with pytest.raises(jwt.InvalidKeyError):
+            mint_app_jwt()
+
+
 # ---------------------------------------------------------------------------
 # Installation token tests
 # ---------------------------------------------------------------------------

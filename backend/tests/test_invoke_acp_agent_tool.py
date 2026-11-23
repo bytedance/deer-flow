@@ -43,6 +43,13 @@ def test_build_mcp_servers_filters_disabled_and_maps_transports():
         mcp_servers={
             "stdio": McpServerConfig(enabled=True, type="stdio", command="npx", args=["srv"]),
             "http": McpServerConfig(enabled=True, type="http", url="https://example.com/mcp"),
+            "browser": McpServerConfig.model_validate(
+                {
+                    "type": "http",
+                    "url": "https://browser.example.com/mcp",
+                    "user_oauth": {"issuer": "https://id.example.com", "client_id": "deerflow", "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback"},
+                }
+            ),
             "disabled": McpServerConfig(enabled=False, type="stdio", command="echo"),
         },
         skills={},
@@ -69,6 +76,13 @@ def test_build_acp_mcp_servers_formats_list_payload():
         mcp_servers={
             "stdio": McpServerConfig(enabled=True, type="stdio", command="npx", args=["srv"], env={"FOO": "bar"}),
             "http": McpServerConfig(enabled=True, type="http", url="https://example.com/mcp", headers={"Authorization": "Bearer token"}),
+            "browser": McpServerConfig.model_validate(
+                {
+                    "type": "http",
+                    "url": "https://browser.example.com/mcp",
+                    "user_oauth": {"issuer": "https://id.example.com", "client_id": "deerflow", "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback"},
+                }
+            ),
             "disabled": McpServerConfig(enabled=False, type="stdio", command="echo"),
         },
         skills={},
@@ -145,6 +159,47 @@ def test_missing_mcode_command_returns_install_and_login_guidance():
     assert "npm install --global @minimax-ai/code" in result
     assert "mcode login" in result
     assert "restart DeerFlow" in result
+
+
+@pytest.mark.parametrize("agent", ["pi", "pi_coding"])
+def test_missing_pi_command_returns_adapter_install_guidance(agent):
+    result = _format_invocation_error(agent, "pi-acp", FileNotFoundError())
+
+    assert "npm install --global pi-acp" in result
+    assert "npx -y pi-acp" in result
+    assert "Gateway PATH" in result
+
+
+def test_missing_npx_for_pi_returns_node_install_guidance():
+    result = _format_invocation_error("pi", "npx", FileNotFoundError())
+
+    assert "Command 'npx' was not found" in result
+    assert "Install Node.js" in result
+    assert "npm" in result
+    assert "Gateway PATH" in result
+    assert "container" in result
+    assert "npm install --global pi-acp" not in result
+
+
+@pytest.mark.anyio
+async def test_pi_invocation_reports_missing_npx(monkeypatch, tmp_path):
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    tool = build_invoke_acp_agent_tool({"pi": ACPAgentConfig(command="npx", args=["-y", "pi-acp"], description="Pi coding agent")})
+
+    result = await tool.coroutine(agent="pi", prompt="Inspect the repository")
+
+    assert "Command 'npx' was not found" in result
+    assert "Install Node.js" in result
+    assert "npm install --global pi-acp" not in result
 
 
 @pytest.mark.anyio

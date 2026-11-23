@@ -86,6 +86,8 @@ hook directory, so they never run a developer's or CI's Git hooks.
   look identical.
 - **Shutdown stops accepting detached observations before the memory flush**, so an
   accepted observation is never registered after shutdown began.
+- **Search indexes are rebuildable.** The Gateway rechecks each indexed hit
+  against the current owner-visible message before returning text.
 
 ## Full-stack plugins and host access
 
@@ -99,6 +101,7 @@ hook directory, so they never run a developer's or CI's Git hooks.
   cannot collide.
 - **`configuration_revision` never exposes raw configuration.** It returns an HMAC.
   Sets hash the same way across process hash seeds; ordered lists keep their order.
+- **Restorable authority is captured, never created.** Restores revalidate it.
 
 ## Extension-first exceptions
 

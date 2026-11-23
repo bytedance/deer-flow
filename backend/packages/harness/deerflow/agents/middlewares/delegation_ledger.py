@@ -7,9 +7,10 @@ from datetime import UTC, datetime
 from html import escape
 from typing import Any
 
-from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
+from langchain_core.messages import AnyMessage
 
 from deerflow.agents.middlewares.receipt_verification import render_citation_verdict, validate_receipt_verdict
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.thread_state import DelegationEntry
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, render_acceptance_segment, validate_acceptance_verdict
 from deerflow.subagents.status_contract import (
@@ -97,48 +98,32 @@ def _tool_call_name(tool_call: dict[str, Any]) -> str:
     return ""
 
 
-def _tool_call_id(tool_call: dict[str, Any]) -> str | None:
-    tool_call_id = tool_call.get("id")
-    return str(tool_call_id) if tool_call_id else None
-
-
-def _tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
-    args = tool_call.get("args")
-    return args if isinstance(args, dict) else {}
-
-
 def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
-    """Enumerate `task` delegations from AI tool calls and paired results."""
-    entries_by_id: dict[str, DelegationEntry] = {}
-    order: list[str] = []
-    now = _utc_now_iso()
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in message.tool_calls or []:
-            if _tool_call_name(tool_call) != "task":
-                continue
-            tool_call_id = _tool_call_id(tool_call)
-            if tool_call_id is None:
-                continue
-            args = _tool_call_args(tool_call)
-            description = str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP]
-            if tool_call_id not in entries_by_id:
-                order.append(tool_call_id)
-            entries_by_id[tool_call_id] = {
-                "id": tool_call_id,
-                "description": description,
-                "subagent_type": str(args.get("subagent_type") or ""),
-                "status": "in_progress",
-                "created_at": now,
-            }
+    """Enumerate `task` delegations from AI tool calls and paired results.
 
-    for message in messages:
-        if not isinstance(message, ToolMessage):
+    Tool-call ids are unique per response, not per conversation, so each call
+    is its own delegation, identified with the AIMessage that issued it, and
+    takes only the result of its own response (``pair_tool_call_results``).
+    """
+    entries: list[DelegationEntry] = []
+    now = _utc_now_iso()
+    for occurrence in pair_tool_call_results(messages):
+        if _tool_call_name(occurrence.tool_call) != "task":
             continue
-        tool_call_id = str(message.tool_call_id) if message.tool_call_id else ""
-        entry = entries_by_id.get(tool_call_id)
-        if entry is None:
+        tool_call_id = occurrence.call_id
+        args = occurrence.args
+        entry: DelegationEntry = {
+            "id": tool_call_id,
+            "description": str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP],
+            "subagent_type": str(args.get("subagent_type") or ""),
+            "status": "in_progress",
+            "created_at": now,
+        }
+        if isinstance(occurrence.message.id, str) and occurrence.message.id:
+            entry["dispatch_message_id"] = occurrence.message.id
+        entries.append(entry)
+        message = occurrence.result
+        if message is None:
             continue
         structured = read_subagent_result_metadata(message.additional_kwargs)
         if structured is None:
@@ -163,7 +148,7 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
                     "result_ref": str(message.id or tool_call_id),
                 }
             )
-    return [entries_by_id[tool_call_id] for tool_call_id in order]
+    return entries
 
 
 def _fits_budget(lines: list[str], candidate: str, max_chars: int) -> bool:

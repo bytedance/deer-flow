@@ -7,8 +7,9 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
@@ -33,6 +34,7 @@ from deerflow.agents.middlewares.audit_context import (
 )
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.authz.provider import Principal
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
@@ -44,6 +46,7 @@ from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
     SubagentCapacityError,
     SubagentExecutionCapacity,
+    configured_subagent_queue_timeout_seconds,
     get_subagent_execution_capacity,
 )
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -119,6 +122,15 @@ class SubagentStatus(Enum):
 
 
 @dataclass
+class _ExecutionTimeout:
+    seconds: float
+    status: SubagentStatus
+    error: str
+    admitted: asyncio.Event = field(default_factory=asyncio.Event)
+    deadline: float | None = None
+
+
+@dataclass
 class SubagentResult:
     """Result of a subagent execution.
 
@@ -183,6 +195,7 @@ class SubagentResult:
     bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     knowledge_sources: list[dict[str, Any]] = field(default_factory=list, kw_only=True)
     _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
+    _execution_timeout: _ExecutionTimeout | None = field(default=None, init=False, repr=False, compare=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -289,6 +302,13 @@ class SubagentResult:
         with self._state_lock:
             if self.status.is_terminal:
                 return False
+
+            # Finalization can run past the deadline without yielding to the
+            # watcher. Decide before publishing a success or its payload.
+            timeout = self._execution_timeout
+            if status is SubagentStatus.COMPLETED and timeout is not None and timeout.deadline is not None and time.monotonic() >= timeout.deadline:
+                status, error = timeout.status, timeout.error
+                result, stop_reason = None, None
 
             if result is not None:
                 self.result = result
@@ -485,15 +505,18 @@ _BASH_EVIDENCE_COMMAND_CHARS = 500
 _BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
 
 
-def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | None]:
-    """Derive the recorded status from the shell exit marker when present.
+def _bash_evidence_status(content: str, meta_status: str, meta: Mapping[str, Any]) -> tuple[str, str | None]:
+    """Prefer a provider exit code, retaining text markers for legacy results.
 
     Returns ``(status, marker)``: the marker text actually seen (e.g. ``Exit
-    Code: 5``), so consumers can report it instead of asserting a failure the
-    harness cannot distinguish from the command's own trailing text. The
-    explicit marker takes precedence over generic metadata in old checkpoints
-    or provider stamps that report ``success`` for a nonzero shell exit.
+    Code: 5``) only when text determined the status. A provider's numeric code
+    takes precedence over stdout, which may itself print an exit marker.
+    Missing or invalid codes retain the marker-first fallback for older
+    checkpoints and plain-string providers with generic success metadata.
     """
+    exit_code = meta.get("exit_code")
+    if meta.get("source") == "tool_return" and type(exit_code) is int:
+        return ("success" if exit_code == 0 else "error"), None
     return bash_exit_status(content) or (meta_status, None)
 
 
@@ -556,11 +579,11 @@ def _harvest_bash_executions(
     a specific recorded execution — the command text lets the parent match the
     criterion against the call that actually ran. A bounded summary stamp is
     computed from the full tool output before retaining the diagnostic tail.
-    The recorded status is the **actual shell exit status**: a nonzero bash exit comes back as ordinary output text
-    (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
-    ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
-    as success — so an explicit exit marker wins, and the meta status is only
-    the fallback when no marker exists. Every entry is stamped with
+    The recorded status prefers the provider's numeric exit code from
+    ``deerflow_tool_meta``. Older checkpoints and plain-string providers retain
+    the text-marker fallback (``Exit Code: N`` or a whole-output ``Command
+    exited with code N``), followed by the metadata/native status when no
+    marker exists. Every entry is stamped with
     ``shell_persistent`` — the producing sandbox's
     ``persistent_shell_sessions`` flag, resolved against the sandbox recorded
     in THIS state (the subagent's own graph state), so provenance survives
@@ -608,9 +631,10 @@ def _harvest_bash_executions(
             command_truncated = len(command) > _BASH_EVIDENCE_COMMAND_CHARS
             command = command[:_BASH_EVIDENCE_COMMAND_CHARS]
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
+            meta = meta if isinstance(meta, dict) else {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
-            status, status_marker = _bash_evidence_status(content, meta_status)
+            status, status_marker = _bash_evidence_status(content, meta_status, meta)
             result_id = message.id if isinstance(message.id, str) and message.id else None
             cache_key = _bash_evidence_key({"result_id": result_id, "tool_call_id": tool_call_id})
             cached = summary_cache.get(cache_key) if summary_cache is not None else None
@@ -704,7 +728,27 @@ def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
                 return
 
         if loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
+            from deerflow.subagents.checkpoints import drain_checkpoint_runtimes, has_checkpoint_runtimes
+
+            if has_checkpoint_runtimes(loop):
+
+                async def drain_then_stop() -> None:
+                    await drain_checkpoint_runtimes()
+                    loop.call_soon(loop.stop)
+
+                cleanup = asyncio.run_coroutine_threadsafe(drain_then_stop(), loop)
+                if thread is threading.current_thread():
+                    return
+                try:
+                    cleanup.result(timeout=1)
+                except FuturesTimeoutError:
+                    logger.warning("Retaining isolated subagent loop ownership until checkpoint resources finish draining")
+                    return
+                except Exception:
+                    logger.exception("Retaining isolated subagent loop ownership because checkpoint resource cleanup failed")
+                    return
+            else:
+                loop.call_soon_threadsafe(loop.stop)
 
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=1)
@@ -808,10 +852,10 @@ def _run_on_isolated_loop_if_live(callback: Callable[[], None]) -> None:
         callback()
 
 
-def _submit_to_isolated_loop_in_context(
+def _submit_to_isolated_loop_in_context[T](
     context: Context,
-    coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
-) -> Future[SubagentResult]:
+    coro_factory: Callable[[], Coroutine[Any, Any, T]],
+) -> Future[T]:
     """Submit a coroutine to the isolated loop while preserving ContextVar state.
 
     The loop must be resolved before the coroutine is created: as direct
@@ -826,7 +870,7 @@ def _submit_to_isolated_loop_in_context(
     before the error propagates.
     """
 
-    def _submit() -> Future[SubagentResult]:
+    def _submit() -> Future[T]:
         loop = _get_isolated_subagent_loop()
         coroutine = coro_factory()
         try:
@@ -867,6 +911,9 @@ def _copy_isolated_subagent_context() -> Context:
     continue to reach the parent stream.
     """
     context = copy_context()
+    from deerflow.subagents.checkpoints import capture_checkpoint_runtime
+
+    capture_checkpoint_runtime(context)
     inherited_config = context.get(var_child_runnable_config)
     if inherited_config is None or "callbacks" not in inherited_config:
         return context
@@ -959,6 +1006,8 @@ class SubagentExecutor:
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
         input_gate: Any | None = None,
+        agent_mcp_authority: Any | None = None,
+        principal_resolver: Callable[[], Awaitable[Principal]] | None = None,
     ):
         """Initialize the executor.
 
@@ -1039,6 +1088,7 @@ class SubagentExecutor:
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
         self.input_gate = input_gate
+        self.agent_mcp_authority = agent_mcp_authority
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
@@ -1046,6 +1096,7 @@ class SubagentExecutor:
         self.user_id = user_id
         # Guardrail attribution propagated from the parent runtime context.
         self.user_role = user_role
+        self._principal_resolver = principal_resolver
         self.oauth_provider = oauth_provider
         self.oauth_id = oauth_id
         self.run_id = run_id
@@ -1116,6 +1167,9 @@ class SubagentExecutor:
         self.assembly_descriptor: Any | None = None
         self._assembled_system_prompt = self.config.system_prompt or ""
         self._assembled_skills: list[Any] = []
+        # Only these exact, build-generated instances receive the discovery
+        # exemption in the final name-policy audit; names alone are insufficient.
+        self._policy_discovery_tools: tuple[BaseTool, ...] = ()
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
@@ -1246,7 +1300,6 @@ class SubagentExecutor:
                 authorization_provider=authz_provider,
             )
             middlewares = apply_declared_tool_view(middlewares, authorized_names=declared_authorized)
-            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
         elif authz_provider is not None:
             # Defense in depth: the provider is configured but the seeded
             # decision state is missing, so the declaration pass is skipped.
@@ -1268,6 +1321,25 @@ class SubagentExecutor:
         from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
 
         _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False, model_name=self.model_name)
+        # Extensions can add tools through middleware after the inherited list
+        # was filtered. Apply the same subagent policy to those declarations,
+        # independently of global authorization, without changing shared stacks
+        # or re-filtering generated discovery helpers in bound_tools.
+        from deerflow.agents.middlewares.tool_declarations import ToolPolicyNameResolver, apply_declared_tool_policy, verify_subagent_tool_policy
+
+        policy_names = ToolPolicyNameResolver()
+        middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools, name_resolver=policy_names)
+
+        from deerflow.subagents.checkpoints import checkpoint_runtime
+
+        history_runtime = checkpoint_runtime()
+        state_schema = ThreadState
+        if history_runtime is not None and history_runtime.mode == "delta":
+            from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+
+            state_schema = get_thread_state_schema("delta")
+            middlewares = normalize_middleware_state_schemas(middlewares, "delta")
+
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1280,13 +1352,28 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
+        # Delta normalization can copy middleware, so audit both policies on
+        # the final instances that create_agent will bind.
+        if declared_authorized is not None:
+            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
+        verify_subagent_tool_policy(
+            bound_tools,
+            middlewares,
+            allowed=self.config.tools,
+            disallowed=self.config.disallowed_tools,
+            discovery_tools=getattr(self, "_policy_discovery_tools", ()),
+            name_resolver=policy_names,
+        )
         agent = create_agent(
             model=model,
             tools=bound_tools,
             middleware=middlewares,
             system_prompt=None,
-            state_schema=ThreadState,
-            checkpointer=False,
+            state_schema=state_schema,
+            # The opted-in scope replaces the inherited saver with its
+            # loop-owned peer before graph construction. All other entrypoints
+            # keep isolation from a possibly synchronous parent saver.
+            checkpointer=None if history_runtime is not None else False,
         )
         # Use the compiled registry: it includes middleware tools, normalized
         # callables, and LangChain's last-definition-wins name precedence.
@@ -1607,6 +1694,7 @@ class SubagentExecutor:
             enabled=resolved_app_config.tool_search.enabled,
         )
         final_tools.extend(late_tools)
+        self._policy_discovery_tools = tuple(helper for helper in (deferred_setup.tool_search_tool, skill_setup.describe_skill_tool) if helper is not None and any(helper is tool for tool in final_tools))
 
         # Combine the system prompt and skill discovery metadata into a single
         # SystemMessage. Full SKILL.md bodies are loaded only when activated.
@@ -1710,17 +1798,52 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
+        from deerflow.subagents.checkpoints import SubagentCheckpointError, subagent_checkpoint_scope
+
         with ensure_trace_context(self.deerflow_trace_id):
+            # Read the handoff before the first await: the delegating wrapper
+            # clears the field as soon as it stops waiting, while this
+            # execution may still be running under supervision.
+            timeout = result._execution_timeout
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
-                async with slot:
+                async with (
+                    subagent_checkpoint_scope(execution_id=result.task_id, run_id=self.run_id, tool_call_id=result.external_task_id, agent_name=self.config.name),
+                    slot,
+                ):
+                    if timeout is not None:
+                        # The deadline starts at slot grant and includes
+                        # principal revalidation and any time before the watcher wakes.
+                        timeout.deadline = time.monotonic() + timeout.seconds
+                        timeout.admitted.set()
+                    if self._principal_resolver is not None:
+                        # Durable work can wait behind ordinary subagents after
+                        # its worker-side check. Revalidate before marking it
+                        # running or entering any task lifecycle hooks.
+                        try:
+                            principal = await self._principal_resolver()
+                            if not isinstance(principal, Principal) or principal.user_id != self.user_id:
+                                raise PermissionError("Subagent principal does not match its owner")
+                            self.user_role = principal.role
+                            self.oauth_provider = principal.oauth_provider
+                            self.oauth_id = principal.oauth_id
+                            self.channel_user_id = principal.channel_user_id
+                            self.is_internal = principal.is_internal
+                            self.authz_attributes = normalize_authz_attributes(principal.attributes)
+                            self._skill_authorization = None
+                        except Exception as exc:
+                            result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+                            return result
                     with result._state_lock:
                         if result.status.is_terminal:
                             return result
                         result.status = SubagentStatus.RUNNING
                         result.started_at = _utcnow()
                     return await self._aexecute_admitted(task, result)
+            except SubagentCheckpointError as exc:
+                result.try_set_terminal(SubagentStatus.FAILED, error=str(exc), admission_failure=True)
+                return result
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
                     SubagentStatus.FAILED,
@@ -1731,6 +1854,12 @@ class SubagentExecutor:
                 )
                 return result
             finally:
+                # Cover every path that never reached admission (capacity
+                # rejection, terminal short-circuit, cancellation): the
+                # delegating wrapper must not wait for an event that will
+                # never fire.
+                if timeout is not None:
+                    timeout.admitted.set()
                 if self.input_gate is not None:
                     self.input_gate.close()
                 result.execution_done_event.set()
@@ -1766,6 +1895,7 @@ class SubagentExecutor:
             lead_task_id,
             notify_task_start,
             notify_task_stop,
+            stopped_task_info,
             subagent_task_outcome,
         )
 
@@ -1912,6 +2042,10 @@ class SubagentExecutor:
             # audit). user_id reuses the resolved tracing id; on every
             # authenticated/IM path this equals the parent context value.
             context["user_id"] = self.user_id
+            if self.agent_mcp_authority is not None:
+                from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY
+
+                context[AGENT_AUTH_CONTEXT_KEY] = self.agent_mcp_authority
             context["user_role"] = self.user_role
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
@@ -2204,7 +2338,11 @@ class SubagentExecutor:
                         await notify_task_stop(
                             loaded_extensions,
                             task_store,
-                            task_info,
+                            stopped_task_info(
+                                task_info,
+                                status=result.status.value,
+                                error=result.error,
+                            ),
                             subagent_task_outcome(
                                 cancelled=result.status is SubagentStatus.CANCELLED,
                                 succeeded=result.status is SubagentStatus.COMPLETED,
@@ -2224,6 +2362,80 @@ class SubagentExecutor:
 
         return result
 
+    async def _await_admitted_execution(
+        self,
+        execution_task: asyncio.Task[SubagentResult],
+        result: SubagentResult,
+        timeout: _ExecutionTimeout,
+        *,
+        execution_id: str,
+    ) -> tuple[SubagentResult, bool]:
+        """Wait for admission, then apply the execution timeout.
+
+        The capacity controller already bounds queue wait with
+        ``queue_timeout_seconds``; the execution clock must start only once a
+        slot is granted. That start is recorded on the result at admission, not
+        when this watcher is scheduled: synchronous work between the two still
+        consumes the execution budget. Completion is accepted in place of
+        admission so executions supplied by wrappers that never signal
+        admission still return normally.
+
+        Returns the outcome and whether a timed-out execution was detached to
+        the background supervisor for teardown.
+        """
+        admission_waiter = asyncio.create_task(timeout.admitted.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {execution_task, admission_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if execution_task in done:
+                return execution_task.result(), False
+        finally:
+            if not admission_waiter.done():
+                try:
+                    admission_waiter.cancel()
+                except RuntimeError:
+                    # The isolated loop can close while a detached sync
+                    # wrapper is still being reclaimed; there is no loop left
+                    # to schedule the waiter's cancellation on.
+                    pass
+
+        remaining = timeout.seconds if timeout.deadline is None else timeout.deadline - time.monotonic()
+        if remaining > 0:
+            await asyncio.wait({execution_task}, timeout=remaining)
+
+        if execution_task.done():
+            return execution_task.result(), False
+
+        # Publish the configured hard timeout without waiting for
+        # cancellation-resistant stream cleanup. The detached execution still
+        # owns its capacity slot and sandbox lease until its supervisor
+        # observes full teardown.
+        result.try_set_terminal(
+            timeout.status,
+            error=timeout.error,
+            tool_receipts=result.snapshot_tool_receipts(),
+        )
+        result.cancel_event.set()
+        execution_task.cancel()
+        _supervise_background_execution(execution_id, result, execution_task)
+        return result, True
+
+    def _sync_timeout_backstop_seconds(self) -> int:
+        """Outer bound on the synchronous wait for the isolated loop.
+
+        The admission-aware wrapper owns the execution timeout; this bound
+        exists only for a loop that never settles, so it allows the queue stage
+        and the execution stage plus the same cleanup margin as the poller.
+        The injected capacity's queue bound wins over the process-wide
+        snapshot because it is the controller this executor waits on.
+        """
+        queue_timeout_seconds = getattr(self.execution_capacity, "queue_timeout_seconds", None)
+        if queue_timeout_seconds is None:
+            queue_timeout_seconds = configured_subagent_queue_timeout_seconds()
+        return queue_timeout_seconds + self.config.timeout_seconds + 60
+
     def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute the subagent on the persistent isolated event loop.
 
@@ -2237,12 +2449,40 @@ class SubagentExecutor:
             result_holder = SubagentResult(task_id=str(uuid.uuid4())[:8], trace_id=self.trace_id, status=SubagentStatus.PENDING)
         future: Future[SubagentResult] | None = None
         parent_context = _copy_isolated_subagent_context()
-        try:
-            future = _submit_to_isolated_loop_in_context(
-                parent_context,
-                lambda: self._aexecute(task, result_holder),
+        timeout = _ExecutionTimeout(self.config.timeout_seconds, SubagentStatus.FAILED, "")
+        result_holder._execution_timeout = timeout
+
+        async def run_with_admission_timeout() -> SubagentResult:
+            execution_task = asyncio.create_task(
+                self._aexecute(task, result_holder),
+                name=f"subagent-{self.config.name}-sync-execution",
             )
-            return future.result(timeout=self.config.timeout_seconds)
+            try:
+                outcome, _ = await self._await_admitted_execution(
+                    execution_task,
+                    result_holder,
+                    timeout,
+                    execution_id=result_holder.task_id,
+                )
+                return outcome
+            except asyncio.CancelledError:
+                if not execution_task.done():
+                    execution_task.cancel()
+                try:
+                    await execution_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise
+            finally:
+                result_holder._execution_timeout = None
+
+        try:
+            future = _submit_to_isolated_loop_in_context(parent_context, run_with_admission_timeout)
+            # Backstop only: the admission-aware wrapper owns the execution
+            # timeout. Reaching this bound means the isolated loop itself is
+            # stuck, so allow both stages plus the same cleanup margin as the
+            # poller before giving up on the synchronous call.
+            return future.result(timeout=self._sync_timeout_backstop_seconds())
         except FuturesTimeoutError as exc:
             # Publish the synchronous API's failure before cancellation can
             # reach task-stop observers or win the terminal-state race.
@@ -2263,6 +2503,11 @@ class SubagentExecutor:
                     exc_info=True,
                 )
             raise
+        finally:
+            # Also covers a wrapper that never started (submit failure or a
+            # synchronous raise before its own cleanup), so a reused holder
+            # cannot inherit a stale, already-set admission signal or clock.
+            result_holder._execution_timeout = None
 
     def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
@@ -2359,46 +2604,39 @@ class SubagentExecutor:
                 )
                 _mark_background_execution_done(execution_id, result)
                 return result
-            execution_task = asyncio.create_task(
-                self._aexecute(task, result),
-                name=f"subagent-{self.config.name}-execution",
+            timeout = _ExecutionTimeout(
+                self.config.timeout_seconds,
+                SubagentStatus.TIMED_OUT,
+                f"Execution timed out after {self.config.timeout_seconds} seconds",
             )
+            result._execution_timeout = timeout
+            execution_task = None
+            execution_detached = False
             try:
-                done, _ = await asyncio.wait(
-                    {execution_task},
-                    timeout=self.config.timeout_seconds,
+                execution_task = asyncio.create_task(
+                    self._aexecute(task, result),
+                    name=f"subagent-{self.config.name}-execution",
                 )
-                if execution_task in done:
-                    return execution_task.result()
-
-                # Publish the configured hard timeout without waiting for
-                # cancellation-resistant stream cleanup. The detached execution
-                # still owns its capacity slot and sandbox lease until its
-                # supervisor observes full teardown.
-                result.cancel_event.set()
-                result.try_set_terminal(
-                    SubagentStatus.TIMED_OUT,
-                    error=f"Execution timed out after {self.config.timeout_seconds} seconds",
-                    tool_receipts=result.snapshot_tool_receipts(),
-                )
-                execution_task.cancel()
-                _supervise_background_execution(
-                    execution_id,
-                    result,
+                outcome, supervised = await self._await_admitted_execution(
                     execution_task,
+                    result,
+                    timeout,
+                    execution_id=execution_id,
                 )
-                execution_task = None
-                return result
+                if supervised:
+                    execution_detached = True
+                return outcome
             except asyncio.CancelledError:
                 result.cancel_event.set()
-                if not execution_task.done():
-                    execution_task.cancel()
-                try:
-                    await execution_task
-                except (asyncio.CancelledError, Exception):
-                    # The child can fail before cancellation reaches it. Keep
-                    # its terminal write, or publish cancellation below.
-                    pass
+                if execution_task is not None:
+                    if not execution_task.done():
+                        execution_task.cancel()
+                    try:
+                        await execution_task
+                    except (asyncio.CancelledError, Exception):
+                        # The child can fail before cancellation reaches it. Keep
+                        # its terminal write, or publish cancellation below.
+                        pass
                 result.try_set_terminal(
                     SubagentStatus.CANCELLED,
                     error="Cancelled by user",
@@ -2407,18 +2645,19 @@ class SubagentExecutor:
                 return result
             except Exception as exc:
                 logger.exception("[trace=%s] Subagent %s async execution failed", self.trace_id, self.config.name)
-                if not execution_task.done():
+                if execution_task is not None and not execution_task.done():
                     execution_task.cancel()
                     _supervise_background_execution(
                         execution_id,
                         result,
                         execution_task,
                     )
-                    execution_task = None
+                    execution_detached = True
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 return result
             finally:
-                if execution_task is not None:
+                result._execution_timeout = None
+                if not execution_detached:
                     _mark_background_execution_done(execution_id, result)
 
         try:

@@ -654,6 +654,77 @@ def test_artifact_sandbox_sync_skipped_when_denied(monkeypatch, tmp_path):
     assert artifact_path.read_bytes() == b"after"
 
 
+def test_safe_app_config_denies_after_authz_config_becomes_unreadable(monkeypatch):
+    """A config that was authorization-enabled must fail closed after becoming unreadable."""
+    from deerflow.authz import sandbox_authz as mod
+
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    assert mod.safe_app_config() is app_config
+
+    def _unreadable():
+        raise FileNotFoundError("config.yaml was removed after startup")
+
+    monkeypatch.setattr("deerflow.config.get_app_config", _unreadable)
+    with pytest.raises(SandboxAuthorizationError) as exc_info:
+        mod.safe_app_config()
+    assert "temporarily unavailable" in str(exc_info.value)
+
+
+def test_safe_app_config_still_denies_with_fail_closed_false(monkeypatch):
+    """The unavailable-policy error is intentional even if the old policy said fail_open."""
+    from deerflow.authz import sandbox_authz as mod
+
+    app_config = _make_app_config()
+    _enable_authz(app_config, fail_closed=False)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    assert mod.safe_app_config() is app_config
+
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: (_ for _ in ()).throw(FileNotFoundError("config.yaml removed")),
+    )
+    with pytest.raises(SandboxAuthorizationError):
+        mod.safe_app_config()
+
+
+def test_safe_app_config_uses_loaded_config_before_first_helper_call(monkeypatch):
+    """A config loaded by the ordinary loader must arm the guard before the first helper call."""
+    from deerflow.authz import sandbox_authz as mod
+
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr("deerflow.authz.sandbox_authz.peek_loaded_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: (_ for _ in ()).throw(FileNotFoundError("config.yaml removed")),
+    )
+
+    with pytest.raises(SandboxAuthorizationError) as exc_info:
+        mod.safe_app_config()
+    assert "temporarily unavailable" in str(exc_info.value)
+
+
+def test_safe_app_config_does_not_log_config_exception_details(monkeypatch, caplog):
+    """The deny warning records the exception type, not configuration values."""
+    from deerflow.authz import sandbox_authz as mod
+
+    mod._authorization_config_loaded = True
+    secret = "token=SUPERSECRET"
+
+    def _unreadable():
+        raise ValueError(secret)
+
+    monkeypatch.setattr("deerflow.config.get_app_config", _unreadable)
+    with caplog.at_level("WARNING", logger=mod.__name__):
+        with pytest.raises(SandboxAuthorizationError):
+            mod.safe_app_config()
+
+    assert secret not in caplog.text
+    assert "ValueError" in caplog.text
+
+
 def test_authorize_sandbox_no_config_file_is_noop(monkeypatch):
     """No readable config.yaml (CI environments) → the gate is a no-op.
 

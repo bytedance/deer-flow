@@ -10,7 +10,10 @@ Supported commands:
 /goal finish the implementation and make all tests pass
 /goal              # show the active goal
 /goal clear        # clear it
+/goal from-chat    # IM only: compose the goal from this conversation
 ```
+
+In supported IM channels, `/goal from-chat [hint]` composes the goal from the conversation instead of taking the text literally. It carries over the constraints and stopping condition discussed in the chat, shows the saved objective, and starts exactly one run. An optional hint adds a constraint without restating the whole goal. If the conversation does not yield a clear goal, nothing is saved or started and the reply explains why; if the assistant is still waiting for your answer, the reply asks you to reply first.
 
 After each Gateway-backed run, DeerFlow evaluates the visible conversation, including the assistant's tool calls and shortened tool results, against the active goal with a non-thinking evaluator model. A successful tool result alone does not satisfy a goal, and when the assistant had to guess missing or ambiguous information the evaluator reports `needs_user_input`. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the evaluator considers the goal satisfied, DeerFlow clears it after the run successfully finalizes and publishes the updated thread state. The same checkpoint records the completion as `goal_outcome`, which stays until the next goal change. If required artifact delivery or its receipt persistence fails, the run reports an error and the goal remains active for a later retry; this does not start another hidden continuation.
 
@@ -49,6 +52,11 @@ and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool
 and filters before limiting results to eight distinct sources. Omitting `role` or
 passing `null` preserves search across all roles. Repeated archives of one source
 share one result slot.
+To recover a recent correction among older drafts, use
+`history_search(query="retention", role="user", order="latest")`. This searches
+active messages from newest to oldest, then reads archived matches from the
+newest batches in the current checkpoint. A batch recaptured after a retry
+is ordered by its position in that checkpoint.
 Search excerpts contain at most 600 characters around the earliest locatable
 matching occurrence that fits and include `excerpt_start` / `excerpt_end`, a
 zero-based, half-open character range
@@ -68,6 +76,9 @@ string `content` and a `pending` / `in_progress` / `completed` status (a missing
 status defaults to `pending`); another shape is rejected with HTTP 400, and an
 already-stored entry of an unusable shape is ignored instead of failing the model
 call.
+The read-only `inspect_run_status` tool reports todo counts from the visible
+state. For embedded integrations and restored checkpoints, it counts missing
+and null statuses as pending.
 In planning mode, if the original `write_todos` call is no longer visible,
 DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.
