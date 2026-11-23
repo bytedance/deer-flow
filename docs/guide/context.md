@@ -76,6 +76,9 @@ string `content` and a `pending` / `in_progress` / `completed` status (a missing
 status defaults to `pending`); another shape is rejected with HTTP 400, and an
 already-stored entry of an unusable shape is ignored instead of failing the model
 call.
+The read-only `inspect_run_status` tool reports todo counts from the visible
+state. For embedded integrations and restored checkpoints, it counts missing
+and null statuses as pending.
 In planning mode, if the original `write_todos` call is no longer visible,
 DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.
