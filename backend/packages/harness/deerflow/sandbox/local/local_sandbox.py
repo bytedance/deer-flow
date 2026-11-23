@@ -1513,6 +1513,7 @@ class LocalSandbox(Sandbox):
                         max_results=max_results - len(results) + 1,
                         relative_prefix=child,
                         user_data=user_data,
+                        display_line=self._reverse_resolve_paths_in_output,
                     )
                     results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
                     if len(results) > max_results:
@@ -1527,6 +1528,11 @@ class LocalSandbox(Sandbox):
                 case_sensitive=case_sensitive,
                 max_results=max_results,
                 user_data=user_data,
+                # write_file stores host paths in code files. Matched lines show
+                # virtual paths, as bash output does, for every file: the record
+                # of agent-written files that read_file consults does not
+                # survive a restart.
+                display_line=self._reverse_resolve_paths_in_output,
             )
         except OSError as e:
             if e.filename is None:

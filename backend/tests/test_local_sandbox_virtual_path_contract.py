@@ -17,6 +17,7 @@ shim required.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,7 +25,9 @@ from unittest.mock import patch
 import pytest
 
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+from deerflow.sandbox.search import truncate_line
 
 
 def _build_config(skills_dir: Path) -> SimpleNamespace:
@@ -126,6 +129,51 @@ def test_grep_with_virtual_path(provider):
     matches, _ = sbx.grep("/mnt/user-data/workspace", "needle", literal=True)
     assert matches
     assert matches[0].path.endswith("/mnt/user-data/workspace/findme.txt")
+
+
+def _host_dir(sbx, container_path: str) -> str:
+    return os.path.realpath(next(m.local_path for m in sbx.path_mappings if m.container_path == container_path))
+
+
+def test_grep_lines_show_virtual_paths_that_write_file_stored_as_host_paths(provider):
+    sbx = provider.get(provider.acquire("alpha"))
+    host_workspace = _host_dir(sbx, "/mnt/user-data/workspace")
+    sbx.write_file("/mnt/user-data/workspace/run.py", 'DATA = "/mnt/user-data/workspace/data.csv"\n')
+    # Pin the scenario: a code file stores the host path on disk.
+    assert host_workspace in (Path(host_workspace) / "run.py").read_text()
+
+    # A fresh sandbox over the same mounts stands in for a Gateway restart or an
+    # LRU eviction, which forgets which files write_file wrote.
+    restarted = LocalSandbox(sbx.id, path_mappings=sbx.path_mappings)
+    for sandbox in (sbx, restarted):
+        matches, _ = sandbox.grep("/mnt/user-data/workspace", "DATA =")
+        assert [(m.path, m.line) for m in matches] == [("/mnt/user-data/workspace/run.py", 'DATA = "/mnt/user-data/workspace/data.csv"')]
+
+
+def test_grep_line_is_shortened_after_host_paths_become_virtual(provider):
+    sbx = provider.get(provider.acquire("alpha"))
+    host_workspace = _host_dir(sbx, "/mnt/user-data/workspace")
+    # The host path straddles the summary cut; shortening first would keep a
+    # fragment of it that no longer matches a mount.
+    shown = f'{"#" * 150} "/mnt/user-data/workspace/data.csv" {"y" * 60}'
+    sbx.write_file("/mnt/user-data/workspace/long.py", shown + "\n")
+    assert host_workspace in (Path(host_workspace) / "long.py").read_text()
+
+    matches, _ = sbx.grep("/mnt/user-data/workspace", "data.csv", literal=True)
+
+    assert [m.line for m in matches] == [truncate_line(shown)]
+
+
+def test_grep_lines_under_skill_category_mounts_show_virtual_paths(provider):
+    sbx = provider.get(provider.acquire("alpha"))
+    host_workspace = _host_dir(sbx, "/mnt/user-data/workspace")
+    skill_dir = Path(_host_dir(sbx, "/mnt/skills/public")) / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"input: {host_workspace}/data.csv\n")
+
+    matches, _ = sbx.grep("/mnt/skills", "input:")
+
+    assert [(m.path, m.line) for m in matches] == [("/mnt/skills/public/demo/SKILL.md", "input: /mnt/user-data/workspace/data.csv")]
 
 
 def test_execute_command_lists_aggregate_user_data_root(provider):
