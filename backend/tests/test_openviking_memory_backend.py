@@ -2339,6 +2339,7 @@ def test_multi_user_shutdown_flush_drains_inflight_and_closes_provider(
     assert not writer.is_alive()
     assert rec_alice.closed is True
     assert rec_bob.closed is True
+    assert manager.shutdown_flush(1.0) is True
     assert close_calls == 1
     assert manager.shutdown_flush(1.0) is True
     assert close_calls == 1
@@ -3202,36 +3203,79 @@ def test_single_user_config_parity_and_multi_user_edge_cases(
         mgr.close()
 
 
-def test_end_operation_skips_wait_when_cleanup_already_timed_out(
+@pytest.mark.asyncio
+async def test_admitted_async_write_does_not_wait_on_slow_provider_cleanup_during_shutdown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _track_official_integration(monkeypatch)
-    release_close = threading.Event()
-    close_started = threading.Event()
+    import asyncio
 
-    class _HungCloseProvider:
+    recorders, _ = _track_official_integration(monkeypatch)
+    resolve_started = threading.Event()
+    release_resolve = threading.Event()
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_calls = 0
+
+    class _SlowCleanupProvider:
         def resolve(self, user_id: str) -> str:
+            resolve_started.set()
+            assert release_resolve.wait(timeout=5.0)
             return f"key-{user_id}"
 
         def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
             close_started.set()
             assert release_close.wait(timeout=5.0)
 
     manager = OpenVikingMemoryManager.from_config(
         _multi_user_backend_config(tmp_path, timeout_seconds=5.0),
-        credential_provider=_HungCloseProvider(),
+        credential_provider=_SlowCleanupProvider(),
     )
-    try:
-        assert manager.shutdown_flush(0.05) is False
-        assert manager._cleanup_timed_out is True
-        assert close_started.wait(timeout=1.0)
 
-        # Simulate a staggered worker thread reaching the cleanup tail after shutdown timed out
-        with manager._lifecycle:
-            manager._active_operations = 1
-        t0 = time.monotonic()
-        manager._end_operation()
-        assert time.monotonic() - t0 < 0.5
+    write_task = asyncio.create_task(
+        manager.aadd(
+            "thread-1",
+            [HumanMessage("admitted async write", id="h1")],
+            user_id="alice",
+        )
+    )
+    flush_task: asyncio.Task[bool] | None = None
+    try:
+        assert await asyncio.to_thread(resolve_started.wait, 5.0)
+
+        flush_task = asyncio.create_task(asyncio.to_thread(manager.shutdown_flush, 0.15))
+        deadline = time.monotonic() + 5.0
+        while not manager._closed and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert manager._closed is True
+
+        release_resolve.set()
+
+        # The last admitted async write must finish immediately after recording its
+        # update without blocking on slow provider cleanup (timeout_seconds=5.0).
+        await asyncio.wait_for(write_task, timeout=1.0)
+        assert len(recorders) == 1
+        assert len(recorders[0].calls) == 1
+        assert recorders[0].closed is True
+        assert manager._state_path(_session_id("alice", "deerflow", "thread-1")).exists()
+
+        # Shutdown flush owns the bounded cleanup wait and times out on schedule.
+        assert await asyncio.wait_for(flush_task, timeout=1.0) is False
+        assert await asyncio.to_thread(close_started.wait, 1.0)
+        assert not release_close.is_set()
+
+        # Follow-up Gateway close() must not block past the already-timed-out flush.
+        await asyncio.wait_for(asyncio.to_thread(manager.close), timeout=0.5)
+        assert close_calls == 1
     finally:
+        release_resolve.set()
         release_close.set()
+        if not write_task.done():
+            await asyncio.wait_for(write_task, timeout=5.0)
+        if flush_task is not None and not flush_task.done():
+            await asyncio.wait_for(flush_task, timeout=5.0)
+
+    assert manager.shutdown_flush(1.0) is True
+    assert close_calls == 1
