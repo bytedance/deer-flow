@@ -84,7 +84,7 @@ make test-blocking-io
   adapter.
 - **Drain the agent's stderr for the whole call.** The SDK opens the pipe and does
   not read it, so an agent that logs enough blocks on a write and the call stalls.
-  The stderr tail goes to the Gateway log, never into model-visible text.
+  Report the agent's exit status or timeout in the Gateway log.
 - **Race the exchange against process exit.** The SDK does not fail pending
   requests when the agent exits.
 - **Keep the SDK process context outside the timeout**, so teardown finishes
