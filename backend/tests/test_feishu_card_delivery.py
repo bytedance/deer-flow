@@ -208,6 +208,9 @@ async def test_consecutive_card_answers_resume_the_same_thread(card_channel, tmp
 
         card_channel.bus.subscribe_outbound(deliver)
         await card_channel.send(message, _max_retries=1)
+        if bound_identity:
+            assert await repo.get_thread_id(connection["id"], "chat-1", "source-1") == "thread-1"
+            assert await store.list_entries() == []
         button = sent_button(card_channel)
         if reset_conversation:
             command = InboundMessage(
@@ -273,6 +276,49 @@ async def test_reused_request_ids_do_not_cross_route_cards(card_channel):
 
 def group_message(message_id: str) -> _ParsedMessage:
     return _ParsedMessage(chat_id="chat-1", msg_id=message_id, sender_id="ou-originator", root_id=None, parent_id=None, feishu_thread_id=None, chat_type="group", text="Another question", files=[])
+
+
+@pytest.mark.asyncio
+async def test_bound_text_clarification_keeps_the_connection_alias(card_channel):
+    message = clarification_outbound()
+    message.connection_id = "conn-1"
+    message.owner_user_id = "owner-1"
+    repo = SimpleNamespace(
+        find_connection_by_external_identity=AsyncMock(return_value={"id": "conn-1", "owner_user_id": "owner-1"}),
+        set_thread_id=AsyncMock(),
+        get_thread_id=AsyncMock(return_value=None),
+    )
+    card_channel._connection_repo = repo
+    await card_channel.send(message, _max_retries=1)
+    repo.set_thread_id.reset_mock()
+
+    routed = await card_channel._resolve_routing(_RoutingAttempt(group_message("plain-answer")))
+    assert routed.from_pending
+    repo.set_thread_id.assert_awaited_once_with(connection_id="conn-1", owner_user_id="owner-1", provider="feishu", external_conversation_id="chat-1", external_topic_id=routed.topic_id, thread_id=message.thread_id)
+    assert await card_channel.config["channel_store"].list_entries() == []
+
+
+@pytest.mark.asyncio
+async def test_unbound_feishu_topic_starts_fresh_after_legacy_alias_and_keeps_new_binding(card_channel, tmp_path):
+    from app.channels.manager import ChannelManager
+    from app.channels.store import JsonChannelStore
+
+    store = JsonChannelStore(path=tmp_path / "mixed.json")
+    await store.set_thread_id("feishu", "chat-1", "pre-upgrade", topic_id="old-topic")
+    repo = SimpleNamespace(find_connection_by_external_identity=AsyncMock(return_value=None))
+    card_channel.config["channel_store"] = store
+    card_channel._connection_repo = repo
+    parsed = group_message("new-message")
+    parsed.root_id = "old-topic"
+    routing = await card_channel._resolve_routing(_RoutingAttempt(parsed))
+    assert not routing.from_stored_mapping
+
+    inbound = InboundMessage(channel_name="feishu", chat_id=parsed.chat_id, user_id=parsed.sender_id, text="Hello", topic_id=routing.topic_id)
+    manager = ChannelManager(bus=card_channel.bus, store=store, connection_repo=repo)
+    assert await manager._lookup_thread_id(inbound) is None
+    assert await manager._claim_thread_id(inbound, "new-thread") == "new-thread"
+    assert await manager._lookup_thread_id(inbound) == "new-thread"
+    assert (await card_channel._resolve_routing(_RoutingAttempt(parsed))).from_stored_mapping
 
 
 @pytest.mark.asyncio
