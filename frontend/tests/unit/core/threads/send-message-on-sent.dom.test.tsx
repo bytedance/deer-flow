@@ -817,3 +817,41 @@ test("binds a created thread to the send that asked for it, not a released one",
   expect(onSentB).toHaveBeenCalledTimes(1);
   expect(onSentA).not.toHaveBeenCalled();
 });
+test("accepts a frame that names the submitted id after the SDK created another thread", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  // The sidecar's gateway-created chat is submitted before useStream adopts it,
+  // so the SDK creates its own conversation. The Gateway reports the run under
+  // the id the caller submitted, which is this send's own identity too.
+  const { result, rerender } = await renderThreadStream(null);
+  const onSent = rs.fn();
+  rerender({ threadId: "sidecar-thread" });
+  await flushFrames();
+
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current.sendMessage(
+      "sidecar-thread",
+      { text: "What tradeoffs should we consider?", files: [] },
+      undefined,
+      { onSent },
+    );
+  });
+  await flushFrames();
+  markThreadCreation("server-created", "sidecar-thread");
+  await act(async () => {
+    mocks.callbacks.onThreadId?.("server-created");
+  });
+  await act(async () => {
+    mocks.callbacks.onCreated?.({
+      thread_id: "sidecar-thread",
+      run_id: "run-sidecar",
+    });
+  });
+  await act(async () => {
+    await sendPromise;
+  });
+
+  expect(onSent).toHaveBeenCalledTimes(1);
+});

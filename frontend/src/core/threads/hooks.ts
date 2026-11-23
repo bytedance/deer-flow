@@ -2422,10 +2422,19 @@ export function useThreadStream({
       // names the server's real thread. It accepts that frame only when no other
       // unnamed send could own it; a send on an existing conversation still
       // rejects a frame from another thread.
+      //
+      // The run may also be reported under the id we submitted: the sidecar's
+      // gateway-created chat is submitted before `useStream` has adopted it, so
+      // the SDK can create its own conversation while the Gateway still reports
+      // the send the caller made. Either identity belongs to this send.
+      const frameThreadId = threadId ?? "";
       if (
         !shouldAcceptPendingSend({
-          frameThreadId: threadId ?? "",
-          pendingThreadId: pending.serverThreadId ?? pending.threadId,
+          frameThreadId,
+          pendingThreadId:
+            frameThreadId === pending.threadId
+              ? pending.threadId
+              : (pending.serverThreadId ?? pending.threadId),
           pendingNewThread: pending.newThread && !pending.serverThreadId,
           retiredReleased,
           otherUnnamedReleased: releasedSendsRef.current.some(
