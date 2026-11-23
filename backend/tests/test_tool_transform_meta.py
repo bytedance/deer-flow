@@ -65,6 +65,9 @@ def test_content_fingerprint_ignores_block_ids_but_not_data():
     assert tool_content_fingerprint(first) == tool_content_fingerprint(second)
     assert tool_content_fingerprint([create_text_block("other page")]) != tool_content_fingerprint(first)
     assert tool_content_fingerprint("page") != tool_content_fingerprint("other page")
+    # Outside a standard content block an id can be the data that changed.
+    assert tool_content_fingerprint([{"id": "row-1", "status": "pending"}]) != tool_content_fingerprint([{"id": "row-2", "status": "pending"}])
+    assert tool_content_fingerprint([{"type": ["text"], "id": "a"}]) != tool_content_fingerprint([{"type": ["text"], "id": "b"}])
 
 
 def test_mcp_source_projection_is_credential_free_and_defaults_transport():

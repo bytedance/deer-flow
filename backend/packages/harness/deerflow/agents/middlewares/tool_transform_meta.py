@@ -13,6 +13,8 @@ import hashlib
 import json
 from typing import Any
 
+from langchain_core.messages.content import KNOWN_BLOCK_TYPES
+
 TOOL_TRANSFORMS_KEY = "deerflow_tool_transforms"
 _SHA256_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -58,7 +60,16 @@ def tool_content_fingerprint(content: Any) -> str:
     langchain-core's ``create_*_block`` helpers (used by every MCP result
     conversion) stamp a fresh ``lc_<uuid>`` id on each content block, so two
     identical results never serialize the same. Those ids are not tool data.
+    Only standard content blocks lose their ``id``: in any other dict it can be
+    the data that changed.
     """
     if isinstance(content, list):
-        content = [{key: value for key, value in block.items() if key != "id"} if isinstance(block, dict) else block for block in content]
+        content = [_without_block_id(block) for block in content]
     return hashlib.sha256(json.dumps(content, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def _without_block_id(block: Any) -> Any:
+    block_type = block.get("type") if isinstance(block, dict) else None
+    if not isinstance(block_type, str) or block_type not in KNOWN_BLOCK_TYPES:
+        return block
+    return {key: value for key, value in block.items() if key != "id"}
