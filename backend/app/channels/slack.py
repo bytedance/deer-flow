@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import math
 import re
 from typing import Any
 from urllib.parse import urlsplit
@@ -29,6 +30,11 @@ from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 SLACK_STOP_TIMEOUT_SECONDS = 5.0
+# Outbound sends run inline on the shared inbound workers, so a long wait would
+# hold a worker that other providers also need. A 429 Retry-After up to this
+# budget is waited out; a longer one abandons the reply (logged) instead of
+# sleeping, and never retries before Slack allows it.
+SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS = 15.0
 # Match the manager's URL download ceiling. Slack workspace limits may be higher;
 # this keeps a single upload from exhausting Gateway memory.
 SLACK_MAX_INBOUND_FILE_BYTES = 50 * 1024 * 1024
@@ -274,6 +280,56 @@ class SlackChannel(Channel):
                 except Exception:
                     pass
             raise
+
+    def _outbound_retry_delay(self, attempt: int, exc: Exception) -> float:
+        """Wait out a Slack HTTP 429 before the next ``chat.postMessage``.
+
+        ``WebClient`` keeps the SDK's default handlers, which retry connection
+        errors only, so a 429 reaches this shared loop. The header is seconds.
+        A missing or unusable hint keeps ``2**attempt``, and a shorter hint
+        does not shrink it. A hint above ``SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS``
+        re-raises the 429 so the shared loop stops retrying: sleeping that long
+        would occupy a shared inbound worker, and retrying sooner would be
+        rejected again.
+        """
+        delay = super()._outbound_retry_delay(attempt, exc)
+        hint = self._slack_retry_after_seconds(exc)
+        if hint is None:
+            return delay
+        if hint > SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS:
+            logger.warning(
+                "[Slack] Retry-After %ss exceeds the inline wait budget of %ss; abandoning the send",
+                hint,
+                SLACK_MAX_OUTBOUND_RETRY_DELAY_SECONDS,
+            )
+            raise exc
+        return max(delay, hint)
+
+    @staticmethod
+    def _slack_retry_after_seconds(exc: Exception) -> float | None:
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) != 429:
+            return None
+        headers = getattr(response, "headers", None)
+        items = getattr(headers, "items", None)
+        if not callable(items):
+            return None
+        raw = None
+        for key, value in items():
+            if str(key).lower() == "retry-after":
+                raw = value
+                break
+        if isinstance(raw, (list, tuple)):
+            raw = raw[0] if raw else None
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            hint = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(hint):
+            return None
+        return hint
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         web_client = await self._get_web_client_for_message(msg)

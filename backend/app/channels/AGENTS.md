@@ -40,6 +40,13 @@ make test-blocking-io                                  # channels share the Gate
 - **Goal handoff pins the saved thread.** Recheck the conversation binding after
   confirmation delivery and run preparation. Use run-admission evidence when
   reporting a rejected start or a response lost after submission.
+- **Slack does not retry HTTP 429 inside the SDK.** `WebClient` is created with
+  the default handlers, which cover connection failures only. `SlackChannel.send`
+  waits for `Retry-After` in the shared channel retry up to 15 seconds; a longer
+  hint abandons the reply with a log line so it cannot hold a shared inbound
+  worker. A missing or shorter hint keeps
+  the 1s/2s backoff. File uploads, connection replies, and the Working-on-it acknowledgment
+  (`_send_running_reply`) still try once.
 - **Telegram photo fallback is narrow.** Only a photo `BadRequest` with
   `PHOTO_INVALID_DIMENSIONS` or `IMAGE_PROCESS_FAILED` is retried, once, as a
   document with the same bytes, file name and reply target. Other errors and
