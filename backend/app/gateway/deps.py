@@ -337,6 +337,8 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     if extensions is not None:
         # deerflow.mcp.oauth_store keeps rotating refresh tokens in the database.
         for name, server in extensions.get_enabled_mcp_servers().items():
+            if server.uses_browser_oauth:
+                consumers.append(f"mcpServers.{name}.user_oauth.enabled=true")
             oauth = server.oauth
             if oauth is not None and oauth.enabled and oauth.grant_type == "refresh_token":
                 consumers.append(f"mcpServers.{name}.oauth.enabled=true")
@@ -975,6 +977,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
+            app.state.coordination_workers = None
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
             # Memory backend has no durable PAT store, so Bearer credentials
@@ -1157,6 +1160,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.agent_runs_host = GatewayAgentRunsHost(app, load_user=SQLiteUserRepository(sf).get_user_by_id if sf is not None else None)
         stack.callback(app.state.agent_runs_host.close)
+        if sf is not None:
+            from app.gateway.coordination_workers import CoordinationWorkers
+            from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
+            from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
+
+            app.state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(sf), app.state.agent_runs_host, ChannelConnectionRepository(sf))
+            stack.push_async_callback(app.state.coordination_workers.close)
         # Extension unattended recovery waits on this before restoring grants;
         # past it, the whole run-admission stack above is ready.
         agent_runs_host_installed.set()
@@ -1565,13 +1575,24 @@ async def is_admin_user(request: Request) -> bool:
     return getattr(user, "system_role", None) == "admin"
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
+async def require_admin_user(request: Request, *, detail: str, pat_scope: str | None = None) -> None:
     """Require the authenticated caller to be an admin user.
 
     ``detail`` is the route-specific 403 message. The shared predicate keeps
     read-side redaction and write authorization on the same admin definition.
-    """
 
+    ``pat_scope`` names the one opt-in exception to "PATs never carry admin
+    capability": a route that passes it also admits a PAT whose owner is an
+    admin *and* which holds that scope. Only routes that pass it are affected;
+    ``is_admin_user`` stays False for every PAT.
+    """
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if pat_scope is not None and getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        user = getattr(request.state, "user", None)
+        if pat_scope in getattr(request.state, "pat_scopes", frozenset()) and getattr(user, "system_role", None) == "admin":
+            return
+        raise HTTPException(status_code=403, detail=detail)
     if not await is_admin_user(request):
         raise HTTPException(status_code=403, detail=detail)
 

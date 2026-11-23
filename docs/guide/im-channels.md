@@ -266,7 +266,13 @@ Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu
 3. Copy the `Client ID` and `Client Secret`, set `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` in `.env`, and enable the channel in `config.yaml`.
 4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
 
-DingTalk's Markdown fallback displays tables as labeled blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or trailing cells so values stay under the correct column labels.
+DingTalk's Markdown fallback converts same-line code spans with equal-length
+backtick delimiters to bold. For spans with non-space content, it removes one
+ASCII space from each end when both ends are padded. Tables display as labeled
+blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or
+trailing cells so values stay under the correct column labels.
+Each delimiter cell requires hyphens with optional alignment colons and accepts
+space or tab padding. Malformed delimiter rows are left as text.
 
 
 DingTalk token caching uses a two-hour fallback when the provider's token lifetime is invalid or no longer than the five-minute refresh margin, avoiding a refresh on every request.

@@ -22,7 +22,7 @@ Both use the model `inherit`, meaning the Lead Agent's current model. Both deny 
 
 - Not available without a `sandbox` section.
 - Available with any container sandbox (any non-local provider).
-- Under the local sandbox it depends on `sandbox.allow_host_bash`, which defaults to `false`. Delegating to `bash` then returns an explicit failure explaining that the option should only be enabled in a fully trusted local environment.
+- Bash delegation requires an isolated provider. The local provider serves workspace file tools.
 
 The `general-purpose` system prompt carries a `tool_restrictions` block stating that `task` is unavailable and that it must never spawn further subagents; when parallelism is needed it should use bash background processes or work sequentially.
 

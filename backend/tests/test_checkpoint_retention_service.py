@@ -298,18 +298,23 @@ async def test_postgres_round_trip_shape_pruned_by_default(saver_env: _SaverEnv)
         # aput needs the full configurable (namespace included) for the parent link.
         return {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": parent_id}}
 
-    # Control: one NEW channel version on an otherwise verbatim clone — a
-    # client ``update_state`` can produce this, the runtime writer cannot.
-    control = copy.deepcopy(dict(head.checkpoint))
+    # Seed two distinct channel counters so the regression is deterministic
+    # even when the real graph writes only one state channel.
+    baseline = copy.deepcopy(dict(head.checkpoint))
+    baseline.update(_new_checkpoint_marker())
+    baseline["channel_versions"] = {"messages": "v1", "goal": "v2"}
+    baseline_id = baseline["id"]
+    baseline_meta = {"source": "loop", "step": 1}
+    await saver_env.saver.aput(_leaf_config(head_id), baseline, baseline_meta, {})
+
+    # Control: exchange the channel versions without changing their value set.
+    # The channel ownership changed, so this checkpoint must remain resumable.
+    control = copy.deepcopy(baseline)
     control.update(_new_checkpoint_marker())
-    control["channel_versions"] = dict(control["channel_versions"])
-    # A version value no real channel would carry; the classifier compares the
-    # frozenset of versions against the parent's, so any strictly-different
-    # set is what matters.
-    control["channel_versions"]["_control"] = "__control_version__"
+    control["channel_versions"] = {"messages": "v2", "goal": "v1"}
     control_id = control["id"]
-    control_meta = _pg_round_trip_meta(head.metadata)
-    await saver_env.saver.aput(_leaf_config(head_id), control, control_meta, {})
+    control_meta = _pg_round_trip_meta(baseline_meta)
+    await saver_env.saver.aput(_leaf_config(baseline_id), control, control_meta, {})
 
     # The Postgres round-trip shape on top: verbatim clone of the control
     # (identical ``channel_versions``), marker popped from the metadata.
@@ -374,6 +379,8 @@ async def test_regenerated_old_head_pruned_opt_in(saver_env: _SaverEnv) -> None:
     assert fork_tuple is not None
     base = await _walk(saver_env, _config_thread(thread_id, fork_head_id), "fork-turn")
     assert base is not None
+    materialized = await graph.aget_state(_config(thread_id))
+    assert materialized.values["messages"][-1].content.startswith("regenerated turn:")
     remaining = await _listed_checkpoint_ids(saver_env, thread_id)
     assert old_head_id not in remaining
     assert {checkpoint_ids[0], checkpoint_ids[1], fork_head_id}.issubset(remaining)
@@ -832,7 +839,7 @@ async def test_admission_retention_bounds_storage_work_independently_of_history(
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "shape",
-    ["pending-writes", "missing-parent", "no-parent-link", "changed-versions", "swapped-channels", "markerless", "empty-durations", "empty-write-entry"],
+    ["pending-writes", "missing-parent", "no-parent-link", "changed-versions", "swapped-channels", "markerless", "empty-durations", "empty-write-entry", "empty-channel-versions", "markerless-empty-channel-versions"],
 )
 async def test_admission_retention_checks_only_a_proven_metadata_leaf(
     saver_env: _SaverEnv,
@@ -851,12 +858,21 @@ async def test_admission_retention_checks_only_a_proven_metadata_leaf(
         saver_env.saver.writes[(thread_id, "", duration_id)] = {}
     elif shape == "pending-writes":
         await saver_env.saver.aput_writes(head.config, [("messages", [HumanMessage(content="pending")])], task_id="pending")
-    elif shape in {"markerless", "empty-durations"}:
+    elif shape in {"markerless", "empty-durations", "empty-channel-versions", "markerless-empty-channel-versions"}:
         metadata = copy.deepcopy(head.metadata)
-        metadata.pop("writes", None)
+        if shape in {"markerless", "empty-durations", "markerless-empty-channel-versions"}:
+            metadata.pop("writes", None)
         if shape == "empty-durations":
             metadata["run_durations"] = {}
-        await saver_env.saver.aput(head.parent_config, head.checkpoint, metadata, {})
+        if shape in {"empty-channel-versions", "markerless-empty-channel-versions"}:
+            parent_checkpoint = copy.deepcopy(parent.checkpoint)
+            parent_checkpoint["channel_versions"] = {}
+            await saver_env.saver.aput(parent.parent_config, parent_checkpoint, parent.metadata, {})
+            checkpoint = copy.deepcopy(head.checkpoint)
+            checkpoint["channel_versions"] = {}
+            await saver_env.saver.aput(head.parent_config, checkpoint, metadata, {})
+        else:
+            await saver_env.saver.aput(head.parent_config, head.checkpoint, metadata, {})
     elif shape in {"changed-versions", "swapped-channels"}:
         checkpoint = copy.deepcopy(head.checkpoint)
         versions = checkpoint["channel_versions"]
@@ -880,11 +896,15 @@ async def test_admission_retention_checks_only_a_proven_metadata_leaf(
 
         monkeypatch.setattr(saver_env.saver, "aget_tuple", incomplete_chain)
 
+    if shape == "empty-channel-versions" and saver_env.kind == "postgres":
+        pytest.skip("Postgres removes the writes marker, so this marker-backed case applies to memory and SQLite")
+
     report = await enforce_completed_run_retention(checkpointer=saver_env.saver, thread_id=thread_id)
 
-    assert report.deleted_checkpoint_ids == ([duration_id] if shape in {"markerless", "empty-write-entry"} else [])
+    should_delete = shape in {"markerless", "empty-write-entry", "empty-channel-versions"}
+    assert report.deleted_checkpoint_ids == ([duration_id] if should_delete else [])
     retained = await original_get(_config_thread(thread_id, duration_id))
-    assert (retained is None) == (shape in {"markerless", "empty-write-entry"})
+    assert (retained is None) == should_delete
 
 
 @pytest.mark.anyio

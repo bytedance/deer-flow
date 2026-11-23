@@ -368,12 +368,8 @@ curl http://localhost:2026/health
 **Steps**:
 1. Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh`.
 2. The script auto-detects whether authentication (`DEER_FLOW_AUTH_DISABLED`) is enabled.
-3. When auth is on, the script registers / logs in a smoke-test user (`smoke-test@deerflow.dev` by default) and passes the session cookie so the real `/workspace/*` pages are verified — not the login redirect.
-4. When auth is off, the routes are checked anonymously as before.
-
-**Customisation**:
-- `SMOKE_TEST_EMAIL` — email for the test account (default: `smoke-test@deerflow.dev`).
-- `SMOKE_TEST_PASSWORD` — password for the test account (default: `SmokeTest123!`).
+3. When auth is on, finish setup before running the check. Set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing test account with a local DeerFlow password and workspace access. The script signs in and uses a temporary cookie jar that it removes on exit.
+4. When auth is off, the script checks the routes anonymously.
 
 ---
 
@@ -434,12 +430,8 @@ curl http://localhost:2026/health
 **Steps**:
 1. Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh`.
 2. The script auto-detects whether authentication (`DEER_FLOW_AUTH_DISABLED`) is enabled.
-3. When auth is on, the script registers / logs in a smoke-test user (`smoke-test@deerflow.dev` by default) and passes the session cookie so the real `/workspace/*` pages are verified — not the login redirect.
-4. When auth is off, the routes are checked anonymously as before.
-
-**Customisation**:
-- `SMOKE_TEST_EMAIL` — email for the test account (default: `smoke-test@deerflow.dev`).
-- `SMOKE_TEST_PASSWORD` — password for the test account (default: `SmokeTest123!`).
+3. When auth is on, finish setup before running the check. Set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing test account with a local DeerFlow password and workspace access. The script signs in and uses a temporary cookie jar that it removes on exit.
+4. When auth is off, the script checks the routes anonymously.
 
 ---
 
