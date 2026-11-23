@@ -42,8 +42,9 @@ _WEB_FETCH_URL = "https://web-fetch.apify.actor/"
 # Sent with every request so Apify can attribute the traffic to this integration.
 _INTEGRATION_HEADERS = {"x-apify-integration-platform": "deerflow"}
 
-# apify/web-search spends up to 60 seconds on a query; the rest covers a Standby cold start.
-_SEARCH_TIMEOUT_SECS = 90.0
+# apify/web-search spends up to 60 seconds on a query; the rest covers a Standby cold start,
+# which took over 90 seconds in a live run.
+_SEARCH_TIMEOUT_SECS = 120.0
 _FETCH_TIMEOUT_SECS = 120.0
 _API_TIMEOUT_SECS = 30.0
 # apify/web-search reads one Google results page, which holds about 10 organic results.
@@ -209,7 +210,8 @@ def _actor_path(actor_id: str) -> str:
 def _error_text(error: Exception, api_key: str | None, action: str) -> str:
     if not isinstance(error, ApifyError):
         logger.error("Apify %s failed: %s", action, type(error).__name__)
-    return redact_secret(error, api_key)
+    # Some transport errors, such as httpx.ReadTimeout, carry no message.
+    return redact_secret(error, api_key) or f"Apify {action} failed: {type(error).__name__}"
 
 
 @tool("web_search", parse_docstring=True)

@@ -185,6 +185,14 @@ class TestWebSearch:
         apify.on("POST", "https://web-search.apify.actor/", fail)
         assert "connection refused" in json.loads(await apify_tools.web_search_tool.ainvoke({"query": "q"}))["error"]
 
+    async def test_a_timeout_without_a_message_is_still_named(self, config, apify):
+        def time_out(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("", request=request)
+
+        apify.on("POST", "https://web-search.apify.actor/", time_out)
+        error = json.loads(await apify_tools.web_search_tool.ainvoke({"query": "q"}))["error"]
+        assert error == "Apify web search failed: ReadTimeout"
+
 
 class TestWebFetch:
     async def test_returns_the_title_from_metadata_and_the_markdown(self, config, apify):
