@@ -62,6 +62,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -642,10 +643,13 @@ def _run_scenario(
                 for start in range(0, iterations, concurrency):
                     batch = range(start, min(start + concurrency, iterations))
                     barrier = threading.Barrier(len(batch))
-                    futures = [pool.submit(_run_one, i, barrier) for i in batch]
+                    # Scoped AppConfig and other ContextVars do not cross a
+                    # ThreadPoolExecutor boundary automatically. Copy once per
+                    # submission: one Context cannot run concurrently twice.
+                    futures = [pool.submit(copy_context().run, _run_one, i, barrier) for i in batch]
                     results.extend(future.result() for future in as_completed(futures))
             else:
-                futures = [pool.submit(_run_one, i) for i in range(iterations)]
+                futures = [pool.submit(copy_context().run, _run_one, i) for i in range(iterations)]
                 results.extend(future.result() for future in as_completed(futures))
     results.sort(key=lambda result: result.iteration)
     _write_results(results, output_path, config_used)

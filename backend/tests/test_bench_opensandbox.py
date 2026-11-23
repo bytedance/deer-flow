@@ -71,6 +71,8 @@ def transport(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider_module, "_import_sdk", lambda: (SimpleNamespace(create=create), SimpleNamespace, SimpleNamespace))
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+    # A worker must inherit the scoped config; no checkout config.yaml is needed.
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing-config.yaml"))
     config = AppConfig(
         sandbox=SandboxConfig(
             use="deerflow.community.opensandbox:OpenSandboxProvider",
