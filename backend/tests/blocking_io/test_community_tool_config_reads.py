@@ -43,6 +43,7 @@ from deerflow.community.lightrag import tools as lightrag_tools
 from deerflow.community.ragflow import tools as ragflow_tools
 from deerflow.community.searxng import tools as searxng_tools
 from deerflow.community.tavily import tools as tavily_tools
+from deerflow.community.webrouter import tools as webrouter_tools
 
 pytestmark = pytest.mark.asyncio
 
@@ -135,6 +136,8 @@ _CASES = [
     pytest.param(tavily_tools, _call(tavily_tools.web_search_tool, query="q"), 1, id="tavily-web_search"),
     pytest.param(tavily_tools, _call(tavily_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="tavily-web_fetch"),
     pytest.param(searxng_tools, _call(searxng_tools.web_search_tool, query="q"), 1, id="searxng-web_search"),
+    pytest.param(webrouter_tools, _call(webrouter_tools.web_search_tool, query="q"), 1, id="webrouter-web_search"),
+    pytest.param(webrouter_tools, _call(webrouter_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="webrouter-web_fetch"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_search_tool, query="q"), 1, id="firecrawl-web_search"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_fetch_tool, url=_URL), 1, id="firecrawl-web_fetch"),
     pytest.param(infoquest_tools, _call(infoquest_tools.web_search_tool, query="q"), 1, id="infoquest-web_search"),

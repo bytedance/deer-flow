@@ -1097,6 +1097,22 @@ tools:
   #   max_results: 5                  # Clamped to 1-100 by You.com
   #   # api_key: $YDC_API_KEY         # Omit to use the keyless free tier
 
+  # Web search tool (uses WebRouter; no key required)
+  # WebRouter (https://github.com/Nimbleway/webrouter) puts one interface in front of
+  # many search backends, with fallback between them. With no key, queries go to
+  # keyless tiers (Nimble, Tavily, You.com, Exa, Parallel, Keenable). WebRouter also
+  # uses every backend key in the process environment (TAVILY_API_KEY, EXA_API_KEY,
+  # BRAVE_SEARCH_API_KEY, NIMBLE_API_KEY, ...), including keys set for other tools:
+  # those backends are tried first and bill their own accounts. Pin `provider` to
+  # use one backend only.
+  # Install: cd backend && uv sync --extra webrouter   (Docker: UV_EXTRAS=webrouter)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.webrouter.tools:web_search_tool
+  #   max_results: 5
+  #   # provider: auto                # or one search backend: nimble, tavily, exa, brave, you, ...
+  #   # timeout: 60                   # Seconds
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
@@ -1338,6 +1354,19 @@ tools:
   #   use: deerflow.community.unbrowse.tools:web_fetch_tool
   #   # render: auto                  # auto | never (plain HTTP only) | always (cloud browser)
   #   # api_key: $UNBROWSE_API_KEY
+
+  # Web fetch tool (uses WebRouter; no key required)
+  # Returns the page as markdown from a hosted reader, with fallback between
+  # backends. With no key, pages are read by keyless tiers (Nimble, Tavily, Jina,
+  # Firecrawl, Keenable); backend keys in the environment are used as for web_search.
+  # Install: cd backend && uv sync --extra webrouter   (Docker: UV_EXTRAS=webrouter)
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.webrouter.tools:web_fetch_tool
+  #   # provider: auto                # or one extract backend: nimble, tavily, jina, firecrawl, ...
+  #   # timeout: 60                   # Seconds
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation

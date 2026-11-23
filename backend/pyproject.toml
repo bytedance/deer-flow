@@ -51,6 +51,7 @@ monocle = ["deerflow-harness[monocle]"]
 ollama = ["deerflow-harness[ollama]"]
 browser = ["deerflow-harness[browser]"]
 memory-zh = ["deerflow-harness[memory-zh]"]
+webrouter = ["deerflow-harness[webrouter]"]
 
 [dependency-groups]
 # Managed extension packages are added here by `deerflow extensions install`.
@@ -81,6 +82,10 @@ dev = [
     # TUI runtime dep (also declared as the deerflow-harness[tui] extra); kept in
     # the dev group so the terminal workbench can be run and tested locally / in CI.
     "textual>=0.80",
+    # WebRouter web_search/web_fetch provider (also the deerflow-harness[webrouter]
+    # extra); kept in the dev group so its tests run the real library over a fake
+    # HTTP transport without forcing it onto installs.
+    "webrouter[search,extract]>=0.14.0",
 ]
 
 [tool.pytest.ini_options]

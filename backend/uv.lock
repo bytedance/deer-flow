@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -884,7 +884,6 @@ wheels = [
 name = "deer-flow"
 version = "2.3.0.dev0"
 source = { virtual = "." }
-default-groups = ["dev", "extensions"]
 dependencies = [
     { name = "bcrypt" },
     { name = "deerflow-extension-api" },
@@ -933,6 +932,9 @@ postgres = [
 redis = [
     { name = "deerflow-harness", extra = ["redis"] },
 ]
+webrouter = [
+    { name = "deerflow-harness", extra = ["webrouter"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -949,6 +951,7 @@ dev = [
     { name = "redis" },
     { name = "ruff" },
     { name = "textual" },
+    { name = "webrouter", extra = ["extract", "search"] },
 ]
 
 [package.metadata]
@@ -963,6 +966,7 @@ requires-dist = [
     { name = "deerflow-harness", extras = ["ollama"], marker = "extra == 'ollama'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
+    { name = "deerflow-harness", extras = ["webrouter"], marker = "extra == 'webrouter'", editable = "packages/harness" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.7.0" },
     { name = "e2b-code-interpreter", specifier = ">=2.8.1" },
@@ -982,7 +986,7 @@ requires-dist = [
     { name = "websockets", specifier = ">=16.0,<17" },
     { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
-provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh"]
+provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh", "webrouter"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -999,6 +1003,7 @@ dev = [
     { name = "redis", specifier = ">=5.0.0" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "textual", specifier = ">=0.80" },
+    { name = "webrouter", extras = ["search", "extract"], specifier = ">=0.14.0" },
 ]
 extensions = []
 
@@ -1098,6 +1103,9 @@ tenki = [
 tui = [
     { name = "textual" },
 ]
+webrouter = [
+    { name = "webrouter", extra = ["extract", "search"] },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1160,8 +1168,9 @@ requires-dist = [
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
     { name = "tzdata", specifier = ">=2025.1" },
+    { name = "webrouter", extras = ["search", "extract"], marker = "extra == 'webrouter'", specifier = ">=0.14.0" },
 ]
-provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "boxd", "monocle", "browser", "memory-zh"]
+provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "boxd", "monocle", "browser", "memory-zh", "webrouter"]
 
 [[package]]
 name = "defusedxml"
@@ -2993,6 +3002,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762", size = 2068504, upload-time = "2025-12-08T17:02:38.159Z" },
+]
+
+[[package]]
+name = "nimble-python"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c4/91/988c3173670bb1f1682ba497f5aeecf58ebfd9072253b3ef3f126d46e77f/nimble_python-1.6.0.tar.gz", hash = "sha256:f746b55244034e2ec427ed04c8fe0a5ff8f05d78e4a0e94ffa6870493b90734f", size = 325482, upload-time = "2026-09-07T13:54:48.917Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/2d/e95228afc8b64bfa0a5327978a44ae9d57b16f633caef16b7f7aa49a3260/nimble_python-1.6.0-py3-none-any.whl", hash = "sha256:b0f0700232e19d45e59dd24fd748c5b0f9bd796520aa878e3a2ef2c7ef82a2d1", size = 265483, upload-time = "2026-09-07T13:54:49.907Z" },
 ]
 
 [[package]]
@@ -5320,6 +5346,31 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/0b/02/ae6ceac1baeda530866a85075641cec12989bd8d31af6d5ab4a3e8c92f47/webencodings-0.5.1.tar.gz", hash = "sha256:b36a1c245f2d304965eb4e0a82848379241dc04b865afcc4aab16748587e1923", size = 9721, upload-time = "2017-04-05T20:21:34.189Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/24/2a3e3df732393fed8b3ebf2ec078f05546de641fe1b667ee316ec1dcf3b7/webencodings-0.5.1-py2.py3-none-any.whl", hash = "sha256:a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78", size = 11774, upload-time = "2017-04-05T20:21:32.581Z" },
+]
+
+[[package]]
+name = "webrouter"
+version = "0.14.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/53/9d/08cd5e52d9fdea4e1ad8890a17fa2c3d542212e9bdc15f2157c72be5a3f2/webrouter-0.14.0.tar.gz", hash = "sha256:0380bc412187af5943dd1a0cd7c0b59d88b692d2ed290fb6194a02a4a5ea686a", size = 2137016, upload-time = "2026-11-19T09:15:55.073Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2c/69/7f85820e21ddb8a704ea2c6da4b06a8e9a986368753e2585a27ab6992a01/webrouter-0.14.0-py3-none-any.whl", hash = "sha256:14783fc6cc8efa6969082b52fddbd845457e6dc57d0660a3c179abca59b9767a", size = 1779626, upload-time = "2026-11-19T09:15:53.472Z" },
+]
+
+[package.optional-dependencies]
+extract = [
+    { name = "httpx" },
+    { name = "nimble-python" },
+    { name = "tavily-python" },
+]
+search = [
+    { name = "httpx" },
+    { name = "nimble-python" },
+    { name = "tavily-python" },
 ]
 
 [[package]]

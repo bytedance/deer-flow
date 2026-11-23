@@ -759,6 +759,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="SPECSTREAM_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="webrouter",
+        display_name="WebRouter",
+        description="Many search backends with fallback, no API key required (needs the webrouter extra)",
+        use="deerflow.community.webrouter.tools:web_search_tool",
+        env_var=None,
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -843,6 +851,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Page text as markdown, also PDF, Word and Excel, API key required",
         use="deerflow.community.specstream.tools:web_fetch_tool",
         env_var="SPECSTREAM_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="webrouter",
+        display_name="WebRouter",
+        description="Page as markdown from hosted readers with fallback, no API key required (needs the webrouter extra)",
+        use="deerflow.community.webrouter.tools:web_fetch_tool",
+        env_var=None,
         tool_name="web_fetch",
     ),
 ]

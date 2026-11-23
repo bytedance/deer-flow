@@ -110,6 +110,9 @@ monocle = ["monocle_apptrace>=0.8.8"]
 browser = ["playwright>=1.40"]
 # Optional Chinese tokenization for the FTS5 memory retrieval adapter.
 memory-zh = ["jieba>=0.42.1"]
+# WebRouter web_search/web_fetch provider (deerflow.community.webrouter). The
+# library is imported only when one of its tools runs.
+webrouter = ["webrouter[search,extract]>=0.14.0"]
 
 [build-system]
 requires = ["hatchling"]

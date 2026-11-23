@@ -8,14 +8,15 @@ from deerflow.community.ddg_search.tools import web_search_tool as ddg_web_searc
 from deerflow.community.searxng.tools import web_search_tool as searxng_web_search
 from deerflow.community.sofya.tools import web_search_tool as sofya_web_search
 from deerflow.community.tavily.tools import web_search_tool as tavily_web_search
+from deerflow.community.webrouter.tools import web_search_tool as webrouter_web_search
 
 EXPECTED_TIME_RANGES = {"day", "week", "month", "year"}
 
 
 @pytest.mark.parametrize(
     "tool_obj",
-    [ddg_web_search, brave_web_search, tavily_web_search, searxng_web_search, sofya_web_search],
-    ids=["ddg", "brave", "tavily", "searxng", "sofya"],
+    [ddg_web_search, brave_web_search, tavily_web_search, searxng_web_search, sofya_web_search, webrouter_web_search],
+    ids=["ddg", "brave", "tavily", "searxng", "sofya", "webrouter"],
 )
 def test_web_search_time_range_schema_is_consistent(tool_obj) -> None:
     parameters = convert_to_openai_tool(tool_obj)["function"]["parameters"]

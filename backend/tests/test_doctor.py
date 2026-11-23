@@ -575,6 +575,21 @@ class TestCheckWebSearch:
         assert result.status == "ok"
         assert "DuckDuckGo" in result.detail
 
+    def test_webrouter_always_ok(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "WebRouter" in result.detail
+
+    def test_webrouter_without_the_extra_warns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(doctor, "find_spec", lambda name: None)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.fix == "cd backend && uv sync --extra webrouter"
+
     def test_commented_out_tools_block_warns_without_traceback(self, tmp_path):
         # config.example.yaml ships a `tools:` key whose entries can all be
         # commented out, so it parses as None rather than an empty list.
@@ -868,6 +883,13 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "ok"
         assert "Jina AI" in result.detail
+
+    def test_webrouter_always_ok(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.webrouter.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "ok"
+        assert "WebRouter" in result.detail
 
     @pytest.mark.usefixtures("delegated_backend_dns")
     def test_browserless_fetch_explicit_token_wins_over_the_environment(self, tmp_path, monkeypatch):

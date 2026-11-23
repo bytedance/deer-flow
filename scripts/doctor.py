@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from importlib import import_module
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Literal
 
@@ -683,8 +684,9 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             "web_search": {
                 "ddg_search": "DuckDuckGo (no key needed)",
                 "youcom": "You.com (works with no key; YDC_API_KEY enables the full Search API)",
+                "webrouter": "WebRouter (no key needed; backend keys in the environment add more backends)",
             },
-            "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)", "crawl4ai": "Crawl4AI (self-hosted, no key needed)"},
+            "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)", "crawl4ai": "Crawl4AI (self-hosted, no key needed)", "webrouter": "WebRouter (no key needed; backend keys in the environment add more backends)"},
             "image_search": {"deerflow.community.image_search.tools": "DuckDuckGo Images (no key needed)"},
         }
         key_providers = {
@@ -851,6 +853,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
                 if provider in use:
+                    if provider == "webrouter" and find_spec("web_router") is None:
+                        return CheckResult(label, "warn", "WebRouter is configured but the webrouter extra is not installed", fix="cd backend && uv sync --extra webrouter")
                     var, reads_config = free_provider_keys.get(provider, (None, False))
                     sources = [_config_source(tool, "api_key")] if reads_config else []
                     if var:
