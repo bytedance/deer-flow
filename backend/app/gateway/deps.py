@@ -412,12 +412,12 @@ def _validate_agent_storage(config: AppConfig) -> None:
 def _validate_provisioner_environment(config: AppConfig) -> None:
     """Refuse a ``sandbox.environment`` map the provisioner would reject.
 
-    The sandbox provider is built lazily, so this map used to pass startup and
-    only fail when the first sandbox was created: the create returned no
-    Pod, the upload path turned the resulting ``ValueError`` into a 400 as if
-    the request were malformed, and ``/health/ready`` still reported ready.
-    The limits checked here are the provisioner's own, applied to the same
-    filtered map the backend forwards, and sandbox allocation stays lazy.
+    The sandbox provider is built lazily, so the map used to pass startup and
+    fail on the first sandbox create instead: no Pod appeared, the upload path
+    turned the resulting ``ValueError`` into a 400 against a request that was
+    fine, and ``/health/ready`` still reported ready. The limits checked here
+    are the provisioner's own, applied to the same filtered map the backend
+    forwards, and sandbox allocation itself stays lazy.
     """
     from app.gateway.health import resolve_provisioner_url
     from deerflow.community.aio_sandbox.remote_backend import check_provisioner_environment, operator_provisioner_environment
