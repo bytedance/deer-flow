@@ -293,6 +293,7 @@ class RunRecord:
     start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
+    coordination_shutdown: bool = False
     error: str | None = None
     model_name: str | None = None
     store_only: bool = False
@@ -3596,6 +3597,8 @@ class RunManager:
         ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``. Runs still active
         after ``timeout`` are logged and may still race teardown.
         """
+        from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, WORKER_SHUTDOWN
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
@@ -3608,6 +3611,8 @@ class RunManager:
             finalizing = [record for record in self._runs.values() if record.status not in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
             finalizing_ids = {record.run_id for record in finalizing}
             for record in inflight:
+                if not record.abort_event.is_set() and (record.metadata or {}).get(RUN_GRANT_METADATA):
+                    record.coordination_shutdown = True
                 record.abort_action = "interrupt"
                 record.abort_event.set()
                 record.task.cancel()  # type: ignore[union-attr]  # filtered above
@@ -3649,6 +3654,8 @@ class RunManager:
                     continue
                 if record.status in (RunStatus.pending, RunStatus.running):
                     record.status = RunStatus.interrupted
+                    if record.coordination_shutdown:
+                        record.stop_reason = WORKER_SHUTDOWN
                     record.terminal_status_persisted = self._store is None
                     record.updated_at = _now_iso()
                 to_persist.append(record)
