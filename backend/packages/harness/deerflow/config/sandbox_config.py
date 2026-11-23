@@ -1,10 +1,15 @@
 import ipaddress
+import logging
 import math
+import re
 from typing import Literal
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
+
+logger = logging.getLogger(__name__)
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -15,6 +20,11 @@ SandboxNetworkApproval = Literal["deny", "prompt"]
 # Reserving half the signed range for that timestamp keeps accepted TTLs usable
 # without making config validation depend on the current clock.
 _REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
+
+
+def is_local_sandbox_use(use: str) -> bool:
+    """Identify the built-in local provider by its configured class path."""
+    return use.endswith(":LocalSandboxProvider") and "deerflow.sandbox.local" in use
 
 
 def normalize_container_path(value: str) -> str:
@@ -99,6 +109,28 @@ class SandboxNetworkConfig(BaseModel):
         return normalized
 
 
+def parse_cluster_node(address: str) -> tuple[str, int]:
+    match = re.fullmatch(r"(\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9._-]+):([0-9]{1,5})", address)
+    if not match or not 1 <= int(match[2]) <= 65535:
+        raise ValueError("redis_cluster_nodes entries must be host:port or [IPv6]:port")
+    host = match[1]
+    if host.startswith("["):
+        host = str(ipaddress.IPv6Address(host[1:-1]))
+    return host, int(match[2])
+
+
+def validate_cluster_redis_url(url: str) -> None:
+    seed = urlsplit(url)
+    if seed.scheme not in {"redis", "rediss"} or not seed.hostname or seed.port == 0 or seed.fragment:
+        raise ValueError("cluster redis_url requires a redis:// or rediss:// seed host")
+    options = parse_qs(seed.query, keep_blank_values=True)
+    if seed.path not in {"", "/", "/0"} or any(db != "0" for db in options.get("db", [])):
+        raise ValueError("Redis Cluster supports database 0 only")
+    # redis-py gives URL query parameters precedence over client kwargs.
+    if options.keys() & {"decode_responses", "socket_timeout", "socket_connect_timeout", "read_from_replicas", "load_balancing_strategy"}:
+        raise ValueError("cluster redis_url cannot override ownership read routing, decoding or socket timeouts")
+
+
 class SandboxOwnershipConfig(BaseModel):
     """Configuration for cross-instance sandbox container ownership (#4206).
 
@@ -117,8 +149,11 @@ class SandboxOwnershipConfig(BaseModel):
     )
     redis_url: str | None = Field(
         default=None,
-        description="Redis URL for the redis ownership type. If omitted, DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL, DEER_FLOW_STREAM_BRIDGE_REDIS_URL, REDIS_URL, or redis://localhost:6379/0 is used.",
+        description="Redis endpoint or cluster seed URL. Falls back to DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL, DEER_FLOW_STREAM_BRIDGE_REDIS_URL, then REDIS_URL. Standalone also defaults to redis://localhost:6379/0.",
     )
+    redis_mode: Literal["standalone", "cluster"] = Field(default="standalone", description="startup-only: Redis topology for sandbox ownership and E2B capacity.")
+    redis_cluster_nodes: list[str] = Field(default_factory=list, description="startup-only: Additional Redis Cluster discovery seeds (host:port or [IPv6]:port).")
+
     renewal_interval_seconds: float = Field(
         default=30.0,
         gt=0,
@@ -144,6 +179,24 @@ class SandboxOwnershipConfig(BaseModel):
         default="deerflow:sandbox:owner",
         description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
     )
+
+    @model_validator(mode="after")
+    def validate_redis_topology(self) -> "SandboxOwnershipConfig":
+        if self.redis_mode == "cluster":
+            if self.type != "redis":
+                raise ValueError("redis_mode: cluster requires sandbox.ownership.type: redis")
+            if self.redis_url is not None:
+                validate_cluster_redis_url(self.redis_url)
+            for node in self.redis_cluster_nodes:
+                parse_cluster_node(node)
+        elif self.redis_cluster_nodes:
+            raise ValueError("redis_cluster_nodes requires redis_mode: cluster")
+        return self
+
+    @property
+    def cluster_nodes(self) -> list[str] | None:
+        """An empty list enables cluster discovery from the seed URL alone."""
+        return self.redis_cluster_nodes if self.redis_mode == "cluster" else None
 
     @model_validator(mode="after")
     def validate_lease_ttl(self) -> "SandboxOwnershipConfig":
@@ -192,8 +245,6 @@ class SandboxConfig(BaseModel):
 
     Common options:
         use: Class path of the sandbox provider (required)
-        allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
-            Dangerous and intended only for fully trusted local workflows.
 
     AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, and
     LocalSandboxProvider shared options:
@@ -204,9 +255,7 @@ class SandboxConfig(BaseModel):
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are
             resolved from host env when config is loaded; providers use them verbatim). Injected
-            entries bypass the env-policy scrubber as operator-authorized values;
-            LocalSandboxProvider masks injected credentials from bash tool output and command
-            errors while preserving benign configuration values.
+            entries bypass the env-policy scrubber as operator-authorized values.
 
     BoxliteProvider specific options:
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
@@ -248,8 +297,17 @@ class SandboxConfig(BaseModel):
     )
     allow_host_bash: bool = Field(
         default=False,
-        description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
+        deprecated=True,
+        description="Legacy setting accepted for compatibility. Bash requires an isolated sandbox provider.",
     )
+
+    @field_validator("allow_host_bash")
+    @classmethod
+    def _warn_legacy_host_bash(cls, value: bool, info: ValidationInfo) -> bool:
+        if value and is_local_sandbox_use(info.data.get("use", "")):
+            logger.warning("LocalSandboxProvider ignores deprecated sandbox.allow_host_bash. To run Bash commands, select an isolated sandbox provider such as AioSandboxProvider via sandbox.use and remove sandbox.allow_host_bash.")
+        return value
+
     prewarm: bool = Field(
         default=False,
         description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),

@@ -8,7 +8,9 @@ messages, the tool-boundary allowlist, and the pinned detector registry.
 
 import random
 import re
-import time
+from statistics import median
+from time import process_time
+from timeit import Timer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -160,20 +162,19 @@ class TestDetectors:
         ],
     )
     def test_redaction_stays_linear_on_whitespace_free_text(self, make_payload):
-        # The email scan was quadratic in the longest local-part run: 100 KB
-        # of hex took ~6 s on the event loop, on every model call. Assert the
-        # shape, not an absolute budget (see test_skill_review_core.py): the
-        # quadratic path takes ~4x per doubling, the linear one ~2x.
-        def timed(payload):
-            def once():
-                started = time.perf_counter()
-                redact_text(payload, _PII_CFG)
-                return time.perf_counter() - started
+        # The quadratic email scan took ~6 s for 100 KB of hex. Doubling the
+        # input takes ~4x as much work for that scan and ~2x for a linear scan.
+        def redaction_timer(size):
+            payload = make_payload(size)
+            return Timer(lambda: redact_text(payload, _PII_CFG), timer=process_time)
 
-            return min(once() for _ in range(5))
-
-        small_elapsed = timed(make_payload(32768))
-        large_elapsed = timed(make_payload(65536))
+        small_timer = redaction_timer(32768)
+        large_timer = redaction_timer(65536)
+        # CPU time excludes runner pauses. Calibrate the batch size above the
+        # clock's resolution and sample both sizes together to limit drift.
+        repeats, _ = small_timer.autorange()
+        samples = [(small_timer.timeit(repeats), large_timer.timeit(repeats)) for _ in range(3)]
+        small_elapsed, large_elapsed = (median(times) / repeats for times in zip(*samples))
 
         assert small_elapsed < 1.0, f"redaction took {small_elapsed:.2f}s"
         assert large_elapsed / small_elapsed < 3, f"redaction looks superlinear: 32K took {small_elapsed:.4f}s, 64K took {large_elapsed:.4f}s"

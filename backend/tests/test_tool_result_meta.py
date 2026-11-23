@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -20,7 +20,6 @@ from deerflow.agents.middlewares.tool_result_meta import (
 )
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX shell probes")
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("progress_enabled", [False, True])
 @pytest.mark.parametrize(
@@ -38,7 +37,7 @@ from deerflow.agents.middlewares.tool_result_meta import (
     ],
 )
 @pytest.mark.asyncio
-async def test_native_bash_producer_status_reaches_graph_and_receipt(tmp_path, monkeypatch, mode, progress_enabled, stdout, exit_code):
+async def test_bash_structured_exit_code_reaches_graph_and_receipt(tmp_path, monkeypatch, mode, progress_enabled, stdout, exit_code):
     from langchain.agents import create_agent
     from langchain_core.callbacks import BaseCallbackHandler
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -49,7 +48,8 @@ async def test_native_bash_producer_status_reaches_graph_and_receipt(tmp_path, m
     from deerflow.config import app_config, paths
     from deerflow.extensions.registry import EMPTY_EXTENSIONS
     from deerflow.sandbox import sandbox_provider
-    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+    from deerflow.sandbox.sandbox import CommandOutput, Sandbox
     from deerflow.sandbox.tools import bash_tool
 
     class Model(GenericFakeChatModel):
@@ -73,11 +73,9 @@ async def test_native_bash_producer_status_reaches_graph_and_receipt(tmp_path, m
         {
             "models": [],
             "sandbox": {
-                "use": "deerflow.sandbox.local:LocalSandboxProvider",
-                "allow_host_bash": True,
+                "use": "deerflow.community.aio_sandbox:AioSandboxProvider",
                 "bash_output_max_chars": 0 if exit_code == 124 else 80,
                 "bash_command_timeout": 0.1 if exit_code == 124 else 5,
-                "environment": {"EXAMPLE_API_KEY": "example-api-secret"},
             },
             "memory": {"enabled": False},
             "summarization": {"enabled": False},
@@ -87,15 +85,24 @@ async def test_native_bash_producer_status_reaches_graph_and_receipt(tmp_path, m
     )
     monkeypatch.setattr(app_config, "_app_config", config)
     monkeypatch.setattr(app_config, "_app_config_is_custom", True)
-    provider = LocalSandboxProvider()
+    output = "Command timed out" if exit_code == 124 else stdout
+    if exit_code:
+        output = f"{output}\nExit Code: {exit_code}"
+    # This double models a provider with a structured exit code. AIO emits text.
+    execute_command = Mock(return_value=CommandOutput(output, exit_code))
+    sandbox = Mock(spec=Sandbox, id="fixture:status", execute_command=execute_command, supports_command_cancellation=False)
+    provider = Mock(spec=sandbox_provider.SandboxProvider)
+    provider.uses_thread_data_mounts = False
+    provider.acquire.return_value = sandbox.id
+    provider.acquire_async = AsyncMock(return_value=sandbox.id)
+    provider.get.return_value = sandbox
+    provider.get_scoped.return_value = sandbox
     monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)
-    command = f"printf '%s' {shlex.quote(stdout)}; exit {exit_code}"
-    if exit_code == 124:
-        command = "while :; do :; done"
+    monkeypatch.setattr("deerflow.sandbox.tools.read_active_secrets", lambda _: {"EXAMPLE_API_KEY": "example-api-secret"})
     model = Model(
         messages=iter(
             [
-                AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": command}, "id": "bash-probe"}]),
+                AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": "pwd"}, "id": "bash-probe"}]),
                 AIMessage(content="Done."),
             ]
         )
@@ -107,6 +114,7 @@ async def test_native_bash_producer_status_reaches_graph_and_receipt(tmp_path, m
         captured = Requests()
         invoke_config = {"callbacks": [captured]}
         result = graph.invoke(state, context=context, config=invoke_config) if mode == "sync" else await graph.ainvoke(state, context=context, config=invoke_config)
+        execute_command.assert_called_once()
         message = next(m for m in result["messages"] if isinstance(m, ToolMessage) and m.name == "bash")
         if exit_code == 124:
             assert "timed out" in message.content.lower()
@@ -128,7 +136,7 @@ async def test_native_bash_producer_status_reaches_graph_and_receipt(tmp_path, m
         projected = next(m for m in captured.messages[-1] if isinstance(m, ToolMessage) and m.name == "bash")
         assert json.loads(projected.content) == {TOOL_META_KEY: {"status": expected, "source": "tool_return"}, "content": message.content}
     finally:
-        provider.shutdown()
+        get_sandbox_lease_manager(provider).close()
 
 
 def _make_msg(content: str, *, status: str = "success", kwargs: dict[str, object] | None = None) -> ToolMessage:

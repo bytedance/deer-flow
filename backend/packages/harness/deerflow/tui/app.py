@@ -799,7 +799,7 @@ class DeerFlowTUI(App):
         self._refresh_status()
 
     def _flush_transcript(self) -> None:
-        if self._transcript_dirty:
+        if self.is_running and self._transcript_dirty:
             self._transcript_dirty = False
             self._refresh_transcript()
 
@@ -872,7 +872,7 @@ class DeerFlowTUI(App):
         self._refresh_status()
 
     def _tick_spinner(self) -> None:
-        if self._streaming:
+        if self.is_running and self._streaming:
             self._spinner_idx = (self._spinner_idx + 1) % len(SYMBOLS["spinner"])
             self._refresh_status()
 

@@ -786,6 +786,79 @@ async def test_role_search_mapping_and_default_compatibility(role_runtime, async
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("location", ["active", "archive", "mixed"])
+async def test_latest_search_recovers_correction_after_many_user_drafts(role_runtime, async_mode, location):
+    import json
+
+    config = TaskContinuityConfig(enabled=True)
+    drafts = [HumanMessage(content=f"Retention draft {i}", id=f"draft-{i}") for i in range(9)]
+    correction = HumanMessage(content="Correction: use retention of 30 days for the final report.", id="correction")
+    assistant = AIMessage(content="Retention summary", id="assistant")
+    current = HumanMessage(content="Apply the retention decision", id="current")
+    if location == "active":
+        role_runtime.state = {"messages": [*drafts, correction, assistant]}
+    else:
+        earlier = archive.capture({}, role_runtime, drafts, config)
+        history = archive.capture({"task_history": earlier}, role_runtime, [drafts[-1], correction, assistant], config)
+        role_runtime.state = {"task_history": history, "messages": [drafts[0], current] if location == "mixed" else []}
+
+    async def search(**kwargs):
+        args = {"runtime": role_runtime, "query": "retention", "role": "user", **kwargs}
+        return json.loads(await history_search.ainvoke(args) if async_mode else history_search.invoke(args))
+
+    default = await search()
+    assert len(default["results"]) == 8
+    assert "correction" not in {row["message_id"] for row in default["results"]}
+    assert await search(order="relevance") == default
+
+    latest = await search(order="latest")
+    expected = [correction.id, *(message.id for message in reversed(drafts))]
+    if location == "mixed":
+        expected = [current.id, drafts[0].id, *expected[:-1]]
+    assert latest["status"] == "available"
+    assert [row["message_id"] for row in latest["results"]] == expected[:8]
+    row = next(row for row in latest["results"] if row["message_id"] == correction.id)
+    arguments = {"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}
+    source = json.loads(await history_read.ainvoke(arguments) if async_mode else history_read.invoke(arguments))
+    assert source["text"].startswith(row["excerpt"])
+    assert "30 days" in row["excerpt"]
+
+    if location != "active":
+        role_runtime.state = {"task_history": earlier}
+        assert "correction" not in {row["message_id"] for row in (await search(order="latest"))["results"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_latest_search_uses_the_published_checkpoint_order_after_recapture(role_runtime, async_mode):
+    import json
+
+    config = TaskContinuityConfig(enabled=True)
+    drafts = [HumanMessage(content=f"Retention draft {i}", id=f"draft-{i}") for i in range(9)]
+    correction = [
+        HumanMessage(content="Retention decision: revise the earlier draft.", id="decision"),
+        HumanMessage(content="Retention correction: use 30 days.", id="correction"),
+    ]
+
+    # The rows are written, but the first checkpoint update is discarded.
+    unpublished = archive.capture({}, role_runtime, correction, config)
+    earlier = archive.capture({}, role_runtime, drafts, config)
+    latest = archive.capture({"task_history": earlier}, role_runtime, correction, config)
+    assert latest["batches"] == [*earlier["batches"], *unpublished["batches"]]
+
+    async def search(history):
+        role_runtime.state = {"task_history": history}
+        arguments = {"runtime": role_runtime, "query": "retention", "role": "user", "order": "latest"}
+        result = json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))
+        assert result["status"] == "available"
+        return [row["message_id"] for row in result["results"]]
+
+    assert await search(earlier) == [message.id for message in reversed(drafts[1:])]
+    assert await search(latest) == ["correction", "decision", *(message.id for message in reversed(drafts[3:]))]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["human", "ai", "system", "", "USER", 1, ["user"]])
 async def test_role_search_rejects_invalid_tool_arguments(role_runtime, role):
     from pydantic import ValidationError
@@ -803,15 +876,19 @@ def test_role_search_schema_is_optional_and_model_visible():
     assert "runtime" not in schema["properties"]
     assert schema["properties"]["role"]["default"] is None
     assert schema["properties"]["role"]["anyOf"] == [{"enum": ["user", "assistant", "tool"], "type": "string"}, {"type": "null"}]
+    assert "order" not in schema.get("required", [])
+    assert schema["properties"]["order"]["default"] == "relevance"
+    assert schema["properties"]["order"]["enum"] == ["relevance", "latest"]
 
 
 @pytest.mark.parametrize("context", [{"thread_id": "thread-b", "user_id": "alice"}, {"thread_id": "thread-a", "user_id": "bob"}])
-def test_role_search_preserves_checkpoint_scope(role_runtime, context):
+@pytest.mark.parametrize("order", ["relevance", "latest"])
+def test_role_search_preserves_checkpoint_scope(role_runtime, context, order):
     import json
 
     role_runtime.state = {"task_history": archive.capture({}, role_runtime, conversation(), TaskContinuityConfig(enabled=True))}
     role_runtime.context = context
-    assert json.loads(history_search.invoke({"runtime": role_runtime, "query": "Citrine", "role": "user"})) == {"results": [], "status": "scope_unavailable"}
+    assert json.loads(history_search.invoke({"runtime": role_runtime, "query": "Citrine", "role": "user", "order": order})) == {"results": [], "status": "scope_unavailable"}
 
 
 def test_role_search_preserves_visibility_reachability_and_status(role_runtime):
