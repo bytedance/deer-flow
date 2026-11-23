@@ -1086,6 +1086,10 @@ DELETE /api/mcp/agent-auth/{binding}/grants
 {"owners": ["<user id>"], "definition_digests": ["<64-character SHA-256 digest>"]}
 ```
 
+A grant covers the agent, server, destination and OAuth client the binding had
+when it was written; after `config.yaml` changes one of them, responses show
+`"approval": "stale"` and the grant admits nobody until it is written again.
+
 #### Reset MCP Tools Cache
 
 Publish a shared cache generation, then clear cached MCP tools and persistent

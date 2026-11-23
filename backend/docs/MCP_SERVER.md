@@ -656,6 +656,14 @@ stops new runs of that definition; runs and durable tasks already admitted
 keep the definition version they started with. If the grant store cannot be
 read, admission and calls are denied.
 
+A `PUT` records what the grant is approved for: the binding's agent and
+server, the server's destination (transport and URL) and its OAuth client
+(every OAuth setting except the secret). If `config.yaml` later changes any of
+them, the stored grant admits nobody and the API reports it with
+`"approval": "stale"` until an administrator replaces it. Rotating the client
+secret of the same account keeps the grant. `approval` is otherwise `current`
+(the grant is in force), `none` (no grant) or `config` (`grants: config`).
+
 A deploy pipeline adds the new digest right after it deploys (read it from the
 deploy account's copy with `definition-digest`, after reviewing that copy),
 then removes the old one once every copy is updated. A membership sync replaces

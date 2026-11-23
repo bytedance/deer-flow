@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from deerflow.config.agents_config import AgentConfig, load_agent_soul
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, get_extensions_config
-from deerflow.config.mcp_agent_auth_config import BindingId, DefinitionDigest, McpAgentCredentialBinding
+from deerflow.config.mcp_agent_auth_config import BindingId, DefinitionDigest, McpAgentCredentialBinding, McpAgentGrantSubject, StoredMcpAgentGrant
 from deerflow.mcp.headers import apply_header_overrides, header_spellings
 from deerflow.mcp.oauth import OAuthTokenManager
 from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY
@@ -66,12 +66,37 @@ def agent_definition_digest(config: AgentConfig, soul: str | None) -> str:
     return canonical_hash({"version": 1, "config": config.model_dump(mode="json"), "soul": soul or ""})
 
 
+def grant_subject(app_config: Any, binding: McpAgentCredentialBinding) -> McpAgentGrantSubject | None:
+    """What a runtime grant for ``binding`` is approved for under the current configuration."""
+    server = app_config.extensions.mcp_servers.get(binding.server)
+    if server is None:
+        return None
+    return McpAgentGrantSubject(agent=binding.agent, server=binding.server, destination_digest=_destination_digest(server), credential_digest=_credential_digest(binding))
+
+
+def runtime_grant_in_force(app_config: Any, binding_id: str, binding: McpAgentCredentialBinding, grant: StoredMcpAgentGrant | None) -> tuple[frozenset[str], frozenset[str]]:
+    """Owners and digests of a stored runtime grant, or none when it no longer applies.
+
+    An approval covers the agent, server, destination and OAuth client it was
+    given for. Pointing the binding at another agent, server or client, or the
+    server at another destination, leaves the grant stored but in force for
+    nobody until an administrator approves it again.
+    """
+    if grant is None:
+        return frozenset(), frozenset()
+    if grant.approved_for != grant_subject(app_config, binding):
+        logger.warning("MCP agent grant for binding=%s was approved for a different agent, server, destination or OAuth client; it admits nobody until approved again", binding_id)
+        return frozenset(), frozenset()
+    return frozenset(grant.owners), frozenset(grant.definition_digests)
+
+
 def binding_grant(app_config: Any, binding_id: str, binding: McpAgentCredentialBinding) -> tuple[frozenset[str], frozenset[str]]:
     """Return the owners and approved digests in force for one binding.
 
     ``grants: runtime`` bindings read the administrator's grant from the
     database (or file store) on each call, so a change applies without a
-    restart. A binding without a stored grant admits nobody.
+    restart. A binding without a stored grant, or whose grant was approved for
+    another agent, server, destination or OAuth client, admits nobody.
     """
     if binding.grants == "config":
         return frozenset(binding.owners), frozenset(binding.definition_digests)
@@ -82,9 +107,7 @@ def binding_grant(app_config: Any, binding_id: str, binding: McpAgentCredentialB
     except Exception:
         logger.warning("MCP agent grant store unavailable for binding=%s", binding_id, exc_info=True)
         raise ToolException("MCP agent credential policy is unavailable") from None
-    if grant is None:
-        return frozenset(), frozenset()
-    return frozenset(grant.owners), frozenset(grant.definition_digests)
+    return runtime_grant_in_force(app_config, binding_id, binding, grant)
 
 
 def _credential_digest(binding: McpAgentCredentialBinding) -> str:

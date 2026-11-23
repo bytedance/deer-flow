@@ -8,7 +8,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from deerflow.config.mcp_agent_auth_config import McpAgentGrant
+from deerflow.config.mcp_agent_auth_config import StoredMcpAgentGrant
 from deerflow.config.paths import get_paths
 from deerflow.persistence.mcp_agent_grants import McpAgentGrantStore
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
@@ -22,11 +22,11 @@ class FileMcpAgentGrantStore(McpAgentGrantStore):
     def _root() -> Path:
         return get_paths().base_dir / "mcp-agent-grants"
 
-    def _read(self, path: Path) -> tuple[str, McpAgentGrant]:
+    def _read(self, path: Path) -> tuple[str, StoredMcpAgentGrant]:
         document = json.loads(path.read_text(encoding="utf-8"))
-        return document.pop("binding"), McpAgentGrant.model_validate(document)
+        return document.pop("binding"), StoredMcpAgentGrant.model_validate(document)
 
-    def get(self, binding_id: str) -> McpAgentGrant | None:
+    def get(self, binding_id: str) -> StoredMcpAgentGrant | None:
         path = self._root() / f"{binding_id}.json"
         if not path.is_file():
             return None
@@ -35,13 +35,13 @@ class FileMcpAgentGrantStore(McpAgentGrantStore):
         # never applies to a binding it was not written for.
         return grant if stored_id == binding_id else None
 
-    def list(self) -> dict[str, McpAgentGrant]:
+    def list(self) -> dict[str, StoredMcpAgentGrant]:
         root = self._root()
         if not root.exists():
             return {}
         return dict(sorted(self._read(path) for path in root.glob("*.json")))
 
-    def put(self, binding_id: str, grant: McpAgentGrant) -> None:
+    def put(self, binding_id: str, grant: StoredMcpAgentGrant) -> None:
         reason = windows_incompatible_segment(binding_id)
         if reason is not None:
             raise ValueError(f"Binding ID {binding_id!r} cannot be stored as a file: {reason}")

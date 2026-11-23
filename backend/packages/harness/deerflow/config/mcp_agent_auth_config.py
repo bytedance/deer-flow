@@ -74,3 +74,25 @@ class McpAgentGrant(BaseModel):
     @classmethod
     def _unique_digests(cls, value: list[str]) -> list[str]:
         return list(dict.fromkeys(value))
+
+
+class McpAgentGrantSubject(BaseModel):
+    """What an administrator approved a runtime grant for.
+
+    The grant applies only while the binding still names this agent and server,
+    the server keeps this destination, and the binding keeps this OAuth client
+    (a nonsecret digest, so rotating the secret of the same account keeps it).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    agent: str
+    server: str
+    destination_digest: DefinitionDigest
+    credential_digest: DefinitionDigest
+
+
+class StoredMcpAgentGrant(McpAgentGrant):
+    """A runtime grant as stored: the administrator's grant and what it was approved for."""
+
+    approved_for: McpAgentGrantSubject

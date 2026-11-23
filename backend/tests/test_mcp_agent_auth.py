@@ -24,7 +24,7 @@ from support.mcp_agent_auth import agent_mcp_transport as agent_mcp_transport
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.app_config import AppConfig, pop_current_app_config, push_current_app_config, reset_app_config, set_app_config
 from deerflow.config.extensions_config import McpServerConfig
-from deerflow.config.mcp_agent_auth_config import McpAgentCredentialBinding, McpAgentGrant
+from deerflow.config.mcp_agent_auth_config import McpAgentCredentialBinding, McpAgentGrant, McpAgentGrantSubject, StoredMcpAgentGrant
 from deerflow.persistence import bootstrap
 from deerflow.persistence.base import Base
 from deerflow.persistence.mcp_agent_grants import McpAgentGrantRow, make_mcp_agent_grant_store
@@ -647,11 +647,26 @@ def runtime_env(agent_auth_env):
     set_app_config(config)
     store = make_mcp_agent_grant_store(config)
     digest = agent_definition_digest(agent_auth_env.agent, agent_auth_env.soul)
-    return SimpleNamespace(**{**vars(agent_auth_env), "config": config, "store": store, "digest": digest})
+
+    def approve(binding_id, grant, app_config=None):
+        """Store ``grant`` as an administrator approves it for the binding's current identity."""
+        from deerflow.mcp.agent_auth import grant_subject
+
+        app_config = app_config or config
+        store.put(binding_id, StoredMcpAgentGrant(**grant.model_dump(), approved_for=grant_subject(app_config, app_config.mcp_agent_auth[binding_id])))
+
+    return SimpleNamespace(**{**vars(agent_auth_env), "config": config, "store": store, "digest": digest, "approve": approve})
 
 
 def _grant(owners=("alice",), digests=()):
     return McpAgentGrant(owners=list(owners), definition_digests=list(digests))
+
+
+_SUBJECT = McpAgentGrantSubject(agent="research-bot", server="tickets", destination_digest="d" * 64, credential_digest="e" * 64)
+
+
+def _stored(owners=("alice",), digests=()):
+    return StoredMcpAgentGrant(owners=list(owners), definition_digests=list(digests), approved_for=_SUBJECT)
 
 
 @pytest.mark.parametrize("updates", [{"owners": ["alice"]}, {"definition_digests": ["a" * 64]}])
@@ -679,10 +694,10 @@ def test_runtime_grant_applies_to_the_next_admission(runtime_env):
     from deerflow.mcp.agent_auth import McpAgentAuthorizationError, capture_agent_authority
 
     env = runtime_env
-    env.store.put("research-tickets", _grant(digests=["0" * 64]))
+    env.approve("research-tickets", _grant(digests=["0" * 64]))
     with pytest.raises(McpAgentAuthorizationError, match="not approved"):
         capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
-    env.store.put("research-tickets", _grant(digests=["0" * 64, env.digest]))
+    env.approve("research-tickets", _grant(digests=["0" * 64, env.digest]))
     authority = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
     assert [ref.binding for ref in authority.references] == ["research-tickets"]
     assert capture_agent_authority(env.config, user_id="bob", agent_config=env.agent) is None
@@ -694,7 +709,7 @@ async def test_removing_a_runtime_owner_denies_the_next_call_with_a_cached_token
     from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, build_agent_auth_interceptor, capture_agent_authority
 
     env = runtime_env
-    env.store.put("research-tickets", _grant(owners=["alice", "bob"], digests=[env.digest]))
+    env.approve("research-tickets", _grant(owners=["alice", "bob"], digests=[env.digest]))
     authority = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
     runtime = Runtime(context={"user_id": "alice", AGENT_AUTH_CONTEXT_KEY: authority})
     interceptor = build_agent_auth_interceptor(env.config.extensions)
@@ -714,9 +729,9 @@ async def test_removing_a_runtime_owner_denies_the_next_call_with_a_cached_token
     request = MCPToolCallRequest(name="search", args={}, server_name="tickets", runtime=runtime)
     assert await interceptor(request, handler) == "ok"
     # Approving a new digest leaves admitted runs alone.
-    env.store.put("research-tickets", _grant(owners=["alice", "bob"], digests=["0" * 64]))
+    env.approve("research-tickets", _grant(owners=["alice", "bob"], digests=["0" * 64]))
     assert await interceptor(request, handler) == "ok"
-    env.store.put("research-tickets", _grant(owners=["bob"], digests=[env.digest]))
+    env.approve("research-tickets", _grant(owners=["bob"], digests=[env.digest]))
     with pytest.raises(ToolException, match="revoked"):
         await interceptor(request, handler)
     env.store.delete("research-tickets")
@@ -731,7 +746,7 @@ async def test_an_unavailable_grant_store_fails_closed(runtime_env, monkeypatch)
     from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, McpAgentAuthorizationError, build_agent_auth_interceptor, capture_agent_authority
 
     env = runtime_env
-    env.store.put("research-tickets", _grant(digests=[env.digest]))
+    env.approve("research-tickets", _grant(digests=[env.digest]))
     authority = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
 
     class Broken:
@@ -759,9 +774,59 @@ def test_overlapping_runtime_grants_fail_admission(runtime_env):
     data["mcp_agent_auth"]["second-grant"] = data["mcp_agent_auth"]["research-tickets"]
     config = AppConfig.model_validate(data)
     for binding_id in ("research-tickets", "second-grant"):
-        env.store.put(binding_id, _grant(digests=[env.digest]))
+        env.approve(binding_id, _grant(digests=[env.digest]), config)
     with pytest.raises(McpAgentAuthorizationError, match="overlap"):
         capture_agent_authority(config, user_id="alice", agent_config=env.agent)
+
+
+def _repoint_agent(config):
+    binding = config.mcp_agent_auth["research-tickets"]
+    config.mcp_agent_auth["research-tickets"] = binding.model_copy(update={"agent": "other-bot"})
+    return "other-bot"
+
+
+def _repoint_server(config):
+    config.extensions.mcp_servers["tickets-2"] = config.extensions.mcp_servers["tickets"].model_copy(deep=True)
+    binding = config.mcp_agent_auth["research-tickets"]
+    config.mcp_agent_auth["research-tickets"] = binding.model_copy(update={"server": "tickets-2"})
+
+
+def _move_destination(config):
+    config.extensions.mcp_servers["tickets"].url = "https://other-mcp.example"
+
+
+def _change_oauth(**updates):
+    def change(config):
+        binding = config.mcp_agent_auth["research-tickets"]
+        config.mcp_agent_auth["research-tickets"] = binding.model_copy(update={"oauth": binding.oauth.model_copy(update=updates)})
+
+    return change
+
+
+@pytest.mark.parametrize(
+    ("change", "in_force"),
+    [
+        pytest.param(_repoint_agent, False, id="agent"),
+        pytest.param(_repoint_server, False, id="server"),
+        pytest.param(_move_destination, False, id="destination"),
+        pytest.param(_change_oauth(client_id="other-client"), False, id="oauth-client"),
+        pytest.param(_change_oauth(token_url="https://other-idp.example/token"), False, id="oauth-endpoint"),
+        pytest.param(_change_oauth(client_secret="rotated-client-secret"), True, id="secret-rotation"),
+    ],
+)
+def test_a_runtime_grant_admits_only_for_the_identity_it_was_approved_for(runtime_env, change, in_force):
+    from deerflow.mcp.agent_auth import agent_definition_digest, capture_agent_authority
+
+    env = runtime_env
+    other_digest = agent_definition_digest(AgentConfig(name="other-bot"), "")
+    env.approve("research-tickets", _grant(digests=[env.digest, other_digest]))
+    config = env.config.model_copy(deep=True)
+    renamed = change(config)
+    set_app_config(config)
+    authority = capture_agent_authority(config, user_id="alice", agent_config=AgentConfig(name=renamed) if renamed else env.agent)
+    assert (authority is not None) == in_force
+    if in_force:
+        assert [ref.binding for ref in authority.references] == ["research-tickets"]
 
 
 # --- stores ------------------------------------------------------------------
@@ -785,10 +850,10 @@ def store(request, tmp_path, monkeypatch):
 
 def test_store_replaces_lists_and_deletes(store):
     assert store.get("b1") is None and store.list() == {}
-    store.put("b1", _grant(owners=["alice"], digests=["a" * 64]))
-    store.put("b1", _grant(owners=["bob"], digests=["b" * 64]))
-    store.put("b0", _grant(owners=[]))
-    assert store.get("b1") == _grant(owners=["bob"], digests=["b" * 64])
+    store.put("b1", _stored(owners=["alice"], digests=["a" * 64]))
+    store.put("b1", _stored(owners=["bob"], digests=["b" * 64]))
+    store.put("b0", _stored(owners=[]))
+    assert store.get("b1") == _stored(owners=["bob"], digests=["b" * 64])
     assert list(store.list()) == ["b0", "b1"]
     assert store.delete("b1") is True
     assert store.delete("b1") is False
@@ -799,15 +864,15 @@ def test_file_store_never_applies_a_grant_to_another_binding(tmp_path, monkeypat
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     store = FileMcpAgentGrantStore()
-    store.put("Tickets", _grant())
+    store.put("Tickets", _stored())
     # Simulate a case-insensitive filesystem resolving "tickets" to the same file.
     (tmp_path / "mcp-agent-grants" / "tickets.json").write_text((tmp_path / "mcp-agent-grants" / "Tickets.json").read_text())
     assert store.get("tickets") is None
     assert store.delete("tickets") is False
     with pytest.raises(ValueError, match="differs only in case"):
-        store.put("tickets", _grant())
+        store.put("tickets", _stored())
     with pytest.raises(ValueError):
-        store.put("CON", _grant())
+        store.put("CON", _stored())
     assert json.loads((tmp_path / "mcp-agent-grants" / "Tickets.json").read_text())["binding"] == "Tickets"
 
 
@@ -874,13 +939,13 @@ async def test_admin_api_maintains_runtime_grants(api_env):
     router, env = api_env.router, api_env.env
     admin = _request("admin")
     listed = (await router.list_bindings(admin)).model_dump()["bindings"]
-    assert [(b["binding"], b["grants"], b["owners"]) for b in listed] == [("config-grant", "config", ["carol"]), ("research-tickets", "runtime", [])]
+    assert [(b["binding"], b["grants"], b["approval"], b["owners"]) for b in listed] == [("config-grant", "config", "config", ["carol"]), ("research-tickets", "runtime", "none", [])]
     assert all("oauth" not in b and "client_secret" not in json.dumps(b) for b in listed)
 
     digest = await router.definition_digest("research-tickets", admin, owner="alice")
     assert digest.definition_digest == env.digest
     response = await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[digest.definition_digest]), admin)
-    assert response.owners == ["alice"] and response.definition_digests == [env.digest]
+    assert response.owners == ["alice"] and response.definition_digests == [env.digest] and response.approval == "current"
     assert (await router.get_binding("research-tickets", admin)).owners == ["alice"]
 
     from deerflow.mcp.agent_auth import capture_agent_authority
@@ -888,6 +953,32 @@ async def test_admin_api_maintains_runtime_grants(api_env):
     assert capture_agent_authority(api_env.config, user_id="alice", agent_config=env.agent) is not None
     assert (await router.delete_grant("research-tickets", admin)).status_code == 204
     assert capture_agent_authority(api_env.config, user_id="alice", agent_config=env.agent) is None
+
+
+@pytest.mark.asyncio
+async def test_admin_api_reports_and_replaces_a_stale_grant(api_env):
+    from deerflow.mcp.agent_auth import capture_agent_authority
+
+    router, env = api_env.router, api_env.env
+    admin = _request("admin")
+    assert (await router.get_binding("research-tickets", admin)).approval == "none"
+    assert (await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[env.digest]), admin)).approval == "current"
+    moved = api_env.config.model_copy(deep=True)
+    _change_oauth(client_id="other-client")(moved)
+    set_app_config(moved)
+    stale = await router.get_binding("research-tickets", admin)
+    assert (stale.approval, stale.owners) == ("stale", ["alice"])
+    assert capture_agent_authority(moved, user_id="alice", agent_config=env.agent) is None
+    # A stale grant admits nobody, so it doesn't block granting its owners elsewhere.
+    data = moved.model_dump()
+    data["mcp_agent_auth"]["research-tickets-2"] = {**data["mcp_agent_auth"]["research-tickets"]}
+    with_second = AppConfig.model_validate(data)
+    set_app_config(with_second)
+    assert (await router.put_grant("research-tickets-2", _grant(owners=["alice"]), admin)).approval == "current"
+    with pytest.raises(HTTPException) as exc:
+        await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[env.digest]), admin)
+    assert exc.value.status_code == 409
+    assert (await router.put_grant("research-tickets", _grant(owners=["bob"], digests=[env.digest]), admin)).approval == "current"
 
 
 @pytest.mark.asyncio
