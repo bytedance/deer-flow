@@ -136,6 +136,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     voice = getattr(config, "voice_input", None)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     auth = get_auth_context(request)
+    skill_management_enabled = getattr(getattr(config, "skills", None), "management_enabled", False)
     return FeaturesResponse(
         voice_input=VoiceInputFeature(enabled=True, max_audio_bytes=voice.max_audio_bytes, max_duration_seconds=voice.max_duration_seconds) if voice is not None else VoiceInputFeature(),
         tool_approval=ToolApprovalFeature(enabled=approval.enabled, default_mode=approval.default_mode, allowed_modes=approval.allowed_modes) if approval is not None else ToolApprovalFeature(),
@@ -169,8 +170,8 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         # Startup-scoped: the read repository exists only with SQL persistence.
         thread_activity=ThreadActivityFeature(available=thread_activity_available(request.app.state)),
         skill_management=SkillManagementFeature(
-            can_manage=bool(auth and Permissions.SKILLS_MANAGE in auth.permissions),
-            source_install_available=source_install_available(),
+            can_manage=bool(skill_management_enabled and auth and Permissions.SKILLS_MANAGE in auth.permissions),
+            source_install_available=bool(skill_management_enabled and source_install_available()),
         ),
     )
 

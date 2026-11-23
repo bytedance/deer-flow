@@ -83,10 +83,42 @@ def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True) ->
 @pytest.fixture(autouse=True)
 def _reset_upgrade_diagnostics(monkeypatch):
     monkeypatch.setattr("app.gateway.authz._route_permission_upgrade_diagnostics", set())
+    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=True)))
 
 
 def test_disabled_authorization_admin_only_set_is_exact():
     assert _DISABLED_AUTHORIZATION_ADMIN_ONLY == frozenset({Permissions.SKILLS_MANAGE})
+
+
+def test_skill_management_config_defaults_disabled():
+    from deerflow.config.skills_config import SkillsConfig
+
+    assert SkillsConfig().management_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_skill_management_deployment_gate_disables_admin_default(monkeypatch):
+    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig(enabled=False))
+    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=False)))
+
+    disabled = await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
+    assert Permissions.SKILLS_MANAGE not in disabled
+
+    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=True)))
+    enabled = await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
+    assert Permissions.SKILLS_MANAGE in enabled
+
+
+@pytest.mark.asyncio
+async def test_skill_management_deployment_gate_precedes_provider_grants(monkeypatch):
+    provider = _RecordingProvider()
+    _enable_authorization(monkeypatch, provider)
+    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=False)))
+
+    permissions = await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
+
+    assert Permissions.SKILLS_MANAGE not in permissions
+    assert all(request.target != Permissions.SKILLS_MANAGE for request in provider.requests)
 
 
 @pytest.mark.asyncio

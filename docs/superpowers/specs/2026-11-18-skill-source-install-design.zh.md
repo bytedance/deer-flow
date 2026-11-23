@@ -4,7 +4,7 @@
 **状态**：评审草案 v5（补齐安装器同源规则、provenance 与交付依赖）
 **当前代码锚点**：`main @ 340822f2c153a1db0183d6fb00d0203ae8847f0c`；#8393 不构成前置运行时能力。  
 **相关事项**：#8342、#8393  
-**设计结论**：**PROCEED，带明确部署门槛**。先交付 `skills:manage` 及其完整 per-user 生命周期；来源安装只在具备 Vercel 项目 OIDC 凭据的部署开放。普通自托管部署继续使用文件上传，不显示不可用的来源入口。
+**设计结论**：**PROCEED，带明确部署门槛**。`skills.management_enabled` 默认 `false`，所有角色（包括 admin）都没有自定义技能安装/生命周期能力；部署方显式开启后才交付 `skills:manage` 及其完整 per-user 生命周期。来源安装还只在具备 Vercel 项目 OIDC 凭据的部署开放。
 
 ---
 
@@ -22,7 +22,7 @@
 skills.sh 官方 API 需要 Vercel 项目 OIDC token。`VERCEL_OIDC_TOKEN` 不是普通自托管部署可以自行编造的通用 API key。第一版因此明确为：
 
 - 具有有效 Vercel 项目 OIDC 环境的部署：可以开放 From source；
-- 普通自托管部署：保留文件上传和生命周期管理，**不显示 From source**；
+- 普通自托管部署：显式开启管理开关后保留文件上传和生命周期管理，**不显示 From source**；
 - 缺少凭据不是“管理员再配置一个环境变量就能获得能力”的通用降级路径；
 - 若未来需要自托管来源安装，必须另提一个可自托管 resolver 的设计，不能声称本版已覆盖。
 
@@ -46,7 +46,7 @@ skills.sh 官方 API 需要 Vercel 项目 OIDC token。`VERCEL_OIDC_TOKEN` 不�
 - `_install_skill_archive()` 已复用 per-user storage、安全扫描、缓存刷新、跨实例 reset 和“取消也不丢安装”的 drain 包装；该包装不表示全局串行化。
 - `resolve_thread_virtual_path()` 使用 `get_effective_user_id()` 解析到 `users/<uid>/threads/<tid>/user-data/...`。传入他人 thread id 不会跨用户寻址；缺失 thread 归档按现有路径语义失败。路由不返回文件内容，安装也写入调用者自己的 storage。
 - legacy/unregistered thread 的现有 read/access 语义不能被本功能顺手改成 `require_existing=True`。
-- `resolve_route_permissions()` 在授权关闭时返回 `_ALL_PERMISSIONS`；新增权限必须单独保持 admin-only 默认。
+- `resolve_route_permissions()` 在授权关闭时保留 legacy 权限集合，但部署管理开关关闭时必须从中移除 `skills:manage`；开启后新增权限仍单独保持 admin-only 默认。
 - 内置 RBAC 使用 `resource="route"`、`target=<permission>`；无 routes policy 为 unrestricted，`allow: "*"` 包含新 target。
 - 自定义授权 provider 也会收到新 target。其默认 allow 行为可能在升级后开放管理能力，不只有内置 RBAC 需要升级审计。
 - PAT 有独立 default-deny 路由边界；`is_admin_user()` 对 PAT 恒 false。权限层仅看到 `User.system_role` 时，不能把 PAT 拒绝误归因于权限计算。
@@ -94,12 +94,14 @@ AuthzRequest(resource="route", action="manage", target="skills:manage")
 
 ### 4.3 默认与升级语义
 
+- **部署总开关**：`skills.management_enabled` 默认 `false`，权限解析在角色/provider 判断之前移除 `skills:manage`，provider 故障 fail-open 也不得恢复它；`/api/features` 同时关闭 `can_manage` 与 source capability。只有显式设为 `true` 后，以下角色矩阵才适用。
+
 - **授权关闭**：用显式集合 `_DISABLED_AUTHORIZATION_ADMIN_ONLY = frozenset({Permissions.SKILLS_MANAGE})` 声明 admin-only 权限；默认权限计算从 `_ALL_PERMISSIONS` 中对该集合按 admin 身份过滤。不得写成散落各处的内联 permission remove，测试必须枚举该集合并与文档矩阵一致。
 - **授权开启**：所有角色（包括 admin）由 provider 评估；显式 deny 对 admin 同样有效。
 - **内置 RBAC**：deny 优先；allow `*` 包含新权限；无 routes policy 为 unrestricted。
 - **provider 故障**：遵循 `authorization.fail_closed`。安全边界部署必须保持 true。
 - **PAT**：不加入 PAT scopes/routes。权限层可能根据 `system_role` 计算权限，但最终拒绝依赖 PAT middleware/default-deny；两层分别测试，不能互相冒充。
-- **auth-disabled 单用户模式**：保持当前默认用户/admin 体验。
+- **auth-disabled 单用户模式**：管理开关默认关闭；显式开启后保持当前默认用户/admin 体验。
 
 当前没有 internal caller 调用 skill 安装路由，因此授权关闭时 internal 失去 manage 是可接受的显式行为；测试必须固定它，而不是为了保持旧全量列表把安装权限授予 internal。
 
@@ -341,6 +343,7 @@ custom skill 的查看、编辑、删除、导出和启停入口同步迁移，�
 
 | 场景 | 期望 |
 | --- | --- |
+| 管理开关关闭，任意角色/provider | 不评估或不授予 manage，管理路由 403，前端隐藏 |
 | 授权关闭，admin session | 自有 custom 全生命周期可用 |
 | 授权关闭，非 admin session | 管理路由 403，前端隐藏 |
 | 授权开启，角色显式 allow | 自有 custom 全生命周期可用 |
@@ -350,7 +353,7 @@ custom skill 的查看、编辑、删除、导出和启停入口同步迁移，�
 | provider 故障且 fail_closed=true | 403，前端隐藏 |
 | provider 故障且 fail_closed=false | 按既有 fail-open 返回全部权限，非 admin/internal 也会获得 manage；必须有升级告警，安全部署不得使用该组合 |
 | 授权关闭，internal caller | 非 admin，不获得 manage；更新 blocking-IO 权限集合期望 |
-| auth-disabled 单用户合成 admin | 可用，保持本地零配置路径 |
+| auth-disabled 单用户合成 admin | 开关默认关闭；显式开启后可用，保持本地零额外授权配置路径 |
 | admin PAT | 权限计算与 PAT 最终拒绝分别验证；路由始终 default-deny |
 | 有管理权限，尝试公共/集成 skill 全局启停 | 仍要求 admin |
 | 有管理权限，尝试其他用户 custom skill | 无法访问他人 per-user storage |

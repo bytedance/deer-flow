@@ -102,6 +102,7 @@ def _default_route_authorization_config(monkeypatch):
         "app.gateway.authz._get_route_authorization_config",
         lambda: AuthorizationConfig(),
     )
+    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=True)))
 
 
 @pytest.fixture()
@@ -139,6 +140,16 @@ def test_me_lists_all_route_permissions_when_authorization_disabled(client):
     res = client.get("/api/v1/auth/me")
     assert res.status_code == 200
     assert res.json()["permissions"] == _ALL_PERMISSIONS
+
+
+def test_me_omits_skill_management_when_deployment_disables_it(client, monkeypatch):
+    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=False)))
+    _initialize_admin(client)
+
+    response = client.get("/api/v1/auth/me")
+
+    assert response.status_code == 200
+    assert Permissions.SKILLS_MANAGE not in response.json()["permissions"]
 
 
 def test_account_preferences_use_registered_auth_and_csrf_middleware(client):

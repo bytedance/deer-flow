@@ -79,6 +79,26 @@ test.describe("Skill gallery", () => {
     ).toBeVisible();
   });
 
+  test("hides install controls for admins when deployment management is disabled", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      features: {
+        skillManagement: {
+          lifecyclePermissions: true,
+          canManage: false,
+          sourceInstallAvailable: false,
+        },
+      },
+    });
+
+    await page.goto("/workspace/capabilities?tab=skills");
+
+    await expect(
+      page.getByRole("button", { name: "Install skill", exact: true }),
+    ).toHaveCount(0);
+  });
+
   for (const skillManagement of [undefined, null] as const) {
     test(`does not grant an old-backend entry to non-admin users (${String(skillManagement)})`, async ({
       page,

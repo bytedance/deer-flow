@@ -2311,6 +2311,12 @@ skills:
   # Default: /mnt/skills
   container_path: /mnt/skills
 
+  # Deployment-wide opt-in for installing and managing caller-owned custom skills.
+  # false (default): no role, including admin, receives skills:manage; the Web UI
+  # hides install/lifecycle controls and the routes remain forbidden.
+  # true: the authorization rules below determine which roles may manage skills.
+  management_enabled: false
+
   # Deferred skill discovery (default: false)
   # When enabled, only skill names appear in the system prompt (<skill_index>).
   # The LLM discovers skill details on demand via the describe_skill tool.

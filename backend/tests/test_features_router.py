@@ -41,6 +41,7 @@ def _app_with_config(
     scheduler_tool_enabled: bool = False,
     channel_connections_enabled: bool | None = None,
     permissions: list[str] | None = None,
+    skill_management_enabled: bool = True,
 ) -> FastAPI:
     app = FastAPI()
     if permissions is not None:
@@ -65,6 +66,7 @@ def _app_with_config(
         tools.append(SimpleNamespace(name="read_conversation", use="deerflow.tools.conversation:read_conversation", model_extra={}))
     fake_config = SimpleNamespace(
         agents_api=SimpleNamespace(enabled=agents_api_enabled),
+        skills=SimpleNamespace(management_enabled=skill_management_enabled),
         tools=tools,
         subagent_runtime=SimpleNamespace(max_running=3),
         knowledge_base=SimpleNamespace(
@@ -166,6 +168,21 @@ def test_features_reevaluates_source_install_availability_per_request(monkeypatc
 
         monkeypatch.setenv("VERCEL_OIDC_TOKEN", "rotated-token")
         assert client.get("/api/features").json()["skill_management"]["source_install_available"] is True
+
+
+def test_features_disables_skill_management_deployment_wide(monkeypatch) -> None:
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
+    app = _app_with_config(
+        agents_api_enabled=True,
+        permissions=[Permissions.SKILLS_MANAGE],
+        skill_management_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        capability = client.get("/api/features").json()["skill_management"]
+
+    assert capability["can_manage"] is False
+    assert capability["source_install_available"] is False
 
 
 def test_features_reports_conversation_references_when_the_tool_is_configured() -> None:

@@ -7,8 +7,8 @@ const APP =
   `http://localhost:${process.env.E2E_FRONTEND_PORT ?? "3000"}`;
 
 // /me also returns the caller's effective route permissions (RFC #4063
-// Phase 4). Auth-disabled mode grants the full registered set, in the order
-// of backend _ALL_PERMISSIONS (backend/app/gateway/authz.py).
+// Phase 4). Auth-disabled mode grants the legacy set, excluding the
+// deployment-opt-in skills:manage permission by default.
 const AUTH_DISABLED_PERMISSIONS = [
   "threads:read",
   "threads:write",
@@ -23,7 +23,6 @@ const AUTH_DISABLED_PERMISSIONS = [
   "projects:read",
   "projects:write",
   "projects:delete",
-  "skills:manage",
 ];
 
 test.describe("auth-disabled contract (real backend)", () => {

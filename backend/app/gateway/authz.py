@@ -48,6 +48,7 @@ from fastapi import HTTPException, Request
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
 from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
+from deerflow.config.app_config import peek_loaded_app_config as _peek_loaded_app_config
 from deerflow.config.authorization_config import AuthorizationConfig
 
 if TYPE_CHECKING:
@@ -217,6 +218,18 @@ async def _route_authorization_config_async() -> AuthorizationConfig:
     return await asyncio.to_thread(_get_route_authorization_config)
 
 
+def _skill_management_enabled() -> bool:
+    """Read the deployment gate from the AppConfig loaded just above."""
+    config = _peek_loaded_app_config()
+    return bool(config and config.skills.management_enabled)
+
+
+def _apply_skill_management_gate(permissions: list[str], *, enabled: bool) -> list[str]:
+    if enabled or Permissions.SKILLS_MANAGE not in permissions:
+        return permissions
+    return [permission for permission in permissions if permission != Permissions.SKILLS_MANAGE]
+
+
 # --- Provider cache (W1/F1) ---
 # Keyed by config object identity (id) so the expensive model_dump() signature
 # is only recomputed when get_app_config() returns a new object (hot-reload).
@@ -320,10 +333,11 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     authenticated request.
     """
     config = await _route_authorization_config_async()
+    skill_management_enabled = _skill_management_enabled()
     if config.enabled is not True:
         if not is_internal and getattr(user, "system_role", None) == "admin":
-            return list(_ALL_PERMISSIONS)
-        return [permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY]
+            return _apply_skill_management_gate(list(_ALL_PERMISSIONS), enabled=skill_management_enabled)
+        return _apply_skill_management_gate([permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY], enabled=skill_management_enabled)
 
     # Align with Phase 1B's tool path: internal callers (IM channel workers,
     # scheduler) have system_role="internal", which is not a real RBAC role.
@@ -343,8 +357,9 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     except Exception:
         logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
         if not config.fail_closed:
-            _log_route_permission_upgrade(config, role=resolved_role, target=Permissions.SKILLS_MANAGE)
-            return list(_ALL_PERMISSIONS)
+            if skill_management_enabled:
+                _log_route_permission_upgrade(config, role=resolved_role, target=Permissions.SKILLS_MANAGE)
+            return _apply_skill_management_gate(list(_ALL_PERMISSIONS), enabled=skill_management_enabled)
         return []
 
     principal = build_principal_from_context(
@@ -386,7 +401,8 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
             _log_route_permission_upgrade(config, role=resolved_role, target=permission)
         return permission if decision.allow else None
 
-    results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])
+    permissions = _ALL_PERMISSIONS if skill_management_enabled else [permission for permission in _ALL_PERMISSIONS if permission != Permissions.SKILLS_MANAGE]
+    results = await asyncio.gather(*[_evaluate(p) for p in permissions])
     return [p for p in results if p is not None]
 
 

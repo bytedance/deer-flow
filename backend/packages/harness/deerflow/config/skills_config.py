@@ -35,6 +35,11 @@ class SkillsConfig(BaseModel):
         ),
     )
 
+    management_enabled: bool = Field(
+        default=False,
+        description="Enable installation and lifecycle management of caller-owned custom skills. When disabled, no role receives skills:manage.",
+    )
+
     @field_validator("container_path")
     @classmethod
     def _normalize_container_path(cls, value: str) -> str:

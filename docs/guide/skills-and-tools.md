@@ -36,13 +36,19 @@ Community tab supports importing `.skill` archives into My skills.
 
 ### Installing and managing custom skills
 
-The `skills:manage` route permission controls installation and the lifecycle of
-the caller's own custom skills: view, edit, enable/disable, export, history,
-rollback and delete. With authorization disabled, only administrators receive
-this permission. With authorization enabled, the configured provider evaluates
-`resource="route"`, `action="manage"`, `target="skills:manage"`; role policies
-can grant or deny it. Skill catalog visibility remains a separate `skills`
-resource policy. PAT credentials cannot install or manage skills.
+Custom skill management is a deployment-wide opt-in. Set
+`skills.management_enabled: true` in `config.yaml` to enable it. The default
+`false` removes `skills:manage` from every role, including administrators, and
+hides the install and lifecycle controls in the Web UI.
+
+When enabled, the `skills:manage` route permission controls installation and
+the lifecycle of the caller's own custom skills: view, edit, enable/disable,
+export, history, rollback and delete. With authorization disabled, only
+administrators receive this permission. With authorization enabled, the
+configured provider evaluates `resource="route"`, `action="manage"`,
+`target="skills:manage"`; role policies can grant or deny it. Skill catalog
+visibility remains a separate `skills` resource policy. PAT credentials cannot
+install or manage skills.
 
 Users with this permission can choose **Install skill → From .skill file** and
 upload an archive. Imported custom skills are enabled immediately and can be
