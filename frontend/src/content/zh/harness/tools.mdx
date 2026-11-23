@@ -124,7 +124,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Apify", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -247,6 +247,16 @@ tools:
 tools:
   - name: web_search
     group: web
+    use: deerflow.community.apify.tools:web_search_tool
+    api_key: $APIFY_API_TOKEN
+```
+通过 Apify 的 [`apify/web-search`](https://apify.com/apify/web-search) Actor 获取 Google 搜索结果，每次查询最多 10 条。需要 Apify API Token：[为 DeerFlow 创建一个](https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations)，并在创建后立即复制，因为它只显示一次。同时支持 `web_fetch` 和下文的 Apify Actor 工具。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
     use: deerflow.community.youcom.tools:web_search_tool
     # api_key: $YDC_API_KEY # 可选；不填则使用免密钥的免费额度
 ```
@@ -261,7 +271,7 @@ API Key 可选，可在 [You.com](https://you.com/platform) 获取。
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Apify", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -343,6 +353,16 @@ tools:
 tools:
   - name: web_fetch
     group: web
+    use: deerflow.community.apify.tools:web_fetch_tool
+    api_key: $APIFY_API_TOKEN
+```
+通过 Apify 的 [`apify/web-fetch`](https://apify.com/apify/web-fetch) Actor 以 Markdown 形式返回页面内容，页面由 Apify 的基础设施加载。与网络搜索一样需要 Apify API Token。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
     use: deerflow.community.unbrowse.tools:web_fetch_tool
     api_key: $UNBROWSE_API_KEY
     # render: auto # auto | never（仅普通 HTTP）| always（云端浏览器）
@@ -416,6 +436,28 @@ tools:
 通过 Brave Image Search 获取独立图片结果。需要 [Brave Search API](https://brave.com/search/api/) Key，与 Brave `web_search` 工具复用同一个 `BRAVE_SEARCH_API_KEY`。
   </Tabs.Tab>
 </Tabs>
+
+### Apify Actor 工具
+
+配置 Apify API Token 后，Agent 还可以使用 [Apify Store](https://apify.com/store) 中的任意 Actor，例如 Instagram、Google 地图或电商爬虫。`apify_actor_discover` 搜索 Store 或返回某个 Actor 的输入 schema，`apify_actor_start` 启动一次运行，`apify_actor_await` 等待运行完成并返回结果。Agent 可以先启动多个运行再逐一等待，从而并行抓取。`apify-scraper` 技能会把常见平台路由到已知的 Actor。
+
+```yaml
+tools:
+  - name: apify_actor_discover
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_discover_tool
+  - name: apify_actor_start
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_start_tool
+    # max_total_charge_usd: 1.0 # 按事件计费的 Actor 的费用上限
+  - name: apify_actor_await
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_await_tool
+    timeout_secs: 300
+    max_items: 50
+```
+
+Actor 运行会消耗 Apify 额度。所有选项见 `config.example.yaml`。
 
 ## 工具组
 

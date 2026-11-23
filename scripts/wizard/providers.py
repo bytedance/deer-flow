@@ -759,6 +759,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="SPECSTREAM_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="apify",
+        display_name="Apify",
+        description="Google results through Apify's web-search Actor, API token required",
+        use="deerflow.community.apify.tools:web_search_tool",
+        env_var="APIFY_API_TOKEN",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -843,6 +851,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Page text as markdown, also PDF, Word and Excel, API key required",
         use="deerflow.community.specstream.tools:web_fetch_tool",
         env_var="SPECSTREAM_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="apify",
+        display_name="Apify",
+        description="Page as markdown through Apify's web-fetch Actor, API token required",
+        use="deerflow.community.apify.tools:web_fetch_tool",
+        env_var="APIFY_API_TOKEN",
         tool_name="web_fetch",
     ),
 ]

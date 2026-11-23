@@ -127,7 +127,7 @@ Community tools connect the agent to external services. Each `tools:` entry in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Apify", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -253,6 +253,16 @@ Results carry a snippet and a source URL, and a direct answer when the sources a
 tools:
   - name: web_search
     group: web
+    use: deerflow.community.apify.tools:web_search_tool
+    api_key: $APIFY_API_TOKEN
+```
+Google results through Apify's [`apify/web-search`](https://apify.com/apify/web-search) Actor, up to 10 per query. Requires an Apify API token: [create one for DeerFlow](https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations) and copy it right after creating it, because it is shown only once. Also supports `web_fetch` and the Apify Actor tools below.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
     use: deerflow.community.youcom.tools:web_search_tool
     # api_key: $YDC_API_KEY # optional; omit to use the keyless free tier
 ```
@@ -270,7 +280,7 @@ No extra dependency required.
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Apify", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -354,6 +364,16 @@ Returns the page as markdown, including PDF, Word and Excel files. Requires a [S
 tools:
   - name: web_fetch
     group: web
+    use: deerflow.community.apify.tools:web_fetch_tool
+    api_key: $APIFY_API_TOKEN
+```
+Returns the page as markdown through Apify's [`apify/web-fetch`](https://apify.com/apify/web-fetch) Actor, which loads the page on Apify's infrastructure. Requires an Apify API token, as for web search.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
     use: deerflow.community.unbrowse.tools:web_fetch_tool
     api_key: $UNBROWSE_API_KEY
     # render: auto # auto | never (plain HTTP only) | always (cloud browser)
@@ -428,6 +448,28 @@ tools:
 Independent image results via Brave Image Search. Requires a [Brave Search API](https://brave.com/search/api/) key. Reuses `BRAVE_SEARCH_API_KEY` with the Brave `web_search` tool.
   </Tabs.Tab>
 </Tabs>
+
+### Apify Actor tools
+
+With an Apify API token, the agent can also use any Actor in [Apify Store](https://apify.com/store), for example an Instagram, Google Maps or e-commerce scraper. `apify_actor_discover` searches the Store or returns an Actor's input schema, `apify_actor_start` starts a run, and `apify_actor_await` waits for the run and returns its results. The agent can start several runs before awaiting them, to scrape in parallel. The `apify-scraper` skill routes common platforms to known Actors.
+
+```yaml
+tools:
+  - name: apify_actor_discover
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_discover_tool
+  - name: apify_actor_start
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_start_tool
+    # max_total_charge_usd: 1.0 # cost cap for pay-per-event Actors
+  - name: apify_actor_await
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_await_tool
+    timeout_secs: 300
+    max_items: 50
+```
+
+Actor runs spend Apify credits. `config.example.yaml` lists every option.
 
 ## Tool groups
 

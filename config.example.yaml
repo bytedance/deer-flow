@@ -1240,7 +1240,7 @@ tools:
   #   group: browser
   #   use: deerflow.community.browser_automation.tools:browser_close_tool
 
-  # Web search tool (uses Apify Google Search Scraper, requires APIFY_API_TOKEN)
+  # Web search tool (uses Apify's apify/web-search Actor for Google results, requires APIFY_API_TOKEN)
   # Create an API token for DeerFlow in Apify Console and copy it right after creating it, because it is shown only once:
   # https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations
   # NOTE: Only one web_search provider can be active at a time.
@@ -1248,8 +1248,8 @@ tools:
   # - name: web_search
   #   group: web
   #   use: deerflow.community.apify.tools:web_search_tool
-  #   max_results: 5
-  #   api_key: $APIFY_API_TOKEN
+  #   max_results: 5                  # 1-10; the Actor reads one Google results page
+  #   # api_key: $APIFY_API_TOKEN     # Optional explicit env-var reference
 
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
@@ -1350,39 +1350,41 @@ tools:
   #   # render: auto                  # auto | never (plain HTTP only) | always (cloud browser)
   #   # api_key: $UNBROWSE_API_KEY
 
-  # Web fetch tool (uses Apify Website Content Crawler, requires APIFY_API_TOKEN)
+  # Web fetch tool (uses Apify's apify/web-fetch Actor, requires APIFY_API_TOKEN)
+  # Returns the page as markdown. Apify fetches the page on its own infrastructure;
+  # non-public URLs are refused before the request leaves DeerFlow.
   # Create an API token for DeerFlow in Apify Console and copy it right after creating it, because it is shown only once:
   # https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI/other web_fetch entry above before enabling this one.
-  # crawler_type options: "cheerio" (fast, no JS), "playwright:firefox" (JS-heavy pages)
   # - name: web_fetch
   #   group: web
   #   use: deerflow.community.apify.tools:web_fetch_tool
-  #   crawler_type: cheerio
-  #   api_key: $APIFY_API_TOKEN
+  #   # api_key: $APIFY_API_TOKEN     # Optional explicit env-var reference
 
-  # Apify async actor tools — discover/start/await pattern for parallel actor runs (requires APIFY_API_TOKEN)
+  # Apify Actor tools (require APIFY_API_TOKEN): find, start and await any Actor in Apify Store,
+  # for example an Instagram, Google Maps or e-commerce scraper. Start several runs, then await
+  # each, to scrape in parallel. The apify-scraper skill routes common platforms to known Actors.
+  # Actor runs spend Apify credits. Await and discover results pass through the tool-result
+  # sanitization middleware like other remote content.
   # Create an API token for DeerFlow in Apify Console and copy it right after creating it, because it is shown only once:
   # https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations
   # - name: apify_actor_discover
   #   group: web
   #   use: deerflow.community.apify.tools:apify_actor_discover_tool
-  #   max_results: 10
-  #   api_key: $APIFY_API_TOKEN
+  #   max_results: 10                 # Store search results
   # - name: apify_actor_start
   #   group: web
   #   use: deerflow.community.apify.tools:apify_actor_start_tool
-  #   # timeout_secs: 3600   # optional: override Apify platform default
-  #   # memory_mbytes: 1024  # optional: override Apify platform default
-  #   api_key: $APIFY_API_TOKEN
+  #   # timeout_secs: 300             # Actor run timeout on Apify (default: the Actor's own)
+  #   # memory_mbytes: 1024           # Run memory, a power of 2 (default: the Actor's own)
+  #   # max_total_charge_usd: 1.0     # Cost cap per run for pay-per-event Actors
   # - name: apify_actor_await
   #   group: web
   #   use: deerflow.community.apify.tools:apify_actor_await_tool
-  #   poll_interval_secs: 5   # seconds between Apify API status checks
-  #   timeout_secs: 300       # give up after this many seconds (default 5 min)
-  #   max_items: 50
-  #   api_key: $APIFY_API_TOKEN
+  #   poll_interval_secs: 5           # Seconds between run status checks
+  #   timeout_secs: 300               # Local wait; the run keeps going on Apify and await can be called again
+  #   max_items: 50                   # Dataset items returned to the agent
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation

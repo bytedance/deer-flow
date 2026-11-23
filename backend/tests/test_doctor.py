@@ -740,6 +740,22 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert "SOFYA_API_KEY" in (result.fix or "")
 
+    def test_apify_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("APIFY_API_TOKEN", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.apify.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "apify" in result.detail
+
+    def test_apify_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("APIFY_API_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.apify.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "APIFY_API_TOKEN" in (result.fix or "")
+
     def test_specstream_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SPECSTREAM_API_KEY", "test-key")
         cfg = tmp_path / "config.yaml"
@@ -908,6 +924,14 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "warn"
         assert "SOFYA_API_KEY" in (result.fix or "")
+
+    def test_apify_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("APIFY_API_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.apify.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert "APIFY_API_TOKEN" in (result.fix or "")
 
     def test_specstream_without_key_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SPECSTREAM_API_KEY", raising=False)
