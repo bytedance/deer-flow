@@ -72,6 +72,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **sandbox:** A fresh OpenSandbox run with an explicit Agent skill list, empty
+  or not, no longer acquires a remote before the first sandbox tool call.
+  `acquire` installs the thread's scoped skill view on new and warm remotes, so
+  runs that never use a sandbox tool no longer hold a sandbox replica.
+  Existing sandbox bindings keep the eager rebind and strict sync.
+
 - **agents:** A todo list revised after the last `write_todos` call (for
   example an approved plan edited on resume) is shown to the model again
   instead of being silently skipped, and a stale injected reminder is

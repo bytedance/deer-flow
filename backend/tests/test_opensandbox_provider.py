@@ -645,13 +645,33 @@ def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
 
     for allowlist, expected in [({"alpha"}, {"alpha"}), (set(), set()), (None, {"alpha", "beta", "alice-only"})]:
         runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-        update = SandboxMiddleware(lazy_init=True, available_skills=allowlist).before_agent({}, runtime)
-        assert update == {"sandbox": {"sandbox_id": alice_id}}
+        # A fresh run defers acquisition; the first sandbox tool's acquire
+        # reclaims the warm remote with the run's scoped view.
+        assert SandboxMiddleware(lazy_init=True, available_skills=allowlist).before_agent({}, runtime) is None
+        assert "sandbox_id" not in runtime.context
+        assert env.provider.acquire("thread", user_id="alice") == alice_id
         assert _remote_skills(alice) == expected
         assert {p.name for p in alice.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
         env.provider.release(alice_id)
     assert len(env.sdk.remotes) == 2
     assert _remote_skills(bob) == {"alpha", "beta", "bob-only"}
+
+
+def test_opensandbox_policy_run_without_sandbox_tool_creates_no_remote(opensandbox_skill_view):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    runtime = Runtime(context={"thread_id": "fresh", "user_id": "alice"})
+
+    assert SandboxMiddleware(lazy_init=True, available_skills=set()).before_agent({}, runtime) is None
+    assert env.sdk.remotes == []
+    assert "sandbox_id" not in runtime.context
+
+    # A later sandbox tool gets a remote holding only the (empty) scoped view.
+    sandbox_id = env.provider.acquire("fresh", user_id="alice")
+    remote = env.sdk.remotes[0]
+    assert env.provider.get(sandbox_id) is not None
+    assert _remote_skills(remote) == set()
+    assert {p.name for p in remote.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
 
 
 @pytest.mark.parametrize("restricted", [False, True])
@@ -711,7 +731,8 @@ def test_opensandbox_skill_upload_preserves_package_links(opensandbox_skill_view
     (package / "empty link").symlink_to("assets/empty", target_is_directory=True)
 
     runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-    SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent({}, runtime)
+    assert SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent({}, runtime) is None
+    env.provider.acquire("thread", user_id="alice")
     uploaded = env.sdk.remotes[0].skill_root / "custom" / "allowed"
     assert (uploaded / "file link").is_symlink()
     assert (uploaded / "file link").read_bytes() == b"data"
