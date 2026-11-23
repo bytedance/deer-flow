@@ -67,6 +67,7 @@ import {
   type ThreadMetadataPatch,
 } from "./api";
 import { isHistoryError, withHistoryErrorTagging } from "./history-error";
+import { runErrorThreadId, withRunErrorTagging } from "./run-error";
 import {
   dedupeMessagesByIdentity,
   insertByTrustedSeq,
@@ -2618,7 +2619,7 @@ export function useThreadStream({
   // the SDK reports both without run metadata, but only the refusal means the
   // send never became a turn.
   const streamClient = useMemo(
-    () => withHistoryErrorTagging(getAPIClient(isMock)),
+    () => withRunErrorTagging(withHistoryErrorTagging(getAPIClient(isMock))),
     [isMock],
   );
 
@@ -2845,17 +2846,30 @@ export function useThreadStream({
       // send can still be accepted afterwards: settle it from its own
       // run-creation result instead of rejecting it (#8092 review).
       if (!run && !isHistoryError(error)) {
-        // A refused run request carries no run identity, so settle the oldest
-        // send still waiting for one: a released attempt comes before the send
-        // submitted after it. Rejecting the mounted send with an earlier
-        // attempt's failure would present a delivered message as retryable
-        // (#8092 review); dropping the failed attempt keeps its draft instead.
-        const oldestReleased = releasedSendsRef.current[0];
-        if (oldestReleased) {
-          discardReleasedSend(oldestReleased);
-        } else if (pendingSendRef.current) {
+        // Settle the refusal on the submission that produced it. Its thread id
+        // is the only identity available here: an aborted attempt (navigation
+        // clears its stream) ends without any callback, so guessing "the
+        // oldest released send" handed that attempt a later refusal and left
+        // the mounted send pending forever (#8092 review).
+        const refusedThreadId = runErrorThreadId(error);
+        const ownsRefusal = (send: PendingSend) =>
+          Boolean(refusedThreadId) &&
+          (send.threadId === refusedThreadId ||
+            send.serverThreadId === refusedThreadId);
+        const released = releasedSendsRef.current.find(ownsRefusal);
+        if (released) {
+          // The refused attempt was released on navigation: drop it without
+          // running `onSent`, so its draft stays for a retry.
+          discardReleasedSend(released);
+        } else if (
+          !refusedThreadId ||
+          (pendingSendRef.current !== null &&
+            ownsRefusal(pendingSendRef.current))
+        ) {
           rejectPendingSend(error);
         }
+        // A refusal naming another thread belongs to an attempt this hook no
+        // longer tracks; the mounted send keeps waiting for its own frames.
       }
       if (pendingApprovalSubmissionRef.current) {
         settlePendingApproval(false);

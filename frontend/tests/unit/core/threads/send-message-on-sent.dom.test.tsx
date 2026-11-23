@@ -7,6 +7,7 @@ import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
+import { markRunError } from "@/core/threads/run-error";
 import type { UploadResponse } from "@/core/uploads/api";
 import { AttachmentUploadSession } from "@/core/uploads/attachment-upload-session";
 
@@ -538,8 +539,10 @@ test("drops a released new-chat send whose run request failed before its thread 
   // Its run request is then refused. The draft stays (the run never started),
   // but the record must not survive to claim a later acceptance or to bind the
   // next new chat's created thread to itself.
+  const refusal = new Error("HTTP 500");
+  markRunError(refusal, "placeholder-a");
   await act(async () => {
-    mocks.callbacks.onError?.(new Error("HTTP 500"), undefined);
+    mocks.callbacks.onError?.(refusal, undefined);
   });
   expect(onSentA).not.toHaveBeenCalled();
 
@@ -673,8 +676,8 @@ test("does not reject a newer send when an older released send's request fails",
   });
 
   // B is submitted in the chat now on screen. A's refused request then arrives
-  // without run metadata: it belongs to A, so B must keep waiting for its own
-  // acceptance instead of rejecting with A's error.
+  // without run metadata, tagged with A's thread: it belongs to A, so B must
+  // keep waiting for its own acceptance instead of rejecting with A's error.
   let sendB: Promise<unknown> | undefined;
   act(() => {
     sendB = result.current.sendMessage(
@@ -685,8 +688,10 @@ test("does not reject a newer send when an older released send's request fails",
     );
   });
   await flushFrames();
+  const refusalForA = new Error("HTTP 422");
+  markRunError(refusalForA, "thread-1");
   await act(async () => {
-    mocks.callbacks.onError?.(new Error("HTTP 422"), undefined);
+    mocks.callbacks.onError?.(refusalForA, undefined);
   });
   expect(onSentB).not.toHaveBeenCalled();
 
@@ -698,4 +703,62 @@ test("does not reject a newer send when an older released send's request fails",
   await act(async () => {
     await sendB;
   });
+});
+
+test("rejects the mounted send when its own request is refused after a release", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result, rerender } = await renderThreadStream("thread-1");
+  const onSentA = rs.fn();
+  const onSentB = rs.fn();
+
+  // A is released on navigation. Its request may end without any callback (the
+  // SDK clears the stream silently), so it must not consume B's refusal.
+  let sendA: Promise<unknown> | undefined;
+  act(() => {
+    sendA = result.current.sendMessage(
+      "thread-1",
+      { text: "Hello from A", files: [] },
+      undefined,
+      { onSent: onSentA },
+    );
+  });
+  await flushFrames();
+  rerender({ threadId: "thread-2" });
+  await flushFrames();
+  await act(async () => {
+    await sendA;
+  });
+
+  // B's own run request is refused. The refusal is tagged with B's thread, so
+  // B rejects with it and keeps its draft; A is not discarded by B's error.
+  let sendB: Promise<unknown> | undefined;
+  let sendBError: unknown;
+  act(() => {
+    sendB = result.current
+      .sendMessage("thread-2", { text: "Hello from B", files: [] }, undefined, {
+        onSent: onSentB,
+      })
+      .catch((error: unknown) => {
+        sendBError = error;
+      });
+  });
+  await flushFrames();
+  const refusalForB = new Error("HTTP 422");
+  markRunError(refusalForB, "thread-2");
+  await act(async () => {
+    mocks.callbacks.onError?.(refusalForB, undefined);
+  });
+  await act(async () => {
+    await sendB;
+  });
+  expect(sendBError).toBe(refusalForB);
+  expect(onSentB).not.toHaveBeenCalled();
+
+  // A still retires its draft when its own acceptance arrives afterwards.
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "thread-1", run_id: "run-1" });
+  });
+  expect(onSentA).toHaveBeenCalledTimes(1);
 });
