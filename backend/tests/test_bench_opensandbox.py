@@ -26,7 +26,12 @@ class Remote:
         self.destroy_error = False
         self.command_error = False
         self.commands = SimpleNamespace(run=self.run)
+        self.files = SimpleNamespace(write_file=self.write_file)
+        self.uploaded_files = {}
         self.state = ""
+
+    def write_file(self, path, content, *, mode=755):
+        self.uploaded_files[path] = (content, mode)
 
     def run(self, command, **kwargs):
         if self.command_error:
@@ -105,6 +110,7 @@ def test_factory_preserves_connection_config_without_exporting_secrets(transport
         assert request["ready_timeout"].total_seconds() == 19
         assert snapshot == {"image": request["image"], "replicas": 2, "idle_timeout": 0}
         assert "sentinel" not in json.dumps(snapshot)
+        assert any(path.endswith("/SKILL.md") for path in transport.remotes[0].uploaded_files)
         provider.release(sid)
     finally:
         provider.shutdown()
