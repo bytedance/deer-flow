@@ -370,12 +370,17 @@ boundary; peers separate memory scopes within that user.
   are never closed out from under an active request, and pool locks are never
   held while calling `credential_provider.resolve()`, constructing SDK clients,
   or calling `close()`.
-- **Gateway `/api/memory/config` masking**: `GET /api/memory/config` and
-  `GET /api/memory/status` mask `user_credentials` as `"***"` and mask
-  secret-named keys inside `credential_provider_config` (such as `api_key`,
-  `secret`, `token`, `password`, `credentials`, `bearer`), while keeping
-  non-secret settings (`base_url`, `api_key_env`, `client_pool`, and non-secret
-  provider options) visible.
+- **Gateway `/api/memory/config` masking**: `GET /api/memory/config` masks
+  `user_credentials` wholesale as `"***"` (hiding nested `api_key`,
+  `api_key_env`, and `tenant_id` entries) and masks secret-named keys inside
+  `credential_provider_config` (keys matching `api_key`, `secret`, `token`,
+  `password`, `credentials`, `authorization`, `bearer`, or `cookie`), while
+  keeping top-level non-secret settings (`base_url`, single-user `api_key_env`,
+  `client_pool`, and non-secret provider options) visible. Providers that need
+  DSNs or URLs with embedded credentials should read them from environment
+  variables or secret stores inside the provider rather than passing them via
+  non-secret keys in `credential_provider_config`. Note that `GET /api/memory/status`
+  returns HTTP `501` for OpenViking (same as `GET /api/memory`).
 
 ## Retry and failure behavior
 

@@ -2389,26 +2389,28 @@ def test_shutdown_flush_drains_admitted_write_pending_credential_resolution(
 
     writer = threading.Thread(target=_write_alice)
     writer.start()
-    assert resolve_started.wait(timeout=5.0)
-
     shutdown_thread = threading.Thread(target=_run_shutdown)
-    shutdown_thread.start()
+    try:
+        assert resolve_started.wait(timeout=5.0)
+        shutdown_thread.start()
 
-    deadline = time.monotonic() + 5.0
-    while not manager._closed and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert manager._closed is True
+        deadline = time.monotonic() + 5.0
+        while not manager._closed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert manager._closed is True
 
-    manager.add(
-        "thread-2",
-        [HumanMessage("late", id="h2")],
-        user_id="bob",
-    )
-    assert provider_calls == ["alice"]
-
-    release_resolve.set()
-    writer.join(timeout=5.0)
-    shutdown_thread.join(timeout=5.0)
+        manager.add(
+            "thread-2",
+            [HumanMessage("late", id="h2")],
+            user_id="bob",
+        )
+        assert provider_calls == ["alice"]
+    finally:
+        release_resolve.set()
+        if writer.is_alive():
+            writer.join(timeout=5.0)
+        if shutdown_thread.is_alive():
+            shutdown_thread.join(timeout=5.0)
 
     assert not writer.is_alive()
     assert not shutdown_thread.is_alive()
@@ -2423,6 +2425,154 @@ def test_shutdown_flush_drains_admitted_write_pending_credential_resolution(
     cursor_path = manager._state_path(_session_id("alice", "deerflow", "thread-1"))
     assert cursor_path.exists()
     assert not manager._state_path(_session_id("bob", "deerflow", "thread-2")).exists()
+
+
+def test_shutdown_flush_bounds_provider_cleanup_within_timeout_and_closes_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _track_official_integration(monkeypatch)
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_calls = 0
+
+    class _SlowClosableProvider:
+        def resolve(self, user_id: str) -> str:
+            return f"key-{user_id}"
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            close_started.set()
+            assert release_close.wait(timeout=5.0)
+
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path, timeout_seconds=2.0),
+        credential_provider=_SlowClosableProvider(),
+    )
+
+    try:
+        t0 = time.monotonic()
+        assert manager.shutdown_flush(0.05) is False
+        flush_elapsed = time.monotonic() - t0
+        assert flush_elapsed < 1.0
+        assert close_started.wait(timeout=1.0)
+        assert not release_close.is_set()
+
+        t1 = time.monotonic()
+        manager.close()
+        close_elapsed = time.monotonic() - t1
+        assert close_elapsed < 0.5
+        assert close_calls == 1
+    finally:
+        release_close.set()
+
+    assert manager.shutdown_flush(1.0) is True
+    assert close_calls == 1
+
+
+def test_credential_provider_close_failure_logs_only_exception_class(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _track_official_integration(monkeypatch)
+
+    class _BrokenCloseProvider:
+        def resolve(self, user_id: str) -> str:
+            return f"key-{user_id}"
+
+        def close(self) -> None:
+            raise RuntimeError("postgres://svc:super-secret-dsn@vault.internal:5432/keys")
+
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path),
+        credential_provider=_BrokenCloseProvider(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=OpenVikingMemoryManager.__module__):
+        assert manager.shutdown_flush(1.0) is True
+
+    warnings = [r for r in caplog.records if "Failed to close OpenViking credential provider" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == "Failed to close OpenViking credential provider (RuntimeError)"
+    assert warnings[0].exc_info is None
+    assert "super-secret-dsn" not in caplog.text
+    assert "vault.internal" not in caplog.text
+
+
+def test_multi_user_lazy_client_init_error_honors_failure_policies_and_sanitizes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import deerflow.agents.memory.backends.openviking.openviking_manager as module
+    from deerflow.agents import memory as memory_pkg
+    from deerflow.agents.lead_agent.prompt import _get_memory_context
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    class _ExplodingRecorder:
+        def __init__(self, *, url: str, api_key: str, **kwargs: Any) -> None:
+            del url, kwargs
+            raise RuntimeError(f"handshake failed: {api_key}")
+
+    def _loader() -> dict[str, Any]:
+        return {
+            "OpenVikingCommitPolicy": _CommitPolicy,
+            "OpenVikingPartialWriteError": _PartialWriteError,
+            "OpenVikingRetriever": _Retriever,
+            "OpenVikingSessionRecorder": _ExplodingRecorder,
+            "use_actor_peer": _use_actor_peer,
+        }
+
+    monkeypatch.setattr(module, "_load_official_integration", _loader)
+
+    drop_open_mgr = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path / "open",
+            user_credentials={"alice": {"api_key": "ov-alice-super-secret"}},
+            failure_policy={"read": "fail_open", "write": "log_and_drop"},
+        )
+    )
+    raise_mgr = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path / "raise",
+            user_credentials={"alice": {"api_key": "ov-alice-super-secret"}},
+            failure_policy={"read": "raise", "write": "raise"},
+        )
+    )
+    try:
+        with caplog.at_level(logging.ERROR, logger=OpenVikingMemoryManager.__module__):
+            assert drop_open_mgr.add("thread-1", [HumanMessage("msg", id="h1")], user_id="alice") is None
+        assert any("Failed to initialize OpenViking client for DeerFlow user 'alice' (RuntimeError)" in r.getMessage() and "Dropping the memory write" in r.getMessage() for r in caplog.records)
+        assert "ov-alice-super-secret" not in caplog.text
+
+        open_app_cfg = AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            memory=MemoryConfig(
+                enabled=True,
+                injection_enabled=True,
+                manager_class="openviking",
+                backend_config=drop_open_mgr.backend_config,
+            ),
+        )
+        monkeypatch.setattr(memory_pkg, "get_memory_manager", lambda: drop_open_mgr)
+        assert _get_memory_context(app_config=open_app_cfg, user_id="alice") == ""
+
+        with pytest.raises(MemoryReadError, match="RuntimeError") as read_exc:
+            raise_mgr.get_context("alice")
+        assert "ov-alice-super-secret" not in str(read_exc.value)
+        assert read_exc.value.__cause__ is not None
+        assert "ov-alice-super-secret" not in str(read_exc.value.__cause__)
+
+        with pytest.raises(MemoryManagerError, match="RuntimeError") as write_exc:
+            raise_mgr.add("thread-1", [HumanMessage("msg", id="h1")], user_id="alice")
+        assert "ov-alice-super-secret" not in str(write_exc.value)
+    finally:
+        drop_open_mgr.close()
+        raise_mgr.close()
 
 
 def test_gateway_memory_config_response_masks_multi_user_secrets() -> None:
@@ -2738,3 +2888,350 @@ def test_tenant_reassignment_retires_cached_and_inflight_handles(
         assert rec_initech.closed is False
     finally:
         manager.close()
+
+
+@pytest.mark.parametrize("bad_agent_name", ["", "   ", "__default__"])
+def test_invalid_agent_name_honors_failure_policies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    bad_agent_name: str,
+) -> None:
+    from deerflow.agents import memory as memory_pkg
+    from deerflow.agents.lead_agent.prompt import _get_memory_context
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    recorders, retrievers = _track_official_integration(monkeypatch)
+    monkeypatch.setenv("OPENVIKING_API_KEY", "single-secret")
+
+    single_drop = OpenVikingMemoryManager.from_config(_backend_config(tmp_path / "s-drop", failure_policy={"read": "fail_open", "write": "log_and_drop"}))
+    single_raise = OpenVikingMemoryManager.from_config(_backend_config(tmp_path / "s-raise", failure_policy={"read": "raise", "write": "raise"}))
+    multi_drop = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path / "m-drop",
+            user_credentials={"alice": {"api_key": "alice-secret"}},
+            failure_policy={"read": "fail_open", "write": "log_and_drop"},
+        )
+    )
+    multi_raise = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path / "m-raise",
+            user_credentials={"alice": {"api_key": "alice-secret"}},
+            failure_policy={"read": "raise", "write": "raise"},
+        )
+    )
+    try:
+        for drop_mgr, raise_mgr in ((single_drop, single_raise), (multi_drop, multi_raise)):
+            with caplog.at_level(logging.ERROR, logger=OpenVikingMemoryManager.__module__):
+                assert drop_mgr.add("thread-1", [HumanMessage("secret", id="h1")], user_id="alice", agent_name=bad_agent_name) is None
+            with pytest.raises(MemoryManagerError, match="Invalid OpenViking peer scope"):
+                raise_mgr.add("thread-1", [HumanMessage("secret", id="h1")], user_id="alice", agent_name=bad_agent_name)
+
+            with pytest.raises(MemoryManagerError, match="Invalid OpenViking peer scope"):
+                drop_mgr.get_context("alice", agent_name=bad_agent_name)
+            with pytest.raises(MemoryReadError, match="Invalid OpenViking peer scope"):
+                raise_mgr.get_context("alice", agent_name=bad_agent_name)
+            with pytest.raises(MemoryReadError, match="Invalid OpenViking peer scope"):
+                raise_mgr.search("prefs", user_id="alice", agent_name=bad_agent_name)
+
+            open_cfg = AppConfig(
+                sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+                memory=MemoryConfig(
+                    enabled=True,
+                    injection_enabled=True,
+                    manager_class="openviking",
+                    backend_config=drop_mgr.backend_config,
+                ),
+            )
+            monkeypatch.setattr(memory_pkg, "get_memory_manager", lambda m=drop_mgr: m)
+            assert _get_memory_context(app_config=open_cfg, user_id="alice", agent_name=bad_agent_name) == ""
+
+            raise_cfg = AppConfig(
+                sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+                memory=MemoryConfig(
+                    enabled=True,
+                    injection_enabled=True,
+                    manager_class="openviking",
+                    backend_config=raise_mgr.backend_config,
+                ),
+            )
+            monkeypatch.setattr(memory_pkg, "get_memory_manager", lambda m=raise_mgr: m)
+            with pytest.raises(MemoryReadError, match="Invalid OpenViking peer scope"):
+                _get_memory_context(app_config=raise_cfg, user_id="alice", agent_name=bad_agent_name)
+
+        assert all(rec.calls == [] for rec in recorders)
+        assert all(ret.calls == [] for ret in retrievers)
+    finally:
+        for mgr in (single_drop, single_raise, multi_drop, multi_raise):
+            mgr.close()
+
+
+def test_save_cursor_oserror_honors_write_failure_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _track_official_integration(monkeypatch)
+    drop_mgr = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path / "drop",
+            user_credentials={"alice": {"api_key": "alice-secret"}},
+            failure_policy={"write": "log_and_drop"},
+        )
+    )
+    raise_mgr = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path / "raise",
+            user_credentials={"alice": {"api_key": "alice-secret"}},
+            failure_policy={"write": "raise"},
+        )
+    )
+    try:
+
+        def fail_save(session_id: str, state: dict[str, Any]) -> None:
+            del session_id, state
+            raise OSError("disk full")
+
+        monkeypatch.setattr(drop_mgr, "_save_cursor", fail_save)
+        monkeypatch.setattr(raise_mgr, "_save_cursor", fail_save)
+
+        with caplog.at_level(logging.ERROR, logger=OpenVikingMemoryManager.__module__):
+            assert drop_mgr.add("thread-1", [HumanMessage("msg", id="h1")], user_id="alice") is None
+        assert any("OpenViking capture cursor persistence failed" in r.getMessage() for r in caplog.records)
+
+        with pytest.raises(MemoryManagerError, match="OpenViking capture cursor persistence failed"):
+            raise_mgr.add("thread-1", [HumanMessage("msg", id="h1")], user_id="alice")
+    finally:
+        drop_mgr.close()
+        raise_mgr.close()
+
+
+def test_constructor_exceptions_sanitize_secrets_and_close_loaded_provider_on_init_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.agents.memory.backends.openviking.openviking_manager as module
+
+    pkg = tmp_path / "dyn_ov_ctor_err"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "mod.py").write_text(
+        "class FailingCtorProvider:\n"
+        "    def __init__(self, dsn: str):\n"
+        "        raise RuntimeError(f'bad dsn: {dsn}')\n"
+        "\n"
+        "def failing_factory(token: str):\n"
+        "    raise ValueError(f'bad token: {token}')\n"
+        "\n"
+        "events = []\n"
+        "class CleanupTrackerProvider:\n"
+        "    def resolve(self, user_id: str):\n"
+        "        return 'key-' + user_id\n"
+        "    def close(self):\n"
+        "        events.append('closed')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    with pytest.raises(ValueError, match=r"initialization failed \(RuntimeError\)") as cls_exc:
+        load_credential_provider("dyn_ov_ctor_err.mod:FailingCtorProvider", {"dsn": "postgres://u:super-secret-dsn@h/db"})
+    assert "super-secret-dsn" not in str(cls_exc.value)
+    assert cls_exc.value.__cause__ is None
+
+    with pytest.raises(ValueError, match=r"initialization failed \(ValueError\)") as fac_exc:
+        load_credential_provider("dyn_ov_ctor_err.mod:failing_factory", {"token": "factory-super-secret"})
+    assert "factory-super-secret" not in str(fac_exc.value)
+    assert fac_exc.value.__cause__ is None
+
+    # If model_post_init fails after load_credential_provider(), loaded provider must be closed
+    monkeypatch.setattr(module, "_load_official_integration", lambda: (_ for _ in ()).throw(ImportError("missing integration")))
+    with pytest.raises(ImportError, match="missing integration"):
+        OpenVikingMemoryManager.from_config(
+            _multi_user_backend_config(
+                tmp_path,
+                credential_provider="dyn_ov_ctor_err.mod:CleanupTrackerProvider",
+            )
+        )
+    mod = importlib.import_module("dyn_ov_ctor_err.mod")
+    assert mod.events == ["closed"]
+
+    # Single-user startup _build_scoped_entry failure must also sanitize API key
+    class _ExplodingSingleRecorder:
+        def __init__(self, *, url: str, api_key: str, **kwargs: Any) -> None:
+            del url, kwargs
+            raise RuntimeError(f"boom with {api_key}")
+
+    monkeypatch.setattr(
+        module,
+        "_load_official_integration",
+        lambda: {
+            "OpenVikingCommitPolicy": _CommitPolicy,
+            "OpenVikingPartialWriteError": _PartialWriteError,
+            "OpenVikingRetriever": _Retriever,
+            "OpenVikingSessionRecorder": _ExplodingSingleRecorder,
+            "use_actor_peer": _use_actor_peer,
+        },
+    )
+    monkeypatch.setenv("OPENVIKING_API_KEY", "single-super-secret")
+    with pytest.raises(MemoryManagerError, match=r"Failed to initialize OpenViking client \(RuntimeError\)") as init_exc:
+        OpenVikingMemoryManager.from_config(_backend_config(tmp_path))
+    assert "single-super-secret" not in str(init_exc.value)
+    assert init_exc.value.__cause__ is None
+
+
+def test_inflight_revocation_defers_close_and_inflight_evicted_key_conflict_rejects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorders, _ = _track_official_integration(monkeypatch)
+    keys: dict[str, str | None] = {"alice": "shared-secret", "bob": "bob-secret"}
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path,
+            client_pool={"max_clients": 1},
+            failure_policy={"read": "raise", "write": "raise"},
+        ),
+        credential_provider=lambda uid: keys.get(uid),
+    )
+    try:
+        manager.search("warmup", user_id="alice")
+        assert len(recorders) == 1
+        rec_alice = recorders[0]
+
+        started = threading.Event()
+        release = threading.Event()
+        orig_record = rec_alice.record
+
+        def blocked_record(*args: Any, **kwargs: Any) -> object:
+            started.set()
+            assert release.wait(timeout=5.0)
+            return orig_record(*args, **kwargs)
+
+        rec_alice.record = blocked_record
+        t_inflight = threading.Thread(
+            target=manager.add,
+            args=("t-revoke", [HumanMessage("slow", id="s1")]),
+            kwargs={"user_id": "alice"},
+        )
+        t_inflight.start()
+        try:
+            assert started.wait(timeout=5.0)
+
+            # Evict alice from max_clients=1 pool via bob while alice's entry stays in _inflight_entries
+            manager.search("warmup", user_id="bob")
+            assert len(recorders) == 2
+            assert rec_alice.closed is False
+
+            # Another user reusing alice's still-in-flight evicted key must be rejected
+            keys["carol"] = "shared-secret"
+            with pytest.raises(MemoryManagerError, match="cannot be shared across distinct DeerFlow scopes"):
+                manager.add("t-conflict", [HumanMessage("leak", id="c1")], user_id="carol")
+            assert len(recorders) == 2
+
+            # Revoke alice while alice's entry is still in-flight -> retired now, closed only after completion
+            keys["alice"] = None
+            with pytest.raises(MemoryManagerError, match="No OpenViking USER API key"):
+                manager.add("t-revoked", [HumanMessage("after revoke", id="r1")], user_id="alice")
+            assert rec_alice.closed is False
+        finally:
+            release.set()
+            t_inflight.join(timeout=5.0)
+
+        assert not t_inflight.is_alive()
+        assert rec_alice.closed is True
+    finally:
+        manager.close()
+
+
+def test_single_user_config_parity_and_multi_user_edge_cases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "valid-single-key")
+
+    with pytest.raises(ValueError, match="must not embed credentials"):
+        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, base_url="http://user:pass@127.0.0.1:1933"))
+
+    for bad_owner in (123, True, "alice\x00bob", "alice\nbob"):
+        with pytest.raises(ValueError, match="owner_user_id must be a string without control characters"):
+            OpenVikingConfig.from_backend_config(_backend_config(tmp_path, owner_user_id=bad_owner))
+
+    for bad_env in (123, "ENV\x00KEY", "ENV\nKEY"):
+        with pytest.raises(ValueError, match="api_key_env must be a string without control characters"):
+            OpenVikingConfig.from_backend_config(_backend_config(tmp_path, api_key_env=bad_env))
+
+    # Duplicate secrets across two different env vars in multi-user mode
+    monkeypatch.setenv("ALICE_ENV_KEY", "shared-env-secret")
+    monkeypatch.setenv("BOB_ENV_KEY", "shared-env-secret")
+    with pytest.raises(ValueError, match="must not share the same API key") as dup_exc:
+        OpenVikingConfig.from_backend_config(
+            _multi_user_backend_config(
+                tmp_path,
+                user_credentials={
+                    "alice": {"api_key_env": "ALICE_ENV_KEY"},
+                    "bob": {"api_key_env": "BOB_ENV_KEY"},
+                },
+            )
+        )
+    assert "shared-env-secret" not in str(dup_exc.value)
+
+    # Empty user_credentials paired with credential_provider is valid, and __call__-only provider objects work
+    class _CallableOnlyProvider:
+        def __call__(self, user_id: str) -> str:
+            return f"callable-key-{user_id}"
+
+    cfg = OpenVikingConfig.from_backend_config(
+        _multi_user_backend_config(tmp_path, user_credentials={}),
+        has_injected_credential_provider=True,
+    )
+    assert cfg.isolation_mode == "multi_user"
+    assert len(cfg.user_credentials) == 0
+
+    recorders, _ = _track_official_integration(monkeypatch)
+    mgr = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path, user_credentials={}),
+        credential_provider=_CallableOnlyProvider(),
+    )
+    try:
+        mgr.search("prefs", user_id="alice")
+        assert recorders[-1].connection["api_key"] == "callable-key-alice"
+    finally:
+        mgr.close()
+
+
+def test_end_operation_skips_wait_when_cleanup_already_timed_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _track_official_integration(monkeypatch)
+    release_close = threading.Event()
+    close_started = threading.Event()
+
+    class _HungCloseProvider:
+        def resolve(self, user_id: str) -> str:
+            return f"key-{user_id}"
+
+        def close(self) -> None:
+            close_started.set()
+            assert release_close.wait(timeout=5.0)
+
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(tmp_path, timeout_seconds=5.0),
+        credential_provider=_HungCloseProvider(),
+    )
+    try:
+        assert manager.shutdown_flush(0.05) is False
+        assert manager._cleanup_timed_out is True
+        assert close_started.wait(timeout=1.0)
+
+        # Simulate a staggered worker thread reaching the cleanup tail after shutdown timed out
+        with manager._lifecycle:
+            manager._active_operations = 1
+        t0 = time.monotonic()
+        manager._end_operation()
+        assert time.monotonic() - t0 < 0.5
+    finally:
+        release_close.set()

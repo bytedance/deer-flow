@@ -138,14 +138,20 @@ def load_credential_provider(path: str, config: Mapping[str, Any]) -> Any:
         target = getattr(target, attr)
 
     if isinstance(target, type):
-        provider = target(**kwargs)
+        try:
+            provider = target(**kwargs)
+        except Exception as exc:
+            raise ValueError(f"OpenViking credential_provider {path!r} initialization failed ({type(exc).__name__})") from None
         if not _is_usable_provider(provider):
             raise ValueError(f"OpenViking credential_provider {path!r} instance must define a callable 'resolve(user_id)' method or be callable")
         return provider
 
     if callable(target):
         if kwargs:
-            provider = target(**kwargs)
+            try:
+                provider = target(**kwargs)
+            except Exception as exc:
+                raise ValueError(f"OpenViking credential_provider {path!r} initialization failed ({type(exc).__name__})") from None
             if not _is_usable_provider(provider):
                 raise ValueError(f"OpenViking credential_provider factory {path!r} must return a callable or an object with a callable 'resolve(user_id)' method")
             return provider

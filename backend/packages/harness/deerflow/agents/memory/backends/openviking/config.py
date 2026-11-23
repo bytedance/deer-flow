@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from .credentials import (
     OpenVikingCredential,
+    has_control_chars,
     validate_api_key,
     validate_provider_path,
     validate_user_key,
@@ -113,8 +114,18 @@ class OpenVikingConfig:
             api_key = ""
         else:
             isolation_mode = "single_user"
-            owner_user_id = "" if raw_owner_user_id is None else str(raw_owner_user_id).strip()
-            api_key_env = "OPENVIKING_API_KEY" if raw_api_key_env is None else str(raw_api_key_env).strip()
+            if raw_owner_user_id is None:
+                owner_user_id = ""
+            elif not isinstance(raw_owner_user_id, str) or has_control_chars(raw_owner_user_id):
+                raise ValueError("OpenViking owner_user_id must be a string without control characters")
+            else:
+                owner_user_id = raw_owner_user_id.strip()
+            if raw_api_key_env is None:
+                api_key_env = "OPENVIKING_API_KEY"
+            elif not isinstance(raw_api_key_env, str) or has_control_chars(raw_api_key_env):
+                raise ValueError("OpenViking api_key_env must be a string without control characters")
+            else:
+                api_key_env = raw_api_key_env.strip()
             if not api_key_env:
                 raise ValueError("OpenViking api_key_env must not be empty")
             api_key = os.environ.get(api_key_env, "").strip()
@@ -192,6 +203,8 @@ class OpenVikingConfig:
         parsed = urlparse(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("OpenViking base_url must be an absolute http(s) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("OpenViking base_url must not embed credentials; configure api_key_env, user_credentials, or credential_provider instead")
         if parsed.scheme == "http" and not self.allow_insecure_http and parsed.hostname not in {"127.0.0.1", "localhost", "openviking"}:
             raise ValueError("OpenViking plain HTTP is allowed only for localhost/openviking; set allow_insecure_http=true only for a trusted internal network")
         if self.isolation_mode == "single_user":
