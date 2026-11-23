@@ -271,14 +271,14 @@ Initialize the five-slide progress record before generating the first image:
 python /mnt/skills/public/ppt-generation/scripts/progress.py init \
   --plan-file /mnt/user-data/workspace/ai-product-plan.json \
   --manifest-file /mnt/user-data/workspace/ai-product-progress.json \
-  --slide-images /mnt/user-data/outputs/nova-slide-01.jpg /mnt/user-data/outputs/nova-slide-02.jpg /mnt/user-data/outputs/nova-slide-03.jpg /mnt/user-data/outputs/nova-slide-04.jpg /mnt/user-data/outputs/nova-slide-05.jpg
+  --slide-images /mnt/user-data/outputs/ai-product-slide-01.jpg /mnt/user-data/outputs/ai-product-slide-02.jpg /mnt/user-data/outputs/ai-product-slide-03.jpg /mnt/user-data/outputs/ai-product-slide-04.jpg /mnt/user-data/outputs/ai-product-slide-05.jpg
 ```
 
 ### Step 3: Generate slide images sequentially with reference chaining
 
 **Slide 1 - Title (establishes the visual language):**
 
-Create `/mnt/user-data/workspace/nova-slide-01.json`:
+Create `/mnt/user-data/workspace/ai-product-slide-01.json`:
 ```json
 {
   "prompt": "Ultra-premium presentation title slide with glassmorphism design. Background: smooth flowing gradient from deep purple (#667eea) through magenta (#f093fb) to cyan (#00d4ff), soft and vibrant. Center: large frosted glass panel with strong backdrop blur effect, rounded corners 32px, containing bold white sans-serif title 'Introducing Nova AI' (72pt, SF Pro Display style, font-weight 700) with subtle text shadow, subtitle 'Intelligence, Reimagined' below in lighter weight. The glass panel has subtle white border (1px rgba 255,255,255,0.25) and soft purple-tinted drop shadow. Floating around the card: 3D glass spheres with refraction, translucent geometric shapes (icosahedrons, abstract blobs), creating depth and dimension. Soft luminous glow emanating from behind the glass panel. Small floating particles of light. Apple Vision Pro / visionOS UI aesthetic. Professional presentation slide, 16:9 aspect ratio. Hyper-modern, premium tech product launch feel.",
@@ -291,7 +291,7 @@ Create `/mnt/user-data/workspace/nova-slide-01.json`:
 ```
 
 ```json
-{"prompt_file": "/mnt/user-data/workspace/nova-slide-01.json", "output_file": "/mnt/user-data/outputs/nova-slide-01.jpg", "aspect_ratio": "16:9"}
+{"prompt_file": "/mnt/user-data/workspace/ai-product-slide-01.json", "output_file": "/mnt/user-data/outputs/ai-product-slide-01.jpg", "aspect_ratio": "16:9"}
 ```
 
 After `generate_image` succeeds, record slide 1:
@@ -303,7 +303,7 @@ python /mnt/skills/public/ppt-generation/scripts/progress.py mark \
 
 **Slide 2 - Content (MUST reference slide 1 for consistency):**
 
-Create `/mnt/user-data/workspace/nova-slide-02.json`:
+Create `/mnt/user-data/workspace/ai-product-slide-02.json`:
 ```json
 {
   "prompt": "Presentation slide continuing EXACT visual style from reference image. SAME purple-to-cyan gradient background, SAME glassmorphism aesthetic, SAME typography style. Left side: frosted glass card with backdrop blur containing title 'Why Nova?' in bold white (matching reference font style), three feature points as subtle glass pill badges below. Right side: abstract 3D neural network visualization made of interconnected glass nodes with soft cyan glow, floating in space. Floating translucent geometric shapes (matching style from reference) adding depth. The frosted glass has identical treatment: white border, purple-tinted shadow, same blur intensity. CRITICAL: This slide must look like it belongs in the exact same presentation as the reference image - same colors, same glass treatment, same overall aesthetic.",
@@ -315,7 +315,7 @@ Create `/mnt/user-data/workspace/nova-slide-02.json`:
 ```
 
 ```json
-{"prompt_file": "/mnt/user-data/workspace/nova-slide-02.json", "reference_images": ["/mnt/user-data/outputs/nova-slide-01.jpg"], "output_file": "/mnt/user-data/outputs/nova-slide-02.jpg", "aspect_ratio": "16:9"}
+{"prompt_file": "/mnt/user-data/workspace/ai-product-slide-02.json", "reference_images": ["/mnt/user-data/outputs/ai-product-slide-01.jpg"], "output_file": "/mnt/user-data/outputs/ai-product-slide-02.jpg", "aspect_ratio": "16:9"}
 ```
 
 After slide 2 succeeds, run `progress.py mark` for slide 2. Repeat after each
@@ -334,9 +334,9 @@ Key consistency rules for subsequent slides:
 ```bash
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
   --plan-file /mnt/user-data/workspace/ai-product-plan.json \
-  --slide-images /mnt/user-data/outputs/nova-slide-01.jpg /mnt/user-data/outputs/nova-slide-02.jpg /mnt/user-data/outputs/nova-slide-03.jpg /mnt/user-data/outputs/nova-slide-04.jpg /mnt/user-data/outputs/nova-slide-05.jpg \
+  --slide-images /mnt/user-data/outputs/ai-product-slide-01.jpg /mnt/user-data/outputs/ai-product-slide-02.jpg /mnt/user-data/outputs/ai-product-slide-03.jpg /mnt/user-data/outputs/ai-product-slide-04.jpg /mnt/user-data/outputs/ai-product-slide-05.jpg \
   --progress-file /mnt/user-data/workspace/ai-product-progress.json \
-  --output-file /mnt/user-data/outputs/nova-presentation.pptx
+  --output-file /mnt/user-data/outputs/ai-product-presentation.pptx
 ```
 
 ## Style-Specific Guidelines

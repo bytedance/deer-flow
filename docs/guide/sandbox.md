@@ -98,6 +98,8 @@ same-size content edits are still copied on release.
 Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
+Rebuilding an OpenSandbox for the same user and thread can reuse its logical ID,
+and terminal failures affect only the instance that reported them.
 
 OpenSandbox also uploads enabled skills to `skills.container_path`. An explicit
 Agent skill list replaces the managed skill directories before tools run; an

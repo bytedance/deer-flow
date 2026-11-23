@@ -46,18 +46,19 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
         raise HTTPException(404, "Run not found")
     if get_agent_runs(request) is None:
         raise HTTPException(503, "Run inputs require an authenticated session")
+    from deerflow_extension_api.agent_runs import AgentRunError
+
     from app.gateway.coordination_workers import managed_task, worker_context, worker_error
     from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
 
     if task_id := await managed_task(request, thread_id):
-        service, owner, runs = worker_context(request)
+        service, owner, _runs = worker_context(request)
         if body.mode != "queue":
             raise HTTPException(409, "Use queue mode to update a managed worker")
         try:
-            item = await service.repo.append_input(owner, task_id, request_id=f"run-input:{run_id}:{body.request_id}", content=body.text)
-            service.watch(runs, owner, task_id)
+            item = await service.submit_input(owner, task_id, request_id=f"run-input:{run_id}:{body.request_id}", content=body.text)
             return _worker_input_receipt(item, run_id, body.request_id)
-        except (TaskConflict, TaskNotFound) as exc:
+        except (TaskConflict, TaskNotFound, AgentRunError) as exc:
             raise worker_error(exc) from exc
     row = await _store(request).get(run_id, user_id=user_id)
     if row is None or row.get("run_inputs") is None:

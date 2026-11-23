@@ -756,6 +756,62 @@ async def test_pause_atomically_cancels_waiting_run_but_rejects_launching_run(tm
         await close_engine()
 
 
+async def test_delete_atomically_cancels_waiting_run_but_rejects_launching_run(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await _seed_reuse_task(task_repo, task_id="task-delete-queued", now=now)
+        await run_repo.create(
+            run_record_id="task-run-delete-queued",
+            task_id="task-delete-queued",
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
+
+        # Another user's delete finds nothing and leaves the queue alone.
+        assert await task_repo.delete_with_queue_cancellation("task-delete-queued", user_id="user-2", error="deleted while queued", now=now) == "not_found"
+        assert await task_repo.get("task-delete-queued", user_id="user-1") is not None
+        assert (await run_repo.list_by_task("task-delete-queued"))[0]["status"] == "queued"
+
+        result = await task_repo.delete_with_queue_cancellation("task-delete-queued", user_id="user-1", error="deleted while queued", now=now)
+
+        assert result == "deleted"
+        assert await task_repo.get("task-delete-queued", user_id="user-1") is None
+        (cancelled,) = await run_repo.list_by_task("task-delete-queued")
+        assert (cancelled["status"], cancelled["error"]) == ("interrupted", "deleted while queued")
+
+        await _seed_reuse_task(task_repo, task_id="task-delete-launching", now=now)
+        await run_repo.create(
+            run_record_id="task-run-delete-launching",
+            task_id="task-delete-launching",
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
+        await run_repo.claim_queued_run(
+            "task-run-delete-launching",
+            lease_owner="worker-a",
+            now=now,
+            lease_seconds=120,
+            global_max_concurrent_runs=3,
+        )
+
+        result = await task_repo.delete_with_queue_cancellation("task-delete-launching", user_id="user-1", error="deleted while queued", now=now)
+
+        assert result == "executing"
+        assert await task_repo.get("task-delete-launching", user_id="user-1") is not None
+        assert (await run_repo.list_by_task("task-delete-launching"))[0]["status"] == "launching"
+    finally:
+        await close_engine()
+
+
 async def test_manual_enqueue_cannot_unpause_a_task_that_cancels_its_waiting_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:

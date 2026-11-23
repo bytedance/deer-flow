@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import ANY, Mock
 
 import pytest
 
@@ -26,12 +27,8 @@ class Remote:
         self.destroy_error = False
         self.command_error = False
         self.commands = SimpleNamespace(run=self.run)
-        self.files = SimpleNamespace(write_file=self.write_file)
-        self.uploaded_files = {}
+        self.files = Mock(spec_set=["write_file"])
         self.state = ""
-
-    def write_file(self, path, content, *, mode=755):
-        self.uploaded_files[path] = (content, mode)
 
     def run(self, command, **kwargs):
         if self.command_error:
@@ -71,7 +68,12 @@ def transport(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider_module, "_import_sdk", lambda: (SimpleNamespace(create=create), SimpleNamespace, SimpleNamespace))
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
-    # A worker must inherit the scoped config; no checkout config.yaml is needed.
+    skills_root = tmp_path / "skills"
+    monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", str(skills_root))
+    skill = skills_root / "public" / "bench-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"---\nname: bench-skill\ndescription: Benchmark fixture\n---\n")
+    # Worker threads must inherit scoped config; no checkout config.yaml is needed.
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing-config.yaml"))
     config = AppConfig(
         sandbox=SandboxConfig(
@@ -88,7 +90,7 @@ def transport(monkeypatch, tmp_path):
     )
     push_current_app_config(config)
     try:
-        yield SimpleNamespace(remotes=remotes, requests=requests, config=config)
+        yield SimpleNamespace(remotes=remotes, requests=requests, config=config, skill=skill)
     finally:
         pop_current_app_config()
 
@@ -99,6 +101,7 @@ def test_factory_preserves_connection_config_without_exporting_secrets(transport
         assert get_app_config() is transport.config
         assert transport.config.sandbox.image == "test-image@sha256:fixture"
         sid = provider.acquire("thread", user_id="owner")
+        transport.remotes[0].files.write_file.assert_any_call(ANY, transport.skill.read_bytes(), mode=644)
         request = transport.requests[0]
         assert request["image"] == "test-image@sha256:fixture"
         assert request["env"] == {"BENCH_SECRET": "sentinel-environment"}
@@ -112,7 +115,6 @@ def test_factory_preserves_connection_config_without_exporting_secrets(transport
         assert request["ready_timeout"].total_seconds() == 19
         assert snapshot == {"image": request["image"], "replicas": 2, "idle_timeout": 0}
         assert "sentinel" not in json.dumps(snapshot)
-        assert any(path.endswith("/SKILL.md") for path in transport.remotes[0].uploaded_files)
         provider.release(sid)
     finally:
         provider.shutdown()
