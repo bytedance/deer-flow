@@ -610,3 +610,92 @@ test("resolves an accepted send whose onSent throws and reports the failure", as
     failure,
   );
 });
+test("binds the thread the SDK creates for a send that carried a display id", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  // The sidecar's chat is created by the gateway, but the stream hook has not
+  // adopted it yet when the send goes out, so the SDK creates the thread and
+  // reports it through onThreadId. That report must belong to this send even
+  // though it was submitted with a thread id.
+  const { result } = await renderThreadStream("display-thread");
+  const onSent = rs.fn();
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current.sendMessage(
+      "display-thread",
+      { text: "Hello from the side chat", files: [] },
+      undefined,
+      { onSent },
+    );
+  });
+  await flushFrames();
+
+  await act(async () => {
+    mocks.callbacks.onThreadId?.("server-created");
+  });
+  await act(async () => {
+    mocks.callbacks.onCreated?.({
+      thread_id: "server-created",
+      run_id: "run-created",
+    });
+  });
+
+  expect(onSent).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    await sendPromise;
+  });
+});
+
+test("does not reject a newer send when an older released send's request fails", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result, rerender } = await renderThreadStream("thread-1");
+  const onSentA = rs.fn();
+  const onSentB = rs.fn();
+
+  // A is submitted, then released when the view moves to another chat.
+  let sendA: Promise<unknown> | undefined;
+  act(() => {
+    sendA = result.current.sendMessage(
+      "thread-1",
+      { text: "Hello from A", files: [] },
+      undefined,
+      { onSent: onSentA },
+    );
+  });
+  await flushFrames();
+  rerender({ threadId: "thread-2" });
+  await flushFrames();
+  await act(async () => {
+    await sendA;
+  });
+
+  // B is submitted in the chat now on screen. A's refused request then arrives
+  // without run metadata: it belongs to A, so B must keep waiting for its own
+  // acceptance instead of rejecting with A's error.
+  let sendB: Promise<unknown> | undefined;
+  act(() => {
+    sendB = result.current.sendMessage(
+      "thread-2",
+      { text: "Hello from B", files: [] },
+      undefined,
+      { onSent: onSentB },
+    );
+  });
+  await flushFrames();
+  await act(async () => {
+    mocks.callbacks.onError?.(new Error("HTTP 422"), undefined);
+  });
+  expect(onSentB).not.toHaveBeenCalled();
+
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "thread-2", run_id: "run-2" });
+  });
+  expect(onSentB).toHaveBeenCalledTimes(1);
+  expect(onSentA).not.toHaveBeenCalled();
+  await act(async () => {
+    await sendB;
+  });
+});

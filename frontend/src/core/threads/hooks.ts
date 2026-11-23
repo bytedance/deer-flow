@@ -2845,18 +2845,16 @@ export function useThreadStream({
       // send can still be accepted afterwards: settle it from its own
       // run-creation result instead of rejecting it (#8092 review).
       if (!run && !isHistoryError(error)) {
-        if (pendingSendRef.current) {
+        // A refused run request carries no run identity, so settle the oldest
+        // send still waiting for one: a released attempt comes before the send
+        // submitted after it. Rejecting the mounted send with an earlier
+        // attempt's failure would present a delivered message as retryable
+        // (#8092 review); dropping the failed attempt keeps its draft instead.
+        const oldestReleased = releasedSendsRef.current[0];
+        if (oldestReleased) {
+          discardReleasedSend(oldestReleased);
+        } else if (pendingSendRef.current) {
           rejectPendingSend(error);
-        } else {
-          // No caller is waiting, so the refused request belongs to a send that
-          // was released on navigation. Its run never started: drop the record
-          // instead of letting a later acceptance retire its draft (#8092 review).
-          const orphan = releasedSendsRef.current.find(
-            (send) => send.newThread && !send.serverThreadId,
-          );
-          if (orphan) {
-            discardReleasedSend(orphan);
-          }
         }
       }
       if (pendingApprovalSubmissionRef.current) {
@@ -3579,15 +3577,17 @@ export function useThreadStream({
         };
         pendingSend = pending;
         pendingSendRef.current = pending;
-        if (startedNewThread) {
-          // The SDK will create this conversation and report its id through
-          // `onThreadId`; keep the submission order so each report binds its own
-          // send, even when an earlier attempt was released on navigation.
-          unboundThreadSendsRef.current = [
-            ...unboundThreadSendsRef.current,
-            pending,
-          ];
-        }
+        // The SDK creates a conversation whenever its stream has no thread id
+        // yet, which also happens for a send that carries a display id: the
+        // sidecar's gateway-created chat is submitted before `useStream` has
+        // adopted it, so the SDK creates the thread and reports it through
+        // `onThreadId`. Keep every send in the binding queue, in submission
+        // order, so that report always finds the send that caused it; a settled
+        // send is removed by `forgetUnboundSend`.
+        unboundThreadSendsRef.current = [
+          ...unboundThreadSendsRef.current,
+          pending,
+        ];
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
