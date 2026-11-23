@@ -1803,3 +1803,40 @@ def test_doctor_environment_overlays_the_launcher_on_the_inherited_environment(t
     assert env["PATH"] == "/opt/example/bin:/usr/bin"
     assert env["DEER_FLOW_CONFIG_PATH"] == str(config_path)
     assert env["DEER_FLOW_PROJECT_ROOT"] == str(tmp_path)
+
+
+def test_doctor_environment_marks_the_launcher_view_as_resolved(tmp_path):
+    # The bundled doctor must not re-expand the checkout `.env` over the
+    # selectors the bundle already resolved: that resolves the runtime-root
+    # fallback against the bundle's default and names a different config file.
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+
+    env = support_bundle._doctor_environ(
+        {"DEER_FLOW_CONFIG_PATH": str(config_path), "DEER_FLOW_PROJECT_ROOT": str(tmp_path)},
+        config_path,
+        False,
+    )
+
+    assert env["DEER_FLOW_LAUNCHER_VIEW_RESOLVED"] == "1"
+
+
+def test_config_path_reports_the_resolved_selected_env_file(tmp_path, monkeypatch):
+    # The bundle resolves the selected env file from the launcher's shell view,
+    # so `$PWD` becomes an absolute path. The bundled doctor needs that resolved
+    # path: python-dotenv's own read would keep the literal `$PWD` and fail the
+    # harness import on a file by that name.
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    (backend / "profile.env").write_text("DEER_FLOW_CONFIG_PATH=./profile/active.yaml\n", encoding="utf-8")
+    (backend / "profile").mkdir()
+    (backend / "profile" / "active.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=$PWD/backend/profile.env\n", encoding="utf-8")
+    monkeypatch.setenv("PWD", str(project_root))
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    _, _, _, launcher = support_bundle.resolve_config_path(project_root)
+
+    assert launcher["DEER_FLOW_ENV_FILE"] == str(backend / "profile.env")

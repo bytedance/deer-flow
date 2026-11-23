@@ -1487,6 +1487,30 @@ class TestMainConfigResolution:
         assert "✓ config.yaml found" in output
         assert "✓ models configured  (1 model(s))" in output
 
+    def test_resolved_launcher_view_wins_over_reexpanding_the_dotenv(self, tmp_path, runtime_path_env, capsys):
+        # The support bundle resolves the checkout `.env` against the launcher's
+        # runtime root and hands the selectors over already expanded. Re-reading
+        # `.env` here would expand `${DEER_FLOW_PROJECT_ROOT:-profile}` against
+        # the bundle's defaulted root, pick the checkout `profile/active.yaml`,
+        # and report a different file than the archive's own summary.
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "backend" / "profile").mkdir(parents=True)
+        (repo_root / "profile").mkdir()
+        resolved = repo_root / "backend" / "profile" / "active.yaml"
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text("config_version: 5\nmodels:\n  - name: resolved-model\n")
+        (repo_root / "profile" / "active.yaml").write_text("config_version: 5\nmodels: []\n")
+        (repo_root / ".env").write_text("DEER_FLOW_CONFIG_PATH=${DEER_FLOW_PROJECT_ROOT:-profile}/active.yaml\n")
+        runtime_path_env.setenv("DEER_FLOW_LAUNCHER_VIEW_RESOLVED", "1")
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(repo_root))
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(resolved))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output
+
     def test_dotenv_project_root_overrides_the_shell_like_make_dev(self, tmp_path, runtime_path_env, capsys):
         repo_root = _fake_checkout(tmp_path, runtime_path_env)
         (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")

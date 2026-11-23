@@ -1051,12 +1051,25 @@ def main() -> int:
 
     project_root = Path(__file__).resolve().parents[1]
 
+    # The support bundle resolves the launcher view and hands it over whole
+    # (`DEER_FLOW_LAUNCHER_VIEW_RESOLVED`): the selectors and the selected env
+    # file are already expanded against the checkout the launcher saw, and the
+    # runtime root is the one the bundle defaulted. Re-reading `.env` here would
+    # re-expand `${DEER_FLOW_PROJECT_ROOT:-profile}` against that default and
+    # name a different config file than the archive. Trust the handover.
+    launcher_resolved = os.environ.get("DEER_FLOW_LAUNCHER_VIEW_RESOLVED") == "1"
+
     # Load .env early so key checks work
     try:
         from dotenv import load_dotenv
 
         env_path = project_root / ".env"
-        if env_path.exists():
+        if launcher_resolved:
+            # Only the non-selector credentials still come from the checkout
+            # `.env`; a real key check reads them after this load.
+            if env_path.exists():
+                load_dotenv(env_path, override=False)
+        elif env_path.exists():
             # `make dev` (scripts/serve.sh) sources .env over the shell, so
             # for the variables that choose the config file, .env wins. Expand
             # them the way the launcher and the Gateway do, not the raw text

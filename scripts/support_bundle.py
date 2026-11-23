@@ -353,6 +353,7 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
         base["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
     selected = dict(base)
     selector = base.get("DEER_FLOW_ENV_FILE")
+    resolved_env_file: str | None = None
     # `load_selected_env_file` checks the switch in the environment the
     # launcher handed the Gateway, before it reads the file.
     gateway_disabled = base.get("PYTHON_DOTENV_DISABLED", "").casefold() in {"1", "true", "t", "yes", "y"}
@@ -367,6 +368,11 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
         # A relative selector uses the Gateway's working directory, `backend/`.
         if not selected_file.is_absolute():
             selected_file = project_root / "backend" / selected_file
+        # The launcher's shell expansion already replaced `$PWD` and any
+        # `$NAME` in the selector; python-dotenv's own reader would hand the
+        # Gateway the literal text. Carry the resolved absolute path so a
+        # child (the bundled doctor) loads this file, not the unexpanded one.
+        resolved_env_file = str(selected_file)
         # The Gateway imports the selected file from `backend/`, so its `$PWD`
         # is that directory rather than the checkout the launcher used.
         gateway_environment = {**base, "PWD": str(project_root / "backend")}
@@ -387,6 +393,10 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
             for name, value in assignments.items():
                 selected.setdefault(name, value)
     location = {name: selected[name] for name in CONFIG_LOCATION_ENV_VARS if name in selected}
+    # Carry the resolved selector too: a child that re-reads the checkout `.env`
+    # would otherwise hand the harness the literal `$PWD` python-dotenv keeps.
+    if resolved_env_file is not None:
+        location["DEER_FLOW_ENV_FILE"] = resolved_env_file
     # The Gateway resolves a relative runtime root and config path from its own
     # working directory, `backend/`, not from wherever the bundle was started.
     # Normalize both here so every consumer reads the same file the Gateway would.
@@ -467,8 +477,14 @@ def _doctor_environ(launcher: dict[str, str], config_path: Path, resolution_erro
     of it: the doctor probes `PATH` for node/pnpm/uv and reads shell-only model
     credentials, and a doctor env built from the two selectors alone reports
     every host tool missing.
+
+    ``DEER_FLOW_LAUNCHER_VIEW_RESOLVED`` tells the doctor the selectors are
+    already final, so it must not re-expand the checkout `.env` over them: doing
+    so resolves ``${DEER_FLOW_PROJECT_ROOT:-profile}`` against the runtime root
+    the bundle just defaulted and picks a different file than the archive.
     """
     env = {**os.environ, **launcher}
+    env["DEER_FLOW_LAUNCHER_VIEW_RESOLVED"] = "1"
     env.setdefault("PWD", str(config_path.parent))
     if resolution_error:
         env["DEER_FLOW_CONFIG_PATH"] = str(config_path)
