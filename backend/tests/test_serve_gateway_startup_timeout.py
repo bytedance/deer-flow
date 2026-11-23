@@ -61,7 +61,7 @@ def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, a
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
     (checkout / "backend").mkdir()
-    for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "detect_uv_extras.py"):
+    for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "port-listening.sh", "detect_uv_extras.py"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     (scripts / "nginx-local-conf.sh").write_text("printf 'test-nginx.conf\\n'\n", encoding="utf-8", newline="\n")
     (scripts / "config-upgrade.sh").write_text("exit 0\n", encoding="utf-8", newline="\n")
@@ -145,4 +145,184 @@ def test_invalid_gateway_timeout_does_not_block_stop(tmp_path: Path) -> None:
     result = _run_launcher(tmp_path, timeout="invalid", args=("--stop",))
     assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "cleanup").exists()
+    assert not (tmp_path / "started").exists()
+
+
+# Windows netstat -ano rows. 18001 and 80010 must not count as 8001, and an
+# established socket whose foreign port is 8001 is not a listener.
+_WINDOWS_NETSTAT = r"""
+  TCP    127.0.0.1:18001        0.0.0.0:0              LISTENING       4
+  TCP    127.0.0.1:8001         0.0.0.0:0              LISTENING       9
+  TCP    [::1]:8001             [::]:0                 LISTENING       9
+  TCP    10.0.0.1:50000         1.2.3.4:8001           ESTABLISHED     9
+  TCP    0.0.0.0:80010          0.0.0.0:0              LISTENING       3
+"""
+
+
+def _run_port_probe(tmp_path: Path, script: str, args: list[str], *, uname_s: str, netstat_flag: str, netstat_stdout: str) -> subprocess.CompletedProcess[str]:
+    """Run a copied probe with lsof/ss absent and a powershell.exe that hangs."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("port-listening.sh", "wait-for-port.sh"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    marker = tmp_path / "powershell-called"
+    fixture = tmp_path / "netstat.txt"
+    fixture.write_text(netstat_stdout, encoding="utf-8", newline="\n")
+    hung = tmp_path / "hung-helper"
+    prelude = r"""
+uname() { printf uname > "$TEST_HUNG"; sleep 30; }
+dirname() { printf dirname > "$TEST_HUNG"; sleep 30; }
+command() {
+    if [ "$1" = -v ] && { [ "$2" = lsof ] || [ "$2" = ss ]; }; then
+        return 1
+    fi
+    builtin command "$@"
+}
+powershell.exe() { printf hung > "$TEST_PS"; sleep 30; }
+netstat() {
+    if [ "$1" = "$TEST_NETSTAT_FLAG" ]; then
+        cat "$TEST_NETSTAT_FILE"
+        return 0
+    fi
+    printf 'unexpected netstat args: %s\n' "$*" >&2
+    return 1
+}
+export -f uname dirname command powershell.exe netstat
+bash "$TEST_SCRIPT" "$@"
+"""
+    bash = require_script_bash()
+    env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV"}}
+    env.update(
+        OSTYPE="msys" if uname_s.upper().startswith(("MINGW", "MSYS", "CYGWIN")) else "linux-gnu",
+        TEST_NETSTAT_FLAG=netstat_flag,
+        TEST_NETSTAT_FILE=fixture.as_posix(),
+        TEST_PS=marker.as_posix(),
+        TEST_HUNG=hung.as_posix(),
+        TEST_SCRIPT=(scripts / script).as_posix(),
+    )
+    result = subprocess.run(
+        [bash, "-c", prelude, "port-probe", *args],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=8,
+        check=False,
+    )
+    assert not marker.exists(), result.stdout + result.stderr
+    assert not hung.exists(), result.stdout + result.stderr
+    return result
+
+
+# 80010 is not a TCP port (1..65535), so the probe rejects it before netstat.
+# 18001 is the in-range port that must still match as itself.
+@pytest.mark.parametrize(("port", "expected"), [("8001", 0), ("18001", 0), ("80010", 1), ("801", 1), ("50000", 1)])
+def test_windows_netstat_matches_only_the_listening_port(tmp_path: Path, port: str, expected: int) -> None:
+    result = _run_port_probe(tmp_path, "port-listening.sh", [port], uname_s="MINGW64_NT-10.0", netstat_flag="-ano", netstat_stdout=_WINDOWS_NETSTAT)
+    assert result.returncode == expected, result.stdout + result.stderr
+
+
+def test_windows_netstat_does_not_treat_a_longer_port_as_8001(tmp_path: Path) -> None:
+    nearby_only = "\n".join(
+        (
+            "  TCP    127.0.0.1:18001        0.0.0.0:0              LISTENING       4",
+            "  TCP    0.0.0.0:80010          0.0.0.0:0              LISTENING       3",
+            "  TCP    10.0.0.1:50000         1.2.3.4:8001           ESTABLISHED     9",
+        )
+    )
+    result = _run_port_probe(tmp_path, "port-listening.sh", ["8001"], uname_s="MINGW64_NT-10.0", netstat_flag="-ano", netstat_stdout=nearby_only)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_windows_wait_returns_without_calling_powershell(tmp_path: Path) -> None:
+    result = _run_port_probe(
+        tmp_path,
+        "wait-for-port.sh",
+        ["8001", "5", "Gateway"],
+        uname_s="MINGW64_NT-10.0",
+        netstat_flag="-ano",
+        netstat_stdout=_WINDOWS_NETSTAT,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "failed to start" not in result.stdout
+
+
+def test_linux_netstat_listen_check_still_matches_local_address(tmp_path: Path) -> None:
+    result = _run_port_probe(
+        tmp_path,
+        "port-listening.sh",
+        ["8001"],
+        uname_s="Linux",
+        netstat_flag="-ltn",
+        netstat_stdout="tcp        0      0 127.0.0.1:8001          0.0.0.0:*               LISTEN",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_preflight_rejects_a_windows_listener(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    scripts = checkout / "scripts"
+    scripts.mkdir(parents=True)
+    (checkout / "backend").mkdir()
+    for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "port-listening.sh", "detect_uv_extras.py"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    (scripts / "nginx-local-conf.sh").write_text("printf 'test-nginx.conf\\n'\n", encoding="utf-8", newline="\n")
+    (scripts / "config-upgrade.sh").write_text("exit 0\n", encoding="utf-8", newline="\n")
+    (scripts / "cleanup-containers.sh").write_text('printf "cleanup\\n" >> "$TEST_CLEANUP"\n', encoding="utf-8", newline="\n")
+    (checkout / "config.yaml").write_text("models: []\n", encoding="utf-8", newline="\n")
+    marker = tmp_path / "powershell-called"
+    prelude = r"""
+git() { return 1; }
+pgrep() { return 1; }
+nginx() { return 0; }
+command() {
+    if [ "$1" = -v ] && { [ "$2" = lsof ] || [ "$2" = ss ]; }; then
+        return 1
+    fi
+    builtin command "$@"
+}
+sleep() { return 0; }
+uname() { printf '%s\n' 'MINGW64_NT-10.0'; }
+powershell.exe() { printf hung > "$TEST_PS"; sleep 30; }
+netstat() {
+    printf '%s\n' '  TCP    127.0.0.1:8001         0.0.0.0:0              LISTENING       42'
+    return 0
+}
+python3() { "$TEST_PYTHON" "$@"; }
+env() {
+    if [ "$1" = python3 ]; then shift; python3 "$@"; else command env "$@"; fi
+}
+sh() { touch "$TEST_STARTED"; }
+nohup() { sh "$@"; }
+bash() { command "$TEST_BASH" "$@"; }
+export -f command sleep uname powershell.exe netstat
+source "$@"
+"""
+    bash = require_script_bash()
+    env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV", "DEER_FLOW_GATEWAY_STARTUP_TIMEOUT", "DEER_FLOW_ENV_FILE"}}
+    env.update(
+        TEST_BASH=bash,
+        TEST_PYTHON=Path(sys.executable).as_posix(),
+        TEST_PS=marker.as_posix(),
+        TEST_CLEANUP=(tmp_path / "cleanup").as_posix(),
+        TEST_STARTED=(tmp_path / "started").as_posix(),
+        OSTYPE="msys",
+        DEER_FLOW_HOME=(tmp_path / "runtime").as_posix(),
+        DEER_FLOW_PROJECT_ROOT=checkout.as_posix(),
+        DEER_FLOW_CONFIG_PATH=(checkout / "config.yaml").as_posix(),
+    )
+    result = subprocess.run(
+        [bash, "-c", prelude, "windows-preflight", (scripts / "serve.sh").as_posix(), "--skip-install", "--dev"],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "port 8001 is already in use" in result.stdout
+    assert not marker.exists()
     assert not (tmp_path / "started").exists()

@@ -194,28 +194,12 @@ _kill_repo_port() {
     fi
 }
 
+# shellcheck source=scripts/port-listening.sh
+source "$REPO_ROOT/scripts/port-listening.sh"
+
 _is_port_listening() {
     local port=$1
-
-    if command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-
-    if command -v ss >/dev/null 2>&1; then
-        if ss -ltn "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .; then
-            return 0
-        fi
-    fi
-
-    if command -v netstat >/dev/null 2>&1; then
-        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
-            return 0
-        fi
-    fi
-
-    return 1
+    port_is_listening "$port"
 }
 
 _is_repo_nginx_pid() {

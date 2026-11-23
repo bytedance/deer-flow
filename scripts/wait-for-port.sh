@@ -32,32 +32,19 @@ fi
 elapsed=0
 interval=1
 
+# Bash parameter expansion, not dirname(1). From make on Windows the launcher is
+# cmd → Git Bash, and an external dirname in this script never returns, so the
+# 30s timeout below never starts.
+_script="${BASH_SOURCE[0]}"
+case "$_script" in
+    */*) SCRIPT_DIR="${_script%/*}" ;;
+    *) SCRIPT_DIR="." ;;
+esac
+# shellcheck source=scripts/port-listening.sh
+source "$SCRIPT_DIR/port-listening.sh"
+
 is_port_listening() {
-    if command -v powershell.exe >/dev/null 2>&1; then
-        if WAIT_FOR_PORT_PORT="$PORT" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference='SilentlyContinue'; \$Port = [int]\$env:WAIT_FOR_PORT_PORT; if (Get-NetTCPConnection -LocalPort \$Port -State Listen) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-
-    if command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-
-    if command -v ss >/dev/null 2>&1; then
-        if ss -ltn "( sport = :$PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
-            return 0
-        fi
-    fi
-
-    if command -v netstat >/dev/null 2>&1; then
-        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${PORT}$"; then
-            return 0
-        fi
-    fi
-
-    return 1
+    port_is_listening "$PORT"
 }
 
 while ! is_port_listening; do
