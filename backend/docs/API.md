@@ -169,8 +169,9 @@ Revocation is immediate.
 ### Agent configuration by PAT
 
 A pipeline that deploys agents, their managed subagents and schedules can use a
-PAT instead of a password session. Each route needs its scope; routes not
-listed here stay `403` for PATs.
+PAT instead of a password session. Set `agents_api.enabled` to `true` in
+`config.yaml` to use the agent management API. The deployment routes require
+the scopes and permissions below.
 
 | Routes | Scope | Also required |
 |---|---|---|

@@ -859,8 +859,6 @@ def test_pat_agent_config_policy_admits_exactly_the_deploy_routes():
     assert set(expected) <= mounted, "a listed route no longer exists"
 
     for method, path in [
-        ("PUT", "/api/agents/check"),
-        ("DELETE", "/api/agents/import"),
         ("POST", "/api/agents/a1"),
         ("GET", "/api/scheduled-tasks/preview-cron"),
         ("PATCH", "/api/scheduled-tasks/preview-cron"),
@@ -874,36 +872,22 @@ def test_pat_agent_config_policy_admits_exactly_the_deploy_routes():
 
 @pytest.fixture
 def deploy_client(pat_env, tmp_path, monkeypatch):
-    """PAT app plus routes that mirror the real agent/schedule decorators and
-    the real managed-subagent router (file store, admin-only writes)."""
+    """PAT app with the real agent and managed-subagent routers and the schedule permission checks."""
     from app.gateway.authz import require_permission
-    from app.gateway.routers import subagents
+    from app.gateway.routers import agents, subagents
+    from deerflow.config.agents_api_config import AgentsApiConfig
     from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
     from deerflow.config.sandbox_config import SandboxConfig
     from deerflow.persistence.managed_subagents.file import FileManagedSubagentStore
 
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr(agents, "get_agents_api_config", lambda: AgentsApiConfig(enabled=True))
     set_app_config(AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider")))
     store = FileManagedSubagentStore()
     monkeypatch.setattr(subagents, "get_managed_subagent_store", lambda *_: store)
 
     app, _repo, engine = pat_env
-
-    @app.get("/api/agents")
-    @require_permission("agents", "read")
-    async def list_agents(request: Request):
-        return {"agents": []}
-
-    @app.post("/api/agents")
-    @require_permission("agents", "write")
-    async def create_agent(request: Request):
-        return {"created": True}
-
-    @app.get("/api/user-profile")
-    @require_permission("agents", "read")
-    async def user_profile(request: Request):
-        return {"profile": ""}
 
     @app.get("/api/scheduled-tasks")
     @require_permission("threads", "read")
@@ -916,11 +900,14 @@ def deploy_client(pat_env, tmp_path, monkeypatch):
     async def create_task(request: Request):
         return {"created": True}
 
+    app.include_router(agents.router)
     app.include_router(subagents.router)
-    with TestClient(app) as test_client:
-        yield test_client
-    asyncio.run(engine.dispose())
-    reset_app_config()
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        asyncio.run(engine.dispose())
+        reset_app_config()
 
 
 def _bearer(created: dict) -> dict[str, str]:
@@ -948,12 +935,38 @@ def test_pat_agent_scopes_narrow_agent_routes(deploy_client):
     denied = deploy_client.post("/api/agents", headers=_bearer(reader))
     assert denied.status_code == 403
     assert denied.json()["detail"] == "Permission denied: agents:write"
-    assert deploy_client.post("/api/agents", headers=_bearer(writer)).status_code == 200
+    assert deploy_client.post("/api/agents", json={"name": "ci-agent"}, headers=_bearer(writer)).status_code == 201
     assert deploy_client.get("/api/agents", headers=_bearer(other)).status_code == 403
     # agents:* guard the user profile for sessions; it stays closed to PATs.
     profile = deploy_client.get("/api/user-profile", headers=_bearer(writer))
     assert profile.status_code == 403
     assert "PAT" in profile.json()["detail"]
+
+
+@pytest.mark.parametrize("name", ["check", "import"])
+@pytest.mark.parametrize(("method", "expected_status"), [("PUT", 200), ("DELETE", 204)])
+def test_pat_agent_mutations_allow_names_shared_by_other_methods(deploy_client, name, method, expected_status):
+    reader = _create_pat(deploy_client, name="reader", scopes=["agents:read"])
+    writer = _create_pat(deploy_client, name="writer", scopes=["agents:read", "agents:write"])
+    deploy_client.cookies.clear()
+
+    created = deploy_client.post("/api/agents", json={"name": name}, headers=_bearer(writer))
+    assert created.status_code == 201, created.text
+
+    path = f"/api/agents/{name}"
+    payload = {"json": {"description": "Updated agent"}} if method == "PUT" else {}
+    denied = deploy_client.request(method, path, headers=_bearer(reader), **payload)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Permission denied: agents:write"
+    updated = deploy_client.request(method, path, headers=_bearer(writer), **payload)
+    assert updated.status_code == expected_status, updated.text
+
+    if method == "PUT":
+        assert updated.json()["description"] == "Updated agent"
+    else:
+        response = deploy_client.get("/api/agents/check", params={"name": name}, headers=_bearer(reader))
+        assert response.status_code == 200, response.text
+        assert response.json()["available"] is True
 
 
 def test_pat_schedule_scopes_add_to_run_permissions(deploy_client):

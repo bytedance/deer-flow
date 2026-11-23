@@ -66,9 +66,8 @@ PAT_MAX_NAME_LENGTH = 128
 # ``request.state.auth.permissions`` (``@require_permission``). Authenticated
 # mutation routes without that decorator — memory deletion, agent creation,
 # credential switching, channel configuration — would otherwise accept a
-# PAT holding a single read scope. A route is reachable by PAT only when it
-# is explicitly listed here, and only together with the thread/run lifecycle
-# the v1 scopes govern; everything else answers 403 regardless of scopes.
+# PAT holding a single read scope. PAT callers can reach only the routes
+# explicitly listed in this table or the scoped table below.
 _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"POST"}), re.compile(r"^/api/threads$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/search$")),
@@ -151,7 +150,8 @@ _PAT_SCOPED_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str], str], ...]
     (frozenset({"GET"}), re.compile(r"^/api/agents$"), "agents:read"),
     (frozenset({"POST"}), re.compile(r"^/api/agents$"), "agents:write"),
     (frozenset({"GET"}), re.compile(r"^/api/agents/[^/]+$"), "agents:read"),
-    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/agents/(?!check$|import$)[^/]+$"), "agents:write"),
+    # The literal check (GET) and import (POST) actions use different methods.
+    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/agents/[^/]+$"), "agents:write"),
     (frozenset({"GET"}), re.compile(r"^/api/scheduled-tasks$"), "schedules:read"),
     (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks$"), "schedules:write"),
     (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks/preview-cron$"), "schedules:read"),
