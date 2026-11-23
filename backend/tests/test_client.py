@@ -1543,8 +1543,22 @@ class TestClientMcpSelection:
 
 
 class TestEnsureAgent:
-    @pytest.mark.parametrize("selection", ["agent", "constructor", "request", "global"])
-    def test_named_agent_model_profile_reaches_provider(self, client, tmp_path, monkeypatch, selection):
+    @pytest.mark.parametrize(
+        ("selection", "saved_model"),
+        [
+            ("agent", "agent-model"),
+            ("constructor", "agent-model"),
+            ("request", "agent-model"),
+            ("global", "agent-model"),
+            ("agent", ""),
+            ("agent", "retired-profile"),
+            ("constructor", "retired-profile"),
+            ("request", "retired-profile"),
+            ("invalid-constructor", "agent-model"),
+            ("invalid-request", "agent-model"),
+        ],
+    )
+    def test_named_agent_model_profile_reaches_provider(self, client, tmp_path, monkeypatch, selection, saved_model):
         import httpx
 
         from deerflow.config.app_config import AppConfig
@@ -1555,7 +1569,7 @@ class TestEnsureAgent:
         agent_dir = paths.user_agent_dir("test-user", "researcher")
         agent_dir.mkdir(parents=True)
         (agent_dir / "config.yaml").write_text(
-            "name: researcher\nmodel: agent-model\nmodel_settings:\n  temperature: 0.7\n  max_tokens: 32\n",
+            f"name: researcher\nmodel: {json.dumps(saved_model)}\nmodel_settings:\n  temperature: 0.7\n  max_tokens: 32\n",
             encoding="utf-8",
         )
         requests = []
@@ -1579,8 +1593,8 @@ class TestEnsureAgent:
             monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
             client._app_config = app_config
             client._agent_name = None if selection == "global" else "researcher"
-            client._model_name = "explicit-model" if selection == "constructor" else None
-            overrides = {"model_name": "explicit-model"} if selection == "request" else {}
+            client._model_name = "explicit-model" if selection == "constructor" else "unknown-explicit" if selection == "invalid-constructor" else None
+            overrides = {"model_name": "explicit-model"} if selection == "request" else {"model_name": "unknown-explicit"} if selection == "invalid-request" else {}
             # Keep saved configuration, the real graph, model factory and SDK;
             # isolate prompt/middleware work unrelated to model selection.
             with (
@@ -1590,10 +1604,15 @@ class TestEnsureAgent:
                 patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()),
                 patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
             ):
+                if selection.startswith("invalid-"):
+                    with pytest.raises(ValueError, match="unknown-explicit"):
+                        client.chat("Hello", thread_id="model-profile", user_id="test-user", **overrides)
+                    assert requests == []
+                    return
                 assert client.chat("Hello", thread_id="model-profile", user_id="test-user", **overrides) == "Done"
                 assert client.chat("Again", thread_id="model-profile", user_id="test-user", **overrides) == "Done"
 
-        expected_model = "explicit-model" if selection in {"constructor", "request"} else "global-default" if selection == "global" else "agent-model"
+        expected_model = "explicit-model" if selection in {"constructor", "request"} else "global-default" if selection == "global" or saved_model in {"", "retired-profile"} else "agent-model"
         assert len(requests) == 2
         for request in requests:
             assert request["model"] == expected_model

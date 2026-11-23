@@ -33,7 +33,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
+from deerflow.agents.lead_agent.agent import _authorize_model_name, _resolve_model_name, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config, has_bash_tool
 from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
@@ -403,6 +403,8 @@ class DeerFlowClient:
         model_name = cfg.get("model_name")
         if model_name is None:
             model_name = getattr(agent_config, "model", None)
+            if model_name is not None:
+                model_name = _resolve_model_name(model_name, app_config=self._app_config)
         agent_model_settings = getattr(agent_config, "model_settings", None)
         agent_model_overrides = agent_model_settings.model_dump(exclude_none=True) if agent_model_settings else None
         # Phase 3: enforce model:use authorization on the embedded/library path

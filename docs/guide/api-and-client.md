@@ -36,6 +36,7 @@ reference: [API Reference — Personal Access Tokens](../../backend/docs/API.md#
 
 For a named agent, `DeerFlowClient` uses the saved `model` before the global
 default. An explicit constructor or per-call `model_name` takes precedence.
+An empty or removed saved model falls back to the global default, matching the Gateway.
 The agent's `model_settings` sampling overrides apply to the selected model,
 as they do through the Gateway. Call `client.reset_agent()` after editing the
 saved model configuration.
