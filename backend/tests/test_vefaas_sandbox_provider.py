@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import datetime
 import io
-import json
 import os
 import signal
 import subprocess
@@ -24,8 +23,17 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from support.vefaas_sandbox import (
+    FakeAioSandbox as _FakeAioSandbox,
+)
+from support.vefaas_sandbox import (
+    FakeVeFaaSServer as _FakeVeFaaSServer,
+)
+from support.vefaas_sandbox import (
+    install_vefaas_provider as _install_provider,
+)
 
-from deerflow.community.aio_sandbox.ownership import OwnershipBackendError, RenewOutcome
+from deerflow.community.aio_sandbox.ownership import MemoryOwnershipStore, OwnershipBackendError, RenewOutcome
 from deerflow.community.provider_credentials import REDACTION_MARKER
 from deerflow.community.vefaas_sandbox import (
     VeFaaSApiError,
@@ -38,462 +46,7 @@ from deerflow.community.vefaas_sandbox import (
     sign_v4_headers,
 )
 from deerflow.community.vefaas_sandbox import provider as provider_mod
-from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.sandbox.identity import derive_sandbox_scope_token
-from deerflow.sandbox.sandbox_provider import hold_sandbox_shutdown_ownership
-
-# ── Helpers & Fakes ──────────────────────────────────────────────────────
-
-
-class _FakeAioSandbox:
-    """In-memory stand-in for AioSandbox recording data-plane calls."""
-
-    def __init__(
-        self,
-        id: str,
-        base_url: str,
-        request_headers: dict[str, str] | None = None,
-        default_command_timeout: float | None = None,
-        lark_cli_broker: bool | None = None,
-    ) -> None:
-        self.id = id
-        self.base_url = base_url
-        self.request_headers = dict(request_headers or {})
-        self.default_command_timeout = default_command_timeout
-        self.lark_cli_broker = lark_cli_broker
-        self.commands: list[str] = []
-        self.uploaded_files: dict[str, bytes] = {}
-        self.remote_outputs: dict[str, bytes] = {}
-        self.closed = False
-        self.fail_upload_script = False
-        self.fail_bootstrap = False
-        self.bootstrap_output_override: str | None = None
-        self.init_marker_override: str | None = None
-
-    def execute_command(self, command: str) -> str:
-        self.commands.append(command)
-        if command == provider_mod._BOOTSTRAP_COMMAND:
-            if self.bootstrap_output_override is not None:
-                return self.bootstrap_output_override
-            if self.fail_bootstrap:
-                return "mkdir: cannot create directory '/mnt/user-data/workspace': Permission denied\n"
-            return f"{provider_mod._BOOTSTRAP_OK_MARKER}\n"
-        if "INIT_MARKER:" in command:
-            if self.init_marker_override is not None:
-                return self.init_marker_override
-            marker = self.uploaded_files.get(provider_mod._INIT_MARKER_PATH)
-            if marker is not None:
-                return f"INIT_MARKER:{marker.decode('utf-8').strip()}\n"
-            return "INIT_MARKER:MISSING\n"
-        if "UPLOAD_OK" in command:
-            return "" if self.fail_upload_script else "UPLOAD_OK\n"
-        if "find /mnt/user-data/outputs" in command:
-            return "\n".join(sorted(self.remote_outputs.keys()))
-        return ""
-
-    def update_file(self, path: str, content: bytes) -> None:
-        self.uploaded_files[path] = content
-
-    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
-        data = self.remote_outputs[path]
-        if max_bytes is not None and len(data) > max_bytes:
-            raise ValueError("download exceeded max_bytes")
-        return data
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _FakeVeFaaSServer:
-    """In-memory BytePlus veFaaS OpenAPI simulator backing httpx.MockTransport."""
-
-    def __init__(self) -> None:
-        self.sandboxes: dict[str, dict[str, Any]] = {}
-        self.snapshots: dict[str, dict[str, Any]] = {}
-        self.precache_tickets: dict[str, dict[str, Any]] = {}
-        self.requests: list[tuple[str, dict[str, Any], dict[str, str]]] = []
-        self.next_seq = 1
-        self.next_snapshot_seq = 1
-        self.next_ticket_seq = 1
-        self.kill_error: tuple[int, str, str] | None = None
-        self.describe_after_kill_keeps_running = False
-        self.describe_error: tuple[int, str, str] | None = None
-        self.create_status_sequence: list[str] = ["Running"]
-        self.pause_error: tuple[int, str, str] | None = None
-        self.pause_status_sequence: list[str] = ["Paused"]
-        self.resume_error: tuple[int, str, str] | None = None
-        self.resume_status_sequence: list[str] = ["Running"]
-        self.snapshot_create_error: tuple[int, str, str] | None = None
-        self.snapshot_status_sequence: list[str] = ["Ready"]
-        self.precache_status_sequence: list[str] = ["Succeeded"]
-        self.validate_snapshot_on_create = False
-        self.ignore_list_metadata_filter = False
-
-    def handler(self, request: httpx.Request) -> httpx.Response:
-        action = request.url.params.get("Action", "")
-        version = request.url.params.get("Version", "")
-        assert version == "2024-06-06"
-        assert request.headers.get("Authorization", "").startswith("HMAC-SHA256 Credential=")
-        assert "X-Date" in request.headers
-        assert "X-Content-Sha256" in request.headers
-
-        payload = json.loads(request.content.decode("utf-8"))
-        self.requests.append((action, payload, dict(request.headers)))
-
-        if action == "CreateSandbox":
-            snapshot_id = payload.get("SnapshotId")
-            if self.validate_snapshot_on_create and snapshot_id and snapshot_id not in self.snapshots:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-create-snap-404", "Error": {"Code": "SnapshotNotFound", "Message": "snapshot not found"}}},
-                )
-            remote_id = f"vefaas-sb-{self.next_seq}"
-            self.next_seq += 1
-            self.sandboxes[remote_id] = {
-                "Id": remote_id,
-                "FunctionId": payload["FunctionId"],
-                "Status": self.create_status_sequence[0],
-                "_status_queue": list(self.create_status_sequence),
-                "Pending": False,
-                "Metadata": dict(payload.get("Metadata") or {}),
-                "Envs": list(payload.get("Envs") or []),
-                "Timeout": payload.get("Timeout"),
-                "InstanceTosMountConfig": payload.get("InstanceTosMountConfig"),
-                "SnapshotId": snapshot_id,
-                "AutoPauseConfig": payload.get("AutoPauseConfig"),
-            }
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-create"}, "Result": {"SandboxId": remote_id}},
-            )
-
-        if action == "DescribeSandbox":
-            if self.describe_error is not None:
-                code, err_code, err_msg = self.describe_error
-                return httpx.Response(
-                    code,
-                    json={"ResponseMetadata": {"RequestId": "req-desc-err", "Error": {"Code": err_code, "Message": err_msg}}},
-                )
-            remote_id = payload["SandboxId"]
-            record = self.sandboxes.get(remote_id)
-            if record is None:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-404", "Error": {"Code": "SandboxNotFound", "Message": "not found"}}},
-                )
-            queue = record.get("_status_queue")
-            if queue:
-                record["Status"] = queue.pop(0)
-            result_body: dict[str, Any] = {
-                "Id": record["Id"],
-                "FunctionId": record["FunctionId"],
-                "Status": record["Status"],
-                "Pending": record["Pending"],
-                "MetadataList": [{"MetaKey": k, "MetaValue": v} for k, v in record["Metadata"].items()],
-            }
-            if record.get("PausedAt"):
-                result_body["PausedAt"] = record["PausedAt"]
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-desc"}, "Result": result_body},
-            )
-
-        if action == "ListSandboxes":
-            wanted_meta = payload.get("Metadata") or {}
-            items = []
-            for record in self.sandboxes.values():
-                if record["FunctionId"] != payload["FunctionId"]:
-                    continue
-                if self.ignore_list_metadata_filter or all(record["Metadata"].get(k) == v for k, v in wanted_meta.items()):
-                    item: dict[str, Any] = {
-                        "Id": record["Id"],
-                        "FunctionId": record["FunctionId"],
-                        "Status": record["Status"],
-                        "Pending": record["Pending"],
-                        "Metadata": dict(record["Metadata"]),
-                    }
-                    if record.get("PausedAt"):
-                        item["PausedAt"] = record["PausedAt"]
-                    items.append(item)
-            page_number = int(payload.get("PageNumber", 1))
-            page_size = int(payload.get("PageSize", 50))
-            start = (page_number - 1) * page_size
-            page_items = items[start : start + page_size]
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-list"}, "Result": {"Sandboxes": page_items, "Total": len(items)}},
-            )
-
-        if action == "SetSandboxTimeout":
-            remote_id = payload["SandboxId"]
-            if remote_id not in self.sandboxes:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-to-404", "Error": {"Code": "SandboxNotFound", "Message": "not found"}}},
-                )
-            self.sandboxes[remote_id]["Timeout"] = payload["Timeout"]
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-timeout"}, "Result": {"SandboxId": remote_id}},
-            )
-
-        if action == "KillSandbox":
-            if self.kill_error is not None:
-                code, err_code, err_msg = self.kill_error
-                return httpx.Response(
-                    code,
-                    json={"ResponseMetadata": {"RequestId": "req-kill-err", "Error": {"Code": err_code, "Message": err_msg}}},
-                )
-            remote_id = payload["SandboxId"]
-            if not self.describe_after_kill_keeps_running:
-                self.sandboxes.pop(remote_id, None)
-            return httpx.Response(200, json={"ResponseMetadata": {"RequestId": "req-kill"}, "Result": {}})
-
-        if action == "PauseSandbox":
-            if self.pause_error is not None:
-                code, err_code, err_msg = self.pause_error
-                return httpx.Response(
-                    code,
-                    json={"ResponseMetadata": {"RequestId": "req-pause-err", "Error": {"Code": err_code, "Message": err_msg}}},
-                )
-            remote_id = payload["SandboxId"]
-            record = self.sandboxes.get(remote_id)
-            if record is None:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-pause-404", "Error": {"Code": "SandboxNotFound", "Message": "not found"}}},
-                )
-            record["Status"] = self.pause_status_sequence[0]
-            record["_status_queue"] = list(self.pause_status_sequence)
-            record["PausedAt"] = "2026-11-23T01:00:00Z"
-            return httpx.Response(200, json={"ResponseMetadata": {"RequestId": "req-pause"}, "Result": {}})
-
-        if action == "ResumeSandbox":
-            if self.resume_error is not None:
-                code, err_code, err_msg = self.resume_error
-                return httpx.Response(
-                    code,
-                    json={"ResponseMetadata": {"RequestId": "req-resume-err", "Error": {"Code": err_code, "Message": err_msg}}},
-                )
-            remote_id = payload["SandboxId"]
-            record = self.sandboxes.get(remote_id)
-            if record is None:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-resume-404", "Error": {"Code": "SandboxNotFound", "Message": "not found"}}},
-                )
-            record["Status"] = self.resume_status_sequence[0]
-            record["_status_queue"] = list(self.resume_status_sequence)
-            if "Timeout" in payload:
-                record["Timeout"] = payload["Timeout"]
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-resume"}, "Result": {"Status": record["Status"]}},
-            )
-
-        if action == "CreateSandboxSnapshot":
-            if self.snapshot_create_error is not None:
-                code, err_code, err_msg = self.snapshot_create_error
-                return httpx.Response(
-                    code,
-                    json={"ResponseMetadata": {"RequestId": "req-snap-err", "Error": {"Code": err_code, "Message": err_msg}}},
-                )
-            remote_id = payload["SandboxId"]
-            if remote_id not in self.sandboxes:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-snap-sb-404", "Error": {"Code": "SandboxNotFound", "Message": "not found"}}},
-                )
-            seq = self.next_snapshot_seq
-            self.next_snapshot_seq += 1
-            snap_id = f"snap-{seq}"
-            self.snapshots[snap_id] = {
-                "SnapshotId": snap_id,
-                "SandboxId": remote_id,
-                "FunctionId": payload["FunctionId"],
-                "Status": self.snapshot_status_sequence[0],
-                "_status_queue": list(self.snapshot_status_sequence),
-                "SnapshotType": payload.get("Type") or "disk",
-                "Source": "manual",
-                "CreatedAt": f"2026-11-23T01:{seq:02d}:00Z",
-                "RetentionDays": payload.get("RetentionDays"),
-                "Metadata": dict(payload.get("Metadata") or {}),
-            }
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-snap-create"}, "Result": {"SnapshotId": snap_id}},
-            )
-
-        if action == "DescribeSandboxSnapshot":
-            snap_id = payload["SnapshotId"]
-            snap = self.snapshots.get(snap_id)
-            if snap is None:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-snap-404", "Error": {"Code": "SnapshotNotFound", "Message": "not found"}}},
-                )
-            queue = snap.get("_status_queue")
-            if queue:
-                snap["Status"] = queue.pop(0)
-            body = {k: v for k, v in snap.items() if not k.startswith("_")}
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-snap-desc"}, "Result": {"Snapshot": body}},
-            )
-
-        if action == "ListSandboxSnapshots":
-            wanted_sb = payload.get("SandboxId")
-            items = []
-            for snap in self.snapshots.values():
-                if snap["FunctionId"] != payload["FunctionId"]:
-                    continue
-                if wanted_sb and snap["SandboxId"] != wanted_sb:
-                    continue
-                items.append({k: v for k, v in snap.items() if not k.startswith("_")})
-            page_number = int(payload.get("PageNumber", 1))
-            page_size = int(payload.get("PageSize", 50))
-            start = (page_number - 1) * page_size
-            page_items = items[start : start + page_size]
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-snap-list"}, "Result": {"Snapshots": page_items, "Total": len(items)}},
-            )
-
-        if action == "DeleteSandboxSnapshot":
-            snap_id = payload["SnapshotId"]
-            if snap_id not in self.snapshots:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-snap-del-404", "Error": {"Code": "SnapshotNotFound", "Message": "not found"}}},
-                )
-            self.snapshots.pop(snap_id, None)
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-snap-del"}, "Result": {"SnapshotId": snap_id}},
-            )
-
-        if action == "PrecacheSandboxImages":
-            seq = self.next_ticket_seq
-            self.next_ticket_seq += 1
-            ticket_id = f"ticket-{seq}"
-            self.precache_tickets[ticket_id] = {
-                "TicketId": ticket_id,
-                "ImageUrls": list(payload.get("ImageUrls") or []),
-                "Status": self.precache_status_sequence[0],
-                "_status_queue": list(self.precache_status_sequence),
-                "Duration": 12,
-                "Progress": {"Total": len(payload.get("ImageUrls") or []), "Completed": len(payload.get("ImageUrls") or [])},
-            }
-            return httpx.Response(
-                200,
-                json={"ResponseMetadata": {"RequestId": "req-precache"}, "Result": {"TicketId": ticket_id}},
-            )
-
-        if action == "GetSandboxImagePrecacheTicket":
-            ticket_id = payload["TicketId"]
-            ticket = self.precache_tickets.get(ticket_id)
-            if ticket is None:
-                return httpx.Response(
-                    404,
-                    json={"ResponseMetadata": {"RequestId": "req-ticket-404", "Error": {"Code": "TicketNotFound", "Message": "not found"}}},
-                )
-            queue = ticket.get("_status_queue")
-            if queue:
-                ticket["Status"] = queue.pop(0)
-            return httpx.Response(
-                200,
-                json={
-                    "ResponseMetadata": {"RequestId": "req-ticket"},
-                    "Result": {
-                        "TicketId": ticket["TicketId"],
-                        "Status": ticket["Status"],
-                        "Duration": ticket["Duration"],
-                        "Progress": dict(ticket["Progress"]),
-                    },
-                },
-            )
-
-        return httpx.Response(400, json={"ResponseMetadata": {"Error": {"Code": "InvalidAction", "Message": action}}})
-
-
-def _make_app_config(
-    tmp_path: Path,
-    *,
-    sandbox_overrides: dict[str, Any] | None = None,
-    skills_container_path: str = "/mnt/skills",
-) -> Any:
-    raw: dict[str, Any] = {
-        "use": "deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider",
-        "idle_timeout": 0,
-        "replicas": 3,
-        "vefaas": {
-            "region": "ap-southeast-1",
-            "endpoint": "https://vefaas.ap-southeast-1.byteplusapi.com",
-            "function_id": "fn-demo-app",
-            "sandbox_base_url": "https://sandbox.ap-southeast-1.byteplus.example",
-            "access_key": "AK-TEST-KEY",
-            "secret_key": "SK-TEST-SECRET",
-            "timeout_minutes": 60,
-            "ready_timeout": 10,
-        },
-    }
-    if sandbox_overrides:
-        if "vefaas" in sandbox_overrides and isinstance(sandbox_overrides["vefaas"], dict):
-            raw["vefaas"] = {**raw["vefaas"], **sandbox_overrides["vefaas"]}
-        for k, v in sandbox_overrides.items():
-            if k != "vefaas":
-                raw[k] = v
-    sandbox_cfg = SandboxConfig(**raw)
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    return SimpleNamespace(
-        sandbox=sandbox_cfg,
-        skills=SimpleNamespace(
-            container_path=skills_container_path,
-            path=str(skills_dir),
-            get_skills_path=lambda: skills_dir,
-        ),
-        stream_bridge=None,
-    )
-
-
-def _install_provider(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    *,
-    server: _FakeVeFaaSServer | None = None,
-    sandbox_overrides: dict[str, Any] | None = None,
-    ready_result: bool = True,
-) -> tuple[VeFaaSSandboxProvider, _FakeVeFaaSServer, list[_FakeAioSandbox]]:
-    fake_server = server or _FakeVeFaaSServer()
-    mock_http = httpx.Client(transport=httpx.MockTransport(fake_server.handler))
-    app_cfg = _make_app_config(tmp_path, sandbox_overrides=sandbox_overrides)
-    monkeypatch.setattr(provider_mod, "get_app_config", lambda: app_cfg)
-    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "deer-flow-home"))
-    monkeypatch.setattr("deerflow.config.paths._paths", None)
-
-    created_aio: list[_FakeAioSandbox] = []
-
-    def fake_aio_ctor(**kwargs: Any) -> _FakeAioSandbox:
-        inst = _FakeAioSandbox(**kwargs)
-        created_aio.append(inst)
-        return inst
-
-    monkeypatch.setattr(provider_mod, "AioSandbox", fake_aio_ctor)
-    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", lambda url, timeout=30, headers=None: ready_result)
-    monkeypatch.setattr(provider_mod.time, "sleep", lambda _s: None)
-
-    client = VeFaaSClient(
-        endpoint="https://vefaas.ap-southeast-1.byteplusapi.com",
-        region="ap-southeast-1",
-        access_key="AK-TEST-KEY",
-        secret_key="SK-TEST-SECRET",
-        httpx_client=mock_http,
-    )
-    with hold_sandbox_shutdown_ownership():
-        provider = VeFaaSSandboxProvider(client=client)
-    return provider, fake_server, created_aio
-
 
 # ── 1. SigV4 Signing ─────────────────────────────────────────────────────
 
@@ -2721,3 +2274,238 @@ class TestVeFaaSImagePrecache:
             provider.shutdown()
         assert provider._precache_thread is not None
         assert not provider._precache_thread.is_alive()
+
+    def test_reclaim_warm_pool_resumes_auto_paused_instance_instead_of_killing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: auto_pause=True -> server auto-pauses sandbox while in warm pool; next acquire resumes it.
+        server = _FakeVeFaaSServer()
+        server.resume_status_sequence = ["Resuming", "Running"]
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "auto-pause",
+            server=server,
+            sandbox_overrides={"vefaas": {"auto_pause": True}},
+        )
+        persisted_files: dict[str, bytes] = {}
+
+        class _PersistingAio(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_files
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAio)
+        # HTTP readiness fails while remote instance is Paused and succeeds once Running.
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid = provider.acquire("t-auto-paused", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            persisted_files["live-state"] = b"auto-paused-data"
+            provider.release(sid)
+            assert sid in provider._warm_pool
+
+            # Simulate veFaaS auto-pausing the warm sandbox server-side.
+            server.sandboxes[remote_id]["Status"] = "Paused"
+            server.sandboxes[remote_id]["PausedAt"] = "2026-11-23T02:00:00Z"
+
+            reacquired = provider.acquire("t-auto-paused", user_id="u1")
+            assert reacquired == sid
+            assert provider._sandboxes[sid].remote_sandbox_id == remote_id
+            assert server.sandboxes[remote_id]["Status"] == "Running"
+            assert persisted_files["live-state"] == b"auto-paused-data"
+            assert not any(action == "KillSandbox" for action, _, _ in server.requests)
+            assert sum(1 for action, _, _ in server.requests if action == "ResumeSandbox") == 1
+            assert sum(1 for action, _, _ in server.requests if action == "CreateSandbox") == 1
+        finally:
+            provider.shutdown()
+
+        # Case B: auto_pause=False -> sandbox paused externally; failed HTTP probe still hands off to resume.
+        server_ext = _FakeVeFaaSServer()
+        provider_ext, _, _ = _install_provider(monkeypatch, tmp_path / "ext-pause", server=server_ext)
+        persisted_ext: dict[str, bytes] = {}
+
+        class _PersistingAioExt(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_ext
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAioExt)
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server_ext.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid_ext = provider_ext.acquire("t-ext-paused", user_id="u1")
+            remote_ext = provider_ext._sandboxes[sid_ext].remote_sandbox_id
+            provider_ext.release(sid_ext)
+            server_ext.sandboxes[remote_ext]["Status"] = "Paused"
+
+            assert provider_ext.acquire("t-ext-paused", user_id="u1") == sid_ext
+            assert not any(action == "KillSandbox" for action, _, _ in server_ext.requests)
+            assert sum(1 for action, _, _ in server_ext.requests if action == "ResumeSandbox") == 1
+        finally:
+            provider_ext.shutdown()
+
+    def test_snapshot_retirement_renews_teardown_lease_and_aborts_kill_when_peer_adopts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: controlled clock advances past TTL during snapshot polling; teardown lease stays alive.
+        now = [100.0]
+
+        def fake_clock() -> float:
+            return now[0]
+
+        server = _FakeVeFaaSServer()
+        server.snapshot_status_sequence = ["Creating", "Creating", "Ready"]
+        orig_handler = server.handler
+        peer_take_attempts: list[bool] = []
+        store = MemoryOwnershipStore(owner_id="worker-retire", ttl_seconds=10.0, time_source=fake_clock)
+        peer_store = MemoryOwnershipStore(owner_id="worker-peer", ttl_seconds=10.0, time_source=fake_clock)
+        # Share the underlying lease table across worker-retire and worker-peer.
+        peer_store._leases = store._leases
+        peer_store._lock = store._lock
+
+        sid_holder: list[str] = []
+
+        def advancing_handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "DescribeSandboxSnapshot":
+                # Advance 6s per poll (18s total > 10s TTL); without lease refresh, peer take() would succeed.
+                now[0] += 6.0
+                if sid_holder:
+                    peer_take_attempts.append(peer_store.take(sid_holder[0]))
+            return orig_handler(req)
+
+        server.handler = advancing_handler  # type: ignore[method-assign]
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "renew",
+            server=server,
+            sandbox_overrides={"vefaas": {"snapshot_on_idle": True}},
+        )
+        provider._ownership = store
+        try:
+            sid = provider.acquire("t-long-snap", user_id="u1")
+            sid_holder.append(sid)
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            provider.release(sid)
+            entry, _ = provider._warm_pool[sid]
+            provider._warm_pool[sid] = (entry, time.monotonic() - 100.0)
+            provider._reap_expired_warm(1.0)
+
+            assert len(peer_take_attempts) >= 2
+            assert all(taken is False for taken in peer_take_attempts)
+            assert remote_id not in server.sandboxes
+            assert store.owner(sid) is None
+        finally:
+            provider.shutdown()
+
+        # Case B: store loses our teardown lease and a peer takes ownership mid-snapshot -> abort KillSandbox!
+        server_b = _FakeVeFaaSServer()
+        server_b.snapshot_status_sequence = ["Creating", "Ready"]
+        orig_handler_b = server_b.handler
+        store_b = MemoryOwnershipStore(owner_id="worker-retire-b", ttl_seconds=60.0)
+        peer_b = MemoryOwnershipStore(owner_id="worker-peer-b", ttl_seconds=60.0)
+        peer_b._leases = store_b._leases
+        peer_b._lock = store_b._lock
+        sid_b_holder: list[str] = []
+        stole_once = {"done": False}
+
+        def peer_steals_mid_snapshot(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "DescribeSandboxSnapshot" and not stole_once["done"] and sid_b_holder:
+                stole_once["done"] = True
+                # Simulate backend flush + peer adoption while snapshot was in flight.
+                store_b._leases.clear()
+                assert peer_b.take(sid_b_holder[0]) is True
+            return orig_handler_b(req)
+
+        server_b.handler = peer_steals_mid_snapshot  # type: ignore[method-assign]
+        provider_b, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "lost",
+            server=server_b,
+            sandbox_overrides={"vefaas": {"snapshot_on_idle": True}},
+        )
+        provider_b._ownership = store_b
+        try:
+            sid_b = provider_b.acquire("t-lost-snap", user_id="u1")
+            sid_b_holder.append(sid_b)
+            remote_b = provider_b._sandboxes[sid_b].remote_sandbox_id
+            provider_b.release(sid_b)
+            entry_b, _ = provider_b._warm_pool[sid_b]
+            provider_b._warm_pool[sid_b] = (entry_b, time.monotonic() - 100.0)
+            provider_b._reap_expired_warm(1.0)
+
+            assert stole_once["done"] is True
+            # Must NOT kill the peer's running sandbox or clear the peer's lease!
+            assert remote_b in server_b.sandboxes
+            assert not any(action == "KillSandbox" for action, _, _ in server_b.requests)
+            assert store_b.owner(sid_b) == "worker-peer-b"
+            assert not provider_b._pending_destroys
+        finally:
+            provider_b.shutdown()
+
+    @pytest.mark.parametrize("from_warm_pool", [False, True])
+    def test_manual_snapshot_defers_shutdown_until_snapshot_settles(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        from_warm_pool: bool,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.snapshot_status_sequence = ["Creating", "Ready"]
+        orig_handler = server.handler
+        creating_seen = threading.Event()
+        allow_ready = threading.Event()
+
+        def gated_handler(req: httpx.Request) -> httpx.Response:
+            resp = orig_handler(req)
+            if req.url.params.get("Action") == "DescribeSandboxSnapshot":
+                body = resp.json()["Result"]["Snapshot"]
+                if body["Status"] == "Creating":
+                    creating_seen.set()
+                    assert allow_ready.wait(timeout=5)
+            return resp
+
+        server.handler = gated_handler  # type: ignore[method-assign]
+        provider, _, _ = _install_provider(monkeypatch, tmp_path, server=server)
+        try:
+            sid = provider.acquire("t-manual-snap", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            remote_aio = provider._sandboxes[sid].sandbox
+            if from_warm_pool:
+                provider.release(sid)
+                assert sid in provider._warm_pool
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                snap_future = pool.submit(provider.create_snapshot, sid, wait=True)
+                try:
+                    assert creating_seen.wait(timeout=5)
+                    # Concurrent shutdown must stay retryable and leave the snapshot source alive!
+                    with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError, match="snapshot"):
+                        provider.shutdown()
+                    assert not remote_aio.closed
+                    assert remote_id in server.sandboxes
+                    assert not any(action == "KillSandbox" for action, _, _ in server.requests)
+                    assert provider._client is not None and not provider._client._closed
+                finally:
+                    allow_ready.set()
+                snap = snap_future.result(timeout=5)
+
+            assert snap.is_ready
+            assert snap.sandbox_id == remote_id
+            # Once snapshot settles, retrying shutdown tears down the source sandbox cleanly.
+            provider.shutdown()
+            assert remote_id not in server.sandboxes
+            assert sum(1 for action, _, _ in server.requests if action == "KillSandbox") == 1
+        finally:
+            allow_ready.set()
+            provider.shutdown()
