@@ -1343,13 +1343,49 @@ class TestChat:
         """The CLI and chat must agree on interleaved deltas and metadata-only events."""
         from deerflow.tui.cli import _RunOutcome
 
-        with patch.object(client, "stream", return_value=iter(events)):
-            assert client.chat("q", thread_id="t-shared-answer") == expected
+        with patch.object(client, "stream", return_value=iter(events)) as stream:
+            assert client.chat("q", thread_id="t-shared-answer", thinking_enabled=True) == expected
+        stream.assert_called_once_with("q", thread_id="t-shared-answer", thinking_enabled=True)
 
         outcome = _RunOutcome()
         for event in events:
             outcome.observe(event)
         assert outcome.answer() == expected
+
+    def test_uses_stream_bound_to_another_client(self, client, mock_app_config):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            delegate = DeerFlowClient()
+
+        outer_model = FakeMessagesListChatModel(responses=[AIMessage(content="OUTER MODEL")])
+        delegate_model = FakeMessagesListChatModel(responses=[AIMessage(content="DELEGATE MODEL")])
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", create_agent(model=outer_model, state_schema=ThreadState)),
+            patch.object(delegate, "_ensure_agent"),
+            patch.object(delegate, "_agent", create_agent(model=delegate_model, state_schema=ThreadState)),
+            patch.object(client, "stream", delegate.stream),
+        ):
+            assert client.chat("q", thread_id="t-delegated-stream") == "DELEGATE MODEL"
+
+    def test_uses_wrapper_around_bound_stream(self, client):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from wrapt import FunctionWrapper
+
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="answer")])
+        graph = create_agent(model=model, state_schema=ThreadState)
+        wrapper = MagicMock(side_effect=lambda wrapped, instance, args, kwargs: wrapped(*args, **kwargs))
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", graph),
+            patch.object(client, "stream", FunctionWrapper(client.stream, wrapper)),
+        ):
+            assert client.chat("q", thread_id="t-wrapped-stream") == "answer"
+
+        wrapper.assert_called_once()
 
     def test_returns_last_message(self, client):
         """chat() returns the last AI message text."""
@@ -1397,11 +1433,13 @@ class TestChat:
         with (
             patch.object(client, "_ensure_agent"),
             patch.object(client, "_agent", graph),
+            patch.object(client, "_serialize_message", wraps=client._serialize_message) as serialize_message,
         ):
             result = client.chat("q", thread_id="t-loop-stop")
 
         assert result.startswith("Checking again.")
         assert "[FORCED STOP]" in result
+        serialize_message.assert_not_called()
 
     def test_empty_response(self, client):
         """chat() returns empty string if no AI message produced."""
