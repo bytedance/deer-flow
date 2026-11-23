@@ -27,6 +27,8 @@ plain pytest. The app is tested through Textual's pilot with a fake session.
   headless modes exit with status 1 on it.
 - **The command registry excludes the slash names that the agent runtime
   reserves**, in the picker and in the resolver.
+- **Periodic spinner and transcript refreshes check `App.is_running`.** Textual
+  can remove their widgets before it stops the app's timers during shutdown.
 
 ## Runs and threads
 

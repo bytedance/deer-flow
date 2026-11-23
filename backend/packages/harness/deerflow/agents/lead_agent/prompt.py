@@ -28,6 +28,7 @@ from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_sectio
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.skills.storage.skill_storage import SkillStorage
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +271,11 @@ def get_cached_enabled_skills() -> list[Skill]:
     return []
 
 
-def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: str | None = None) -> list[Skill]:
+def get_enabled_skills_for_config(
+    app_config: AppConfig | None = None,
+    user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
+) -> list[Skill]:
     """Return enabled skills using the caller's config source and user scope.
 
     When a concrete ``app_config`` is supplied, cache the loaded skills by that
@@ -281,8 +286,16 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
     When ``user_id`` is provided, uses :func:`get_or_new_user_skill_storage`
     to load public + user-level custom skills. Otherwise falls back to the
     global storage (public + global custom fallback).
+
+    When ``skill_storage`` is provided, load from that request-scoped instance
+    directly and bypass the process cache.
     """
     from deerflow.skills.mutations.guard import owner_is_managed
+
+    if skill_storage is not None:
+        # An injected storage is request-scoped; bypass the process cache so a
+        # later request with the same app_config cannot observe this tree.
+        return list(skill_storage.load_skills(enabled_only=True))
 
     if user_id is not None and (app_config is None or owner_is_managed(user_id)):
         # Without an explicit config, resolve the user storage on each call.
@@ -909,6 +922,7 @@ def get_skills_prompt_section(
     *,
     app_config: AppConfig | None = None,
     user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
     skill_names: frozenset[str] | None = None,
 ) -> str:
     """Generate the skills prompt section.
@@ -916,7 +930,8 @@ def get_skills_prompt_section(
     When *skill_names* is provided, renders a compact ``<skill_index>`` (names
     only) so the LLM can discover skills via ``describe_skill``.  When omitted,
     falls back to the legacy full-metadata ``<available_skills>`` rendering for
-    backward compatibility.
+    backward compatibility. When *skill_storage* is provided, both the enabled
+    and disabled skill lists come from that request-scoped instance.
     """
     if app_config is None:
         try:
@@ -938,6 +953,8 @@ def get_skills_prompt_section(
         container_base_path = app_config.skills.container_path
         skill_evolution_enabled = app_config.skill_evolution.enabled
 
+    if skill_storage is not None:
+        container_base_path = skill_storage.get_container_root()
     skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─
@@ -951,14 +968,16 @@ def get_skills_prompt_section(
         )
 
     # ── Legacy full-metadata path — load ALL skills for disabled-skill section
-    if user_id:
+    if skill_storage is not None:
+        storage = skill_storage
+    elif user_id:
         storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
     else:
         storage = get_or_new_skill_storage(app_config=app_config)
     all_skills = storage.load_skills(enabled_only=False)
     disabled_skills = [s for s in all_skills if not s.enabled]
 
-    skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+    skills = get_enabled_skills_for_config(app_config, user_id=user_id, skill_storage=skill_storage)
 
     if not skills and not disabled_skills and not skill_evolution_enabled:
         return ""
@@ -1112,6 +1131,7 @@ def apply_prompt_template(
     agent_soul: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
+    skill_storage: SkillStorage | None = None,
     deferred_names: frozenset[str] = frozenset(),
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
@@ -1182,6 +1202,7 @@ def apply_prompt_template(
         available_skills,
         app_config=app_config,
         user_id=user_id,
+        skill_storage=skill_storage,
         skill_names=skill_names,
     )
 

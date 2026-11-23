@@ -39,7 +39,6 @@ description: 子 Agent 相关的配置键、请求上下文键、工具签名、
 | `tool_search.enabled` / `auto_promote_top_k` |                                        | 延迟加载 MCP 工具                                                     |
 | `token_usage.enabled`                      | true                                     | 卡片是否显示 token                                                    |
 | `agent_storage.backend`                    | `file`                                   | 设置页管理的子 Agent 存储位置，`file` 或 `db`                         |
-| `sandbox.allow_host_bash`                  | false                                    | 本地沙箱下 `bash` 子 Agent 是否可用                                   |
 | `sandbox.environment.MAX_SHELL_SESSIONS`   | 镜像默认 10                              | 须不小于 `subagent_runtime.max_running + 1`                           |
 | 环境变量 `DEER_FLOW_DATE_TIMEZONE`         | 服务器时区                               | `current_date` 提醒使用的 IANA 时区                                   |
 
@@ -141,7 +140,7 @@ invoke_acp_agent(...)   # 外部 ACP Agent，见子 Agent 目录
 - [#5076](https://github.com/bytedance/deer-flow/pull/5076) 回执引用核对。
 - [#4998](https://github.com/bytedance/deer-flow/pull/4998) 统一进程级容量与持久批处理。
 - [#4887](https://github.com/bytedance/deer-flow/pull/4887) 设置页管理的子 Agent 目录与 Custom Agent 委派范围。
-- [#4928](https://github.com/bytedance/deer-flow/pull/4928) 延迟清理任务保留强引用。
+- [#4928](https://github.com/bytedance/deer-flow/commit/f1f4af99bbf1cffb83a80744bf6e4a44ee8f24be) 延迟清理任务保留强引用。
 - [#4797](https://github.com/bytedance/deer-flow/pull/4797) 仅含日期的隔离上下文。
 - [#4758](https://github.com/bytedance/deer-flow/pull/4758) 后台任务注册表改用服务端执行 id。
 

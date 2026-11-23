@@ -53,6 +53,17 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `history_read`: read the exact source ID in 4,000-character pages. Results mark
   truncation and provide `next_offset` while more stored text remains.
 
+### Search order
+
+Use `history_search(query="replicas", role="user", order="latest")` to look for a
+recent correction or decision. This orders active matches from newest to oldest
+in the current message list, then fills the remaining slots from reachable
+batches in reverse checkpoint order and from newest to oldest within each batch.
+Recapturing a batch makes it newest when the updated checkpoint is saved.
+With `order="relevance"` (the default), archived matches use the existing full-text
+rank and active matches use message-list order. Both orders apply the role
+filter and deduplicate source IDs before returning up to eight results.
+
 ### Matching excerpts and character offsets
 
 Each search result includes `excerpt`, `excerpt_start`, `excerpt_end`, and

@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from typing import Self
 
 import httpx
 
@@ -143,6 +144,22 @@ async def _plain_client(options):
         yield client
 
 
+class JinaHTTPFailure(str):
+    """Keep the crawl string contract while carrying the received HTTP status."""
+
+    status_code: int
+
+    @classmethod
+    def with_status(cls, status_code: int, message: str) -> Self:
+        result = cls(message)
+        result.status_code = status_code
+        return result
+
+    @classmethod
+    def from_response(cls, status_code: int, response_text: str) -> Self:
+        return cls.with_status(status_code, f"Error: Jina API returned status {status_code}: {response_text}")
+
+
 class JinaClient:
     async def crawl(
         self,
@@ -231,7 +248,10 @@ class JinaClient:
                                                     if max_response_bytes is not None and len(content) + len(chunk) > max_response_bytes:
                                                         reason = "response_limit"
                                                         pending_return = True
-                                                        return f"Error: Jina API response exceeds max_response_bytes ({max_response_bytes})"
+                                                        return JinaHTTPFailure.with_status(
+                                                            response.status_code,
+                                                            f"Error: Jina API response exceeds max_response_bytes ({max_response_bytes})",
+                                                        )
                                                     content.extend(chunk)
                                                 response_text = content.decode(response.encoding or "utf-8", errors="replace")
                             except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -254,17 +274,16 @@ class JinaClient:
                                 retryable = response.status_code in {502, 503, 504} or (response.status_code == 429 and server_floor is not None)
                                 if not retryable or attempt == max_retries:
                                     reason = "attempt_exhaustion" if retryable or (response.status_code == 429 and attempt == max_retries and attempt > 0) else "nonretryable_http"
-                                    error_message = f"Jina API returned status {response.status_code}: {response_text}"
-                                    logger.error(error_message)
+                                    logger.error("Jina API returned status %s", response.status_code)
                                     pending_return = True
-                                    return f"Error: {error_message}"
+                                    return JinaHTTPFailure.from_response(response.status_code, response_text)
 
                             # Only allowlisted failures reach the non-blocking wait.
                             remaining = deadline - asyncio.get_running_loop().time()
                             if server_floor is not None and server_floor >= remaining:
                                 reason = "retry_after_unfit"
                                 pending_return = True
-                                return f"Error: Jina API returned status {response.status_code}: {response_text}"
+                                return JinaHTTPFailure.from_response(response.status_code, response_text)
                             if remaining <= 0:
                                 raise _RetryBudgetExhausted
                             wait = min(delay, remaining) * random.uniform(0.5, 1.0)
@@ -273,7 +292,7 @@ class JinaClient:
                                 if wait >= remaining:
                                     reason = "retry_after_unfit"
                                     pending_return = True
-                                    return f"Error: Jina API returned status {response.status_code}: {response_text}"
+                                    return JinaHTTPFailure.from_response(response.status_code, response_text)
                             async with _retry_budget_timeout_at(deadline if admission else None):
                                 wait_started = time.monotonic() if diagnostic else 0.0
                                 try:
