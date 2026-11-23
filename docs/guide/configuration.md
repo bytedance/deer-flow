@@ -155,6 +155,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](../../backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
 
+   Crawl4AI `web_fetch` accepts an optional `max_chars` tool setting (positive integer, default 4096) for its output cap. A page cut at the cap ends with a note giving the kept and total length, so the agent knows the page goes on. Outputs above `tool_output.externalize_min_chars` are still externalized to a file.
+
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](../../backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
    At DEBUG level, Jina emits one bounded crawl completion summary with attempts, elapsed/backoff seconds, outcome and stop reason. See [diagnostics](../../backend/docs/CONFIGURATION.md#jina-crawl-diagnostics) for configuration and correlation.

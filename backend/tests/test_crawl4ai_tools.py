@@ -259,19 +259,34 @@ class TestCrawl4AiTools:
         assert result == "# Title\n\nContent"
         assert "Error:" not in result
 
+    @pytest.mark.parametrize(
+        ("cfg", "length", "kept"),
+        [
+            (None, 5000, 4096),  # default cap
+            ({"max_chars": 8000}, 9000, 8000),
+            ({"max_chars": "8000"}, 9000, 8000),
+            ({"max_chars": 0}, 5000, 4096),  # invalid values keep the default
+            ({"max_chars": True}, 5000, 4096),
+            ({"max_chars": "lots"}, 5000, 4096),
+            ({"max_chars": 8000}, 8000, None),  # fits: unchanged, no note
+        ],
+    )
     @patch("deerflow.community.crawl4ai.tools._build_client")
     @pytest.mark.usefixtures("public_dns")
-    async def test_web_fetch_tool_truncates_to_4096(self, mock_build):
+    async def test_web_fetch_tool_truncates_to_max_chars(self, mock_build, cfg, length, kept):
         from deerflow.community.crawl4ai import tools
 
         mock_client = MagicMock()
-        mock_client.fetch_markdown = AsyncMock(return_value="x" * 5000)
+        mock_client.fetch_markdown = AsyncMock(return_value="x" * length)
         mock_build.return_value = mock_client
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=cfg):
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
-        assert len(result) == 4096
+        if kept is None:
+            assert result == "x" * length
+        else:
+            assert result == "x" * kept + f"\n\n[web_fetch: truncated to the first {kept} of {length} characters]"
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
     @pytest.mark.usefixtures("public_dns")
