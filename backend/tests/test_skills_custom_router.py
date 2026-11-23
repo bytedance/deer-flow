@@ -522,8 +522,17 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
-@pytest.mark.parametrize("history_index", [False, True])
-def test_custom_skill_rollback_rejects_boolean_history_index(monkeypatch, tmp_path, history_index):
+@pytest.mark.parametrize(
+    ("history_index", "expected_status", "expected_description"),
+    [
+        pytest.param(False, 422, "Current", id="false"),
+        pytest.param(True, 422, "Current", id="true"),
+        pytest.param("1", 200, "Previous", id="integer-string"),
+        pytest.param(1.0, 200, "Previous", id="integral-float"),
+        pytest.param(1.5, 422, "Current", id="fractional-float"),
+    ],
+)
+def test_custom_skill_rollback_validates_history_index(monkeypatch, tmp_path, history_index, expected_status, expected_description):
     from deerflow.config.paths import Paths
 
     skills_root = tmp_path / "skills"
@@ -555,8 +564,8 @@ def test_custom_skill_rollback_rejects_boolean_history_index(monkeypatch, tmp_pa
     with TestClient(app) as client:
         response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": history_index})
 
-    assert response.status_code == 422
-    assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == current_content
+    assert response.status_code == expected_status
+    assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == _skill_content("demo-skill", expected_description)
 
 
 def test_custom_skill_update_static_scan_failure_blocks_edit_before_llm(monkeypatch, tmp_path):
