@@ -504,6 +504,8 @@ async def test_copy_whose_import_history_is_unreadable_is_kept_out_of_memory_unt
     captured = await _run_and_capture(ctx, manager, thread_id)
     assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == "share"
     assert _follows_copy(captured) and not any("Alice" in str(message.content) for message in captured)
+    # The turn Bob wrote while the copy was unresolved is not lost.
+    assert "And sets?" in [message.content for message in captured]
 
 
 async def test_branch_of_a_copy_with_unreadable_import_history_is_unresolved(share_app, monkeypatch, tmp_path):
