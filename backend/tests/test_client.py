@@ -1370,6 +1370,23 @@ class TestChat:
         ):
             assert client.chat("q", thread_id="t-delegated-stream") == "DELEGATE MODEL"
 
+    def test_uses_wrapper_around_bound_stream(self, client):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from wrapt import FunctionWrapper
+
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="answer")])
+        graph = create_agent(model=model, state_schema=ThreadState)
+        wrapper = MagicMock(side_effect=lambda wrapped, instance, args, kwargs: wrapped(*args, **kwargs))
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", graph),
+            patch.object(client, "stream", FunctionWrapper(client.stream, wrapper)),
+        ):
+            assert client.chat("q", thread_id="t-wrapped-stream") == "answer"
+
+        wrapper.assert_called_once()
+
     def test_returns_last_message(self, client):
         """chat() returns the last AI message text."""
         ai1 = AIMessage(content="thinking...", id="ai-1")

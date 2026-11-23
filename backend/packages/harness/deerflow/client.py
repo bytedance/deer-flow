@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MethodType
 from typing import Any, Literal
 
 from langchain.agents import create_agent
@@ -1346,7 +1347,8 @@ class DeerFlowClient:
             if no AI text was produced.
         """
         stream = self.stream
-        if getattr(stream, "__self__", None) is self and getattr(stream, "__func__", None) is DeerFlowClient._default_stream:
+        # Callable wrappers can forward method attributes, including __class__.
+        if type(stream) is MethodType and stream.__self__ is self and stream.__func__ is DeerFlowClient._default_stream:
             events = self._stream_with_trace(message, thread_id=thread_id, emit_values=False, overrides=kwargs)
         else:
             events = stream(message, thread_id=thread_id, **kwargs)
