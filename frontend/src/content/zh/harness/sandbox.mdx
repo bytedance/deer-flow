@@ -20,15 +20,11 @@ DeerFlow 支持四种沙箱模式，选择适合你部署的一种：
 
 ### LocalSandbox（默认）
 
-命令直接在主机机器的文件系统上运行，没有容器隔离。
-
-- **适合**：受信任的单用户本地开发工作流。
-- **风险**：Agent 可以访问主机文件系统。默认使用 `allow_host_bash: false` 防止任意命令执行。
+本地提供器通过专用文件工具处理工作区文件。
 
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false # 默认；仅对完全受信任的工作流设置为 true
 ```
 
 ### 基于容器的 AIO 沙箱
@@ -201,14 +197,7 @@ sandbox:
 
 ### LocalSandbox
 
-`LocalSandbox` 直接在主机上运行命令。默认情况下，`bash` 工具**被禁用**以防止任意主机命令执行。仅对完全受信任的单用户工作流启用它：
-
-```yaml
-sandbox:
-  allow_host_bash: true # 危险：授予 Agent 对你机器的 Shell 访问权限
-```
-
-即使没有 `bash`，Agent 也可以通过专用文件工具读写文件。
+本地提供器用于工作区文件操作。运行 Bash 命令需要使用隔离沙箱。
 
 ### 容器沙箱
 

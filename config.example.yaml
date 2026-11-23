@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 67
+config_version: 68
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1409,9 +1409,7 @@ tools:
     group: file:write
     use: deerflow.sandbox.tools:str_replace_tool
 
-  # Bash execution tool
-  # Active only when using an isolated shell sandbox or when
-  # sandbox.allow_host_bash: true explicitly opts into host bash.
+  # Bash execution tool. Select an isolated sandbox provider to use it.
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
@@ -1773,16 +1771,12 @@ uploads:
 # ============================================================================
 # Sandbox Configuration
 # ============================================================================
-# Choose between local sandbox (direct execution), Docker-based AIO sandbox,
+# Choose between local file tools, Docker-based AIO sandbox,
 # or BoxLite micro-VM sandbox
 # Option 1: Local Sandbox (Default)
-# Executes commands directly on the host machine
+# Serves workspace file operations
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  # Host bash execution is disabled by default because LocalSandboxProvider is
-  # not a secure isolation boundary for shell access. Enable only for fully
-  # trusted, single-user local workflows.
-  allow_host_bash: false
   # For AioSandboxProvider only: overlap likely sandbox work with the first
   # model call. It is disabled by default and ignored by other providers.
   prewarm: false
@@ -1941,6 +1935,9 @@ sandbox:
 #   # ownership:
 #   #   type: redis                  # required for multi-instance / load-balanced
 #   #   redis_url: redis://redis:6379/0
+#   #   redis_mode: standalone       # use cluster for Redis Cluster (database 0)
+#   #   # redis_cluster_nodes:       # optional extra discovery seeds in cluster mode
+#   #   #   - redis-1:6379
 #   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
 #   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
 #   #                                # single missed renewal cannot expire a live
@@ -1950,8 +1947,9 @@ sandbox:
 #   #   key_prefix: deerflow:sandbox:owner
 #   #
 #   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
-#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
-#   # startup, but a sandbox whose ownership cannot be published is not handed out
+#   # fail-hard policy. Standalone Redis connects on first use. Cluster mode
+#   # discovers the topology at provider startup and requires a reachable seed.
+#   # A sandbox whose ownership cannot be published is not handed out
 #   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
 #   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
 #   #
