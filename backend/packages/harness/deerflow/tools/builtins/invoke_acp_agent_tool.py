@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import shutil
+from pathlib import Path
 from typing import Annotated, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -12,8 +13,6 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-# Bytes of agent stderr kept for the Gateway log when an invocation fails.
-_STDERR_TAIL_BYTES = 8 * 1024
 # After the agent process exits, how long the SDK receive loop may keep reading
 # responses still buffered in the stdout pipe before the call is declared failed.
 _EXIT_DRAIN_SECONDS = 2.0
@@ -149,77 +148,23 @@ def _agent_path(env: dict[str, str] | None) -> str | None:
 
 
 def _resolve_agent_command(command: str, path: str | None = None) -> str:
-    r"""Return the host path to spawn for a configured ACP agent command.
+    """Locate the configured launcher using the Gateway's working directory.
 
-    ``asyncio.create_subprocess_exec``, which the ACP SDK's stdio transport
-    uses, does not apply ``PATHEXT`` on Windows: a bare ``npx`` or ``mcode``
-    raises ``FileNotFoundError`` even though the npm shim (``npx.cmd``) is on
-    ``PATH``, and an absolute ``C:\npm\mcode`` spawns npm's extensionless shell
-    script instead of ``mcode.CMD`` and dies with ``WinError 193``. Resolve
-    the command the way the MCP Python SDK normalizes stdio commands, and keep
-    the configured value when nothing matches so the not-found remediation
-    still fires.
-
-    Bare names and absolute paths are resolved. A relative configured path is
-    handed to the spawn unchanged: it refers to the ACP workspace the spawn
-    runs in, not to the Gateway's cwd. An absolute path keeps its own
-    directory -- ``shutil.which`` searches that directory and probes
-    ``PATHEXT`` there.
-
-    ``path`` is the ``PATH`` the agent subprocess will actually see (see
-    ``_agent_path``); the Gateway's own is only the fallback. A successful
-    lookup is returned absolute: for a relative ``PATH`` entry ``shutil.which``
-    yields a result relative to the Gateway's cwd, while the spawn runs with
-    ``cwd`` set to the ACP workspace, where that path resolves elsewhere -- or
-    not at all.
-
-    An already-absolute result is returned unchanged: a lexical ``abspath``
-    would collapse a ``..`` that follows a symlink, changing which file the
-    spawn actually runs.
-
-    The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
-    callers must run it off the event loop.
+    Resolve the executable before changing the child's working directory.
+    shutil.which also selects Windows PATHEXT shims. Keep symlink/..
+    traversal intact when anchoring a relative PATH entry.
     """
-    if os.path.dirname(command) and not os.path.isabs(command):
-        return command
-    try:
-        resolved = shutil.which(command, path=path)
-    except OSError:
-        return command
+    resolved = shutil.which(command, path=path)
     if not resolved:
-        return command
-    return resolved if os.path.isabs(resolved) else os.path.abspath(resolved)
+        raise FileNotFoundError(command)
+    # Path.absolute also anchors drive-relative and rooted Windows paths.
+    return str(Path(resolved).absolute())
 
 
-class _StderrTail:
-    """Drain an agent's stderr pipe, keeping only a bounded tail.
-
-    The SDK spawns agents with ``stderr=PIPE`` but never reads it. Once an agent
-    has logged more than asyncio's pipe buffering absorbs, its next stderr write
-    blocks, the agent stops answering, and the invocation stalls until the
-    timeout. Draining continuously keeps verbose agents running.
-    """
-
-    def __init__(self, stream: asyncio.StreamReader | None) -> None:
-        self._data = bytearray()
-        self._task = asyncio.create_task(self._drain(stream)) if stream is not None else None
-
-    async def _drain(self, stream: asyncio.StreamReader) -> None:
-        while chunk := await stream.read(65536):
-            self._data += chunk
-            del self._data[:-_STDERR_TAIL_BYTES]
-
-    async def text(self, *, wait: float = 0.0) -> str:
-        """Return the tail, waiting up to ``wait`` seconds for the pipe to reach EOF."""
-        if self._task is not None and wait > 0:
-            await asyncio.wait({self._task}, timeout=wait)
-        return self._data.decode("utf-8", errors="replace").strip()
-
-    async def aclose(self) -> None:
-        if self._task is not None:
-            # A descendant can keep the pipe open after the agent itself is reaped.
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+async def _drain_agent_stderr(stream: asyncio.StreamReader) -> None:
+    """Keep a verbose subprocess's stderr pipe flowing without retaining its contents."""
+    while await stream.read(65536):
+        pass
 
 
 class _AgentExitedError(Exception):
@@ -257,8 +202,13 @@ async def _await_while_agent_runs(awaitable: Any, proc: asyncio.subprocess.Proce
 
 def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
     """Return a user-facing ACP invocation error with actionable remediation."""
+    if isinstance(exc, TimeoutError):
+        return f"Error invoking ACP agent '{agent}': SDK transport timed out"
     if not isinstance(exc, FileNotFoundError):
-        return f"Error invoking ACP agent '{agent}': {exc}"
+        return f"Error invoking ACP agent '{agent}' ({type(exc).__name__}). Check the agent's configuration and authentication."
+
+    if os.path.dirname(cmd):
+        return f"Error invoking ACP agent '{agent}': Could not start the file configured in `acp_agents.{agent}.command`. Check that the file exists and the Gateway account has execute permission."
 
     message = f"Error invoking ACP agent '{agent}': Command '{cmd}' was not found on PATH."
     if cmd == "codex-acp" and shutil.which("codex"):
@@ -312,13 +262,12 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
     _agents = dict(agents)
 
     async def _invoke(agent: str, prompt: str, config: Annotated[RunnableConfig, InjectedToolArg] = None) -> str:
-        logger.info("Invoking ACP agent %s (prompt length: %d)", agent, len(prompt))
-        logger.debug("Invoking ACP agent %s with prompt: %.200s%s", agent, prompt, "..." if len(prompt) > 200 else "")
         if agent not in _agents:
             available = ", ".join(_agents.keys())
             return f"Error: Unknown agent '{agent}'. Available: {available}"
 
         agent_config = _agents[agent]
+        logger.info("Invoking ACP agent %s (prompt length: %d)", agent, len(prompt))
         thread_id: str | None = ((config or {}).get("configurable") or {}).get("thread_id")
 
         try:
@@ -363,16 +312,15 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             agent_env = dict(agent_config.env)
         # Resolve against the PATH the agent subprocess will see, not the Gateway's:
         # the SDK merges agent_env over its inherited environment at spawn time.
-        cmd = await asyncio.to_thread(_resolve_agent_command, agent_config.command, _agent_path(agent_env))
         args = agent_config.args or []
         physical_cwd = await asyncio.to_thread(_get_work_dir, thread_id)
         try:
             mcp_servers = await asyncio.to_thread(_build_acp_mcp_servers)
         except ValueError as exc:
             logger.warning(
-                "Invalid MCP server configuration for ACP agent '%s'; continuing without MCP servers: %s",
+                "Invalid MCP server configuration for ACP agent '%s'; continuing without MCP servers (%s)",
                 agent,
-                exc,
+                type(exc).__name__,
             )
             mcp_servers = []
 
@@ -391,60 +339,46 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 prompt=[text_block(prompt)],
             )
 
-        stderr_tail: _StderrTail | None = None
+        stderr_drain: asyncio.Task[None] | None = None
         timed_out = False
         try:
             from acp import spawn_agent_process
 
+            cmd = await asyncio.to_thread(_resolve_agent_command, agent_config.command, _agent_path(agent_env))
             async with spawn_agent_process(client, cmd, *args, env=agent_env, cwd=physical_cwd) as (conn, proc):
-                stderr_tail = _StderrTail(proc.stderr)
-                logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
+                if proc.stderr is not None:
+                    stderr_drain = asyncio.create_task(_drain_agent_stderr(proc.stderr))
                 try:
                     async with asyncio.timeout(agent_config.timeout_seconds) as deadline:
                         await _await_while_agent_runs(_converse(conn), proc)
                 except TimeoutError:
                     if not deadline.expired():
                         raise
-                    # Leave the SDK context first: it terminates and reaps the
-                    # agent, so the lines a stalled agent wrote last reach the tail.
+                    # Leave the SDK context first so the stalled process is reaped.
                     timed_out = True
                 except _AgentExitedError as exc:
                     status = f"exited with code {exc.returncode}" if exc.returncode is not None else "closed its ACP connection"
-                    logger.error(
-                        "ACP agent '%s' %s before completing the ACP invocation. stderr tail:\n%s",
-                        agent,
-                        status,
-                        await stderr_tail.text(wait=_EXIT_DRAIN_SECONDS),
-                    )
-                    return (
-                        f"Error: ACP agent '{agent}' {status} before completing the ACP invocation. "
-                        f"Check that the agent is installed and authenticated and that acp_agents.{agent} in config.yaml is correct; "
-                        "the agent's stderr is recorded in the Gateway log."
-                    )
+                    logger.error("ACP agent '%s' %s before completing the ACP invocation", agent, status)
+                    return f"Error: ACP agent '{agent}' {status} before completing the ACP invocation. Check that the agent is installed and authenticated and that acp_agents.{agent} in config.yaml is correct."
             if timed_out:
-                logger.error(
-                    "ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt; subprocess terminated. stderr tail:\n%s",
-                    agent,
-                    agent_config.timeout_seconds,
-                    await stderr_tail.text(wait=_EXIT_DRAIN_SECONDS),
-                )
+                logger.error("ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt", agent, agent_config.timeout_seconds)
                 return (
                     f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
                     "without completing the ACP invocation. The agent subprocess has been terminated. If this agent handles "
                     f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
                 )
             result = client.collected_text
-            logger.info("ACP agent '%s' returned %s", agent, result[:1000])
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))
             return result or "(no response)"
         except Exception as e:
-            logger.error("ACP agent '%s' invocation failed: %s", agent, e)
+            logger.error("ACP agent '%s' invocation failed (%s)", agent, type(e).__name__)
             # Report the configured command, not the resolved path: remediation
             # text has to match what the operator wrote in config.yaml.
             return await asyncio.to_thread(_format_invocation_error, agent, agent_config.command, e)
         finally:
-            if stderr_tail is not None:
-                await stderr_tail.aclose()
+            if stderr_drain is not None:
+                stderr_drain.cancel()
+                await asyncio.gather(stderr_drain, return_exceptions=True)
 
     return StructuredTool.from_function(
         name="invoke_acp_agent",
