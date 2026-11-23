@@ -9,7 +9,7 @@ Scrapes business listings from Google Maps: name, address, rating, reviews count
 ```json
 {
   "searchStringsArray": ["<SEARCH QUERY>"],
-  "maxCrawledPlacesPerSearch": 20,
+  "maxCrawledPlacesPerSearch": 10,
   "language": "en"
 }
 ```
@@ -20,7 +20,7 @@ Include `locationQuery` when the search term alone is ambiguous (e.g. "coffee sh
 {
   "searchStringsArray": ["coffee shops"],
   "locationQuery": "Prague, Czech Republic",
-  "maxCrawledPlacesPerSearch": 20,
+  "maxCrawledPlacesPerSearch": 10,
   "language": "en"
 }
 ```
@@ -30,9 +30,10 @@ Include `locationQuery` when the search term alone is ambiguous (e.g. "coffee sh
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | searchStringsArray | array of strings | Search queries, same as typing into Google Maps. E.g. `["coffee shops Prague"]` |
-| maxCrawledPlacesPerSearch | integer | Max results per query (default 20, max ~120) |
+| maxCrawledPlacesPerSearch | integer | Max places per search term |
 | language | string | Results language code. E.g. `"en"`, `"cs"`, `"de"` |
-| locationQuery | string | Optional — center the search on a specific location. Use when the query doesn't contain a location. E.g. `"Prague, Czech Republic"` |
+| locationQuery | string | Optional. One location per run to center the search on. Use when the query has no location. E.g. `"Prague, Czech Republic"` |
+| maxReviews | integer | Optional. Reviews per place (default 0, charged extra) |
 
 ### Examples
 
@@ -41,17 +42,18 @@ User: "Find coffee shops in Prague city centre"
 ```json
 {
   "searchStringsArray": ["coffee shops Prague city centre"],
-  "maxCrawledPlacesPerSearch": 20,
+  "maxCrawledPlacesPerSearch": 10,
   "language": "en"
 }
 ```
 
-User: "Get all Italian restaurants in Berlin with their ratings"
+User: "Get 10 Italian restaurants in Berlin with their ratings"
 
 ```json
 {
-  "searchStringsArray": ["Italian restaurants Berlin"],
-  "maxCrawledPlacesPerSearch": 40,
+  "searchStringsArray": ["Italian restaurants"],
+  "locationQuery": "Berlin, Germany",
+  "maxCrawledPlacesPerSearch": 10,
   "language": "en"
 }
 ```

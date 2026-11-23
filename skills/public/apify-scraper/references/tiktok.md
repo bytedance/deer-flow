@@ -9,7 +9,7 @@ Scrapes TikTok profiles, videos, and hashtags. Returns video descriptions, play 
 ```json
 {
   "profiles": ["<USERNAME>"],
-  "resultsPerPage": 20
+  "resultsPerPage": 10
 }
 ```
 
@@ -18,7 +18,7 @@ Scrapes TikTok profiles, videos, and hashtags. Returns video descriptions, play 
 ```json
 {
   "hashtags": ["<HASHTAG>"],
-  "resultsPerPage": 20
+  "resultsPerPage": 10
 }
 ```
 
@@ -28,7 +28,9 @@ Scrapes TikTok profiles, videos, and hashtags. Returns video descriptions, play 
 |-----------|------|-------------|
 | profiles | array of strings | TikTok usernames **without** `@`. Strip it before passing. E.g. `["tiktok", "apify"]` not `["@tiktok"]` |
 | hashtags | array of strings | Hashtags **without** `#`. E.g. `["ai", "programming"]` not `["#ai"]` |
-| resultsPerPage | integer | Max results to return per profile or hashtag |
+| searchQueries | array of strings | Optional. Keyword search across videos and profiles |
+| postURLs | array of strings | Optional. Direct URLs of specific TikTok videos |
+| resultsPerPage | integer | Max videos per profile, hashtag or search query (default 1) |
 
 ### Examples
 
@@ -37,7 +39,7 @@ User: "Get recent videos from TikTok user @apify"
 ```json
 {
   "profiles": ["apify"],
-  "resultsPerPage": 30
+  "resultsPerPage": 10
 }
 ```
 
@@ -46,6 +48,6 @@ User: "Scrape TikTok videos with hashtag #artificialintelligence"
 ```json
 {
   "hashtags": ["artificialintelligence"],
-  "resultsPerPage": 50
+  "resultsPerPage": 10
 }
 ```

@@ -1,6 +1,6 @@
 # Actor Catalog
 
-Curated list of 56 Apify actors. Use this when the routing table in SKILL.md does not match the user's task. Pick the most specific actor, then call `apify_actor_discover` with its ID to get the input schema before starting.
+Curated list of 54 Apify Actors. Use this when the routing table in SKILL.md does not match the user's task. Pick the most specific Actor, then call `apify_actor_discover(actor_id="owner/name")` to get its input schema before starting. If nothing here fits, search the Apify Store with `apify_actor_discover(query="...")`.
 
 Actor IDs use `owner/name` format as required by the Apify client.
 
@@ -40,7 +40,7 @@ Actor IDs use `owner/name` format as required by the Apify client.
 | apify/facebook-marketplace-scraper | Marketplace listings |
 | apify/facebook-followers-following-scraper | Follower and following lists |
 
-## TikTok (14 actors)
+## TikTok (13 actors)
 
 | Actor ID | Description |
 |----------|-------------|
@@ -57,9 +57,8 @@ Actor IDs use `owner/name` format as required by the Apify client.
 | clockworks/tiktok-discover-scraper | Discover page content |
 | clockworks/tiktok-explore-scraper | Explore content |
 | clockworks/tiktok-trends-scraper | Trending content |
-| clockworks/tiktok-live-scraper | Live stream data |
 
-## YouTube (5 actors)
+## YouTube (4 actors)
 
 | Actor ID | Description |
 |----------|-------------|
@@ -67,7 +66,6 @@ Actor IDs use `owner/name` format as required by the Apify client.
 | streamers/youtube-channel-scraper | Channel metadata and video list |
 | streamers/youtube-comments-scraper | Comments on videos |
 | streamers/youtube-shorts-scraper | Shorts |
-| streamers/youtube-video-scraper-by-hashtag | Videos by hashtag |
 
 ## Google Maps (4 actors)
 

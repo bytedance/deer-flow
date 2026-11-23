@@ -2,14 +2,13 @@
 
 ## Actor: apify/instagram-profile-scraper
 
-Scrapes public profile data: bio, follower/following counts, post count, verified status.
+Scrapes public profile data: bio, follower/following counts, post count, verified status. Returns one item per username.
 
 ### Input Template
 
 ```json
 {
-  "usernames": ["<USERNAME>"],
-  "resultsLimit": 20
+  "usernames": ["<USERNAME>"]
 }
 ```
 
@@ -17,17 +16,15 @@ Scrapes public profile data: bio, follower/following counts, post count, verifie
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| usernames | array of strings | Instagram usernames without @. E.g. `["apify", "nasa"]` |
-| resultsLimit | integer | Max profiles to return (default 20) |
+| usernames | array of strings | Instagram usernames without @. E.g. `["humansofny", "nasa"]` |
 
 ### Example
 
-User: "Get Instagram profile info for @apify"
+User: "Get Instagram profile info for @humansofny"
 
 ```json
 {
-  "usernames": ["apify"],
-  "resultsLimit": 1
+  "usernames": ["humansofny"]
 }
 ```
 
@@ -35,14 +32,14 @@ User: "Get Instagram profile info for @apify"
 
 ## Actor: apify/instagram-post-scraper
 
-Scrapes posts from a profile, hashtag, or location. Returns captions, likes, comments count, media URLs.
+Scrapes posts from profiles or single post URLs. Returns captions, likes, comments count, media URLs. For hashtags, use `apify/instagram-hashtag-scraper`.
 
 ### Input Template
 
 ```json
 {
-  "directUrls": ["https://www.instagram.com/<USERNAME>/"],
-  "resultsLimit": 50
+  "username": ["<USERNAME>"],
+  "resultsLimit": 10
 }
 ```
 
@@ -50,35 +47,60 @@ Scrapes posts from a profile, hashtag, or location. Returns captions, likes, com
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| directUrls | array of strings | Profile URL (`/username/`), hashtag URL (`/explore/tags/ai/`), or individual post URL (`/p/ABC123/`) |
-| resultsLimit | integer | Max posts to scrape |
+| username | array of strings | Usernames (without @), profile URLs, or post URLs (`https://www.instagram.com/p/<POST_ID>/`) |
+| resultsLimit | integer | Max posts per profile. Ignored for post URLs |
+| onlyPostsNewerThan | string | Optional. `YYYY-MM-DD` or relative, e.g. `"2 weeks"` |
 
 ### Examples
 
-User: "Scrape the last 20 posts from @apify"
+User: "Scrape the last 10 posts from @natgeo"
 
 ```json
 {
-  "directUrls": ["https://www.instagram.com/apify/"],
-  "resultsLimit": 20
+  "username": ["natgeo"],
+  "resultsLimit": 10
 }
 ```
 
-User: "Find posts tagged #artificialintelligence"
+User: "Get data from this Instagram post https://www.instagram.com/p/DLNsnpUTdVS/"
 
 ```json
 {
-  "directUrls": ["https://www.instagram.com/explore/tags/artificialintelligence/"],
-  "resultsLimit": 30
+  "username": ["https://www.instagram.com/p/DLNsnpUTdVS/"]
 }
 ```
 
-User: "Get data from this Instagram post https://www.instagram.com/p/ABC123/"
+---
+
+## Actor: apify/instagram-hashtag-scraper
+
+Scrapes posts or reels that use a hashtag. Returns captions, likes, comments count, owner, media URLs.
+
+### Input Template
 
 ```json
 {
-  "directUrls": ["https://www.instagram.com/p/ABC123/"],
-  "resultsLimit": 1
+  "hashtags": ["<HASHTAG>"],
+  "resultsLimit": 10
+}
+```
+
+### Key Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| hashtags | array of strings | One hashtag per entry, with or without `#`. Words in one entry merge into one hashtag |
+| resultsType | string | Optional. `"posts"` (default), `"reels"` or `"stories"` |
+| resultsLimit | integer | Max results per hashtag |
+
+### Example
+
+User: "Find 10 posts tagged #artificialintelligence"
+
+```json
+{
+  "hashtags": ["artificialintelligence"],
+  "resultsLimit": 10
 }
 ```
 
@@ -86,14 +108,14 @@ User: "Get data from this Instagram post https://www.instagram.com/p/ABC123/"
 
 ## Actor: apify/instagram-comment-scraper
 
-Scrapes comments from Instagram posts.
+Scrapes comments from Instagram posts and reels.
 
 ### Input Template
 
 ```json
 {
   "directUrls": ["https://www.instagram.com/p/<POST_ID>/"],
-  "resultsLimit": 100
+  "resultsLimit": 10
 }
 ```
 
@@ -101,17 +123,18 @@ Scrapes comments from Instagram posts.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| directUrls | array of strings | Direct post URLs in format `https://www.instagram.com/p/<POST_ID>/` |
-| resultsLimit | integer | Max comments to scrape |
+| directUrls | array of strings | Post or reel URLs, e.g. `https://www.instagram.com/p/<POST_ID>/` or `https://www.instagram.com/reel/<REEL_ID>/` |
+| resultsLimit | integer | Max comments per post |
+| includeNestedComments | boolean | Optional. Also scrape replies |
 
 ### Example
 
-User: "Get 50 comments from this Instagram post"
+User: "Get 10 comments from this Instagram post https://www.instagram.com/p/DN8-GjPkgjS/"
 
 ```json
 {
-  "directUrls": ["https://www.instagram.com/p/ABC123/"],
-  "resultsLimit": 50
+  "directUrls": ["https://www.instagram.com/p/DN8-GjPkgjS/"],
+  "resultsLimit": 10
 }
 ```
 
@@ -119,14 +142,14 @@ User: "Get 50 comments from this Instagram post"
 
 ## Actor: apify/instagram-reel-scraper
 
-Scrapes Instagram Reels: video URL, description, play count, like count, author.
+Scrapes Instagram Reels: video URL, caption, play count, like count, author.
 
 ### Input Template
 
 ```json
 {
-  "directUrls": ["https://www.instagram.com/<USERNAME>/reels/"],
-  "resultsLimit": 20
+  "username": ["<USERNAME>"],
+  "resultsLimit": 10
 }
 ```
 
@@ -134,16 +157,16 @@ Scrapes Instagram Reels: video URL, description, play count, like count, author.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| directUrls | array of strings | Profile reels URL or individual reel URL |
-| resultsLimit | integer | Max reels to scrape |
+| username | array of strings | Usernames (without @), profile URLs, or reel URLs |
+| resultsLimit | integer | Max reels per profile. Ignored for reel URLs |
 
 ### Example
 
-User: "Get the latest reels from @apify"
+User: "Get the latest reels from @natgeo"
 
 ```json
 {
-  "directUrls": ["https://www.instagram.com/apify/reels/"],
-  "resultsLimit": 20
+  "username": ["natgeo"],
+  "resultsLimit": 10
 }
 ```

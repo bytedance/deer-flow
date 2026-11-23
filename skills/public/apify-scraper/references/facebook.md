@@ -1,17 +1,18 @@
-# Facebook Actor
+# Facebook Actors
+
+Both Actors work only on public Facebook pages, not on personal profiles. For comments on posts, use `apify/facebook-comments-scraper` from the catalog.
 
 ## Actor: apify/facebook-pages-scraper
 
-Scrapes public Facebook pages: page info, recent posts, likes, comments, reactions, contact details.
+Scrapes page info: name, intro, categories, likes, followers, rating, address, phone, website. It takes only page URLs and returns one item per page; use `apify/facebook-posts-scraper` for posts.
 
 ### Input Template
 
 ```json
 {
   "startUrls": [
-    {"url": "https://www.facebook.com/<PAGE_NAME>"}
-  ],
-  "maxPosts": 20
+    {"url": "https://www.facebook.com/<PAGE_NAME>/"}
+  ]
 }
 ```
 
@@ -19,28 +20,50 @@ Scrapes public Facebook pages: page info, recent posts, likes, comments, reactio
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| startUrls | array of objects | URLs of Facebook pages to scrape |
-| maxPosts | integer | Max posts to scrape per page (default 20) |
-| maxPostComments | integer | Max comments per post. Omit for no comments. |
-| maxReviews | integer | Max reviews to scrape. Omit to skip reviews. |
+| startUrls | array of objects | Facebook page URLs, one `{"url": ...}` object per page |
 
-### Examples
+### Example
 
-User: "Scrape the Apify Facebook page and get its latest posts"
+User: "Get the contact details and follower count of the NASA Facebook page"
 
 ```json
 {
-  "startUrls": [{"url": "https://www.facebook.com/apifytech"}],
-  "maxPosts": 20
+  "startUrls": [{"url": "https://www.facebook.com/NASA/"}]
 }
 ```
 
-User: "Get Facebook page info and 5 posts with their comments for NASA"
+---
+
+## Actor: apify/facebook-posts-scraper
+
+Scrapes posts from Facebook pages: text, date, likes, comments count, shares, media URLs.
+
+### Input Template
 
 ```json
 {
-  "startUrls": [{"url": "https://www.facebook.com/NASA"}],
-  "maxPosts": 5,
-  "maxPostComments": 10
+  "startUrls": [
+    {"url": "https://www.facebook.com/<PAGE_NAME>/"}
+  ],
+  "resultsLimit": 10
+}
+```
+
+### Key Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| startUrls | array of objects | Facebook page URLs or post URLs |
+| resultsLimit | integer | Max posts per page. Ignored for post URLs |
+| onlyPostsNewerThan | string | Optional. `YYYY-MM-DD` or relative, e.g. `"1 month"` |
+
+### Example
+
+User: "Get the 5 latest posts from the Humans of New York Facebook page"
+
+```json
+{
+  "startUrls": [{"url": "https://www.facebook.com/humansofnewyork/"}],
+  "resultsLimit": 5
 }
 ```

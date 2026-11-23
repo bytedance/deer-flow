@@ -2,25 +2,25 @@
 
 ## Actor: streamers/youtube-scraper
 
-Scrapes YouTube videos, channels, and search results. Returns title, description, view count, like count, published date, channel info.
+Scrapes YouTube videos, channels, playlists and search results. Returns title, description, view count, like count, published date, channel info.
 
 ### Input Template — Search
 
 ```json
 {
-  "searchKeywords": "<SEARCH QUERY>",
-  "maxResults": 20
+  "searchQueries": ["<SEARCH QUERY>"],
+  "maxResults": 10
 }
 ```
 
-### Input Template — Specific Channel or Video
+### Input Template — Specific Channel, Video or Playlist
 
 ```json
 {
   "startUrls": [
     {"url": "https://www.youtube.com/@<CHANNEL_HANDLE>"}
   ],
-  "maxResults": 20
+  "maxResults": 10
 }
 ```
 
@@ -28,9 +28,11 @@ Scrapes YouTube videos, channels, and search results. Returns title, description
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| searchKeywords | string | Search query. Used when you want to search YouTube, not scrape a specific channel |
-| startUrls | array of objects | Direct URLs to channels, videos, or playlists. Use instead of searchKeywords for specific targets |
-| maxResults | integer | Max videos/results to return |
+| searchQueries | array of strings | Search terms, as typed into YouTube's search bar. Ignored when `startUrls` is set |
+| startUrls | array of objects | Channel, video, playlist or search results URLs. Use instead of `searchQueries` for specific targets |
+| maxResults | integer | Max regular videos per search term or channel |
+| maxResultsShorts | integer | Optional. Max Shorts per search term or channel (default 0) |
+| sortVideosBy | string | Optional, channels only. `"NEWEST"`, `"POPULAR"` or `"OLDEST"` |
 
 ### Examples
 
@@ -38,16 +40,16 @@ User: "Find the top 10 YouTube videos about LLM benchmarking"
 
 ```json
 {
-  "searchKeywords": "LLM benchmarking 2025",
+  "searchQueries": ["LLM benchmarking"],
   "maxResults": 10
 }
 ```
 
-User: "Scrape the latest 20 videos from the Apify YouTube channel"
+User: "Scrape the latest 10 videos from the Apify YouTube channel"
 
 ```json
 {
   "startUrls": [{"url": "https://www.youtube.com/@apify"}],
-  "maxResults": 20
+  "maxResults": 10
 }
 ```
