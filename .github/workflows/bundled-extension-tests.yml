@@ -20,8 +20,14 @@ on:
       - 'backend/packages/**'
       - 'backend/app/gateway/**'
       - 'backend/tests/conftest.py'
+      - 'backend/extension_test_fixtures/agent_teams_gateway.py'
       - 'backend/tests/support/**'
       - 'backend/tests/test_agent_teams_plugin.py'
+      - 'backend/tests/test_agent_teams_postgres_store.py'
+      - 'backend/tests/test_agent_teams_postgres_flow.py'
+      - 'backend/tests/test_agent_teams_storage_config.py'
+      - 'backend/tests/test_agent_teams_storage_lifecycle.py'
+      - 'backend/tests/blocking_io/test_agent_teams_storage_offloop.py'
       - 'backend/tests/test_bookmark_plugin.py'
       - 'backend/tests/test_bundled_extension_ci.py'
       - 'backend/tests/test_jev_classify_extension.py'
@@ -49,8 +55,14 @@ on:
       - 'backend/packages/**'
       - 'backend/app/gateway/**'
       - 'backend/tests/conftest.py'
+      - 'backend/extension_test_fixtures/agent_teams_gateway.py'
       - 'backend/tests/support/**'
       - 'backend/tests/test_agent_teams_plugin.py'
+      - 'backend/tests/test_agent_teams_postgres_store.py'
+      - 'backend/tests/test_agent_teams_postgres_flow.py'
+      - 'backend/tests/test_agent_teams_storage_config.py'
+      - 'backend/tests/test_agent_teams_storage_lifecycle.py'
+      - 'backend/tests/blocking_io/test_agent_teams_storage_offloop.py'
       - 'backend/tests/test_bookmark_plugin.py'
       - 'backend/tests/test_bundled_extension_ci.py'
       - 'backend/tests/test_jev_classify_extension.py'
@@ -84,6 +96,20 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: deerflow
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: deerflow_test
+        ports:
+          - '127.0.0.1:5432:5432'
+        options: >-
+          --health-cmd "pg_isready -U deerflow -d deerflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v6
@@ -99,8 +125,17 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: uv sync --group dev
+        run: uv sync --group dev --extra postgres
 
       - name: Run bundled extension behavior tests
         working-directory: backend
+        env:
+          TEST_POSTGRES_URI: postgresql://deerflow:test-only-password@127.0.0.1:5432/deerflow_test
+          UV_NO_SYNC: '1'
         run: make test-bundled-extensions
+
+      - name: Check team storage event-loop isolation
+        working-directory: backend
+        env:
+          UV_NO_SYNC: '1'
+        run: uv run pytest tests/blocking_io/test_agent_teams_storage_offloop.py -q

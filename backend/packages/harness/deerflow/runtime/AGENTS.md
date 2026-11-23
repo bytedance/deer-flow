@@ -34,9 +34,12 @@ make test-blocking-io
   would overwrite the thread view of an SDK client. Consumers that only handle the
   root run ignore namespaced frames.
 
-- **Memory writers fence admission and captured generations.** Check the bridge close fence before waiting for a stream Condition and again under it. After waiting, check `retired` and `ended` before allocating event IDs or appending; rejected writes consume no sequence number, and END is idempotent. A reader that captured a generation before cleanup still receives its retirement gap while close waits on a later run; live generations remain rejected during the drain.
-
-- **Bridge close is a retirement barrier, not a permanent terminal state.** Memory fences `publish`, `publish_end` and new stream creation while close drains. Overlapping closes keep admission fenced until every active drain exits, including when one caller is cancelled. A caller that captured an existing generation may observe its retirement gap; later calls can create a fresh generation after close returns. Keep close idempotent and retryable after cancellation.
+- **Stream close fences admission, not reuse.** Memory checks before and under
+  the Condition, then checks `retired`/`ended` before allocating IDs; rejected
+  writes consume none, and END is idempotent. Retired readers keep their gap
+  while later runs drain. Overlapping closes hold the fence until every drain
+  exits, even on cancellation; new generations may start after close returns.
+  Redis fences publish/end and checks subscribe before and after cursor lookup.
 
 ## Checkpoints
 
