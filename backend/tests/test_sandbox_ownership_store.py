@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import uuid
+from contextlib import ExitStack
 from unittest.mock import MagicMock
 
 import pytest
@@ -338,6 +339,113 @@ def test_unknown_type_raises():
     object.__setattr__(config, "type", "bogus")
     with pytest.raises(ValueError, match="Unknown sandbox ownership type"):
         make_sandbox_ownership_store(config, owner_id="A")
+
+
+def test_cluster_factory_uses_all_seeds_credentials_and_bounded_primary_reads(monkeypatch):
+    from redis import RedisCluster
+    from redis.cluster import NodesManager
+    from redis.connection import SSLConnection
+    from redis.exceptions import SlotNotCoveredError
+
+    # Keep redis-py's real URL parsing, TLS setup and node construction.
+    # Replace only the two startup network reads (slot map and command table).
+    def partial_topology(manager):
+        manager.default_node = next(iter(manager.startup_nodes.values()))
+
+    monkeypatch.setattr(NodesManager, "initialize", partial_topology)
+    monkeypatch.setattr(RedisCluster, "command", lambda self: {})
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", "rediss://operator:p%40ss@seed-a:7000/0")
+    config = SandboxOwnershipConfig(type="redis", redis_mode="cluster", redis_cluster_nodes=["seed-b:7001", "[::1]:7002"])
+    store = make_sandbox_ownership_store(config)
+    try:
+        client = store._redis
+        assert isinstance(client, RedisCluster)
+        assert {(n.host, n.port) for n in client.startup_nodes} == {("seed-a", 7000), ("seed-b", 7001), ("::1", 7002)}
+        options = client.nodes_manager.connection_kwargs
+        assert options["connection_class"] is SSLConnection
+        assert (options["username"], options["password"]) == ("operator", "p@ss")
+        assert options["decode_responses"] is True
+        assert options["socket_timeout"] == options["socket_connect_timeout"] == 5
+        assert not client.read_from_replicas
+        assert not getattr(client, "load_balancing_strategy", None)
+        # Discovery supplied no slots. This SDK exception is outside RedisError.
+        with pytest.raises(OwnershipBackendError) as error:
+            store.claim("unmapped")
+        assert isinstance(error.value.__cause__, SlotNotCoveredError)
+        close = MagicMock()
+        monkeypatch.setattr(client, "close", close)
+    finally:
+        store.close()
+    close.assert_called_once()
+
+
+@pytest.mark.parametrize("node", ["", "seed", "seed:0", "seed:65536", "seed:not-a-port", "redis://seed:7000", "user@seed:7000", "::1:7000"])
+def test_cluster_seed_must_be_a_host_and_port(node):
+    with pytest.raises(ValueError, match="host:port"):
+        SandboxOwnershipConfig(type="redis", redis_mode="cluster", redis_cluster_nodes=[node])
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"type": "memory", "redis_mode": "cluster"},
+        {"type": "redis", "redis_cluster_nodes": ["seed:7000"]},
+        {"type": "redis", "redis_mode": "cluster", "redis_url": "redis://seed/2"},
+        {"type": "redis", "redis_mode": "cluster", "redis_url": "redis://seed/0?db=2"},
+        {"type": "redis", "redis_mode": "cluster", "redis_url": "unix:///tmp/redis.sock"},
+        {"type": "redis", "redis_mode": "cluster", "redis_url": "redis://seed/0?socket_timeout=0"},
+        {"type": "redis", "redis_mode": "cluster", "redis_url": "redis://seed/0?read_from_replicas=true"},
+    ],
+)
+def test_invalid_cluster_configuration_is_rejected(settings):
+    with pytest.raises(ValueError):
+        SandboxOwnershipConfig(**settings)
+
+
+def test_cluster_requires_an_explicit_seed_url(monkeypatch):
+    for variable in ("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "REDIS_URL"):
+        monkeypatch.delenv(variable, raising=False)
+    config = SandboxOwnershipConfig(type="redis", redis_mode="cluster")
+    with pytest.raises(ValueError, match="seed redis_url"):
+        make_sandbox_ownership_store(config)
+    monkeypatch.setenv("REDIS_URL", "redis://seed/5")
+    with pytest.raises(ValueError, match="database 0"):
+        make_sandbox_ownership_store(config)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.getenv("TEST_REDIS_CLUSTER_URL"), reason="TEST_REDIS_CLUSTER_URL is unset")
+def test_ownership_across_two_cluster_primaries():
+    from redis import RedisCluster
+
+    seed = os.environ["TEST_REDIS_CLUSTER_URL"]
+    prefix = f"deerflow:test:{uuid.uuid4().hex}"
+    config = SandboxOwnershipConfig(type="redis", redis_mode="cluster", redis_url=seed, key_prefix=prefix)
+    with ExitStack() as stack:
+        topology = stack.enter_context(RedisCluster.from_url(seed))
+        by_primary = {}
+        for index in range(256):
+            sandbox_id = str(index)
+            primary = topology.get_node_from_key(f"{prefix}:{sandbox_id}")
+            by_primary.setdefault(primary.name, sandbox_id)
+            if len(by_primary) == 2:
+                break
+        assert len(by_primary) == 2, "test requires keys on two distinct Redis primaries"
+        a = make_sandbox_ownership_store(config, owner_id="A")
+        stack.callback(a.close)
+        b = make_sandbox_ownership_store(config, owner_id="B")
+        stack.callback(b.close)
+        for sandbox_id in by_primary.values():
+            assert a.claim(sandbox_id)
+            assert a.renew(sandbox_id) is RenewOutcome.RENEWED
+            assert b.take(sandbox_id)
+            assert a.renew(sandbox_id) is RenewOutcome.LOST
+            a.release(sandbox_id)
+            assert a.owner(sandbox_id) == "B"
+            assert b.claim(sandbox_id, for_destroy=True)
+            assert not a.take(sandbox_id)
+            b.release(sandbox_id)
+            assert a.renew(sandbox_id) is RenewOutcome.LAPSED
 
 
 def test_ttl_derives_from_renewal_interval_not_idle_timeout():
