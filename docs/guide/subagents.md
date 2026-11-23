@@ -72,8 +72,13 @@ uv run --no-sync --project backend python backend/scripts/subagent_history_inven
   --db /path/to/deerflow.db --thread-id YOUR_THREAD_ID
 ```
 
-The command opens the database read-only. Its JSON report lists each child
-namespace in the thread with the available execution and parent run IDs.
+The command opens the database in read-only mode. For a database in WAL mode,
+SQLite may create `-wal` and `-shm` sidecar files in the database directory.
+If the directory is read-only, both sidecar files must already exist and be
+readable. See the [SQLite WAL documentation](https://sqlite.org/wal.html#read_only_databases).
+
+The JSON report lists each child namespace in the thread with the available
+execution and parent run IDs.
 A namespace with only writes or conflicting execution metadata still appears
 with its counts and a null execution ID. Both counts measure logical rows at
 the same instant, even if another delegation commits during the read.
