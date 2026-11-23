@@ -21,12 +21,14 @@ import threading
 import types
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
 from deerflow.community.boxd_sandbox.boxd_sandbox import BoxdSandbox
 from deerflow.community.boxd_sandbox.boxd_sandbox_provider import BoxdSandboxProvider, _import_client, _ShutdownIncompleteError
 from deerflow.config.paths import Paths
+from deerflow.sandbox.identity import derive_sandbox_scope_token
 
 posix_only = pytest.mark.skipif(os.name != "posix", reason="runs generated scripts with the local bash")
 
@@ -335,8 +337,10 @@ def test_create_is_isolated_labelled_and_sized(monkeypatch: pytest.MonkeyPatch, 
         assert kwargs["auto_suspend_timeout"] == 300
         generation = kwargs["labels"].pop("deer-flow-generation")
         assert re.fullmatch(r"[0-9a-f]{32}", generation)
-        assert kwargs["labels"] == {"team": "research", "deer-flow": "sandbox", "deer-flow-scope": sandbox_id}
-        assert re.fullmatch(rf"deer-flow-{sandbox_id}-[0-9a-f]{{6}}", name)
+        scope_id = derive_sandbox_scope_token(user_id="owner", thread_id="thread")
+        assert kwargs["labels"] == {"team": "research", "deer-flow": "sandbox", "deer-flow-scope": scope_id}
+        assert sandbox_id == f"{scope_id}-{generation}"
+        assert re.fullmatch(rf"deer-flow-{scope_id}-[0-9a-f]{{6}}", name)
         assert fake.client_kwargs == {"api_key": "test-key", "region": "fra"}
         # Every later call addresses the machine by the id create returned.
         assert {call["machine"] for call in fake.execs} == {"m-1"}
@@ -396,6 +400,10 @@ def test_each_generation_gets_a_new_machine_name(installed) -> None:
 # ── Acquire, reuse and release ───────────────────────────────────────────
 
 
+def _warm_sandbox_ids(provider: BoxdSandboxProvider) -> set[str]:
+    return {sandbox.id for sandbox, _ in provider._warm_pool.values()}
+
+
 def test_scope_reuse_and_user_thread_isolation(installed) -> None:
     provider, fake = installed
     first = provider.acquire("thread", user_id="alice")
@@ -415,12 +423,63 @@ def test_release_parks_and_same_scope_reclaims_without_create(installed) -> None
     assert len(fake.created) == 1
 
 
+def test_release_mirrors_and_parks_only_after_the_last_claim(installed, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overlapping turns share one machine until the final release (#8382)."""
+    provider, fake = installed
+    first = provider.acquire("thread", user_id="owner")
+    assert provider.acquire("thread", user_id="owner") == first
+    sandbox = provider.get(first)
+    sync_outputs = Mock()
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", sync_outputs)
+
+    provider.release(first)
+
+    assert sandbox is not None and provider.get(first) is sandbox
+    assert provider._warm_pool == {}
+    assert provider._claims[first] == 1
+    sync_outputs.assert_not_called()
+
+    provider.release(first)
+
+    assert provider.get(first) is None
+    assert _warm_sandbox_ids(provider) == {first}
+    sync_outputs.assert_called_once_with(sandbox, user_id="owner", thread_id="thread")
+    assert len(fake.created) == 1
+
+
+@pytest.mark.parametrize("release_method", ["release", "_drop_claim"])
+def test_release_from_invalidated_machine_keeps_replacement_claim(installed, monkeypatch: pytest.MonkeyPatch, release_method: str) -> None:
+    provider, fake = installed
+    old_id = provider.acquire("thread", user_id="owner")
+    provider._invalidate_sandbox(old_id, "gone")
+    replacement_id = provider.acquire("thread", user_id="owner")
+    replacement = provider.get(replacement_id)
+    sync_outputs = Mock()
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", sync_outputs)
+
+    getattr(provider, release_method)(old_id)
+
+    assert replacement is not None and provider.get(replacement_id) is replacement
+    assert provider._claims[replacement_id] == 1
+    assert provider.get(old_id) is None
+    assert provider._warm_pool == {}
+    assert fake.deleted == ["m-1"]
+    sync_outputs.assert_not_called()
+
+    provider.release(replacement_id)
+    sync_outputs.assert_called_once_with(replacement, user_id="owner", thread_id="thread")
+    provider._invalidate_sandbox(old_id, "late terminal failure")
+    assert provider.acquire("thread", user_id="owner") == replacement_id
+    assert provider.get(replacement_id) is replacement
+    assert len(fake.created) == 2
+
+
 def test_unhealthy_warm_machine_is_deleted_and_replaced(installed) -> None:
     provider, fake = installed
     sandbox_id = provider.acquire("thread", user_id="owner")
     provider.release(sandbox_id)
     fake.health_ok = False
-    provider.acquire("thread", user_id="owner")
+    assert provider.acquire("thread", user_id="owner") != sandbox_id
     assert fake.deleted == ["m-1"]
     assert len(fake.created) == 2
 
@@ -622,7 +681,7 @@ def test_output_mirror_passes_remaining_deadline_to_downloads(installed, paths: 
     assert [call["timeout"] for call in downloads] == [1.0, 0.25]
     assert (outputs / "a.txt").read_bytes() == (b"previous" if first_transfer_fails else b"a")
     assert (outputs / "b.txt").read_bytes() == b"b"
-    assert sandbox_id in provider._warm_pool
+    assert _warm_sandbox_ids(provider) == {sandbox_id}
 
 
 def test_expired_output_mirror_starts_no_download(installed, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -640,7 +699,7 @@ def test_expired_output_mirror_starts_no_download(installed, monkeypatch: pytest
     fake.exec_override = listing
     provider.release(sandbox_id)
     assert all(call["argv"][0] != "head" for call in fake.execs)
-    assert sandbox_id in provider._warm_pool
+    assert _warm_sandbox_ids(provider) == {sandbox_id}
 
 
 @pytest.mark.parametrize("stop_during_listing", [False, True])
@@ -664,7 +723,7 @@ def test_output_mirror_defers_stopped_machine_recovery(installed, paths: Paths, 
     provider.release(sandbox_id)
     assert fake.starts == []
     assert (outputs / "a.txt").read_bytes() == b"previous"
-    assert sandbox_id in provider._warm_pool
+    assert _warm_sandbox_ids(provider) == {sandbox_id}
     fake.exec_override = None
     provider.acquire("thread", user_id="owner")
     assert fake.starts == ["m-1"]
@@ -685,7 +744,7 @@ def test_output_mirror_rechecks_deadline_after_local_preflight(installed, monkey
     monkeypatch.setattr(provider, "_output_destination", preflight)
     provider.release(sandbox_id)
     assert all(call["argv"][0] != "head" for call in fake.execs)
-    assert sandbox_id in provider._warm_pool
+    assert _warm_sandbox_ids(provider) == {sandbox_id}
 
 
 def test_output_sync_skips_ambiguous_and_unsafe_names(installed, paths: Paths) -> None:
@@ -706,20 +765,19 @@ def test_output_sync_failure_still_parks_machine(installed, monkeypatch: pytest.
     sandbox_id = provider.acquire("thread", user_id="owner")
     monkeypatch.setattr(provider, "_sync_outputs_to_host", lambda *a, **k: (_ for _ in ()).throw(OSError("listing failed")))
     provider.release(sandbox_id)
-    assert sandbox_id in provider._warm_pool
+    assert _warm_sandbox_ids(provider) == {sandbox_id}
 
 
 def test_invalidated_during_sync_is_not_parked(installed, monkeypatch: pytest.MonkeyPatch) -> None:
     provider, fake = installed
     sandbox_id = provider.acquire("thread", user_id="owner")
-    sandbox = provider.get(sandbox_id)
 
     def invalidate(*args, **kwargs):
-        provider._invalidate_sandbox(sandbox_id, "gone", expected_sandbox=sandbox)
+        provider._invalidate_sandbox(sandbox_id, "gone")
 
     monkeypatch.setattr(provider, "_sync_outputs_to_host", invalidate)
     provider.release(sandbox_id)
-    assert sandbox_id not in provider._warm_pool
+    assert provider._warm_pool == {}
     assert fake.deleted == ["m-1"]
 
 
@@ -1007,7 +1065,7 @@ def test_reset_parks_active_machines_for_later_cleanup(installed) -> None:
     sandbox_id = provider.acquire("thread", user_id="owner")
     provider.reset()
     assert provider.get(sandbox_id) is None
-    assert sandbox_id in provider._warm_pool
+    assert _warm_sandbox_ids(provider) == {sandbox_id}
     assert fake.deleted == []
 
 
@@ -1051,7 +1109,7 @@ def test_cancelled_acquire_releases_its_new_machine(installed) -> None:
             await asyncio.sleep(0.01)
 
     asyncio.run(scenario())
-    assert list(provider._warm_pool) == [provider._sandbox_id("thread", "owner")]
+    assert list(provider._warm_pool) == [derive_sandbox_scope_token(user_id="owner", thread_id="thread")]
     assert provider._sandboxes == {}
 
 
@@ -1103,7 +1161,7 @@ def test_two_cancelled_acquires_release_the_machine(installed) -> None:
             await asyncio.sleep(0.01)
 
     asyncio.run(scenario())
-    assert list(provider._warm_pool) == [provider._sandbox_id("thread", "owner")]
+    assert list(provider._warm_pool) == [derive_sandbox_scope_token(user_id="owner", thread_id="thread")]
     assert provider._sandboxes == {}
     assert len(fake.created) == 1
 

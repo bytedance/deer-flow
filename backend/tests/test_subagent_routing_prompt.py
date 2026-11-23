@@ -105,5 +105,7 @@ def test_bash_descriptions_require_benefit_beyond_routine_commands(monkeypatch) 
 
     assert policy in section
     assert policy in task_tool.description
+    assert "requires an isolated sandbox provider" in " ".join(task_tool.description.split())
+    assert "host bash" not in task_tool.description
     assert policy in BASH_AGENT_CONFIG.description
     assert "Execute commands one at a time when they depend on each other" in BASH_AGENT_CONFIG.system_prompt

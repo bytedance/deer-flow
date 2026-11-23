@@ -180,7 +180,7 @@ async def list_subagents(request: Request) -> SubagentsListResponse:
 
 @router.post("", response_model=SubagentResponse, status_code=201, summary="Create Managed Subagent")
 async def create_managed_subagent(request: Request, body: ManagedSubagentCreateRequest) -> SubagentResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL, pat_scope="subagents:write")
     _validate_path_name(body.name, for_creation=True)
     try:
         definition = ManagedSubagentDefinition(**body.model_dump(exclude_none=True))
@@ -206,7 +206,7 @@ async def create_managed_subagent(request: Request, body: ManagedSubagentCreateR
 
 @router.put("/{name}", response_model=SubagentResponse, summary="Update Managed Subagent")
 async def update_managed_subagent(name: str, request: Request, body: ManagedSubagentUpdateRequest) -> SubagentResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL, pat_scope="subagents:write")
     name = _validate_path_name(name)
     app_config = await asyncio.to_thread(get_app_config)
     store = get_managed_subagent_store(app_config)
@@ -242,7 +242,7 @@ async def update_managed_subagent(name: str, request: Request, body: ManagedSuba
 
 @router.delete("/{name}", status_code=204, summary="Delete Managed Subagent")
 async def delete_managed_subagent(name: str, request: Request) -> None:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL, pat_scope="subagents:write")
     name = _validate_path_name(name)
     app_config = await asyncio.to_thread(get_app_config)
     store = get_managed_subagent_store(app_config)
