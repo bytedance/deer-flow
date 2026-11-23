@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "id": "community.run-postmortem",
+  "locales": {
+    "zh-CN": {
+      "title": "运行复盘",
+      "description": "在会话页把一次已封存运行的事件证据整理成结论、异常清单与时间线，并可下载 Markdown 报告。",
+      "usage": [
+        {
+          "title": "安装并授权",
+          "description": "通过 make extension-install 安装示例，在 config.yaml 的 plugins 中授予 host_access.evidence 后重启 Gateway。"
+        },
+        {
+          "title": "在工作区打开运行复盘页",
+          "description": "侧边栏进入“运行复盘”，填入会话与运行 ID（或点“最新一次运行”），生成报告后可下载 Markdown。"
+        },
+        {
+          "title": "查看单次运行报告",
+          "description": "调用 /api/extension-run-postmortem/runs/{thread_id}/{run_id} 获取结构化复盘，或在末尾追加 /markdown 下载可分享报告。"
+        },
+        {
+          "title": "先看异常再读时间线",
+          "description": "anomalies 汇总部分封存、错误事件、护栏触发、交付未完成、工具失败与证据截断；timeline 则是按事件序号展开的执行轨迹。"
+        }
+      ],
+      "requirements": [
+        "需要持久化 run store 与数据库事件存储（run_events.backend: db）。",
+        "需要在 config.yaml 中显式授予 host_access.evidence。"
+      ]
+    },
+    "en-US": {
+      "title": "Run postmortem",
+      "description": "Explain one sealed run from its own evidence on a workspace page: verdict, anomalies and a timeline, with a downloadable Markdown report.",
+      "usage": [
+        {
+          "title": "Install and grant access",
+          "description": "Install the example with make extension-install, grant host_access.evidence in config.yaml plugins, then restart Gateway."
+        },
+        {
+          "title": "Open the workspace page",
+          "description": "Open Run postmortem from the sidebar, enter a thread and run ID (or load the latest run), then generate and download the Markdown report."
+        },
+        {
+          "title": "Open a run report",
+          "description": "Call /api/extension-run-postmortem/runs/{thread_id}/{run_id} for the structured report, or append /markdown for a shareable document."
+        },
+        {
+          "title": "Read anomalies before the timeline",
+          "description": "anomalies summarizes partial sealing, error events, guardrail hits, incomplete delivery, tool failures and truncated evidence; timeline expands the run by event sequence."
+        }
+      ],
+      "requirements": [
+        "Requires a durable run store and the database event store (run_events.backend: db).",
+        "Requires an explicit host_access.evidence grant in config.yaml."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-run-postmortem#readme"
+}

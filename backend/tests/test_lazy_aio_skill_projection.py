@@ -63,6 +63,7 @@ def _write_skill(root: Path, name: str) -> None:
 @pytest.fixture
 def lazy_aio_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     paths = Paths(base_dir=tmp_path / "state")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(paths.base_dir))
     skills_root = tmp_path / "skills"
     config = SimpleNamespace(
         sandbox=SandboxConfig(use="deerflow.community.aio_sandbox:AioSandboxProvider", idle_timeout=0),

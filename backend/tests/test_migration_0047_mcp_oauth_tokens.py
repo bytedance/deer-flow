@@ -21,6 +21,7 @@ from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0047_mcp_oauth_tokens"
+HEAD = "0058_mcp_browser_oauth"
 PREVIOUS = "0046_skill_mutations"
 TABLE = "mcp_oauth_tokens"
 COLUMNS = {
@@ -44,9 +45,10 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_0047_remains_in_the_single_migration_chain():
-    assert bootstrap._get_head_revision() == "0057_coordination_workers"
+    assert bootstrap._get_head_revision() == HEAD
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == ["0057_coordination_workers"]
+    assert script.get_heads() == [HEAD]
+    assert script.get_revision(HEAD).down_revision == "0057_coordination_workers"
     assert script.get_revision("0057_coordination_workers").down_revision == "0056_coordination_task_state"
     assert script.get_revision("0056_coordination_task_state").down_revision == "0055_thread_shares"
     assert script.get_revision("0055_thread_shares").down_revision == "0054_project_memory"
@@ -96,8 +98,8 @@ async def _orm_diff(engine) -> list:
 
     def only_oauth_tokens(obj, name, type_, reflected, compare_to):
         if type_ == "table":
-            return name == TABLE
-        return getattr(getattr(obj, "table", None), "name", TABLE) == TABLE
+            return name in {TABLE, "mcp_oauth_attempts"}
+        return getattr(getattr(obj, "table", None), "name", TABLE) in {TABLE, "mcp_oauth_attempts"}
 
     async with engine.connect() as conn:
 
@@ -138,16 +140,14 @@ async def test_0047_creates_the_table_matching_the_orm_and_downgrades_cleanly(tm
         assert shape["pk"]["name"] in ("pk_mcp_oauth_tokens", None)  # SQLite does not report constraint names
         # Token columns are empty while the first refresh is claimed; the key never is.
         assert {name for name, column in shape["columns"].items() if column["nullable"]} == NULLABLE
-        # ``make migrate-rev`` would propose nothing: the revision matches the ORM model.
-        assert await _orm_diff(engine) == []
-
         async with engine.begin() as conn:
-            await conn.execute(sa.insert(McpOAuthTokenRow).values(**_row()))
+            table = await conn.run_sync(lambda sync: sa.Table(TABLE, sa.MetaData(), autoload_with=sync))
+            await conn.execute(sa.insert(table).values(**_row()))
             # A personal connection may reuse a deployment server's name.
-            await conn.execute(sa.insert(McpOAuthTokenRow).values(**_row(scope="personal", owner_user_id="user-1")))
+            await conn.execute(sa.insert(table).values(**_row(scope="personal", owner_user_id="user-1")))
         with pytest.raises(sa.exc.IntegrityError):
             async with engine.begin() as conn:
-                await conn.execute(sa.insert(McpOAuthTokenRow).values(**_row(version=3)))
+                await conn.execute(sa.insert(table).values(**_row(version=3)))
 
         await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
         assert TABLE not in (await _shape(engine))["tables"]
@@ -190,8 +190,38 @@ async def test_bootstrap_provisions_the_table_on_an_empty_database(tmp_path):
     try:
         await bootstrap.bootstrap_schema(engine, backend="sqlite")
         await bootstrap.bootstrap_schema(engine, backend="sqlite")
-        assert set((await _shape(engine))["columns"]) == COLUMNS
+        assert set((await _shape(engine))["columns"]) == COLUMNS | {"grant_epoch", "grant_context"}
+        assert "mcp_oauth_attempts" in (await _shape(engine))["tables"]
         async with engine.connect() as conn:
             assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == bootstrap._get_head_revision()
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_browser_oauth_migration_preserves_legacy_tokens_and_drops_delegated_grants_on_downgrade(tmp_path, backend):
+    engine, schema = _engine(tmp_path, backend)
+    cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")
+    try:
+        if schema:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+        await asyncio.to_thread(command.upgrade, cfg, "0057_coordination_workers")
+        async with engine.begin() as conn:
+            table = await conn.run_sync(lambda sync: sa.Table(TABLE, sa.MetaData(), autoload_with=sync))
+            await conn.execute(sa.insert(table).values(**_row(refresh_token_enc="legacy ciphertext")))
+        await asyncio.to_thread(command.upgrade, cfg, HEAD)
+        assert await _orm_diff(engine) == []
+        async with engine.begin() as conn:
+            assert (await conn.execute(sa.select(McpOAuthTokenRow.grant_epoch))).scalar_one() is None
+            await conn.execute(sa.insert(McpOAuthTokenRow).values(**_row(scope="delegated", owner_user_id="alice", grant_epoch=1)))
+        await asyncio.to_thread(command.downgrade, cfg, "0057_coordination_workers")
+        shape = await _shape(engine)
+        assert set(shape["columns"]) == COLUMNS
+        assert "mcp_oauth_attempts" not in shape["tables"]
+        async with engine.begin() as conn:
+            table = await conn.run_sync(lambda sync: sa.Table(TABLE, sa.MetaData(), autoload_with=sync))
+            assert (await conn.execute(sa.select(table.c.scope, table.c.refresh_token_enc))).one() == ("deployment", "legacy ciphertext")
+    finally:
+        await _drop_schema(engine, schema)
         await engine.dispose()

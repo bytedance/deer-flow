@@ -23,11 +23,14 @@ from __future__ import annotations
 import logging
 import math
 
+from deerflow.config.sandbox_config import parse_cluster_node, validate_cluster_redis_url
+
 from .base import OwnershipBackendError, RenewOutcome, SandboxOwnershipStore
 
 try:
     from redis import Redis
-    from redis.exceptions import RedisError
+    from redis.cluster import ClusterNode, RedisCluster
+    from redis.exceptions import RedisClusterException, RedisError
 except ImportError:  # pragma: no cover - only hit when the optional extra is missing
     # ``redis`` is an optional extra (mirrors the stream_bridge redis path). This
     # module is imported lazily from ``make_sandbox_ownership_store`` only when
@@ -53,6 +56,18 @@ _DEL = "del:"
 # a black-holed connection could hold a destroy path (and its deferred release)
 # open indefinitely. Without a socket timeout redis-py blocks forever.
 _STORE_SOCKET_TIMEOUT_SECONDS = 5.0
+
+
+def make_ownership_redis_client(redis_url: str, cluster_nodes: list[str] | None) -> Redis | RedisCluster:
+    """Both the lease store and the E2B capacity ledger must use the configured topology."""
+    options = dict(decode_responses=True, socket_timeout=_STORE_SOCKET_TIMEOUT_SECONDS, socket_connect_timeout=_STORE_SOCKET_TIMEOUT_SECONDS)
+    if cluster_nodes is None:
+        return Redis.from_url(redis_url, **options)
+    validate_cluster_redis_url(redis_url)  # The effective URL can come from the environment.
+    seeds = [ClusterNode(*parse_cluster_node(node)) for node in cluster_nodes]
+    # redis-py defaults to primary-only reads. Topology discovery happens here.
+    return RedisCluster.from_url(redis_url, startup_nodes=seeds, **options)
+
 
 # Acquire-path takeover. Overwrites a live peer's normal lease on purpose — a
 # thread's turn has routed here — but refuses a teardown in progress, which is
@@ -130,27 +145,15 @@ class RedisOwnershipStore(SandboxOwnershipStore):
         redis_url: str,
         ttl_seconds: float,
         key_prefix: str = "deerflow:sandbox:owner",
-        client: Redis | None = None,
+        client: Redis | RedisCluster | None = None,
+        cluster_nodes: list[str] | None = None,
     ) -> None:
         self._owner_id = owner_id
         # Redis accepts integer milliseconds; round up so conversion never
         # shortens the configured lease.
         self._ttl_ms = max(1, math.ceil(float(ttl_seconds) * 1000))
         self._key_prefix = key_prefix.rstrip(":")
-        # Redis.from_url is lazy, so an unreachable Redis does not block provider
-        # construction; the first claim raises instead. socket_timeout bounds
-        # every round-trip (see _STORE_SOCKET_TIMEOUT_SECONDS) so no store call —
-        # in particular a teardown-heartbeat refresh — can block unbounded.
-        self._redis = (
-            client
-            if client is not None
-            else Redis.from_url(
-                redis_url,
-                decode_responses=True,
-                socket_timeout=_STORE_SOCKET_TIMEOUT_SECONDS,
-                socket_connect_timeout=_STORE_SOCKET_TIMEOUT_SECONDS,
-            )
-        )
+        self._redis = client if client is not None else make_ownership_redis_client(redis_url, cluster_nodes)
         self._owns_client = client is None
         self._take = self._redis.register_script(_TAKE_SCRIPT)
         self._claim = self._redis.register_script(_CLAIM_SCRIPT)
@@ -167,21 +170,21 @@ class RedisOwnershipStore(SandboxOwnershipStore):
     def take(self, sandbox_id: str) -> bool:
         try:
             result = self._take(keys=[self._key(sandbox_id)], args=[self._owner_id, self._ttl_ms])
-        except RedisError as e:
+        except (RedisError, RedisClusterException) as e:
             raise OwnershipBackendError(f"failed to publish sandbox ownership for {sandbox_id}: {e}") from e
         return bool(result)
 
     def claim(self, sandbox_id: str, *, for_destroy: bool = False) -> bool:
         try:
             result = self._claim(keys=[self._key(sandbox_id)], args=[self._owner_id, self._ttl_ms, "1" if for_destroy else "0"])
-        except RedisError as e:
+        except (RedisError, RedisClusterException) as e:
             raise OwnershipBackendError(f"failed to claim sandbox ownership for {sandbox_id}: {e}") from e
         return bool(result)
 
     def renew(self, sandbox_id: str) -> RenewOutcome:
         try:
             result = int(self._renew(keys=[self._key(sandbox_id)], args=[self._owner_id, self._ttl_ms]))
-        except RedisError as e:
+        except (RedisError, RedisClusterException) as e:
             raise OwnershipBackendError(f"failed to renew sandbox ownership for {sandbox_id}: {e}") from e
         if result == 1:
             return RenewOutcome.RENEWED
@@ -192,13 +195,13 @@ class RedisOwnershipStore(SandboxOwnershipStore):
     def release(self, sandbox_id: str) -> None:
         try:
             self._release(keys=[self._key(sandbox_id)], args=[self._owner_id])
-        except RedisError as e:
+        except (RedisError, RedisClusterException) as e:
             raise OwnershipBackendError(f"failed to release sandbox ownership for {sandbox_id}: {e}") from e
 
     def owner(self, sandbox_id: str) -> str | None:
         try:
             value = self._redis.get(self._key(sandbox_id))
-        except RedisError as e:
+        except (RedisError, RedisClusterException) as e:
             raise OwnershipBackendError(f"failed to read sandbox ownership for {sandbox_id}: {e}") from e
         if value is None:
             return None

@@ -2,7 +2,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
-from typing import NotRequired, override
+from typing import TYPE_CHECKING, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -35,6 +35,9 @@ from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.prewarm import close_sandbox_prewarm, start_sandbox_prewarm
 from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
 from deerflow.utils.file_io import await_drained
+
+if TYPE_CHECKING:
+    from deerflow.skills.storage.skill_storage import SkillStorage
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         *,
         available_skills: set[str] | None = None,
         owns_agent_skill_projection: bool = True,
+        skill_storage: "SkillStorage | None" = None,
     ):
         """Initialize sandbox middleware.
 
@@ -83,11 +87,13 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 rebuild the thread's physical skill projection. Delegated
                 subagents share the lead thread sandbox and must preserve the
                 lead-owned view instead of applying their discovery policy to it.
+            skill_storage: Explicit catalog for the lead-owned thread projection.
         """
         super().__init__()
         self._lazy_init = lazy_init
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._owns_agent_skill_projection = owns_agent_skill_projection
+        self._skill_storage = skill_storage
 
     def _prepare_agent_skill_projection(self, thread_id: str, *, user_id: str):
         """Build the run's physical skill view before any sandbox is reused."""
@@ -103,12 +109,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         # Preserve the zero-copy shared view for ordinary threads. A thread
         # that previously used a restricted Agent keeps its stable mount root;
         # an unrestricted run repopulates that root with all enabled skills.
-        if self._available_skills is None and not get_paths().thread_skills_view_dir(thread_id, user_id=user_id).exists():
+        if self._skill_storage is None and self._available_skills is None and not get_paths().thread_skills_view_dir(thread_id, user_id=user_id).exists():
             return None
 
         provider = get_sandbox_provider()
         if not provider.supports_agent_skill_isolation:
-            if self._available_skills is not None:
+            if self._available_skills is not None or self._skill_storage is not None:
                 raise SandboxRuntimeError(f"Sandbox provider {provider.__class__.__name__} cannot enforce per-Agent skill filesystem isolation")
             # The thread projection may have been created under a different
             # provider. An unrestricted run does not need that policy view and
@@ -120,6 +126,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         from deerflow.skills.storage import get_or_new_user_skill_storage
 
         app_config = get_app_config()
+        if self._skill_storage is not None:
+            from deerflow.skills.storage.skill_storage import validate_injected_skill_storage
+
+            validate_injected_skill_storage(self._skill_storage, container_root=app_config.skills.container_path, user_id=user_id)
+            return ensure_thread_skill_projection(self._skill_storage, thread_id, self._available_skills, projection_user_id=user_id)
         storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
         return ensure_thread_skill_projection(storage, thread_id, self._available_skills)
 

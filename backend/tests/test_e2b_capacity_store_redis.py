@@ -11,7 +11,6 @@ import pytest
 
 from deerflow.community.e2b_sandbox.capacity import (
     CapacityBackendError,
-    RedisE2BCapacityStore,
     ReserveStatus,
     make_e2b_capacity_store,
 )
@@ -21,25 +20,28 @@ REDIS_URL = os.environ.get("DEER_FLOW_TEST_REDIS_URL", "redis://localhost:6379/1
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture
-def make_store():
+@pytest.fixture(params=["standalone", pytest.param("cluster", marks=pytest.mark.skipif(not os.getenv("TEST_REDIS_CLUSTER_URL"), reason="TEST_REDIS_CLUSTER_URL is unset"))])
+def make_store(request):
     redis = pytest.importorskip("redis")
-    probe = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=0.5)
-    try:
-        probe.ping()
-    except Exception:
-        probe.close()
-        pytest.skip(f"Redis not reachable at {REDIS_URL}")
+    mode = request.param
+    if mode == "cluster":
+        url = os.environ["TEST_REDIS_CLUSTER_URL"]
+        probe = redis.RedisCluster.from_url(url, decode_responses=True)
+    else:
+        url = REDIS_URL
+        probe = redis.Redis.from_url(url, decode_responses=True, socket_connect_timeout=0.5)
+        try:
+            probe.ping()
+        except Exception:
+            probe.close()
+            pytest.skip(f"Redis not reachable at {url}")
 
     prefix = f"deerflow:test:{uuid.uuid4().hex}"
+    config = SandboxOwnershipConfig(type="redis", redis_url=url, redis_mode=mode, key_prefix=prefix)
     stores = []
 
     def make(hard_limit: int = 1):
-        store = RedisE2BCapacityStore(
-            redis_url=REDIS_URL,
-            hard_limit=hard_limit,
-            key_prefix=prefix,
-        )
+        store = make_e2b_capacity_store(config, hard_limit=hard_limit)
         stores.append(store)
         return store
 
@@ -81,6 +83,23 @@ def test_factory_is_lazy_and_backend_errors_fail_closed() -> None:
             store.reserve("reservation")
     finally:
         store.close()
+
+
+def test_cluster_capacity_discovers_topology_at_startup_and_propagates_failure(monkeypatch):
+    from redis.cluster import NodesManager
+    from redis.exceptions import RedisClusterException
+
+    seeds = set()
+
+    def offline(manager):
+        seeds.update((node.host, node.port) for node in manager.startup_nodes.values())
+        raise RedisClusterException("no reachable seed")
+
+    monkeypatch.setattr(NodesManager, "initialize", offline)
+    config = SandboxOwnershipConfig(type="redis", redis_mode="cluster", redis_url="redis://seed:6379/0", redis_cluster_nodes=["second:6379"])
+    with pytest.raises(RedisClusterException, match="no reachable seed"):
+        make_e2b_capacity_store(config, hard_limit=1)
+    assert seeds == {("seed", 6379), ("second", 6379)}
 
 
 def test_two_gateways_atomically_share_one_hash(make_store) -> None:

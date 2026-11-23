@@ -56,7 +56,8 @@ Windows. The portable string assertions do not replace it.
 
 - **Environment.** `build_sandbox_env()` removes inherited credential variables.
   Values from `sandbox.environment` and per-request secrets are added after the
-  scrub. Route every new subprocess launch through it.
+  scrub. Route every new subprocess launch through it. Channel-managed
+  credentials belong to the integration that uses them.
 - **Network approval** needs a human. Runs with no interactive responder
   (scheduled, webhook, autonomous, subagent) deny automatically. Never show an
   approval card that nobody can answer.
@@ -69,8 +70,12 @@ Windows. The portable string assertions do not replace it.
 
 ## Tools
 
+- Agent shell commands require a separate execution provider. The local provider
+  serves workspace file operations.
 - Tool execution depends on operational arguments only. The `description`
   argument is a progress label and may be empty.
+- Preserve subprocess working directory handling for direct `LocalSandbox`
+  calls that use the `cmd.exe` fallback.
 - Local writes publish a new file revision atomically and keep symlink targets and
   file metadata. Check write access without truncating the file.
 - Line endings are data. Full reads return the stored endings, and `str_replace`

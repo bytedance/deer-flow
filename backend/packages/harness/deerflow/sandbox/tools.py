@@ -29,7 +29,6 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH, WRITE_ELISION_PLAC
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.command_scope import command_owner
-from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
     SandboxAuthorizationError,
     SandboxError,
@@ -62,7 +61,7 @@ from deerflow.sandbox.read_file_contract import (
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
-from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE
 from deerflow.tools.types import Runtime
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.host_paths import windows_incompatible_segment
@@ -1885,9 +1884,8 @@ def _is_expression_division_after_closer(command: str, start: int, spans: list[t
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
-    This validation is only a best-effort guard for the explicit
-    ``sandbox.allow_host_bash: true`` opt-in. It is not a secure sandbox
-    boundary and must not be treated as isolation from the host filesystem.
+    This compatibility helper checks literal paths in trusted local commands.
+    Agent shell commands are handled by a separate sandbox provider.
 
     In local mode, commands must use virtual paths under /mnt/user-data for
     user data access. Skills paths under /mnt/skills, ACP workspace paths
@@ -2048,22 +2046,6 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         result = pattern.sub(replace_user_data_match, result)
 
     return result
-
-
-def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
-    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
-
-    Args:
-        command: The bash command to execute.
-        thread_data: The thread data containing the workspace path.
-
-    Returns:
-        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
-        otherwise the original command unchanged.
-    """
-    if thread_data and (workspace := thread_data.get("workspace_path")):
-        return f"cd {shlex.quote(workspace)} && {command}"
-    return command
 
 
 def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
@@ -2454,9 +2436,12 @@ def _execute_bash_command(
     runtime: Runtime,
     env: dict[str, str] | None,
     timeout: float | None = None,
+    cwd: str | None = None,
 ) -> str:
     """Route subagent bash calls through their isolated shell-session scope."""
     with command_owner(sandbox, sandbox_lease_owner(runtime.context)):
+        if cwd is not None and isinstance(sandbox, LocalSandbox):
+            return sandbox.execute_command(command, env=env, timeout=timeout, cwd=cwd)
         scope_id = sandbox_command_scope(runtime.context)
         scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
         if scope_id is not None and callable(scoped_execute):
@@ -2777,10 +2762,6 @@ USER_ID_ENV = "DEERFLOW_USER_ID"
 _USER_ID_MAX_LEN = 256
 
 
-def _is_windows() -> bool:
-    return os.name == "nt"
-
-
 def _channel_identity_prefix(runtime: Runtime) -> str | None:
     """Build the command prefix that sets or clears the channel-user-id env var.
 
@@ -2851,8 +2832,7 @@ def _user_identity_prefix(runtime: Runtime) -> str:
     is a convenience for skill scripts — exactly like
     ``DEERFLOW_CHANNEL_USER_ID`` — not a credential and not proof of who is
     acting. Any bash command can overwrite its own environment, and anything the
-    command sources or launches (a dependency, a sourced rc file on the
-    host-bash path) can silently re-export a different id before a skill's
+    command sources or launches (such as a dependency or shell startup file) can silently re-export a different id before a skill's
     scoping logic reads it; only the outer prefix on the *next* ``bash_tool``
     call re-asserts the true value. Skills that need user-scoped *authorization*
     must resolve the identity server-side via ``resolve_runtime_user_id`` rather
@@ -2862,51 +2842,6 @@ def _user_identity_prefix(runtime: Runtime) -> str:
     if user_id is not None:
         return f"export {USER_ID_ENV}={shlex.quote(user_id)}; "
     return f"unset {USER_ID_ENV}; "
-
-
-def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
-    """Build a per-call env overlay carrying a GitHub App installation token.
-
-    The GitHub channel mints a short-lived installation token in the
-    ``ChannelManager`` (app layer) and threads it through ``run_context``
-    so it lands in ``runtime.context["github_token"]``. We expose it to
-    the agent's bash as both ``GH_TOKEN`` (what the ``gh`` CLI reads) and
-    ``GITHUB_TOKEN`` (the conventional name). Returning ``None`` when no
-    token is present keeps non-GitHub runs identical to before.
-
-    The value at ``runtime.context["github_token"]`` may be either:
-
-    * a ``str`` — the captured token, the simple shape used by tests and
-      by older code paths that don't need refresh; or
-    * a zero-arg sync callable returning ``str`` — a provider that re-mints
-      transparently when the underlying installation token's 1h TTL is
-      nearing expiry. The provider's cache logic lives app-side (see
-      ``app.gateway.github.app_auth.mint_installation_token`` for the
-      cache + leeway semantics); the harness just calls it.
-
-    The callable path is what lets long autonomous runs survive past the
-    60-minute installation-token life: every bash invocation re-asks the
-    provider, which returns the cached token until ~55 min, then mints a
-    fresh one. Without this, a coder agent doing a multi-hour refactor
-    would do most of the work and then 401 on the final ``git push``.
-
-    The token still crosses the harness/app boundary as opaque data — the
-    harness never imports the app-layer minting code, preserving the
-    dependency firewall enforced by ``tests/test_harness_boundary.py``.
-    """
-    context = runtime.context if runtime.context is not None else None
-    value = context.get("github_token") if context else None
-    if callable(value):
-        try:
-            token = value()
-        except Exception:
-            logger.warning("github_token provider raised; skipping env overlay", exc_info=True)
-            return None
-    else:
-        token = value
-    if not isinstance(token, str) or not token:
-        return None
-    return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
 
 
 _LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
@@ -2938,18 +2873,12 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | ToolMessage:
-    """Execute a bash command in the configured execution environment.
+    """Execute a bash command in the configured isolated sandbox.
 
 
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
-    - When running against the local host via host bash, inspect the current environment instead of
-      guessing. For OS detection, start with `uname -s`; on Darwin follow with `sw_vers`. On Linux,
-      start with `uname -a` and read host system files such as `/etc/os-release` only when the active
-      sandbox policy permits it.
-    - If local host bash rejects a path, do not repeat the rejected command. For environment questions,
-      retry with command-only probes; otherwise use allowed virtual paths or explain the restriction.
     - To start a long-lived process such as a web server, ALWAYS run it in the background with its
       output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
       the log file or poll the port. A long-lived process run in the foreground blocks the turn until
@@ -2962,69 +2891,16 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | To
     redaction_env = None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
-        # Request-scoped secrets resolved for the active skill (#3861), plus a
-        # short-lived GitHub App installation token threaded through by the
-        # GitHub channel. Both are injected as per-call env into the subprocess,
-        # never placed in the command string.
+        if isinstance(sandbox, LocalSandbox) or is_local_sandbox(runtime):
+            return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
+        # Only the active skill's explicitly resolved secrets belong here.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
         user_prefix = _user_identity_prefix(runtime)
-        github_env = _github_env_from_runtime(runtime)
-        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
-        if github_env:
-            injected_env = {**(injected_env or {}), **github_env}
+        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=True, sandbox=sandbox)
         if lark_cli_env:
             injected_env = {**(injected_env or {}), **lark_cli_env}
         redaction_env = injected_env
-        if is_local_sandbox(runtime):
-            # Match the credential-name policy used for inherited host env.
-            # Keep benign operator settings readable and redact effective
-            # credentials before execution, including any exception output.
-            redaction_env = {name: value for name, value in (getattr(sandbox, "environment", None) or {}).items() if is_blocked_env_name(name)}
-            redaction_env.update(injected_env or {})
-            if not is_host_bash_allowed():
-                return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
-            ensure_thread_directories_exist(runtime)
-            thread_data = get_thread_data(runtime)
-            validate_local_bash_command_paths(command, thread_data)
-            command = replace_virtual_paths_in_command(command, thread_data)
-            command = _apply_cwd_prefix(command, thread_data)
-            # POSIX-only: the Windows local sandbox may execute via
-            # PowerShell/cmd.exe where `export` is not valid syntax, so the id
-            # is published through the subprocess environment instead —
-            # LocalSandbox layers `env` into the per-process environment, and
-            # unlike AioSandbox it has no persistent shell session that could
-            # carry a stale value forward. Deliberately kept out of
-            # `injected_env`, which doubles as the secret-redaction set: an
-            # identifier is not a secret and must stay readable in output.
-            local_env = injected_env
-            if not _is_windows():
-                command = user_prefix + (identity_prefix or "") + command
-            else:
-                windows_user_id = _resolved_user_id(runtime)
-                if windows_user_id is not None:
-                    local_env = {**(injected_env or {}), USER_ID_ENV: windows_user_id}
-            try:
-                from deerflow.config.app_config import get_app_config
-
-                sandbox_cfg = get_app_config().sandbox
-                max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
-                command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
-            except Exception:
-                max_chars = 20000
-                command_timeout = None
-            output = _execute_bash_command(
-                sandbox,
-                command,
-                runtime=runtime,
-                env=local_env,
-                timeout=command_timeout,
-            )
-            content = _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
-                max_chars,
-            )
-            return _bash_command_result(runtime, output, content)
         ensure_thread_directories_exist(runtime)
         command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
         command = user_prefix + (identity_prefix or "") + command

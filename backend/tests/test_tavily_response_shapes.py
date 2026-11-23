@@ -268,3 +268,30 @@ async def test_fetch_valid_payload_keeps_existing_normalization(monkeypatch, cap
     assert result == "# Report title\n\nImportant findings."
     assert len(requests) == 1
     assert _error_logs(caplog) == []
+
+
+@pytest.mark.anyio
+async def test_fetch_refuses_private_target_before_delegation(monkeypatch, caplog):
+    from deerflow.community.tavily.tools import web_fetch_tool
+
+    marker = "private-fetch-marker"
+    caplog.set_level(logging.DEBUG, logger=_LOGGER_NAME)
+    output, requests = await _invoke(monkeypatch, web_fetch_tool, {"url": f"https://127.0.0.1/{marker}"}, {"results": []})
+
+    assert requests == []
+    assert output.startswith("Error:")
+    assert marker not in output and marker not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_fetch_delegates_public_target_unchanged_without_dns(monkeypatch):
+    from deerflow.community.tavily.tools import web_fetch_tool
+
+    lookup = MagicMock(side_effect=AssertionError("unexpected DNS lookup"))
+    monkeypatch.setattr("socket.getaddrinfo", lookup)
+    target = "https://docs.example/articles%2Freport?lang=en&a=1&a=2"
+    output, requests = await _invoke(monkeypatch, web_fetch_tool, {"url": target}, {"results": [{"title": "Report", "raw_content": "Body"}]})
+
+    assert output == "# Report\n\nBody"
+    assert [json.loads(req.content)["urls"] for req in requests] == [[target]]
+    lookup.assert_not_called()

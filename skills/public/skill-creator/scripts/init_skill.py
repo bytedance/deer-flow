@@ -11,9 +11,12 @@ Examples:
     init_skill.py custom-skill --path /custom/location
 """
 
+import re
 import sys
 from pathlib import Path
 
+
+MAX_SKILL_NAME_LENGTH = 40
 
 SKILL_TEMPLATE = """---
 name: {skill_name}
@@ -202,21 +205,32 @@ def init_skill(skill_name, path):
     Returns:
         Path to created skill directory, or None if error
     """
-    # Determine skill directory path
-    skill_dir = Path(path).resolve() / skill_name
-
-    # Check if directory already exists
-    if skill_dir.exists():
-        print(f"❌ Error: Skill directory already exists: {skill_dir}")
+    if (
+        not isinstance(skill_name, str)
+        or len(skill_name) > MAX_SKILL_NAME_LENGTH
+        or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", skill_name)
+    ):
+        print(
+            f"❌ Error: Skill name must be 1–{MAX_SKILL_NAME_LENGTH} characters long and contain "
+            "lowercase ASCII letters or digits separated by optional single hyphens.",
+            file=sys.stderr,
+        )
         return None
 
-    # Create skill directory
     try:
+        root = Path(path).resolve()
+        skill_dir = root / skill_name
+        if skill_dir.resolve().parent != root:
+            print("❌ Error: Skill directory must be a direct child of the requested path.", file=sys.stderr)
+            return None
         skill_dir.mkdir(parents=True, exist_ok=False)
-        print(f"✅ Created skill directory: {skill_dir}")
-    except Exception as e:
-        print(f"❌ Error creating directory: {e}")
+    except FileExistsError:
+        print(f"❌ Error: Skill directory already exists: {skill_dir}", file=sys.stderr)
         return None
+    except (OSError, RuntimeError) as e:
+        print(f"❌ Error creating directory: {e}", file=sys.stderr)
+        return None
+    print(f"✅ Created skill directory: {skill_dir}")
 
     # Create SKILL.md from template
     skill_title = title_case_skill_name(skill_name)
@@ -230,7 +244,7 @@ def init_skill(skill_name, path):
         skill_md_path.write_text(skill_content, encoding="utf-8")
         print("✅ Created SKILL.md")
     except Exception as e:
-        print(f"❌ Error creating SKILL.md: {e}")
+        print(f"❌ Error creating SKILL.md: {e}", file=sys.stderr)
         return None
 
     # Create resource directories with example files
@@ -257,7 +271,7 @@ def init_skill(skill_name, path):
         example_asset.write_text(EXAMPLE_ASSET, encoding="utf-8")
         print("✅ Created assets/example_asset.txt")
     except Exception as e:
-        print(f"❌ Error creating resource directories: {e}")
+        print(f"❌ Error creating resource directories: {e}", file=sys.stderr)
         return None
 
     # Print next steps
@@ -272,11 +286,12 @@ def init_skill(skill_name, path):
 
 def main():
     if len(sys.argv) < 4 or sys.argv[2] != '--path':
+        print("❌ Error: Expected a skill name and --path <path>.", file=sys.stderr)
         print("Usage: init_skill.py <skill-name> --path <path>")
         print("\nSkill name requirements:")
         print("  - Hyphen-case identifier (e.g., 'data-analyzer')")
         print("  - Lowercase letters, digits, and hyphens only")
-        print("  - Max 40 characters")
+        print(f"  - Max {MAX_SKILL_NAME_LENGTH} characters")
         print("  - Must match directory name exactly")
         print("\nExamples:")
         print("  init_skill.py my-new-skill --path skills/public")

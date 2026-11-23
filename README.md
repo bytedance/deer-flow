@@ -88,6 +88,7 @@ Open http://localhost:2026.
 
 - All configuration options, providers and manual setup: [Configuration](docs/guide/configuration.md)
 - Docker details, sizing, upgrades, startup modes and production deployment: [Running the Application](docs/guide/deployment.md)
+- Upgrading a custom Redis checkpoint cache prefix: [Redis checkpoint history cache upgrade](docs/guide/deployment.md#redis-checkpoint-history-cache-upgrade)
 - Running on a server or exposing it beyond localhost: read the [Security Notice](docs/guide/security.md) first
 
 ## From Deep Research to Super Agent Harness
@@ -111,11 +112,12 @@ Each guide is the full reference for its topic. Open the one you need.
 | Models, providers, `config.yaml`, environment variables | [Configuration](docs/guide/configuration.md) |
 | DeepSeek web search, thinking mode and citation excerpts | [DeepSeek Web Search](backend/docs/CONFIGURATION.md#deepseek-web-search) |
 | Docker, local development, upgrades, production deployment | [Running the Application](docs/guide/deployment.md) |
-| Sandbox modes, file system, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
+| Workspace file tools, isolated shell providers, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
 | boxd machines, bounded output copies and cleanup retries | [boxd sandbox provider](backend/packages/harness/deerflow/community/boxd_sandbox/README.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
 | Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
+| Agent teams, SQLite/PostgreSQL persistence and shutdown behavior | [Agent teams extension](examples/deerflow-extension-agent-teams/README.md) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
 | Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |
@@ -123,6 +125,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Projects, instructions, document shelf | [Projects](docs/guide/projects.md) |
 | Scheduled tasks | [Scheduled Tasks](docs/guide/scheduled-tasks.md) |
 | Feishu, Slack, Telegram, Discord, DingTalk and other IM channels | [IM Channels](docs/guide/im-channels.md) |
+| GitHub webhooks and tool setup | [GitHub Event-Driven Agents](backend/docs/GITHUB_AGENTS.md) |
 | File attachments, downloads and Office previews | [File Previews](docs/guide/file-previews.md) |
 | Token usage dashboard, workspace, chat archive | [Workspace UI](docs/guide/workspace.md) |
 | Terminal workbench | [Terminal Workbench (TUI)](docs/guide/tui.md) |

@@ -6,6 +6,7 @@ import stat
 import threading
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,7 @@ from deerflow.skills.installer import (
 from deerflow.skills.security_scanner import ScanResult
 from deerflow.skills.security_static_scanner import StaticScannerError
 from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
 # ---------------------------------------------------------------------------
 # is_unsafe_zip_member
@@ -373,6 +375,13 @@ class TestSafeExtract:
 # ---------------------------------------------------------------------------
 
 
+def _make_storage(skills_root: Path, *, skill_scan_enabled: bool) -> LocalSkillStorage:
+    return LocalSkillStorage(
+        host_path=str(skills_root),
+        app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=skill_scan_enabled)),
+    )
+
+
 class TestEntryCountCapAppliesRegardlessOfSkillScan:
     @pytest.fixture(autouse=True)
     def _allow_security_scan(self, monkeypatch):
@@ -380,16 +389,6 @@ class TestEntryCountCapAppliesRegardlessOfSkillScan:
             return ScanResult(decision="allow", reason="ok")
 
         monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
-
-    def _make_storage(self, skills_root: Path, *, skill_scan_enabled: bool):
-        from types import SimpleNamespace
-
-        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-
-        return LocalSkillStorage(
-            host_path=str(skills_root),
-            app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=skill_scan_enabled)),
-        )
 
     def _make_many_entry_zip(self, tmp_path: Path, *, entry_count: int, skill_name: str = "test-skill") -> Path:
         """A real archive with ``entry_count`` tiny members and a small total size —
@@ -408,7 +407,7 @@ class TestEntryCountCapAppliesRegardlessOfSkillScan:
         zip_path = self._make_many_entry_zip(tmp_path, entry_count=50_000)
         skills_root = tmp_path / "skills"
         skills_root.mkdir()
-        storage = self._make_storage(skills_root, skill_scan_enabled=False)
+        storage = _make_storage(skills_root, skill_scan_enabled=False)
 
         with pytest.raises(ValueError, match="too many entries"):
             storage.install_skill_from_archive(zip_path)
@@ -432,7 +431,7 @@ class TestEntryCountCapAppliesRegardlessOfSkillScan:
         zip_path = self._make_many_entry_zip(tmp_path, entry_count=5, skill_name="small-skill")
         skills_root = tmp_path / "skills"
         skills_root.mkdir()
-        storage = self._make_storage(skills_root, skill_scan_enabled=False)
+        storage = _make_storage(skills_root, skill_scan_enabled=False)
 
         result = storage.install_skill_from_archive(zip_path)
 
@@ -576,8 +575,7 @@ class TestInstallSkillFromArchive:
             zf.writestr("test-skill/templates/prompt.txt", "Use care.\n")
             zf.writestr("test-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
             zf.writestr("test-skill/assets/logo.png", b"\x89PNG\r\n\x1a\n")
-            zf.writestr("test-skill/references/.env", "TOKEN=secret\n")
-            zf.writestr("test-skill/templates/config.cfg", "TOKEN=secret\n")
+            zf.writestr("test-skill/templates/config.cfg", "format = plain\n")
         skills_root = tmp_path / "skills"
         skills_root.mkdir()
         calls = []
@@ -607,12 +605,38 @@ class TestInstallSkillFromArchive:
                 "location": "test-skill/scripts/run.sh",
             },
             {
+                "content": "format = plain\n",
+                "executable": True,
+                "location": "test-skill/templates/config.cfg",
+            },
+            {
                 "content": "Use care.\n",
                 "executable": False,
                 "location": "test-skill/templates/prompt.txt",
             },
         ]
-        assert all("secret" not in call["content"] for call in calls)
+
+    @pytest.mark.parametrize("static_enabled", [True, False])
+    @pytest.mark.parametrize(("rel_path", "value"), [("references/.env", "MODE=demo\n"), ("templates/config.cfg", "TOKEN=secret\n")])
+    def test_sensitive_additional_files_stay_local(self, tmp_path, monkeypatch, rel_path, value, static_enabled):
+        zip_path = self._make_skill_zip(tmp_path)
+        with zipfile.ZipFile(zip_path, "a") as zf:
+            zf.writestr(f"test-skill/{rel_path}", value)
+        calls = []
+
+        async def _scan(content, **kwargs):
+            calls.append(content)
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+        skills_root = tmp_path / "skills"
+        storage = _make_storage(skills_root, skill_scan_enabled=static_enabled)
+        with pytest.raises(SkillSecurityScanError, match="sensitive configuration") as error:
+            storage.install_skill_from_archive(zip_path)
+
+        assert value not in str(error.value)
+        assert value not in calls
+        assert not (skills_root / "custom" / "test-skill").exists()
 
     def test_scans_code_files_anywhere_in_tree(self, tmp_path, monkeypatch):
         zip_path = tmp_path / "test-skill.skill"
@@ -640,7 +664,81 @@ class TestInstallSkillFromArchive:
         assert {"executable": True, "location": "test-skill/bin/tool"} in calls
         scanned_locations = {call["location"] for call in calls}
         assert "test-skill/assets/logo.png" not in scanned_locations
-        assert "test-skill/assets/data.txt" not in scanned_locations
+        assert {"executable": True, "location": "test-skill/assets/data.txt"} in calls
+
+    @pytest.mark.parametrize("rel_path", ["data/helper.dat", "assets/helper"])
+    @pytest.mark.parametrize("static_enabled", [True, False])
+    def test_review_of_unmarked_text_can_stop_install(self, tmp_path, monkeypatch, rel_path, static_enabled):
+        zip_path = self._make_skill_zip(tmp_path)
+        marker = "print('review marker')\n"
+        with zipfile.ZipFile(zip_path, "a") as zf:
+            zf.writestr(f"test-skill/{rel_path}", marker)
+
+        reviewed = []
+
+        async def _scan(content, *, location, executable, **kwargs):
+            reviewed.append((location, content, executable))
+            return ScanResult(decision="warn" if content == marker else "allow", reason="fixture decision")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+        skills_root = tmp_path / "skills"
+        storage = _make_storage(skills_root, skill_scan_enabled=static_enabled)
+        with pytest.raises(SkillSecurityScanError, match="fixture decision"):
+            storage.install_skill_from_archive(zip_path)
+
+        assert (f"test-skill/{rel_path}", marker, True) in reviewed
+        assert not (skills_root / "custom" / "test-skill").exists()
+
+    @pytest.mark.parametrize(
+        ("limit", "cap", "contents"),
+        [("MAX_MODEL_FILE_BYTES", 3, ["abcd"]), ("MAX_MODEL_BYTES", 3, ["ab", "cd"]), ("MAX_MODEL_FILES", 1, ["a", "b"])],
+    )
+    def test_additional_text_over_review_limits_prevents_model_calls_and_install(self, tmp_path, monkeypatch, limit, cap, contents):
+        import deerflow.skills.installer as installer
+
+        monkeypatch.setattr(installer, limit, cap)
+        reviewed = []
+
+        async def _scan(content, *, location, **kwargs):
+            reviewed.append(location)
+            return ScanResult(decision="allow", reason="fixture decision")
+
+        monkeypatch.setattr(installer, "scan_skill_content", _scan)
+        zip_path = self._make_skill_zip(tmp_path)
+        with zipfile.ZipFile(zip_path, "a") as zf:
+            zf.writestr("test-skill/a.py", "print('ready')\n")
+            for index, content in enumerate(contents):
+                zf.writestr(f"test-skill/data/{index}.dat", content)
+        skills_root = tmp_path / "skills"
+        with pytest.raises(SkillSecurityScanError, match="additional text"):
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+        assert reviewed == []
+        assert not (skills_root / "custom" / "test-skill").exists()
+
+    @pytest.mark.parametrize("ending", [b"\x00", b"\xff", b"\xc3"], ids=["nul", "invalid-utf8", "truncated-utf8"])
+    def test_binary_asset_with_text_prefix_does_not_consume_text_budget(self, tmp_path, monkeypatch, ending):
+        import deerflow.skills.installer as installer
+
+        monkeypatch.setattr(installer, "MAX_MODEL_FILE_BYTES", 2)
+        monkeypatch.setattr(installer, "MAX_MODEL_BYTES", 2)
+        monkeypatch.setattr(installer, "MAX_MODEL_FILES", 1)
+        zip_path = self._make_skill_zip(tmp_path)
+        with zipfile.ZipFile(zip_path, "a") as zf:
+            zf.writestr("test-skill/data/asset", b"asset" + b" " * 65536 + ending)
+            zf.writestr("test-skill/data/letter", "é")
+        reviewed = []
+
+        async def _scan(content, *, location, **kwargs):
+            reviewed.append((location, content))
+            return ScanResult(decision="allow", reason="fixture decision")
+
+        monkeypatch.setattr(installer, "scan_skill_content", _scan)
+        skills_root = tmp_path / "skills"
+        get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+        assert reviewed[1:] == [("test-skill/data/letter", "é")]
+        assert (skills_root / "custom/test-skill/data/asset").is_file()
 
     def test_shebang_sniff_only_reads_extensionless_files(self, tmp_path, monkeypatch):
         """Suffix/scripts classification is name-based; only extensionless files are opened."""
