@@ -1063,6 +1063,11 @@ Authentication, payment/credit and other statuses remain terminal even with hint
 error-body prose never enables retries. Empty successful responses, read/write
 timeouts and arbitrary exceptions are not retried.
 
+When Jina returns a terminal HTTP error, `web_fetch` passes its status code to
+the harness for error classification. On HTTP 401, the tool result points to
+`JINA_API_KEY` and advises the agent to use another available source or report
+the fetch limitation.
+
 `Retry-After` accepts non-negative ASCII integer seconds or an HTTP-date
 (including obsolete HTTP date forms); past dates mean a zero server floor.
 Signed/fractional delays and non-HTTP dates are invalid. Local backoff ceilings
@@ -1169,10 +1174,11 @@ Enabled fetches stream and count actual content-decoded bytes (after decompressi
 before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
 The first chunk exceeding it stops consumption and closes the response, returning
 an explicit size `Error:` without body content, partial success or readability
-extraction. This applies to all statuses, including 502/503/504, and oversize never
-retries. Each retry response has its own counter within the existing shared time
-budget. Streams close on success, errors, cancellation and read failures. Responses
-within the limit retain charset decoding and existing status/retry handling.
+extraction. The tool result retains the received HTTP status. Oversize responses
+are terminal for all statuses, including 502/503/504. Each retry response has its
+own counter within the existing shared time budget. Streams close on success,
+errors, cancellation and read failures. Responses within the limit retain charset
+decoding and existing status/retry handling.
 
 This limits response retention/consumption, not wire-byte bandwidth or allocations
 inside HTTPX's decompressor; it is not a hard process-memory bound. The final

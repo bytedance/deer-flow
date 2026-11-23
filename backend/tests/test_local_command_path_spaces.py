@@ -3,6 +3,7 @@
 import os
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -200,3 +201,40 @@ def test_local_sandbox_preserves_thread_path_argument(powershell, tmp_path, quot
     assert "needle" in result
     assert "Exit Code:" not in result
     assert not result.startswith("Error:"), result
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows cmd.exe execution")
+def test_local_cmd_honors_an_explicit_working_directory(tmp_path, monkeypatch):
+    shell = shutil.which("cmd.exe")
+    assert shell is not None
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: shell))
+    workspace = tmp_path / "workspace with spaces"
+    workspace.mkdir()
+    (workspace / "marker file.txt").write_text("workspace-marker", encoding="utf-8")
+    sandbox = LocalSandbox("local")
+
+    command = 'type "marker file.txt"'
+    assert sandbox.execute_command(command, cwd=str(workspace)).strip() == "workspace-marker"
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "marker file.txt").write_text("inherited-directory-marker", encoding="utf-8")
+    workspace.rename(tmp_path / "renamed workspace")
+    with pytest.raises(OSError):
+        sandbox.execute_command(command, cwd=str(workspace))
+
+
+def test_local_cmd_passes_explicit_working_directory_to_process_launch(tmp_path, monkeypatch):
+    from deerflow.sandbox.local import local_sandbox
+
+    workspace = tmp_path / "workspace with spaces"
+    monkeypatch.setattr(local_sandbox, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "cmd.exe"))
+    calls = []
+
+    def run(args, timeout, env, **kwargs):
+        calls.append((args, kwargs.get("cwd")))
+        return "workspace-marker", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(run))
+    assert LocalSandbox("local").execute_command('type "marker file.txt"', cwd=str(workspace)) == "workspace-marker"
+    assert calls == [('cmd.exe /d /s /c "type "marker file.txt""', str(workspace))]

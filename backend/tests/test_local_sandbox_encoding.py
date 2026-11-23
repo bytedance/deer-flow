@@ -675,7 +675,7 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
             [r"C:\Windows\System32\cmd.exe", "/c", "echo hello"],
             600,
             {"PATH": r"C:\Windows"},
-            {"encoding": "cp850"},
+            {"encoding": "cp850", "cwd": None},
         )
     ]
 
@@ -739,7 +739,7 @@ def test_execute_command_cmd_rechecks_console_page_between_commands(monkeypatch)
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "cmd.exe"))
     payloads = iter(["café".encode("cp437"), "你好".encode()])
 
-    def fake_run(args, timeout, env, **kwargs):
+    def fake_run(args, timeout, env, *, cwd=None, **kwargs):
         capture = _BoundedPipeCapture(**kwargs)
         capture.append(next(payloads))
         return capture.read(), "", 0, False

@@ -77,6 +77,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.context_keys import MCP_BROWSER_USER_CONTEXT_KEY
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability
+from deerflow.skills.storage.skill_storage import SkillStorage, validate_injected_skill_storage
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.tracing import build_tracing_callbacks
@@ -493,6 +494,7 @@ def build_middlewares(
     memory_enabled: bool = True,
     owns_agent_skill_projection: bool = True,
     app_config: AppConfig | None = None,
+    skill_storage: SkillStorage | None = None,
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
@@ -519,6 +521,10 @@ def build_middlewares(
             thread's physical skill projection. Prompt-only bootstrap agents do
             not; their narrow skill set must not replace the thread view.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
+        skill_storage: Optional storage instance for skill resolution. It is
+            shared by slash activation, skill-read canonicalization and the
+            lead-owned sandbox projection. Its container root must match
+            ``app_config.skills.container_path``.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
         mcp_routing_middleware: Compatibility middleware for advisory MCP
@@ -559,9 +565,12 @@ def build_middlewares(
         # skill-file-load stamp on the same skill:activate decision the
         # activation middleware enforces for slash commands).
         runtime_middleware_kwargs["skill_authorization"] = skill_authorization
+    if skill_storage is not None:
+        validate_injected_skill_storage(skill_storage, container_root=resolved_app_config.skills.container_path, user_id=user_id)
+        runtime_middleware_kwargs["skill_storage"] = skill_storage
     if user_id is not None:
-        # ToolErrorHandlingMiddleware canonicalizes skill-read paths through
-        # the same user-scoped registry the activation/policy middlewares use.
+        # User-scoped fallback for hosts that do not inject a request-scoped
+        # storage instance.
         runtime_middleware_kwargs["user_id"] = user_id
     if authorization_provider is not None and deferred_setup is not None:
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
@@ -592,6 +601,7 @@ def build_middlewares(
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
             skill_authorization=skill_authorization,
+            skill_storage=skill_storage,
         )
     )
 
@@ -853,11 +863,17 @@ def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_c
     middlewares.insert(index, ToolApprovalMiddleware(hitl_config, app_config=app_config, supports_resume=supports_resume, model_name=model_name))
 
 
-def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
+def _load_enabled_available_skills(
+    available_skills: set[str] | None,
+    *,
+    app_config: AppConfig,
+    user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
+) -> list[Skill]:
     try:
         from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-        skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+        skills = get_enabled_skills_for_config(app_config, user_id=user_id, skill_storage=skill_storage)
     except Exception:
         logger.exception("Failed to load enabled skills")
         raise
@@ -876,6 +892,7 @@ def assemble_lead_agent(
     config: RunnableConfig,
     *,
     app_config: AppConfig | None = None,
+    skill_storage: SkillStorage | None = None,
 ) -> LeadAgentAssembly:
     """Return the compiled lead graph together with its assembly descriptor.
 
@@ -883,6 +900,11 @@ def assemble_lead_agent(
     built from does not have to be recovered from LangGraph private runtime
     keys or mutable graph attributes. ``make_lead_agent`` remains the
     graph-only LangGraph Server ABI declared in ``langgraph.json``.
+
+    ``skill_storage`` lets an embedding host supply request-scoped skill
+    storage for skill discovery, activation, skill reads and the lead-owned
+    sandbox projection. Use the configured sandbox skills mount as the storage's
+    container root. The sandbox provider must support thread skill projections.
     """
     runtime_config = _get_runtime_config(config)
     runtime_app_config = app_config or runtime_config.get("app_config")
@@ -910,7 +932,7 @@ def assemble_lead_agent(
     # configurable key must not recompile the channel table either).
     freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
     inject_checkpoint_mode(config, mode)
-    return _assemble_lead_agent(config, app_config=runtime_app_config)
+    return _assemble_lead_agent(config, app_config=runtime_app_config, skill_storage=skill_storage)
 
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
@@ -989,7 +1011,12 @@ def _complete_assembly(
     return LeadAgentAssembly(graph=graph, descriptor=descriptor, effective_model=effective_model)
 
 
-def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> LeadAgentAssembly:
+def _assemble_lead_agent(
+    config: RunnableConfig,
+    *,
+    app_config: AppConfig,
+    skill_storage: SkillStorage | None = None,
+) -> LeadAgentAssembly:
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
@@ -1009,6 +1036,8 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     from deerflow.runtime.user_context import resolve_config_user_id
 
     resolved_user_id = resolve_config_user_id(config)
+    if skill_storage is not None:
+        validate_injected_skill_storage(skill_storage, container_root=resolved_app_config.skills.container_path, user_id=resolved_user_id)
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -1075,7 +1104,14 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         try:
             from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-            candidate_skill_names = [s.name for s in get_enabled_skills_for_config(resolved_app_config, user_id=resolved_user_id)]
+            candidate_skill_names = [
+                s.name
+                for s in get_enabled_skills_for_config(
+                    resolved_app_config,
+                    user_id=resolved_user_id,
+                    skill_storage=skill_storage,
+                )
+            ]
         except Exception:
             logger.warning("Failed to pre-load enabled skills for authorization candidates", exc_info=True)
             # Leave None: the filter resolves candidates itself and applies
@@ -1189,7 +1225,12 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
+    enabled_skills = _load_enabled_available_skills(
+        available_skills,
+        app_config=resolved_app_config,
+        user_id=resolved_user_id,
+        skill_storage=skill_storage,
+    )
 
     # Build skill search setup (deferred skill discovery).
     # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
@@ -1273,6 +1314,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             # the full-metadata rendering advertise a policy-denied skill.
             available_skills=available_skills,
             app_config=resolved_app_config,
+            skill_storage=skill_storage,
             deferred_names=setup.deferred_names,
             user_id=resolved_user_id,
             # Preserve the (possibly empty) index when deferred discovery is
@@ -1414,6 +1456,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         available_skills=available_skills,
         memory_enabled=memory_enabled,
         app_config=resolved_app_config,
+        skill_storage=skill_storage,
         deferred_setup=setup,
         mcp_routing_middleware=mcp_routing_middleware,
         user_id=resolved_user_id,
@@ -1437,6 +1480,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         agent_soul=agent_authority.soul if pinned_agent else None,
         available_skills=available_skills,
         app_config=resolved_app_config,
+        skill_storage=skill_storage,
         deferred_names=setup.deferred_names,
         mcp_routing_hints_section=mcp_routing_hints_section,
         user_id=resolved_user_id,
