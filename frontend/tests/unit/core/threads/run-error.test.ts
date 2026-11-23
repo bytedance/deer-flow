@@ -1,6 +1,9 @@
 import { expect, it } from "@rstest/core";
 
-import { runErrorThreadId, withRunErrorTagging } from "@/core/threads/run-error";
+import {
+  runErrorThreadId,
+  withRunErrorTagging,
+} from "@/core/threads/run-error";
 
 it("tags the refusal a run stream throws with the thread it was sent to", async () => {
   const refusal = new Error("HTTP 422");

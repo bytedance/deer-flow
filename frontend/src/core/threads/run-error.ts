@@ -26,7 +26,9 @@ export function runErrorThreadId(error: unknown): string | undefined {
  * `RunsClient.stream` is an overloaded async generator whose first argument is
  * the thread, so the wrapper reads it loosely and hands the call straight back.
  */
-type LooseRunStream = (...args: unknown[]) => AsyncGenerator<unknown, void, unknown>;
+type LooseRunStream = (
+  ...args: unknown[]
+) => AsyncGenerator<unknown, void, unknown>;
 type RunClient = { runs: { stream: unknown } };
 
 /**

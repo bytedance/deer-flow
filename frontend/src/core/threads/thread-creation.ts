@@ -58,11 +58,17 @@ type CreateClient = { threads: ThreadCreator };
  * attempt whose creation was cancelled leaves a stale head that steals the
  * next attempt's id.
  */
-export function withThreadCreationTagging<T extends CreateClient>(client: T): T {
+export function withThreadCreationTagging<T extends CreateClient>(
+  client: T,
+): T {
   const threads = client.threads as ThreadCreator | undefined;
   // Test doubles and non-SDK clients may not expose a thread reader; leave them
   // untouched so `onThreadId` falls back to submission order.
-  if (!threads || typeof threads.create !== "function" || taggedClients.has(client)) {
+  if (
+    !threads ||
+    typeof threads.create !== "function" ||
+    taggedClients.has(client)
+  ) {
     return client;
   }
   const create = threads.create.bind(threads);
