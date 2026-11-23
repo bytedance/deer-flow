@@ -7,6 +7,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+Local bash tool status follows the process exit code, including timeout failures.
+Successful commands may print `Error:` or JSON containing an `error` field without
+being marked as failed. Output is still subject to the configured redaction and
+size limits; those transformations do not change the execution status.
+
 The optional [Tenki provider](../../backend/packages/harness/deerflow/community/tenki/README.md)
 retains failed termination handles for retry and rejects late acquisitions after
 reset or shutdown. If shutdown reports outstanding work, retry after its SDK
@@ -20,6 +25,12 @@ filtering and read-only mounts still apply. Configured category mounts such as
 `build` or `logs` remain searchable; ignore rules apply inside each mount. A broken
 category mount stops the root search, and the Gateway warning log identifies its
 virtual path.
+
+Explicit `glob` patterns and `grep` file filters can name data directories such
+as `logs/*.txt`, `**/logs/*.txt` or `.cache/*.txt`, even outside the user-data
+mounts. Generic searches keep ignoring those directories outside user data.
+Repository metadata, dependency directories and in-flight `.upload-*.part`
+files remain filtered.
 
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
@@ -83,6 +94,18 @@ same-size content edits are still copied on release.
 Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
+
+OpenSandbox also uploads enabled skills to `skills.container_path`. An explicit
+Agent skill list replaces the managed skill directories before tools run; an
+empty list exposes no skills there. Switching Agents in the same thread
+refreshes the managed view. It does not delete files already copied to the
+workspace.
+
+The optional [boxd provider](../../backend/packages/harness/deerflow/community/boxd_sandbox/README.md)
+runs each user/thread scope in an isolated boxd machine. A new machine receives
+the thread's files and skills before it is handed out, and release copies
+generated outputs back to thread storage with the same alias and path checks.
+See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
 
 The [sandbox benchmark](../../backend/scripts/benchmark/sandbox/README.md#opensandbox)
 also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,
@@ -428,6 +451,10 @@ continue to accept URL-encoded paths.
 The `write_file` guidance reflects the active model's output token limit, including custom-agent and thinking-mode overrides. For longer documents, the agent is guided to write sections with `append=True`; models without a known limit receive no numeric budget hint.
 
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. If local command startup fails after spawning a child, DeerFlow attempts to kill and reap that child before propagating the startup error. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
+
+On Windows, relative paths in local commands start in the thread workspace.
+PowerShell supports spaces and typographic apostrophes in the workspace path.
+The `cmd.exe` fallback supports workspace paths on a local or mapped drive.
 
 Docker AIO sandboxes default to their existing open egress behavior for
 compatibility. Operators can set `sandbox.network.mode` to `isolated` or

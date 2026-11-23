@@ -50,6 +50,22 @@ changing its configuration. Other memory backends do not consume these
 DeerMem-specific fields. Existing external memory templates remain the mechanism
 for complete template replacement; this feature adds no editing endpoint or UI.
 
+## DeepSeek cache accounting
+
+Models configured with `langchain_deepseek:ChatDeepSeek` or
+`deerflow.models.patched_deepseek:PatchedChatDeepSeek` retain DeepSeek's native
+`usage.prompt_cache_hit_tokens` as `input_token_details.cache_read` when the
+standard `prompt_tokens_details.cached_tokens` field is absent or null. An
+explicit standard count, including zero, takes precedence. Invalid native
+counts are ignored; they do not fail an otherwise successful response.
+
+This applies to synchronous, asynchronous and streaming calls. The existing
+lead-agent journal and subagent usage handoff retain that count for per-model
+cache-aware cost estimates. Cached tokens are a subset of input tokens, so
+normalization never adds them or `prompt_cache_miss_tokens` to the input total.
+Responses that already supply the standard field are unchanged. These are
+provider-reported usage estimates, not a measurement of money saved by DeerFlow.
+
 ## Model request admission
 
 For request-per-minute limits, opt into pacing on each relevant `models[]`
@@ -81,6 +97,15 @@ lead agents, subagents and auxiliary models using the standard LangChain
 BaseChatModel invoke/stream hooks. Restart the Gateway after changing,
 disabling or regrouping active policies; conflicting settings fail model
 construction instead of resetting a live budget.
+
+When Agent middleware receives HTTP 429 with a valid `Retry-After` (seconds or
+HTTP date) or `retry-after-ms` of up to 24 hours, new requests in that admission
+group also wait for the provider's cooldown, even if the failed call has no
+retries left. A shorter subsequent hint cannot shorten the pause. Already
+dispatched calls and independent groups are unaffected. Queue bounds, FIFO,
+cancellation and `max_wait_seconds` still apply, so a waiting call can time out
+before the cooldown ends. Missing or invalid hints and other statuses do not
+pause peers. Calls outside Agent middleware do not publish cooldown feedback.
 
 When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
 would bypass the admission hook. Claude and Codex also set their provider-internal
@@ -996,6 +1021,17 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+#### Hosted reader URLs
+
+GroundRoute, InfoQuest, Jina, Sofya, SpecStream, Tavily, Unbrowse and the
+official Exa API accept absolute HTTP(S) URLs for `web_fetch`. The tool checks
+the URL locally before contacting the reader.
+Malformed URLs, embedded user credentials, local hostnames such as `localhost`,
+known metadata hosts and non-public IP literals return a tool error.
+The reader receives an accepted URL exactly as supplied, including encoded paths
+and repeated query parameters such as `tag[]=api&tag[]=guides`. The reader
+resolves the hostname in its own network.
+
 #### Jina fetch retries
 
 Jina's `web_fetch` keeps one attempt by default. Configure retries on its existing
@@ -1026,6 +1062,11 @@ uses the same hints, falling back to local backoff when they are absent or inval
 Authentication, payment/credit and other statuses remain terminal even with hints;
 error-body prose never enables retries. Empty successful responses, read/write
 timeouts and arbitrary exceptions are not retried.
+
+When Jina returns a terminal HTTP error, `web_fetch` passes its status code to
+the harness for error classification. On HTTP 401, the tool result points to
+`JINA_API_KEY` and advises the agent to use another available source or report
+the fetch limitation.
 
 `Retry-After` accepts non-negative ASCII integer seconds or an HTTP-date
 (including obsolete HTTP date forms); past dates mean a zero server floor.
@@ -1133,10 +1174,11 @@ Enabled fetches stream and count actual content-decoded bytes (after decompressi
 before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
 The first chunk exceeding it stops consumption and closes the response, returning
 an explicit size `Error:` without body content, partial success or readability
-extraction. This applies to all statuses, including 502/503/504, and oversize never
-retries. Each retry response has its own counter within the existing shared time
-budget. Streams close on success, errors, cancellation and read failures. Responses
-within the limit retain charset decoding and existing status/retry handling.
+extraction. The tool result retains the received HTTP status. Oversize responses
+are terminal for all statuses, including 502/503/504. Each retry response has its
+own counter within the existing shared time budget. Streams close on success,
+errors, cancellation and read failures. Responses within the limit retain charset
+decoding and existing status/retry handling.
 
 This limits response retention/consumption, not wire-byte bandwidth or allocations
 inside HTTPX's decompressor; it is not a hard process-memory bound. The final
@@ -1315,9 +1357,83 @@ operator handling has not been verified here. Upstream operators are best-effort
 offline mocked tests verify request composition and local filtering, not provider
 retrieval behavior. No paid API calls are needed for the regression suite.
 
+#### DeepSeek Web Search
+
+DeepSeek's `web_search` provider calls the official Chat Completions endpoint
+with the server-side `deepseek_web_search` tool. Set `DEEPSEEK_API_KEY` in the
+Gateway environment and replace the active search provider in `config.yaml`:
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.deepseek.tools:web_search_tool
+    api_key: $DEEPSEEK_API_KEY
+    model: deepseek-flash
+    thinking: false
+    max_results: 5
+    timeout_seconds: 180
+    max_tokens: 8192
+```
+
+Set `thinking: true` to enable DeepSeek's multi-step thinking search. This
+controls the model inside the search tool independently of the main DeerFlow
+model. Boolean strings such as `"false"` are accepted for environment-variable
+configuration. The default model is `deepseek-flash`; use a model that supports
+DeepSeek's server-side web tools. See the official
+[web tools documentation](https://api-docs.deepseek.com/zh-cn/guides/web_tools/).
+
+The tool accepts `query` and `max_results` and returns JSON with `query`,
+`total_results`, `results` (`title`, `url`, `snippet`), `answer`, and `truncated`.
+Source URLs use the shared public-URL policy and are deduplicated. Sources cited
+by the generated answer take priority, with search snippets preserved when
+available. When retained sources have valid citation ranges, each result also
+has a response-local `source_id`, and a top-level `citations` list pairs each
+`excerpt` with its supporting `source_ids`. Resolve those IDs to the returned
+source titles and URLs when citing a claim. For example:
+
+```json
+{"excerpt": "A claim supported by two pages.", "source_ids": [1, 2]}
+```
+
+Each distinct original range is represented once, in answer order, even when
+several sources cite it. Identical text at different ranges remains separate.
+Excerpts stay paired with their sources through tool-result sanitization and
+optional PII redaction. If either boundary falls inside a redacted value, the
+excerpt includes the whole placeholder. Responses without valid retained ranges
+omit `citations` and `source_id`, keeping their usual fields. Long answers or
+distinct long overlapping excerpts still use the normal tool-output budget and
+externalization policy. `max_results` defaults to 5 and is capped at 50.
+A configured value takes precedence over the tool argument. It limits returned
+source links, while DeepSeek controls how many searches it executes and what
+answer it generates.
+
+`timeout_seconds` bounds the request, including server-side search and reasoning.
+`max_tokens` bounds generated output, including thinking. Both accept positive
+numeric values or environment-variable strings. Boolean limits are rejected.
+The API key can also be set directly through the tool's `api_key` field.
+Configured keys take precedence over `DEEPSEEK_API_KEY`.
+
+DeepSeek decides whether to search. A completed response with no usable public
+sources returns `No results found`. Provider failures, malformed payloads,
+timeouts and output-budget exhaustion return structured errors. A partial
+response with usable sources sets `truncated: true` when it reaches its output
+limit. Cancellation waits for HTTP transport cleanup to complete, including when
+the caller is cancelled repeatedly during client teardown. Requests have no
+automatic retries. DeepSeek bills model inference and server-side search/fetch
+calls.
+
+Offline regression tests use HTTPX mock transports. To explicitly run the paid
+API checks for both thinking modes, export `DEEPSEEK_API_KEY` and run from
+`backend/`:
+
+```bash
+DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
+```
+
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -1706,6 +1822,67 @@ horizon. File transfer uses OpenSandbox's native filesystem API; bounded
 Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
 implemented, so `replicas` is a per-Gateway-process soft cap.
+
+**boxd Machine Sandbox** (runs each sandbox as an isolated [boxd](https://boxd.sh?ref=deer-flow) machine):
+
+```yaml
+sandbox:
+   use: deerflow.community.boxd_sandbox:BoxdSandboxProvider
+   boxd_api_key: $BOXD_API_KEY        # falls back to the BOXD_API_KEY env var
+   # org: my-org                      # optional; the key's own org when omitted
+   # region: fra                      # optional; fra or nyc
+   # vcpu: 2                          # optional; 1, 2, 4 or 8 (memory 4G, 8G, 16G or 32G follows)
+   # from_snapshot: my-snapshot       # optional; start machines from a prepared snapshot
+   # auto_suspend_timeout: 300        # optional; idle seconds before a machine goes to standby
+   # ready_timeout: 120               # seconds to wait for a new machine to boot
+   # name_prefix: deer-flow-          # machine names are <prefix><scope>-<random suffix>
+   # labels:                          # extra labels on every machine
+   #    team: research
+   replicas: 3                        # active + warm cap per gateway process
+   idle_timeout: 600                  # warm seconds before the machine is deleted; 0 disables
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional SDK before selecting this provider:
+
+```bash
+pip install "deerflow-harness[boxd]"
+```
+
+Each `(user_id, thread_id)` scope gets its own Ubuntu machine, created with
+`isolated: true`, so it joins no private network and holds no boxd
+credentials. The API key stays in the Gateway. Machines carry the labels
+`deer-flow: sandbox` and `deer-flow-scope: <scope id>`, so you can find them in
+the boxd console or with the CLI. The provider creates `/mnt/user-data` and the
+skills root (`skills.container_path`) as real directories on the machine, so
+shell commands and file tools use the same paths.
+
+A new machine for a thread receives the thread's uploads, workspace and outputs
+files and the skills projection before `acquire()` returns, each as one archive
+of at most 5,000 files and 128 MiB; files past that limit are skipped with a
+warning, and a failed transfer deletes the machine and raises. An Agent with a
+skill policy gets its own skills projection, and the machine sees only what was
+uploaded. Work outside `/mnt/user-data` is lost when the idle reaper deletes a
+machine. At the end of a turn, release copies
+`/mnt/user-data/outputs` back to the thread's output directory (bounded by file
+count, bytes and one shared 120-second deadline), then parks the machine in an
+in-process warm pool. A stopped machine's output copy is skipped until a normal
+sandbox call restarts it. The same scope reclaims it after a health check;
+the idle reaper deletes it after
+`idle_timeout`. Shutdown deletes every machine the provider tracks and can be
+retried when a delete fails.
+Machines discovered after a failed create use the same tracked deletion retries.
+
+Commands run through `bash -lc`. Per-call environment variables travel as exec
+options, never inside the command string. The command deadline (the caller's
+timeout, else `bash_command_timeout`) is enforced in the machine, so a command
+that runs over it ends with `Exit Code: 124` and keeps its partial output. A
+stopped machine is started on the next call; a command that hit the stopped
+machine is not repeated and returns an error. Machines in standby or
+hibernation wake on the call. Downloads are restricted to `/mnt/user-data` and
+capped while streaming. Like the other remote providers, `replicas` is a
+per-Gateway-process soft cap.
 
 Choose between local execution or Docker-based isolation:
 

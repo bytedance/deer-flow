@@ -68,7 +68,7 @@ vercel-labs/agent-skills@vercel-react-best-practices
 When you find relevant skills, present them to the user with:
 
 1. The skill name and what it does
-2. The install command they can run
+2. The installation action for their current environment (see Step 4)
 3. A link to learn more at skills.sh
 
 Example response:
@@ -77,27 +77,31 @@ Example response:
 I found a skill that might help! The "vercel-react-best-practices" skill provides
 React and Next.js performance optimization guidelines from Vercel Engineering.
 
-To install it:
-bash /path/to/skill/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
+To install it in a host DeerFlow checkout, run this command from the repository root:
+bash skills/public/find-skills/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
+
+In a DeerFlow sandbox or Web session, use the administrator .skill import flow described in Step 4.
 
 Learn more: https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices
 ```
 
 ### Step 4: Install the Skill
 
-If the user wants to proceed, use the `install-skill.sh` script to install the skill and automatically link it to the project:
+Choose the installation path for the current environment.
+
+**Inside a host DeerFlow checkout**, run [install-skill.sh](scripts/install-skill.sh) from the repository root. It installs the skill under `$HOME/.agents/skills/` and links it into that checkout's `skills/custom/` directory:
 
 ```bash
-bash /path/to/skill/scripts/install-skill.sh <owner/repo@skill-name>
+bash skills/public/find-skills/scripts/install-skill.sh <owner/repo@skill-name>
 ```
 
-For example, if the user wants to install `vercel-react-best-practices`:
+For example:
 
 ```bash
-bash /path/to/skill/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
+bash skills/public/find-skills/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
 ```
 
-The script will install the skill globally to `skills/custom/`
+**Inside an isolated DeerFlow sandbox or Web session**, do not run this helper. The host checkout and its writable `skills/custom/` directory are unavailable, and `/mnt/skills` is a read-only projection. Instead, provide the skill as a `.skill` archive and ask an administrator to install it through **Capability Center → Skills → My skills → Install .skill**. If the source does not provide an archive, package the downloaded skill directory first with `python /mnt/skills/public/skill-creator/scripts/package_skill.py <skill-directory> <output-directory>` or an equivalent ZIP tool. Installation uses the administrator's per-user skill storage and makes the skill available through the normal skill projection. Do not copy skill files into `/mnt/skills` or claim that writing files into the thread workspace installs a skill.
 
 ## Common Skill Categories
 

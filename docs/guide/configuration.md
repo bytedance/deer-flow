@@ -119,6 +119,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
+   [DeepSeek web search](../../backend/docs/CONFIGURATION.md#deepseek-web-search) uses `deerflow.community.deepseek.tools:web_search_tool`. Configure `DEEPSEEK_API_KEY` in the Gateway environment and replace the active `web_search` entry with the example in `config.example.yaml`. Set `thinking: true` for multi-step thinking search, independently of the main DeerFlow model. The default is `false`. Results include a generated answer and screened, deduplicated source links.
+
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
 
    Several providers, including You.com, GroundRoute, Webz, InfoQuest and Jsonify, initialize HTTPX clients in a worker thread so synchronous TLS trust loading does not block the agent event loop; requests and session cleanup remain asynchronous.
@@ -499,3 +501,40 @@ and objects, so parsing does not silently change its value. Python-literal sets
 and tuples containing non-finite floats also retain the complete argument as
 text, including when nested in other containers. Dictionary keys and values
 are checked recursively as well.
+
+## Rapid-MLX on Apple Silicon
+
+[Rapid-MLX](https://github.com/raullenchai/Rapid-MLX) exposes an
+OpenAI-compatible local endpoint. After installing it, start a server with an
+explicit port (omitting the port allows the server to choose another free port):
+
+```bash
+rapid-mlx serve qwen3.5-4b-4bit --port 8000
+curl http://127.0.0.1:8000/v1/models
+```
+
+Run `make setup` and select **Rapid-MLX (local)**. Accept or edit the default
+`http://127.0.0.1:8000/v1` endpoint, then enter the exact model ID from the
+`data[].id` field returned by `/v1/models`. The wizard skips secret input and
+writes a non-secret `api_key: not-required` placeholder for the OpenAI client;
+no API-key environment variable is needed. It does not infer vision or reasoning
+capabilities from the server name.
+
+Equivalent manual model configuration:
+
+```yaml
+models:
+  - name: rapid-mlx-local
+    display_name: Rapid-MLX (local)
+    use: langchain_openai:ChatOpenAI
+    model: <exact model ID from /v1/models>
+    base_url: http://127.0.0.1:8000/v1
+    api_key: not-required
+```
+
+For containerized DeerFlow, loopback refers to the container. Use a host-reachable
+endpoint such as `http://host.docker.internal:8000/v1` on Docker Desktop, and
+configure the server to listen on an interface reachable from that container.
+For Web setup, use **Custom OpenAI-compatible** with the same endpoint and model
+ID; no separate managed-provider preset is required. Streaming and tool calling
+depend on the selected model and server; check both before using it for agent tasks.

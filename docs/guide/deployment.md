@@ -306,6 +306,15 @@ rolling upgrade, route keyed runs with ID-less input and their retries to
 upgraded workers until all Gateway workers are upgraded; older workers may
 reject those retries with 409. See the [run API contract](../../backend/docs/API.md#create-run).
 
+### Redis checkpoint history cache upgrade
+
+The v2 cache rebuilds histories under a new default prefix. Deleting or pruning
+a thread also purges its v1 entries for the same database, including entries
+without expiry. If `database.checkpoint_cache.key_prefix` is set, stop all
+workers using that prefix, clear this deployment's Redis checkpoint history
+keys, and then start the upgraded workers. Custom prefixes keep the same name
+across cache versions.
+
 ## Option 2: Local Development
 
 If you prefer running services locally:
@@ -413,13 +422,19 @@ Cold agent imports during run creation use a dedicated worker pool, keeping
 unrelated Gateway requests responsive while the agent stack loads. A failed
 factory import prevents the run from being admitted.
 
-For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
-then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
-from the same directory. The build includes public demo assets and resolves
-supported demo API reads locally; writes are unavailable. To display the homepage
-GitHub star count, set `GITHUB_OAUTH_TOKEN` in `frontend/.env` before starting Node.
-The token stays on the server; missing credentials or GitHub failures hide the
-count. Restart Node after changing the token; no rebuild is needed.
+For a read-only demo without the Gateway, run these commands from `frontend/`:
+
+```bash
+make build-static
+HOSTNAME=127.0.0.1 PORT=3000 node .next/standalone/server.js
+```
+
+The build includes public demo assets and resolves supported demo API reads
+locally. Writes are unavailable. To display the homepage GitHub star count, set
+`GITHUB_OAUTH_TOKEN` in `frontend/.env` and add `--env-file=.env` before
+`.next/standalone/server.js` in the launch command. The token stays on the server.
+Missing credentials or GitHub failures hide the count. Restart Node after
+changing the token to load the new value.
 
 ## LangGraph Studio (Optional)
 

@@ -23,9 +23,9 @@ from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
 
 ## Terminal state
 
-- **The first terminal write wins.** Cancellation, timeout and completion race.
-  A late cancellation must not replace a recorded timeout, and a cancelled or
-  stale attempt must not publish a result or evidence.
+- **The first terminal write wins.** Check the deadline under the result lock
+  before publishing success. Cancelled or stale attempts cannot publish
+  results or evidence.
 - **Clean up before you notify.** Stream cleanup and the final usage snapshot come
   before the terminal notification, because callbacks can arrive before the last
   values chunk.

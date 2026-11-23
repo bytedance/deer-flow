@@ -175,7 +175,14 @@ class TestFileMemoryStorage:
         cached = storage.load()
         assert cached["user"]["workContext"]["summary"] == "original"
 
-        with patch("builtins.open", side_effect=OSError("disk full")):
+        real_open = open
+
+        def fail_write_open(file, mode="r", *args, **kwargs):
+            if str(file).endswith(".lock") or not any(flag in mode for flag in ("w", "a", "x", "+")):
+                return real_open(file, mode, *args, **kwargs)
+            raise OSError("disk full")
+
+        with patch("builtins.open", side_effect=fail_write_open):
             changed = create_empty_memory()
             changed["user"]["workContext"]["summary"] = "mutated"
             result = storage.save(changed)
