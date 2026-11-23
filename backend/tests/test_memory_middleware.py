@@ -104,6 +104,28 @@ def test_compaction_flush_marks_capture_from_the_share_copy_channel(monkeypatch)
     assert all(message.additional_kwargs[FOLLOWS_IMPORTED_HISTORY_KEY] is True for message in manager.add_nowait.call_args.args[1])
 
 
+def test_unresolved_share_copy_is_not_captured(monkeypatch):
+    import deerflow.agents.memory.summarization_hook as hook_module
+    from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_UNRESOLVED
+
+    manager = MagicMock()
+    monkeypatch.setattr(memory_middleware_module, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(hook_module, "get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr(hook_module, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(hook_module, "resolve_runtime_user_id", lambda runtime: "importer")
+    # Unmarked copied turns cannot be told from the owner's, so neither path queues anything.
+    unmarked = [HumanMessage(content="I am the sharer", id="h"), AIMessage(content="Hello, sharer", id="a")]
+
+    MemoryMiddleware(memory_config=MemoryConfig(enabled=True)).after_agent({"messages": unmarked, IMPORTED_HISTORY_CHANNEL: IMPORTED_HISTORY_UNRESOLVED}, Runtime(context={"thread_id": "copy", "user_id": "u"}))
+    hook_module.memory_flush_hook(
+        SummarizationEvent(messages_to_summarize=tuple(unmarked), preserved_messages=(), thread_id="copy", agent_name=None, runtime=Runtime(context={"thread_id": "copy"}), imported_history=IMPORTED_HISTORY_UNRESOLVED)
+    )
+
+    manager.add.assert_not_called()
+    manager.add_nowait.assert_not_called()
+
+
 def test_deermem_prompt_warns_that_restated_copied_details_are_not_the_users():
     from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
     from deerflow.agents.memory.backends.deermem.deermem.core.storage import create_empty_memory

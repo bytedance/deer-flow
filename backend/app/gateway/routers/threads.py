@@ -1183,7 +1183,7 @@ async def _branch_thread_with_reservation(
     )
     # A copy imported before share provenance moved into state has nothing for
     # the branch to inherit, so the branch gets it from the source's import.
-    imported_ids = await branch_share_provenance(request, source_metadata, snapshot.values, source_accessor, source_config)
+    branch_provenance = await branch_share_provenance(request, source_metadata, snapshot.values, source_accessor, source_config)
 
     # Workspace files are not checkpointed, so they only reflect the *current* thread
     # state. Cloning them onto a branch from an older turn would leak files created
@@ -1248,14 +1248,14 @@ async def _branch_thread_with_reservation(
         for key, value in source_values.items():
             if key in _BRANCH_EXCLUDED_CHANNELS:
                 continue
-            if key == "messages" and isinstance(value, list) and imported_ids is not None:
-                value = mark_imported(value, imported_ids)
+            if key == "messages" and isinstance(value, list) and branch_provenance is not None:
+                value = mark_imported(value, branch_provenance[1])
             if key in branch_reducer_fields:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:
                 values[key] = value
-        if imported_ids is not None:
-            values[IMPORTED_HISTORY_CHANNEL] = "share"
+        if branch_provenance is not None:
+            values[IMPORTED_HISTORY_CHANNEL] = branch_provenance[0]
         if replaces is not None:
             # The head write lands on the replay base, so goal state the head
             # lacks (write_thread_goal pops goal and goal_outcome) would keep

@@ -477,6 +477,53 @@ async def test_manual_compaction_skips_the_memory_flush_when_share_provenance_is
     flush.add_nowait.assert_not_called()
 
 
+async def test_copy_whose_import_history_is_unreadable_is_kept_out_of_memory_until_resolved(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_UNRESOLVED
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    await _bind_to_default_agent(accessor, config)
+    flush = _wire_manual_compaction(monkeypatch)
+    readable = share_fork._imported_message_ids
+
+    async def import_checkpoint_unavailable(*args, **kwargs):
+        return None
+
+    # The metadata says legacy copy, but which turns were copied cannot be read.
+    monkeypatch.setattr(share_fork, "_imported_message_ids", import_checkpoint_unavailable)
+    await _compact(ctx, thread_id)
+    flush.add_nowait.assert_not_called()
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == IMPORTED_HISTORY_UNRESOLVED
+    result = await ctx.client.post(f"/api/threads/{thread_id}/runs/wait", json={"input": {"messages": [{"type": "human", "content": "And sets?"}]}}, headers=headers("bob"))
+    assert result.status_code == 200, result.text
+    manager.aadd.assert_not_called()
+
+    # Once the import history can be read, the next run resolves it.
+    monkeypatch.setattr(share_fork, "_imported_message_ids", readable)
+    captured = await _run_and_capture(ctx, manager, thread_id)
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == "share"
+    assert _follows_copy(captured) and not any("Alice" in str(message.content) for message in captured)
+
+
+async def test_branch_of_a_copy_with_unreadable_import_history_is_unresolved(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_UNRESOLVED
+
+    ctx = share_app
+    _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, _, _ = await _copy_from_an_earlier_build(ctx)
+
+    async def import_checkpoint_unavailable(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(share_fork, "_imported_message_ids", import_checkpoint_unavailable)
+    branched = await ctx.client.post(f"/api/threads/{thread_id}/branches", json={"message_id": "bob-a"}, headers=headers("bob"))
+
+    assert branched.status_code == 200, branched.text
+    accessor, config = build_checkpoint_state_mutation_accessor(ctx.request, thread_id=branched.json()["thread_id"], as_node="branch")
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == IMPORTED_HISTORY_UNRESOLVED
+
+
 async def test_branch_of_an_unmigrated_copy_marks_the_copied_turns(share_app, monkeypatch, tmp_path):
     from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY
 

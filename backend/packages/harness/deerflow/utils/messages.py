@@ -32,6 +32,11 @@ IMPORTED_HISTORY_KEY = "deerflow_imported_history"
 #: and their marks, and memory capture must still know the thread is a copy.
 IMPORTED_HISTORY_CHANNEL = "imported_history"
 
+#: :data:`IMPORTED_HISTORY_CHANNEL` value for a copy whose copied turns could
+#: not be told apart from the owner's: the history the import wrote is no longer
+#: readable. Memory capture skips such a thread rather than guess.
+IMPORTED_HISTORY_UNRESOLVED = "unresolved"
+
 
 def without_imported_history(messages: list[Any]) -> list[Any]:
     """Drop messages carrying :data:`IMPORTED_HISTORY_KEY`; any truthy value counts."""
@@ -55,8 +60,11 @@ def own_messages_for_memory(messages: list[Any], imported_history: object = None
 
     *imported_history* is the thread's :data:`IMPORTED_HISTORY_CHANNEL` value.
     The thread also counts as a copy when a message carries the import mark,
-    which covers state written before the channel existed.
+    which covers state written before the channel existed. Nothing is
+    returned for :data:`IMPORTED_HISTORY_UNRESOLVED`.
     """
+    if imported_history == IMPORTED_HISTORY_UNRESOLVED:
+        return []
     own = without_imported_history(messages)
     is_copy = len(own) != len(messages) or bool(imported_history)
     if not is_copy:
