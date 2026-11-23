@@ -830,6 +830,35 @@ async def test_latest_search_recovers_correction_after_many_user_drafts(role_run
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_latest_search_uses_the_published_checkpoint_order_after_recapture(role_runtime, async_mode):
+    import json
+
+    config = TaskContinuityConfig(enabled=True)
+    drafts = [HumanMessage(content=f"Retention draft {i}", id=f"draft-{i}") for i in range(9)]
+    correction = [
+        HumanMessage(content="Retention decision: revise the earlier draft.", id="decision"),
+        HumanMessage(content="Retention correction: use 30 days.", id="correction"),
+    ]
+
+    # The rows are written, but the first checkpoint update is discarded.
+    unpublished = archive.capture({}, role_runtime, correction, config)
+    earlier = archive.capture({}, role_runtime, drafts, config)
+    latest = archive.capture({"task_history": earlier}, role_runtime, correction, config)
+    assert latest["batches"] == [*earlier["batches"], *unpublished["batches"]]
+
+    async def search(history):
+        role_runtime.state = {"task_history": history}
+        arguments = {"runtime": role_runtime, "query": "retention", "role": "user", "order": "latest"}
+        result = json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))
+        assert result["status"] == "available"
+        return [row["message_id"] for row in result["results"]]
+
+    assert await search(earlier) == [message.id for message in reversed(drafts[1:])]
+    assert await search(latest) == ["correction", "decision", *(message.id for message in reversed(drafts[3:]))]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["human", "ai", "system", "", "USER", 1, ["user"]])
 async def test_role_search_rejects_invalid_tool_arguments(role_runtime, role):
     from pydantic import ValidationError

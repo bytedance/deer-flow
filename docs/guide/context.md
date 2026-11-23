@@ -54,8 +54,9 @@ passing `null` preserves search across all roles. Repeated archives of one sourc
 share one result slot.
 To recover a recent correction among older drafts, use
 `history_search(query="retention", role="user", order="latest")`. This searches
-active messages from newest to oldest and fills any remaining slots from the
-most recently archived matches reachable from the current checkpoint.
+active messages from newest to oldest, then reads archived matches from the
+newest batches in the current checkpoint. A batch recaptured after a retry
+is ordered by its position in that checkpoint.
 Search excerpts contain at most 600 characters around the earliest locatable
 matching occurrence that fits and include `excerpt_start` / `excerpt_end`, a
 zero-based, half-open character range

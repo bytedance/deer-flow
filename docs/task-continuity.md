@@ -57,9 +57,10 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 
 Use `history_search(query="replicas", role="user", order="latest")` to look for a
 recent correction or decision. This orders active matches from newest to oldest
-in the current message list, then fills the remaining slots in reverse archive
-insertion order within the batches reachable from the current checkpoint. With
-`order="relevance"` (the default), archived matches use the existing full-text
+in the current message list, then fills the remaining slots from reachable
+batches in reverse checkpoint order and from newest to oldest within each batch.
+Recapturing a batch makes it newest when the updated checkpoint is saved.
+With `order="relevance"` (the default), archived matches use the existing full-text
 rank and active matches use message-list order. Both orders apply the role
 filter and deduplicate source IDs before returning up to eight results.
 

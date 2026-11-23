@@ -225,7 +225,12 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
                     parameters = [match, *batches, *([role] if role is not None else [])]
-                    order_by = "rowid DESC" if latest_first else "rank"
+                    order_by = "rank"
+                    if latest_first:
+                        # Recapture moves the checkpoint reference while keeping its stored row IDs.
+                        batch_positions = " ".join(f"WHEN ? THEN {position}" for position in range(len(batches)))
+                        order_by = f"CASE batch {batch_positions} END DESC, rowid DESC"
+                        parameters.extend(batches)
                     # Sort the bounded archive before taking distinct sources.
                     # A SQL row limit can hide distinct sources behind duplicates.
                     rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY {order_by}", parameters)
