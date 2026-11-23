@@ -1528,6 +1528,23 @@ input_polish:
 
 
 # ============================================================================
+# Optional Voice Input (Speech-to-Text)
+# ============================================================================
+# Omit this block (or set voice_input: null) to hide the microphone in the UI.
+# Requires an OpenAI-compatible POST /audio/transcriptions endpoint and a model
+# that accepts the browser's recording format (WebM/Opus, MP4 or Ogg/Opus).
+# The base URL and key stay on the Gateway; audio is sent only after recording.
+# voice_input:
+#   base_url: https://speech.example.com/v1
+#   model: your-transcription-model
+#   api_key: $VOICE_INPUT_API_KEY  # Optional for services without authentication.
+#   language: zh                 # Optional; omit to detect the spoken language.
+#   max_audio_bytes: 10485760     # 10 MiB; must not exceed the provider's limit.
+#   max_duration_seconds: 120    # Browser recording limit.
+#   timeout_seconds: 60          # Total provider request timeout (1–120 seconds).
+
+
+# ============================================================================
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.
@@ -1924,6 +1941,9 @@ sandbox:
 #   # ownership:
 #   #   type: redis                  # required for multi-instance / load-balanced
 #   #   redis_url: redis://redis:6379/0
+#   #   redis_mode: standalone       # use cluster for Redis Cluster (database 0)
+#   #   # redis_cluster_nodes:       # optional extra discovery seeds in cluster mode
+#   #   #   - redis-1:6379
 #   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
 #   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
 #   #                                # single missed renewal cannot expire a live
@@ -1933,8 +1953,9 @@ sandbox:
 #   #   key_prefix: deerflow:sandbox:owner
 #   #
 #   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
-#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
-#   # startup, but a sandbox whose ownership cannot be published is not handed out
+#   # fail-hard policy. Standalone Redis connects on first use. Cluster mode
+#   # discovers the topology at provider startup and requires a reachable seed.
+#   # A sandbox whose ownership cannot be published is not handed out
 #   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
 #   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
 #   #

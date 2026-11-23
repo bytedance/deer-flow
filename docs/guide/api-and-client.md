@@ -52,6 +52,12 @@ delegations: `null` inherits all enabled MCP plugins, `[]` selects none, and
 installation IDs select only those plugins. Call `client.reset_agent()` after
 editing the saved agent configuration to refresh the selection.
 
+The named agent's `tool_groups` also selects configured and extension tools for
+the embedded lead agent and its delegations. `null` inherits all groups, `[]`
+selects no groups, and a list selects those groups. Built-in tools and MCP plugin
+selection retain their own policies. Call `client.reset_agent()` after changing
+the saved group selection.
+
 `DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API.

@@ -98,6 +98,15 @@ BaseChatModel invoke/stream hooks. Restart the Gateway after changing,
 disabling or regrouping active policies; conflicting settings fail model
 construction instead of resetting a live budget.
 
+When Agent middleware receives HTTP 429 with a valid `Retry-After` (seconds or
+HTTP date) or `retry-after-ms` of up to 24 hours, new requests in that admission
+group also wait for the provider's cooldown, even if the failed call has no
+retries left. A shorter subsequent hint cannot shorten the pause. Already
+dispatched calls and independent groups are unaffected. Queue bounds, FIFO,
+cancellation and `max_wait_seconds` still apply, so a waiting call can time out
+before the cooldown ends. Missing or invalid hints and other statuses do not
+pause peers. Calls outside Agent middleware do not publish cooldown feedback.
+
 When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
 would bypass the admission hook. Claude and Codex also set their provider-internal
 `retry_max_attempts` to one, regardless of config or caller overrides, and log a
@@ -1012,6 +1021,17 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+#### Hosted reader URLs
+
+GroundRoute, InfoQuest, Jina, Sofya, SpecStream, Tavily, Unbrowse and the
+official Exa API accept absolute HTTP(S) URLs for `web_fetch`. The tool checks
+the URL locally before contacting the reader.
+Malformed URLs, embedded user credentials, local hostnames such as `localhost`,
+known metadata hosts and non-public IP literals return a tool error.
+The reader receives an accepted URL exactly as supplied, including encoded paths
+and repeated query parameters such as `tag[]=api&tag[]=guides`. The reader
+resolves the hostname in its own network.
+
 #### Jina fetch retries
 
 Jina's `web_fetch` keeps one attempt by default. Configure retries on its existing
@@ -1042,6 +1062,11 @@ uses the same hints, falling back to local backoff when they are absent or inval
 Authentication, payment/credit and other statuses remain terminal even with hints;
 error-body prose never enables retries. Empty successful responses, read/write
 timeouts and arbitrary exceptions are not retried.
+
+When Jina returns a terminal HTTP error, `web_fetch` passes its status code to
+the harness for error classification. On HTTP 401, the tool result points to
+`JINA_API_KEY` and advises the agent to use another available source or report
+the fetch limitation.
 
 `Retry-After` accepts non-negative ASCII integer seconds or an HTTP-date
 (including obsolete HTTP date forms); past dates mean a zero server floor.
@@ -1149,10 +1174,11 @@ Enabled fetches stream and count actual content-decoded bytes (after decompressi
 before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
 The first chunk exceeding it stops consumption and closes the response, returning
 an explicit size `Error:` without body content, partial success or readability
-extraction. This applies to all statuses, including 502/503/504, and oversize never
-retries. Each retry response has its own counter within the existing shared time
-budget. Streams close on success, errors, cancellation and read failures. Responses
-within the limit retain charset decoding and existing status/retry handling.
+extraction. The tool result retains the received HTTP status. Oversize responses
+are terminal for all statuses, including 502/503/504. Each retry response has its
+own counter within the existing shared time budget. Streams close on success,
+errors, cancellation and read failures. Responses within the limit retain charset
+decoding and existing status/retry handling.
 
 This limits response retention/consumption, not wire-byte bandwidth or allocations
 inside HTTPX's decompressor; it is not a hard process-memory bound. The final
@@ -1407,7 +1433,7 @@ DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents

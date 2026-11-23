@@ -48,6 +48,10 @@ transport, so they check the payload that DeerFlow sends.
   Unpaced models keep their own retry policy.
 - **`Retry-After` goes through `utils.retry_after`.** HTTP dates are read as UTC,
   a past date means zero, and the delay is bounded.
+- **HTTP 429 hints extend the opted-in group's admission schedule**, including
+  on the last middleware attempt. Shorter hints never shorten a pause. Keep
+  FIFO, cancellation and deadlines intact; unrelated groups stay independent.
+  Cover provider feedback in `tests/test_model_request_admission.py`.
 
 ## Provider wire rules
 

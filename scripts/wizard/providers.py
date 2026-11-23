@@ -537,6 +537,23 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="rapid_mlx",
+        display_name="Rapid-MLX (local)",
+        description="OpenAI-compatible local inference on Apple Silicon",
+        use="langchain_openai:ChatOpenAI",
+        models=["qwen3.5-4b-4bit"],
+        default_model="qwen3.5-4b-4bit",
+        env_var=None,
+        package="langchain-openai",
+        extra_config={
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "not-required",
+        },
+        base_url_prompt="Rapid-MLX base URL",
+        model_prompt="Exact model ID from GET /v1/models",
+        auth_hint="Rapid-MLX requires no API key. A non-secret placeholder is used by the OpenAI client.",
+    ),
+    LLMProvider(
         name="vllm",
         display_name="vLLM",
         description="Self-hosted OpenAI-compatible serving",

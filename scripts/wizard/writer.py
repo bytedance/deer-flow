@@ -210,8 +210,8 @@ def build_minimal_config(
     if env_var:
         model_entry[api_key_field] = f"${env_var}"
     extra_model_fields = dict(extra_model_config or {})
-    if "base_url" in extra_model_fields and not base_url:
-        base_url = extra_model_fields.pop("base_url")
+    configured_base_url = extra_model_fields.pop("base_url", None)
+    base_url = base_url or configured_base_url
     if base_url:
         model_entry["base_url"] = base_url
     if extra_model_fields:

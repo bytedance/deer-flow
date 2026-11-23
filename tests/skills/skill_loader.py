@@ -36,10 +36,11 @@ def load(skill_name: str):
 class FakeResp:
     """Minimal stand-in for requests.Response."""
 
-    def __init__(self, json_data=None, content=b"", status_code=200):
+    def __init__(self, json_data=None, content=b"", status_code=200, headers=None):
         self._json = json_data if json_data is not None else {}
         self.content = content
         self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:

@@ -731,6 +731,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 />
                 <Tooltip content={t.sidecar.send}>
                   <PromptInputSubmit
+                    aria-label={t.sidecar.send}
                     className="rounded-full"
                     disabled={disabled}
                     status={

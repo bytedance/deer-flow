@@ -98,14 +98,7 @@ class GitHubBinding(BaseModel):
 class GitHubAgentConfig(BaseModel):
     """Top-level ``github:`` block on a custom agent's ``config.yaml``."""
 
-    # GitHub App installation id used to mint per-repo access tokens. The
-    # ``ChannelManager`` mints a 1h installation token from this and injects it
-    # into ``run_context["github_token"]``, which the ``bash`` tool exposes to
-    # the agent's sandbox as ``GH_TOKEN`` / ``GITHUB_TOKEN``. The agent then
-    # uses ``gh`` to read repo state, push branches, and post comments itself.
-    # None means no token is minted: the agent still runs but cannot push or
-    # post (effectively read-only via unauthenticated ``gh`` for public repos,
-    # or fully blind for private ones).
+    # Optional installation identifier retained for existing bindings and metadata.
     installation_id: int | None = None
     # GitHub App login this agent posts as (e.g. ``llm-gateway-ai`` for the
     # ``llm-gateway-ai[bot]`` App identity, without the ``[bot]`` suffix).

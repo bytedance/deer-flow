@@ -203,6 +203,16 @@ the last card is clipped and marked `... (truncated)`. A retry of a partially
 delivered answer resumes after the cards already sent, and a reply to any of the
 cards continues the conversation.
 
+Discord caps a message at 2,000 characters, so a longer answer is sent as
+several messages, split at line breaks where possible. When a split falls inside
+a code block, the message ends with closing backticks and the next one reopens
+the block with its language tag, so both parts render as code. A block that
+would start too close to the end of a message, before any of its code fits,
+moves to the next message whole. Blocks are read the way Discord's client reads
+them, not as CommonMark: a block runs from three backticks to the next three,
+also when those follow the last code on its line, CRLF line endings count as
+line breaks, and `~~~` fences are plain text.
+
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
 
 ## Attachment delivery feedback
