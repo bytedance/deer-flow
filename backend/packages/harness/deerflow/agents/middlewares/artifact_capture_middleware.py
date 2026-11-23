@@ -93,7 +93,7 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
 
         messages = state.get("messages") or []
         existing = state.get("tool_artifacts") or []
-        existing_handles = {entry.get("handle") for entry in existing if isinstance(entry, dict)}
+        existing_handles = {handle for entry in existing if isinstance(entry, dict) and isinstance(handle := entry.get("handle"), str) and handle}
         processed = set(state.get("tool_artifact_processed") or [])
         newly_processed: list[str] = []
         occurrences: dict[str, int] = {}

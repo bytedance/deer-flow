@@ -364,7 +364,15 @@ class TestCapture:
             "consumed_by": [],
         }
         state = {
-            "tool_artifacts": [{"display_name": "legacy.md"}, {"handle": None}, {"handle": 7}, {"handle": ""}, entry],
+            "tool_artifacts": [
+                {"display_name": "legacy.md"},
+                {"handle": None},
+                {"handle": 7},
+                {"handle": ""},
+                {"handle": [handle]},
+                {"handle": {"legacy": handle}},
+                entry,
+            ],
             "messages": [
                 AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": handle}, "id": "call_2", "type": "tool_call"}]),
             ],
@@ -373,7 +381,7 @@ class TestCapture:
         out = middleware.before_model(state, _runtime())
 
         assert out is not None
-        assert out["tool_artifacts"][0]["consumed_by"] == ["call_2"]
+        assert out["tool_artifacts"] == [{**entry, "consumed_by": ["call_2"]}]
 
     def test_treats_a_non_list_consumed_by_as_empty(self):
         """Only a list can be extended; a caller-written string must not become a char list."""
