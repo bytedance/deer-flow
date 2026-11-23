@@ -1142,3 +1142,370 @@ def test_repeated_archive_sources_keep_canonical_read_version(role_runtime):
     assert row["truncated"] is source["truncated"] is True
     assert source["text"] == text[:1000]
     assert row["excerpt"] == source["text"][row["excerpt_start"] : row["excerpt_end"]]
+
+
+def test_index_keeps_latin_words_whole_inside_cjk_text():
+    """A Latin word next to CJK characters stays one index term (#8297).
+
+    The tokenizer split a run of word characters at two characters whenever that
+    run contained a CJK character, so "采购ThinkPad电脑" indexed "ThinkPad" as
+    th/hi/in/nk/kp/pa/ad and a search for the product name found nothing.
+    """
+    assert "thinkpad" in archive.terms("采购ThinkPad电脑的预算为6000元")
+    assert "thinkpad" in archive.index_text("采购ThinkPad电脑的预算为6000元").split()
+    # Latin and digits stay whole; pure CJK still uses two-character terms.
+    assert "6000" in archive.terms("预算为6000元")
+    assert "用户" in archive.terms("用户登录")
+
+
+def test_latin_product_name_stays_searchable_after_capture(scoped):
+    """The same holds through compaction: the archived source is still findable."""
+    import json
+
+    message = HumanMessage(content="采购ThinkPad电脑的预算为6000元", id="u-budget")
+    scoped.state = {"messages": [message]}
+    active = json.loads(history_search.func(scoped, "ThinkPad"))["results"]
+    assert len(active) == 1
+
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    archived = json.loads(history_search.func(scoped, "ThinkPad"))["results"]
+    assert len(archived) == 1, "compaction must not turn a Latin word into two-character index terms"
+
+
+def _archive_db(runtime):
+    """The SQLite file the archive writes for this runtime's scope."""
+    from pathlib import Path as _Path
+
+    path, _owner = archive.scope(runtime)
+    assert _Path(path).exists(), f"archive db not created at {path}"
+    return _Path(path)
+
+
+def test_archive_written_by_the_old_tokenizer_stays_searchable(scoped):
+    """A source indexed before #8297 keeps matching after the tokenizer change.
+
+    Before the split fix the tokenizer stored "A股" as the two-character term "a股";
+    a query tokenized the new way would produce "a" and "股" and miss it. The read path
+    must fall back to the stored text until a capture rebuilds the index, and the rebuild
+    must then keep the source findable through the normal FTS path.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    from deerflow.agents.task_continuity.archive import TOKENIZER_VERSION
+
+    first = HumanMessage(content="持仓 A股 的说明", id="u-old")
+    scoped.state = {"messages": [first]}
+    # Captured sources get a digest id; read it while the message is still active.
+    source_id = _json.loads(history_search.func(scoped, "A股"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [first], TaskContinuityConfig(enabled=True)),
+    }
+    assert [row["id"] for row in _json.loads(history_search.func(scoped, "A股"))["results"]] == [source_id]
+
+    db_path = _archive_db(scoped)
+    # Rewind the archive to what the old tokenizer would have stored.
+    with _sqlite3.connect(db_path) as db:
+        db.execute("UPDATE sources SET words='a股'")
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    # Read-only lookup cannot rebuild, so it must fall back to the stored text.
+    found = [row["id"] for row in _json.loads(history_search.func(scoped, "A股"))["results"]]
+    assert source_id in found, f"an old archive must still match, got {found}"
+
+    # The next capture rebuilds in place and records the new version.
+    second = HumanMessage(content="再记一条 B股 的说明", id="u-new")
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [second], TaskContinuityConfig(enabled=True)),
+    }
+    with _sqlite3.connect(db_path) as db:
+        assert int(db.execute("SELECT value FROM meta WHERE key='tokenizer_version'").fetchone()[0]) == TOKENIZER_VERSION
+        rows = db.execute("SELECT words FROM sources WHERE id=?", (source_id,)).fetchone()
+        assert "a股" in rows[0] and "a" in rows[0].split(), "rebuilt index keeps the compound and the split term"
+
+    found = [row["id"] for row in _json.loads(history_search.func(scoped, "A股"))["results"]]
+    assert source_id in found, f"after the rebuild the FTS path must still find it, got {found}"
+
+
+def test_mixed_script_query_returns_the_exact_source(scoped):
+    """A mixed-script query must not be diluted by its fragments.
+
+    Splitting "A股" into "a" and "股" alone matches every source holding either fragment;
+    with the result cap that can push the exact source out. Keeping the compound as a term
+    is what makes the query specific.
+    """
+    import json as _json
+
+    noise = [HumanMessage(content=f"条目 {index} 提到 a 或 股 其中之一", id=f"n{index}") for index in range(9)]
+    exact = HumanMessage(content="持仓 A股 的说明", id="exact")
+    scoped.state = {"messages": [exact]}
+    exact_id = _json.loads(history_search.func(scoped, "A股"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [*noise, exact], TaskContinuityConfig(enabled=True)),
+    }
+
+    rows = _json.loads(history_search.func(scoped, "A股"))["results"]
+    assert exact_id in [row["id"] for row in rows], f"the exact source must survive the result cap, got {[row['id'] for row in rows]}"
+
+
+def test_legacy_fallback_matches_decoded_text_not_the_json_payload(scoped):
+    """The read-only fallback must match the message, not the row's JSON envelope.
+
+    SQL `LIKE` on the payload has two problems: SQLite's `lower()` folds ASCII only, so a
+    query for `STRASSE` misses a stored `Straße`; and a common word can match the `role`
+    field of unrelated rows, displacing the real text match at the result cap. The active
+    message path compares `text.casefold()`, so the archived fallback must do the same.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    message = HumanMessage(content="Bericht über die Straße", id="u-umlaut")
+    scoped.state = {"messages": [message]}
+    text_id = _json.loads(history_search.func(scoped, "Straße"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    db_path = _archive_db(scoped)
+    # Put the archive back in the pre-#8297 state: stale words, no version marker.
+    with _sqlite3.connect(db_path) as db:
+        db.execute("UPDATE sources SET words='bericht'")
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    hits = [row["id"] for row in _json.loads(history_search.func(scoped, "STRASSE"))["results"]]
+    assert text_id in hits, f"case folding must match Strasse against Straße, got {hits}"
+
+    # "human" only appears in the JSON envelope (the role), never in this text.
+    assert _json.loads(history_search.func(scoped, "human"))["results"] == []
+
+
+def test_legacy_archive_keeps_token_matches_ahead_of_substrings(scoped):
+    """An exact token match must not be crowded out by substring rows.
+
+    The legacy fallback answers from the decoded text, and "cat" is a substring of
+    "concatenate". Eight such rows used to fill the eight-source cap before the one
+    message that actually says "cat" was reached, so the exact match was dropped.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    noise = [HumanMessage(content=f"step {index}: we concatenate the fragments into one line", id=f"c{index}") for index in range(8)]
+    exact = HumanMessage(content="the cat sat on the warm keyboard", id="cat")
+    scoped.state = {"messages": [exact]}
+    exact_id = _json.loads(history_search.func(scoped, "cat"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [*noise, exact], TaskContinuityConfig(enabled=True)),
+    }
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    hits = [row["id"] for row in _json.loads(history_search.func(scoped, "cat"))["results"]]
+    assert hits[0] == exact_id, f"the exact token match must rank first, got {hits}"
+
+
+def test_legacy_archive_decodes_only_until_the_result_cap(scoped, monkeypatch):
+    """The fallback must feed the cap lazily instead of decoding the whole archive.
+
+    Collecting every matching payload first cost one JSON decode per stored row:
+    900 rows for eight results. The index can answer this query, so only the rows
+    that are actually yielded should be decoded.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    hits_needed = [HumanMessage(content=f"step {index}: we concatenate the fragments into one line", id=f"c{index}") for index in range(8)]
+    filler = [HumanMessage(content=f"unrelated note {index} about release planning", id=f"f{index}") for index in range(892)]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [*hits_needed, *filler], TaskContinuityConfig(enabled=True, max_records_per_batch=1024)),
+    }
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        assert db.execute("SELECT count(*) FROM sources").fetchone()[0] == 900
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    decoded = []
+    real_loads = _json.loads
+
+    class CountingJson:
+        def loads(self, payload, *args, **kwargs):
+            decoded.append(payload)
+            return real_loads(payload, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(_json, name)
+
+    monkeypatch.setattr(archive, "json", CountingJson())
+    rows = _json.loads(history_search.func(scoped, "concatenate"))["results"]
+    assert len(rows) == 8
+    assert len(decoded) <= 20, f"decoded {len(decoded)} rows to return eight results"
+
+
+def test_legacy_archive_keeps_fts_normalized_hits(scoped):
+    """A pre-tokenizer-bump archive must still answer diacritic-folded queries.
+
+    FTS5's unicode61 tokenizer folds accents, so `cafe` matches a stored `café`
+    even though the decoded text never contains the literal query (the documented
+    `cafe` → `café` behavior). Re-checking the decoded text dropped those valid
+    hits in the read-only fallback while a fresh archive still answered them.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    message = HumanMessage(content="Travel notes: café and résumé", id="accents")
+    scoped.state = {"messages": [message]}
+    source_id = _json.loads(history_search.func(scoped, "café"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    for query in ("cafe", "resume"):
+        rows = _json.loads(history_search.func(scoped, query))["results"]
+        hits = [row["id"] for row in rows]
+        assert hits == [source_id], f"{query} must keep the FTS-normalized hit, got {hits}"
+        # The documented behaviour is unchanged: the excerpt still does not claim
+        # a literal hit, it only shows the source that FTS legitimately matched.
+        assert rows[0]["excerpt_match"] is False
+        assert (rows[0]["excerpt_start"], rows[0]["excerpt_end"]) == (0, len(message.content))
+        assert rows[0]["excerpt"] == message.content
+
+
+def test_legacy_archive_still_drops_a_stale_index_term(scoped):
+    """Normalized matching must not resurrect a row the decoded text lost.
+
+    A pre-tokenizer archive can hold index terms the stored text no longer
+    carries. The index MATCHes those, so the fallback still has to verify the
+    hit against the decoded text - with the same folding, not literally.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    message = HumanMessage(content="the cat sat on the warm keyboard", id="cat")
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    source_id = _json.loads(history_search.func(scoped, "keyboard"))["results"][0]["id"]
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        # An index term from an older writer that the message text never had.
+        db.execute("UPDATE sources SET words='bericht human'")
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    assert _json.loads(history_search.func(scoped, "human"))["results"] == []
+    # The source is still there and still reachable through its decoded text.
+    assert [row["id"] for row in _json.loads(history_search.func(scoped, "keyboard"))["results"]] == [source_id]
+
+
+def test_capture_evicts_before_reindexing_a_legacy_archive(scoped, monkeypatch):
+    """Reindexing must not run against batches that are about to be dropped.
+
+    A legacy archive sitting at SQLite's page ceiling cannot absorb the growth from
+    reindexing rows that retention is about to delete: the transaction fails with
+    SQLITE_FULL and the new batch is rejected too. Eviction has to come first.
+    """
+    from deerflow.agents.task_continuity import archive as _archive
+
+    first = HumanMessage(content="第一条 内容", id="b1")
+    second = HumanMessage(content="第二条 内容", id="b2")
+    scoped.state = {"messages": [first, second]}
+
+    # First capture creates the archive with one batch.
+    scoped.state = {"messages": [], "task_history": archive.capture(scoped.state, scoped, [first], TaskContinuityConfig(enabled=True, max_batches=1))}
+    db_path = _archive_db(scoped)
+    import sqlite3 as _sqlite3
+
+    with _sqlite3.connect(db_path) as db:
+        first_batch = db.execute("SELECT id FROM batches").fetchone()[0]
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    seen_remaining = []
+    real_rebuild = _archive.rebuild_index
+
+    def spy(db):
+        seen_remaining.append(db.execute("SELECT count(*) FROM sources WHERE batch=?", (first_batch,)).fetchone()[0])
+        return real_rebuild(db)
+
+    monkeypatch.setattr(_archive, "rebuild_index", spy)
+    scoped.state = {"messages": [], "task_history": archive.capture(scoped.state, scoped, [second], TaskContinuityConfig(enabled=True, max_batches=1))}
+
+    assert seen_remaining == [0], "the expired batch must be gone before the rebuild runs"
+    with _sqlite3.connect(db_path) as db:
+        assert db.execute("SELECT count(*) FROM batches").fetchone()[0] == 1
+
+
+def test_mixed_script_compound_outranks_fragment_documents(scoped):
+    """A contiguous compound must survive background documents that match its fragments."""
+    import json as _json
+
+    messages = [HumanMessage(content="a 股", id=f"noise{index}") for index in range(9)]
+    messages += [HumanMessage(content=f"unrelated memo {index}", id=f"filler{index}") for index in range(20)]
+    messages += [HumanMessage(content=" ".join(f"topic{index}" for index in range(20)) + " A股", id="exact")]
+    scoped.state = {"messages": messages}
+    history = archive.capture(scoped.state, scoped, messages, TaskContinuityConfig(enabled=True))
+    scoped.state = {"messages": [], "task_history": history}
+
+    payload = _json.loads(history_search.func(scoped, "A股"))
+    assert "results" in payload, payload
+    rows = payload["results"]
+
+    assert rows and rows[0]["message_id"] == "exact", f"the contiguous compound must rank first, got {[row['message_id'] for row in rows]}"
+
+
+def test_legacy_archive_ranks_recovered_terms_before_cap(scoped):
+    """A mixed query must rank a payload-recovered term above index-only rows."""
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    notes = [HumanMessage(content=f"budget note {index}", id=f"note{index}") for index in range(12)]
+    purchase = HumanMessage(content="采购ThinkPad电脑，budget 6000元", id="purchase")
+    scoped.state = {"messages": [purchase, *notes]}
+    history = archive.capture(scoped.state, scoped, [purchase, *notes], TaskContinuityConfig(enabled=True))
+    scoped.state = {"messages": [], "task_history": history}
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        # What the base writer indexed for "ThinkPad" inside a CJK run: two-character terms.
+        db.execute(
+            "UPDATE sources SET words=? WHERE json_extract(payload, '$.message_id')='purchase'",
+            ("采购 购t th hi in nk kp pa ad 电脑 budget 6000 元",),
+        )
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    rows = _json.loads(history_search.func(scoped, "ThinkPad budget"))["results"]
+
+    assert rows and rows[0]["message_id"] == "purchase", f"the source matching both terms must rank first, got {[row['message_id'] for row in rows]}"
+
+
+def test_legacy_archive_folds_before_stripping_marks(scoped):
+    """Casefold before mark stripping, matching the tokenizer's expansion."""
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    message = HumanMessage(content="ᾠδή", id="greek")
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        db.execute("UPDATE sources SET words='obsolete'")
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    rows = _json.loads(history_search.func(scoped, "ᾠδή"))["results"]
+
+    assert [row["message_id"] for row in rows] == ["greek"], "casefolding must happen before combining marks are stripped"

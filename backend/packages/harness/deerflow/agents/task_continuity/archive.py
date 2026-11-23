@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import sqlite3
+import unicodedata
 from contextlib import closing
 from pathlib import Path
 
@@ -77,15 +78,62 @@ def records(messages, cap: int = 16000) -> list[dict]:
     return result
 
 
+_CJK = "\u3400-\u9fff"
+# A Latin/digit run and a CJK run are different token units. `[^\W_]+` matches
+# letters, digits and CJK in one go, so "采购ThinkPad电脑" became a single run that
+# looked like CJK and had the product name split into two-character terms (#8297):
+# "ThinkPad" was indexed as th/hi/in/nk/kp/pa/ad and could never be found.
+_TOKEN_RE = re.compile(rf"[{_CJK}]+|[^\W{_CJK}_]+")
+_CJK_RUN_RE = re.compile(rf"[{_CJK}]")
+
+
 def _token_spans(folded: str):
     """Preserve indexed token positions in casefolded text without changing tokenization."""
-    for match in re.finditer(r"[^\W_]+", folded):
+    previous_end = None
+    for match in _TOKEN_RE.finditer(folded):
         word = match.group()
-        if re.search(r"[\u3400-\u9fff]", word):
-            for index in range(max(1, len(word) - 1)):
-                yield word[index : index + 2], match.start() + index, match.start() + min(index + 2, len(word))
+        # A two-character compound across a script boundary ("A股", "d打") is what the
+        # old tokenizer stored for every run of word characters that contained CJK.
+        # Emitting it again keeps archives written before #8297 searchable: their index
+        # holds "a股" and never the split "a" / "股". It is also what makes a mixed-script
+        # query specific - without it, "A股" matches any source holding an "a" or a "股".
+        if previous_end is not None and previous_end == match.start():
+            yield folded[previous_end - 1 : match.start() + 1], previous_end - 1, match.start() + 1
+        if _CJK_RUN_RE.match(word):
+            for offset in range(max(1, len(word) - 1)):
+                yield word[offset : offset + 2], match.start() + offset, match.start() + min(offset + 2, len(word))
         else:
             yield word, match.start(), match.end()
+        previous_end = match.end()
+
+
+# Bumped whenever the terms produced by _token_spans change. Archives written by an
+# older version have to be re-indexed, otherwise a query tokenized the new way cannot
+# match index terms stored the old way (#8297 review: "A股" was stored as "a股", and a
+# new query for it produced "a" and "股", so the archived source stopped matching).
+TOKENIZER_VERSION = 2
+
+
+def rebuild_index(db) -> int:
+    """Re-index every stored source with the current tokenizer. Returns rows updated."""
+    updated = 0
+    for rowid, payload in db.execute("SELECT rowid, payload FROM sources").fetchall():
+        try:
+            text = json.loads(payload).get("text", "")
+        except (TypeError, ValueError):
+            continue
+        db.execute("UPDATE sources SET words=? WHERE rowid=?", (index_text(text), rowid))
+        updated += 1
+    return updated
+
+
+def stored_tokenizer_version(db) -> int | None:
+    """The tokenizer version an archive was written with; None when it predates the marker."""
+    try:
+        row = db.execute("SELECT value FROM meta WHERE key='tokenizer_version'").fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row[0]) if row and str(row[0]).isdigit() else None
 
 
 def _tokens(text: str) -> list[str]:
@@ -98,6 +146,120 @@ def terms(text: str) -> list[str]:
 
 def index_text(text: str) -> str:
     return " ".join(_tokens(text))
+
+
+def _source_row(payload: str) -> dict | None:
+    """Decode one stored source, or None when the row is not a usable record."""
+    try:
+        row = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    return row if isinstance(row, dict) and isinstance(row.get("id"), str) else None
+
+
+def _decoded_rows(cursor):
+    for (payload,) in cursor:
+        row = _source_row(payload)
+        if row is not None:
+            yield row
+
+
+def _fold_for_match(value: str) -> str:
+    """Fold text the way the FTS tokenizer does: strip diacritics, then casefold.
+
+    FTS5's unicode61 tokenizer removes diacritics, so a stored "café" MATCHes the
+    query "cafe". Comparing the decoded text literally would reject that genuine
+    hit; comparing both sides folded keeps it, and still rejects an index term the
+    text no longer carries (#8300 review: a legacy archive answered neither "cafe"
+    nor "resume" until the next capture rebuilt the index).
+    """
+    return "".join(char for char in unicodedata.normalize("NFKD", value.casefold()) if not unicodedata.combining(char))
+
+
+def _term_coverage(text: str, folded_terms: list[str]) -> int:
+    """How many query terms occur as whole tokens in the source text.
+
+    Whole tokens, not substrings: a query for "cat" must not score a row that
+    only says "concatenate". The compound token emitted across a script boundary
+    ("a股") counts as one, so a contiguous match outranks documents that only
+    carry its fragments.
+    """
+    folded = _fold_for_match(text)
+    tokens = {folded[left:right] for _, left, right in _token_spans(folded)}
+    return sum(1 for term in folded_terms if term in tokens)
+
+
+def _rank_rows(rows, folded_terms: list[str]):
+    """Yield rows ordered by how many query terms they contain, then by input order."""
+    ranked = []
+    for order, row in enumerate(rows):
+        ranked.append((-_term_coverage(str(row.get("text", "")), folded_terms), order, row))
+    for _, _, row in sorted(ranked, key=lambda item: (item[0], item[1])):
+        yield row
+
+
+def _legacy_rows(db, match: str, placeholders: str, batches: list[str], role: str | None, keywords: list[str], role_filter: str):
+    """Yield matches from an archive whose index predates the current tokenizer.
+
+    The stored index terms cannot answer the new query on their own, so the
+    decoded text backs it up. A single-term query keeps the lazy two-pass order:
+    index hits are genuine token matches, ordered by FTS rank, and running them
+    before the substring scan stops a query like "cat" from being filled with
+    eight rows that merely contain "concatenate". A multi-term query may mix a
+    term the old index can answer with one it cannot, so both passes are merged
+    and ranked by how many query terms each source carries as whole tokens before
+    the caller applies its eight-source cap; otherwise the index pass can fill the
+    cap with rows matching only the term it knows. Both passes compare the decoded
+    text with the same FTS-equivalent folding (_fold_for_match: casefolded, then
+    diacritics stripped), so a normalized hit need not contain the literal query
+    text ("cafe" matching a stored "café") while an index term the text no longer
+    carries is still dropped. Single-term queries stay lazy: rows are decoded only
+    until the caller has eight distinct sources.
+    """
+    emitted: set[str] = set()
+    folded_terms = [_fold_for_match(term) for term in keywords]
+    parameters = [match, *batches, *([role] if role is not None else [])]
+    if len(folded_terms) > 1:
+        candidates = []
+        for order, (payload,) in enumerate(db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)):
+            row = _source_row(payload)
+            if row is None or row["id"] in emitted:
+                continue
+            text = str(row.get("text", ""))
+            if not any(term in _fold_for_match(text) for term in folded_terms):
+                # A stale index term: the stored text no longer carries it.
+                continue
+            emitted.add(row["id"])
+            candidates.append((-_term_coverage(text, folded_terms), 0, order, row))
+        parameters = [*batches, *([role] if role is not None else [])]
+        for order, (payload,) in enumerate(db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}){role_filter} ORDER BY rowid", parameters)):
+            row = _source_row(payload)
+            if row is None or row["id"] in emitted:
+                continue
+            coverage = _term_coverage(str(row.get("text", "")), folded_terms)
+            if coverage:
+                emitted.add(row["id"])
+                candidates.append((-coverage, 1, order, row))
+        for _, _, _, row in sorted(candidates, key=lambda item: (item[0], item[1], item[2])):
+            yield row
+        return
+    for (payload,) in db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters):
+        row = _source_row(payload)
+        if row is None or row["id"] in emitted:
+            continue
+        if not any(term in _fold_for_match(str(row.get("text", ""))) for term in folded_terms):
+            # A stale index term: the stored text no longer carries it.
+            continue
+        emitted.add(row["id"])
+        yield row
+    parameters = [*batches, *([role] if role is not None else [])]
+    for (payload,) in db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}){role_filter} ORDER BY rowid", parameters):
+        row = _source_row(payload)
+        if row is None or row["id"] in emitted:
+            continue
+        if any(term in _fold_for_match(str(row.get("text", ""))) for term in folded_terms):
+            emitted.add(row["id"])
+            yield row
 
 
 def _search_excerpt(text: str, keywords: list[str], *, substring: bool) -> dict:
@@ -172,6 +334,14 @@ def capture(state: dict, runtime, messages, config) -> dict:
             for (expired_id,) in expired:
                 db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
+            # Heal an archive written by an older tokenizer, but only after the batches that
+            # are about to be dropped are gone: reindexing rows that are on the way out can
+            # grow an archive sitting at SQLite's page ceiling enough to fail with SQLITE_FULL,
+            # which would roll the whole capture back and reject the new batch as well.
+            db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
+                rebuild_index(db)
+                db.execute("INSERT OR REPLACE INTO meta VALUES ('tokenizer_version', ?)", (str(TOKENIZER_VERSION),))
             if not exists:
                 db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
                 db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
@@ -217,16 +387,34 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 if present != len(batches) and status != "unavailable":
                     status = "partially_expired"
                 if source_id:
-                    rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
+                    rows = _decoded_rows(db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id]))
                 else:
-                    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
-                    parameters = [match, *batches, *([role] if role is not None else [])]
-                    # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
-                for (payload,) in rows:
-                    row = json.loads(payload)
-                    # Repeated archives share one result slot; keep FTS order
+                    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
+                    if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
+                        # The archive still holds index terms from the older tokenizer and this
+                        # path is read-only, so fall back to the decoded text for the terms the
+                        # index cannot express; the next capture rebuilds the index in place.
+                        # Index hits are yielded first and as they are (FTS normalization folds
+                        # diacritics, so "cafe" legitimately hits a stored "café"); the text pass
+                        # is what replaces SQL `LIKE`: SQLite's `lower()` folds ASCII only, so
+                        # "STRASSE" would miss a stored "Straße", and matching the raw JSON
+                        # payload would let a query like "human" hit the "role" field instead of
+                        # the message text.
+                        rows = _legacy_rows(db, match, placeholders, batches, role, keywords, role_filter)
+                    else:
+                        parameters = [match, *batches, *([role] if role is not None else [])]
+                        # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
+                        decoded = _decoded_rows(db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters))
+                        if len(keywords) > 1:
+                            # OR term scores can let short fragment-only documents outrank the
+                            # contiguous compound (or the source carrying every term), so rank
+                            # by whole-token coverage before the eight-source cap.
+                            rows = _rank_rows(decoded, [_fold_for_match(term) for term in keywords])
+                        else:
+                            rows = decoded
+                for row in rows:
+                    # Repeated archives share one result slot; keep match order
                     # and stop reading once eight distinct sources are selected.
                     found.setdefault(row["id"], row)
                     if len(found) == 8:
