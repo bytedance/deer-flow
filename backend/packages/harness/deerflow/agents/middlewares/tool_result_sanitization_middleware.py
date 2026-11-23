@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 # surfaces the target site's response-status text (``X-Response-Status``, a
 # free-form reason phrase controlled by whatever server is being captured) into
 # its result message, so it is untrusted remote content too and belongs here.
+# The Apify Actor tools return what an Actor scraped (``apify_actor_await``) and
+# Store descriptions and input schemas written by third-party Actor authors
+# (``apify_actor_discover``), so they are remote content as well.
 # The gate is name-based for the first-party web tools; MCP-sourced tools are
 # covered by their ``deerflow_mcp`` metadata tag instead (every MCP server is
 # third-party remote code, so its results are untrusted regardless of what the
@@ -60,6 +63,8 @@ _REMOTE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset(
         "web_search",
         "image_search",
         "web_capture",
+        "apify_actor_await",
+        "apify_actor_discover",
     }
 )
 

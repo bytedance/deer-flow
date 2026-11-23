@@ -9,8 +9,10 @@ untouched.
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
@@ -59,6 +61,22 @@ class TestRemoteToolResultsNeutralized:
         mw = ToolResultSanitizationMiddleware()
         result = mw.wrap_tool_call(_request("image_search"), lambda _: _msg(_MALICIOUS_PAGE, name="image_search"))
         assert "&lt;system-reminder&gt;" in result.content
+
+    @pytest.mark.parametrize("tool_name", ["apify_actor_await", "apify_actor_discover"])
+    def test_apify_actor_results_are_sanitized(self, tool_name):
+        """Scraped Actor output and third-party Store text are remote content too."""
+        mw = ToolResultSanitizationMiddleware()
+        scraped = json.dumps({"status": "SUCCEEDED", "results": [{"biography": _MALICIOUS_PAGE}]})
+        result = mw.wrap_tool_call(_request(tool_name), lambda _: _msg(scraped, name=tool_name))
+        assert "&lt;system-reminder&gt;" in result.content
+        assert "<system-reminder>" not in result.content
+        assert "--- END USER INPUT ---" not in result.content
+
+    def test_apify_actor_start_result_is_not_remote_content(self):
+        """The start tool returns only Apify's own run IDs, so it stays untouched."""
+        mw = ToolResultSanitizationMiddleware()
+        original = _msg("<system-reminder>", name="apify_actor_start")
+        assert mw.wrap_tool_call(_request("apify_actor_start"), lambda _: original) is original
 
     def test_matches_user_input_neutralization(self):
         """A fetched payload should end up as neutralized as the same text typed by the user."""
