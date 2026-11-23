@@ -644,4 +644,4 @@ def test_command_environment_is_provider_specific():
     env = profile.command_environment()
     assert env["IMAGE_GENERATION_PROVIDER"] == "openai"
     assert env["IMAGE_GENERATION_API_KEY"] == "synthetic-key"
-    assert env["GEMINI_API_KEY"] == ""
+    assert "GEMINI_API_KEY" not in env

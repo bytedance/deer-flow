@@ -357,8 +357,8 @@ async def test_unknown_image_capability_does_not_block_generic_aio_creation_or_i
     assert "extra_environment" not in calls[0][2]
     final_env = calls[1][2]["extra_environment"]
     assert final_env["IMAGE_GENERATION_API_KEY"] == ""
-    assert final_env["GEMINI_API_KEY"] == ""
-    assert final_env["MINIMAX_API_KEY"] == ""
+    assert "GEMINI_API_KEY" not in final_env
+    assert "MINIMAX_API_KEY" not in final_env
     assert "synthetic-secret" not in str(calls)
     assert [item[0] for item in destroyed] == probes
     assert user_file.read_text(encoding="utf-8") == "persistent plan"

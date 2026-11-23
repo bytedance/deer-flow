@@ -82,6 +82,16 @@ def test_legacy_server_profile_remains_available(tmp_path, monkeypatch):
     assert (profile.provider.value, profile.model, profile.usable()) == ("gemini", "legacy-image", True)
 
 
+@pytest.mark.parametrize("provider_key,expected_provider", [("GEMINI_API_KEY", "gemini"), ("MINIMAX_API_KEY", "minimax")])
+def test_inferred_legacy_provider_keeps_its_shared_key(provider_key, expected_provider):
+    from deerflow.config.image_generation import legacy_image_profile
+
+    profile = legacy_image_profile({provider_key: "shared-key", "IMAGE_GENERATION_API_KEY": "other-image-key"})
+    assert profile is not None
+    assert profile.provider.value == expected_provider
+    assert profile.api_key.get_secret_value() == "shared-key"
+
+
 def test_typed_minimax_default_uses_canonical_endpoint_identity(tmp_path, monkeypatch):
     from app.gateway.routers import image_generation as router
 
@@ -98,7 +108,7 @@ def test_typed_and_legacy_server_profiles_cannot_compete():
     with pytest.raises(ValueError, match="image_generation.*sandbox.environment"):
         AppConfig.model_validate(
             {
-                "sandbox": {"use": "test", "environment": {"GEMINI_API_KEY": "synthetic-legacy-key"}},
+                "sandbox": {"use": "test", "environment": {"GEMINI_IMAGE_MODEL": "legacy-image"}},
                 "image_generation": {
                     "provider": "openai",
                     "model": "synthetic-image-model",
@@ -107,6 +117,32 @@ def test_typed_and_legacy_server_profiles_cannot_compete():
                 },
             }
         )
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini", "minimax"])
+def test_typed_image_profile_preserves_shared_minimax_key_for_other_skills(provider):
+    config = AppConfig.model_validate(
+        {
+            "sandbox": {"use": "test", "environment": {"MINIMAX_API_KEY": "synthetic-music-key", "MINIMAX_API_HOST": "https://music.example"}},
+            "image_generation": {
+                "provider": provider,
+                "model": "synthetic-image-model",
+                "base_url": "https://images.example/v1",
+                "api_key": "synthetic-image-key",
+            },
+        }
+    )
+    assert config.image_generation is not None
+    assert "MINIMAX_API_KEY" not in config.image_generation.server_environment()
+    assert "MINIMAX_API_HOST" not in config.image_generation.server_environment()
+    assert config.image_generation_environment["IMAGE_GENERATION_API_KEY"] == "synthetic-image-key"
+    from deerflow.config.image_generation import resolve_server_image_profile
+
+    resolved = resolve_server_image_profile(config)
+    assert resolved is not None
+    assert resolved.api_key.get_secret_value() == "synthetic-image-key"
+    if provider == "minimax":
+        assert resolved.base_url == "https://images.example/v1"
 
 
 def test_typed_server_and_web_profiles_remain_separate_choices(tmp_path, monkeypatch):
@@ -328,6 +364,7 @@ def test_typed_server_profile_reaches_local_aio_and_tool(tmp_path, monkeypatch):
 
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     current = [_config()]
+    current[0].sandbox.environment["MINIMAX_API_KEY"] = "synthetic-music-key"
     monkeypatch.setattr(provider_module, "get_app_config", lambda: current[0])
     monkeypatch.setattr(image_tool, "get_app_config", lambda: current[0])
     provider = object.__new__(AioSandboxProvider)
@@ -352,6 +389,7 @@ def test_typed_server_profile_reaches_local_aio_and_tool(tmp_path, monkeypatch):
     sandbox_id = provider._sandbox_id_for_thread("synthetic-thread", "synthetic-user")
     assert sandbox_id != "synthetic-base"
     assert provider._create_sandbox("synthetic-thread", sandbox_id, user_id="synthetic-user") == sandbox_id
+    assert "MINIMAX_API_KEY" not in created[0]["extra_environment"]
     assert created[0]["extra_environment"]["IMAGE_GENERATION_API_KEY"] == "synthetic-server-key"
 
     sandbox = object.__new__(AioSandbox)

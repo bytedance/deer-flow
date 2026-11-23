@@ -64,6 +64,55 @@ async def test_missing_profile_async_returns_before_sandbox_acquisition(monkeypa
     assert "IMAGE_PROVIDER_NOT_CONFIGURED" in result
 
 
+@pytest.mark.asyncio
+async def test_async_image_source_resolution_runs_off_event_loop(monkeypatch):
+    from deerflow.sandbox import tools as sandbox_tools
+
+    loop_thread = threading.get_ident()
+    observed = []
+    profile = ImageGenerationProfile(provider="openai", model="test-image", base_url="https://images.example/v1", api_key="synthetic-secret")
+
+    def load_config():
+        observed.append(threading.get_ident())
+        return config()
+
+    monkeypatch.setattr(image_tool, "get_app_config", load_config)
+
+    def select_source(_environment, *, allows_clarification):
+        observed.append(threading.get_ident())
+        return "managed"
+
+    monkeypatch.setattr(image_tool, "image_generation_source_for_run", select_source)
+    monkeypatch.setattr(image_tool, "resolve_image_generation_profile", lambda _env: (profile, "managed", None))
+
+    async def run_tool(*_args, **_kwargs):
+        return "tool-ran"
+
+    monkeypatch.setattr(sandbox_tools, "_run_sync_tool_after_async_sandbox_init", run_tool)
+    result = await image_tool.generate_image_tool.coroutine(SimpleNamespace(context={}), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/slide.png")
+    assert result == "tool-ran"
+    assert observed and all(thread_id != loop_thread for thread_id in observed)
+
+
+@pytest.mark.asyncio
+async def test_async_image_command_enables_owner_cancellation(monkeypatch):
+    from deerflow.sandbox import tools as sandbox_tools
+
+    profile = ImageGenerationProfile(provider="openai", model="test-image", base_url="https://images.example/v1", api_key="synthetic-secret")
+    monkeypatch.setattr(image_tool, "get_app_config", config)
+    monkeypatch.setattr(image_tool, "resolve_image_generation_profile", lambda _env: (profile, "managed", None))
+    captured = {}
+
+    async def run_tool(*_args, **kwargs):
+        captured.update(kwargs)
+        return "tool-ran"
+
+    monkeypatch.setattr(sandbox_tools, "_run_sync_tool_after_async_sandbox_init", run_tool)
+    result = await image_tool.generate_image_tool.coroutine(SimpleNamespace(context={}), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/slide.png")
+    assert result == "tool-ran"
+    assert captured["_cancel_command"] is True
+
+
 def test_command_receives_secret_as_env_and_requires_success_marker(monkeypatch):
     from deerflow.sandbox import tools as sandbox_tools
 

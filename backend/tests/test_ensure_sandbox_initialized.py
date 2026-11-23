@@ -561,3 +561,44 @@ async def test_cancelled_async_tool_drains_worker_before_execution_lease_cleanup
         allow_worker.set()
         await asyncio.to_thread(worker_finished.wait, 2)
         reset_sandbox_provider()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_command_tool_signals_its_lease_owner(monkeypatch) -> None:
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    started = threading.Event()
+    cancelled = threading.Event()
+    seen_owners = []
+    runtime = _make_runtime({"sandbox": {"sandbox_id": "fresh-sandbox"}})
+    runtime.context.update({SANDBOX_LEASE_OWNER_CONTEXT_KEY: "image-run", "thread_id": "thread-1", "user_id": "user-1"})
+
+    async def allow_sandbox(*, context, app_config):
+        del context, app_config
+
+    async def safe_config():
+        return None
+
+    def request_cancel(owner):
+        seen_owners.append(owner)
+        cancelled.set()
+
+    def command(_runtime):
+        started.set()
+        assert cancelled.wait(2)
+        return "cancelled"
+
+    monkeypatch.setattr("deerflow.sandbox.tools.authorize_sandbox_execution_async", allow_sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.safe_app_config_async", safe_config)
+    monkeypatch.setattr(provider.sandbox, "supports_command_cancellation", True)
+    monkeypatch.setattr(provider.sandbox, "request_command_cancel", request_cancel)
+    try:
+        task = asyncio.create_task(_run_sync_tool_after_async_sandbox_init(command, runtime, _cancel_command=True))
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert seen_owners == ["image-run"]
+    finally:
+        cancelled.set()
+        reset_sandbox_provider()

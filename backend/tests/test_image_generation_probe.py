@@ -13,6 +13,10 @@ def profile():
     return ImageGenerationProfile(provider="openai", model="image-model", base_url="https://images.example/v1", api_key="synthetic-secret")
 
 
+def provider_profile(provider):
+    return ImageGenerationProfile(provider=provider, model="image-model", base_url="https://images.example/v1" if provider == "openai" else None, api_key="synthetic-secret")
+
+
 def client_with(handler, monkeypatch):
     original = httpx.Client
     monkeypatch.setattr(probe.httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs))
@@ -63,4 +67,44 @@ def test_unsupported_edit_and_invalid_response(monkeypatch):
         return httpx.Response(200, json={"data": []})
 
     client_with(empty, monkeypatch)
+    assert probe.probe_image_profile(profile(), "generation") == "invalid_response"
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini", "minimax"])
+@pytest.mark.parametrize("operation", ["generation", "edit"])
+def test_truncated_image_is_not_recorded_as_success(monkeypatch, provider, operation):
+    signature_only = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+    payload = {
+        "openai": {"data": [{"b64_json": signature_only}]},
+        "gemini": {"candidates": [{"content": {"parts": [{"inlineData": {"data": signature_only}}]}}]},
+        "minimax": {"data": {"image_base64": [signature_only]}},
+    }[provider]
+    client_with(lambda _request: httpx.Response(200, json=payload), monkeypatch)
+    assert probe.probe_image_profile(provider_profile(provider), operation) == "invalid_response"
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini", "minimax"])
+@pytest.mark.parametrize("operation", ["generation", "edit"])
+def test_oversized_provider_response_is_rejected_while_streaming(monkeypatch, provider, operation):
+    class OversizedStream(httpx.SyncByteStream):
+        def __init__(self):
+            self.chunks_read = 0
+
+        def __iter__(self):
+            for _ in range(4):
+                self.chunks_read += 1
+                yield b"x" * (probe.MAX_PROBE_RESPONSE_BYTES // 2)
+
+    stream = OversizedStream()
+    client_with(lambda _request: httpx.Response(200, stream=stream), monkeypatch)
+    assert probe.probe_image_profile(provider_profile(provider), operation) == "invalid_response"
+    assert stream.chunks_read == 3
+
+
+def test_compressed_probe_response_is_rejected_before_read(monkeypatch):
+    class UnreadableStream(httpx.SyncByteStream):
+        def __iter__(self):
+            pytest.fail("compressed response body was read")
+
+    client_with(lambda _request: httpx.Response(200, headers={"content-encoding": "gzip"}, stream=UnreadableStream()), monkeypatch)
     assert probe.probe_image_profile(profile(), "generation") == "invalid_response"

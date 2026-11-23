@@ -92,7 +92,7 @@ IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 # when DeerFlow's configured execution capacity cannot fit.
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 _SHELL_SESSION_HEADROOM = 1
-_EMPTY_IMAGE_CREDENTIALS = {key: "" for key in ("IMAGE_GENERATION_API_KEY", "GEMINI_API_KEY", "MINIMAX_API_KEY")}
+_EMPTY_IMAGE_CREDENTIALS = {"IMAGE_GENERATION_API_KEY": ""}
 
 
 class SandboxBeingDestroyedError(RuntimeError):

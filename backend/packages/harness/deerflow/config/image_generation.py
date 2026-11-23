@@ -89,26 +89,23 @@ class ImageGenerationProfile(BaseModel):
     def server_environment(self) -> dict[str, str]:
         """Represent a typed server profile for the existing image resolver."""
         key = self.api_key.get_secret_value() if self.api_key else ""
-        # Clear image credentials inherited from a previously configured
-        # container so the selected profile is the only effective provider.
+        # Shared Gemini and MiniMax keys may also serve video, music or podcast
+        # skills. The explicit provider selector keeps image routing unambiguous.
         env = {
             "IMAGE_GENERATION_PROVIDER": self.provider.value,
-            "GEMINI_API_KEY": "",
-            "MINIMAX_API_KEY": "",
-            "IMAGE_GENERATION_API_KEY": "",
+            "IMAGE_GENERATION_API_KEY": key,
         }
         if self.provider == ImageProvider.OPENAI:
             env.update(
-                IMAGE_GENERATION_API_KEY=key,
                 IMAGE_GENERATION_BASE_URL=self.base_url or "",
                 IMAGE_GENERATION_MODEL=self.model,
             )
             env["IMAGE_GENERATION_SIZE"] = self.size or ""
         elif self.provider == ImageProvider.GEMINI:
-            env.update(GEMINI_API_KEY=key, GEMINI_IMAGE_MODEL=self.model)
+            env["GEMINI_IMAGE_MODEL"] = self.model
         else:
-            env.update(MINIMAX_API_KEY=key, MINIMAX_IMAGE_MODEL=self.model)
-            env["MINIMAX_API_HOST"] = self.base_url or "https://api.minimaxi.com"
+            env["MINIMAX_IMAGE_MODEL"] = self.model
+            env["IMAGE_GENERATION_BASE_URL"] = self.base_url or "https://api.minimaxi.com"
         return env
 
     def command_environment(self) -> dict[str, str]:
@@ -359,6 +356,7 @@ def _legacy_environment(raw: dict[str, str]) -> dict[str, str]:
 def legacy_image_profile(raw_environment: dict[str, str]) -> ImageGenerationProfile | None:
     env = _legacy_environment(raw_environment)
     raw_provider = env.get("IMAGE_GENERATION_PROVIDER", "").strip().lower()
+    explicit_provider = bool(raw_provider)
     if not raw_provider:
         raw_provider = next(
             (
@@ -394,13 +392,13 @@ def legacy_image_profile(raw_environment: dict[str, str]) -> ImageGenerationProf
         return ImageGenerationProfile(
             provider=provider,
             model=env.get("GEMINI_IMAGE_MODEL") or "gemini-3-pro-image-preview",
-            api_key=env.get("GEMINI_API_KEY"),
+            api_key=(env.get("IMAGE_GENERATION_API_KEY") if explicit_provider else None) or env.get("GEMINI_API_KEY"),
         )
     return ImageGenerationProfile(
         provider=provider,
         model=env.get("MINIMAX_IMAGE_MODEL") or "image-01",
-        base_url=env.get("MINIMAX_API_HOST") or None,
-        api_key=env.get("MINIMAX_API_KEY"),
+        base_url=(env.get("IMAGE_GENERATION_BASE_URL") if explicit_provider else None) or env.get("MINIMAX_API_HOST") or None,
+        api_key=(env.get("IMAGE_GENERATION_API_KEY") if explicit_provider else None) or env.get("MINIMAX_API_KEY"),
     )
 
 

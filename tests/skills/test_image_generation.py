@@ -197,6 +197,71 @@ def test_minimax_builds_payload_and_writes(monkeypatch, tmp_path):
     assert "Successfully generated image" in msg
 
 
+def test_minimax_image_uses_dedicated_key_and_endpoint_without_changing_music(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "minimax")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://images.example")
+    monkeypatch.setenv("MINIMAX_API_KEY", "music-key")
+    monkeypatch.setenv("MINIMAX_API_HOST", "https://music.example")
+    captured = {}
+
+    def post(url, **kwargs):
+        captured.update(url=url, headers=kwargs["headers"])
+        return FakeResp(
+            {
+                "data": {"image_base64": [base64.b64encode(b"image").decode()]},
+                "base_resp": {"status_code": 0},
+            }
+        )
+
+    monkeypatch.setattr(img, "_post_image", post)
+    img._generate_image_minimax("slide", [], str(tmp_path / "slide.png"), "1:1")
+    assert captured["url"] == "https://images.example/v1/image_generation"
+    assert captured["headers"]["Authorization"] == "Bearer image-key"
+    monkeypatch.delenv("IMAGE_GENERATION_PROVIDER")
+    img._generate_image_minimax("slide", [], str(tmp_path / "legacy.png"), "1:1")
+    assert captured["url"] == "https://music.example/v1/image_generation"
+    assert captured["headers"]["Authorization"] == "Bearer music-key"
+
+
+def test_gemini_image_uses_dedicated_key_without_changing_shared_key(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "gemini")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "video-key")
+    captured = {}
+
+    def post(_url, **kwargs):
+        captured.update(kwargs["headers"])
+        return FakeResp(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "data": base64.b64encode(b"image").decode()
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(img, "_post_image", post)
+    img._generate_image_gemini("slide", [], str(tmp_path / "slide.png"), "1:1")
+    assert captured["x-goog-api-key"] == "image-key"
+    monkeypatch.delenv("IMAGE_GENERATION_PROVIDER")
+    img._generate_image_gemini("slide", [], str(tmp_path / "legacy.png"), "1:1")
+    assert captured["x-goog-api-key"] == "video-key"
+
+
 def test_minimax_reference_image_as_data_url(monkeypatch, tmp_path):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
     captured = {}

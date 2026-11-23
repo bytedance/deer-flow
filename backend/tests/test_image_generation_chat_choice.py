@@ -370,8 +370,9 @@ async def test_unattended_async_image_call_binds_server_before_sandbox_helper(im
     _, _, environment = image_choice
     monkeypatch.setattr(image_tool, "get_app_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}}))
 
-    async def acquire_then_run(*_args):
+    async def acquire_then_run(*_args, _cancel_command=False):
         assert selected_image_generation_source() == "sandbox_environment"
+        assert _cancel_command is True
         return "synthetic-success"
 
     monkeypatch.setattr(sandbox_tools, "_run_sync_tool_after_async_sandbox_init", acquire_then_run)

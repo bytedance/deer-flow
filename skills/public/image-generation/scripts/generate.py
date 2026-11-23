@@ -69,7 +69,14 @@ def _resolve_provider(
 
 
 def _minimax_host() -> str:
-    return os.getenv("MINIMAX_API_HOST", MINIMAX_DEFAULT_HOST).rstrip("/")
+    image_host = (
+        os.getenv("IMAGE_GENERATION_BASE_URL")
+        if os.getenv("IMAGE_GENERATION_PROVIDER", "").strip().lower() == "minimax"
+        else None
+    )
+    return (image_host or os.getenv("MINIMAX_API_HOST") or MINIMAX_DEFAULT_HOST).rstrip(
+        "/"
+    )
 
 
 def _openai_base_url() -> str:
@@ -271,7 +278,12 @@ def _minimax_prompt(raw: str) -> str:
 def _generate_image_minimax(
     prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
 ) -> str:
-    bearer_value = os.getenv("MINIMAX_API_KEY")
+    image_key = (
+        os.getenv("IMAGE_GENERATION_API_KEY")
+        if os.getenv("IMAGE_GENERATION_PROVIDER", "").strip().lower() == "minimax"
+        else None
+    )
+    bearer_value = image_key or os.getenv("MINIMAX_API_KEY")
     if not bearer_value:
         raise MissingImageCredentialError("MINIMAX_API_KEY is not set")
     prompt = _minimax_prompt(prompt)
@@ -333,7 +345,13 @@ def _generate_image_gemini(
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
         parts.append({"inlineData": {"mimeType": mime_type, "data": image_b64}})
 
-    bearer_value = os.getenv("GEMINI_API_KEY")
+    image_key = (
+        os.getenv("IMAGE_GENERATION_API_KEY")
+        if os.getenv("IMAGE_GENERATION_PROVIDER", "").strip().lower()
+        in {"gemini", "google"}
+        else None
+    )
+    bearer_value = image_key or os.getenv("GEMINI_API_KEY")
     if not bearer_value:
         raise MissingImageCredentialError("GEMINI_API_KEY is not set")
     model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")

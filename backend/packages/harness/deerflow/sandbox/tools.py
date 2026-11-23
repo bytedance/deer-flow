@@ -2406,6 +2406,7 @@ async def _run_sync_tool_after_async_sandbox_init(
     runtime: Runtime,
     *args: object,
     _error_result: Callable[[str, BaseException | None], str | ToolMessage] | None = None,
+    _cancel_command: bool = False,
 ) -> str | ToolMessage:
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
@@ -2418,7 +2419,7 @@ async def _run_sync_tool_after_async_sandbox_init(
 
             owner = sandbox_lease_owner(runtime.context)
             signal_cancel = None
-            if func is bash_tool.func and owner and getattr(sandbox, "supports_command_cancellation", False):
+            if _cancel_command and owner and getattr(sandbox, "supports_command_cancellation", False):
                 signal_cancel = partial(sandbox.request_command_cancel, owner)
             return await run_sync_lifecycle_operation(func, runtime, *args, _on_cancel=signal_cancel)
     except SandboxError as e:
@@ -2957,7 +2958,7 @@ def _bash_command_result(runtime: Runtime, output: str, content: str) -> str | T
 
 
 async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str | ToolMessage:
-    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description)
+    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description, _cancel_command=True)
 
 
 bash_tool.coroutine = _bash_tool_async

@@ -222,8 +222,8 @@ async def test_sandbox_tool_sync_async_signatures_and_forwarding_stay_aligned(
     run_sync_tool = AsyncMock(return_value="forwarded")
     monkeypatch.setattr("deerflow.sandbox.tools._run_sync_tool_after_async_sandbox_init", run_sync_tool)
     runtime = object()
-    # read_file supplies a private callback to format sandbox initialization errors.
-    forwarded_kwargs = {"_error_result": ANY} if tool_obj is read_file_tool else {}
+    # read_file formats init errors; bash enables cancellation of owned commands.
+    forwarded_kwargs = {"_error_result": ANY} if tool_obj is read_file_tool else {"_cancel_command": True} if tool_obj is bash_tool else {}
 
     assert await tool_obj.coroutine(runtime=runtime, **call_args) == "forwarded"
     run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_args, **forwarded_kwargs)

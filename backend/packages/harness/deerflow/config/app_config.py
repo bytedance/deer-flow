@@ -455,11 +455,8 @@ class AppConfig(BaseModel):
                 "IMAGE_GENERATION_BASE_URL",
                 "IMAGE_GENERATION_MODEL",
                 "IMAGE_GENERATION_SIZE",
-                "GEMINI_API_KEY",
                 "GEMINI_IMAGE_MODEL",
-                "MINIMAX_API_KEY",
                 "MINIMAX_IMAGE_MODEL",
-                "MINIMAX_API_HOST",
             )
         ):
             raise ValueError("image_generation and sandbox.environment image settings cannot both be configured")

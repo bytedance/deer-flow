@@ -307,11 +307,18 @@ Administrators can also configure and test image providers under **Settings →
 Models → Image models**. For an operator-owned provider, use the typed top-level
 `image_generation` block in `config.yaml` instead of the legacy image variables
 in `sandbox.environment`; the two YAML forms cannot be configured together.
+Shared `GEMINI_API_KEY`, `MINIMAX_API_KEY`, and `MINIMAX_API_HOST` values may remain in
+`sandbox.environment` for video, music, or podcast skills. Image-specific model,
+provider, endpoint, and size variables must stay in the selected YAML form.
+The typed profile passes its key and endpoint through image-specific variables,
+so it does not replace those shared values in a local AIO sandbox.
 When a server provider and an enabled web profile coexist, interactive runs ask
 which to use, while unattended runs use the server provider. Managed image
 profiles can be disabled at deployment level without disabling the server
 provider. PPT generation records verified slides for safe resume after an image
 model change and publishes the final deck only after the PPTX is valid.
+An explicit provider test reports invalid output when the response exceeds
+16 MiB or contains a truncated image; it never records that result as verified.
 
 The local provider applies the skill view through its workspace file tools.
 Script-based skills require an isolated sandbox provider on Windows as well.
