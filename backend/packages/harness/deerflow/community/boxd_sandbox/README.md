@@ -45,9 +45,10 @@ snapshot here. New machines start from it.
 
 ## Lifecycle and contract
 
-- **One machine per scope.** The local sandbox id comes from
-  `derive_sandbox_scope_token(user_id, thread_id)`. Every SDK call addresses the
-  machine by the id that `create` returned.
+- **One machine per scope.** The scope token comes from the user and thread.
+  The local sandbox ID stays the same while that machine is in use or parked.
+  A replacement machine gets a new sandbox ID. Every SDK call uses the machine
+  ID returned by `create`.
 - **Isolated.** Machines are created with `isolated: true`: no private network,
   no boxd credentials inside the machine. The API key stays in the Gateway, and
   per-call secrets travel as exec environment, not in the command string.
@@ -61,13 +62,13 @@ snapshot here. New machines start from it.
   a skill policy gets its own projection through `sync_agent_skills`, which
   replaces the managed skill categories; the machine sees only what was
   uploaded.
-- **Release.** Output files are copied back to the thread's output directory
-  (at most 2,000 files, 512 MiB and 120 seconds per release), then the machine is
-  parked in the warm pool. Names that differ only by case or Unicode
-  normalization, unsafe names and linked destinations are skipped. A copy
-  failure keeps the previous copy. Listing and downloads share the remaining
-  120-second budget. A stopped machine's copy is skipped, and recovery waits
-  for the next normal sandbox call.
+- **Release.** Once the last caller releases a machine, output files are copied
+  back to the thread's output directory (at most 2,000 files, 512 MiB and 120
+  seconds per release), then the machine is parked in the warm pool. Names
+  that differ only by case or Unicode normalization, unsafe names and linked
+  destinations are skipped. A copy failure keeps the previous copy. Listing
+  and downloads share the remaining 120-second budget. A stopped machine's
+  copy is skipped, and recovery waits for the next normal sandbox call.
 - **Reuse.** Only the same scope can reclaim a warm machine, after a health
   check. A failed check deletes the machine and creates a new one.
 - **Stopped machines** are started on the next call. A file call then runs

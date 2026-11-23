@@ -1941,6 +1941,9 @@ sandbox:
 #   # ownership:
 #   #   type: redis                  # required for multi-instance / load-balanced
 #   #   redis_url: redis://redis:6379/0
+#   #   redis_mode: standalone       # use cluster for Redis Cluster (database 0)
+#   #   # redis_cluster_nodes:       # optional extra discovery seeds in cluster mode
+#   #   #   - redis-1:6379
 #   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
 #   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
 #   #                                # single missed renewal cannot expire a live
@@ -1950,8 +1953,9 @@ sandbox:
 #   #   key_prefix: deerflow:sandbox:owner
 #   #
 #   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
-#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
-#   # startup, but a sandbox whose ownership cannot be published is not handed out
+#   # fail-hard policy. Standalone Redis connects on first use. Cluster mode
+#   # discovers the topology at provider startup and requires a reachable seed.
+#   # A sandbox whose ownership cannot be published is not handed out
 #   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
 #   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
 #   #

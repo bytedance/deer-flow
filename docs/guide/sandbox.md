@@ -125,6 +125,39 @@ saved API error responses and avoids blocking later reads when the optional
 `tool_progress` guard is enabled. Actual read failures and output truncation
 still retain their error or partial-result status.
 
+## Redis Cluster for shared sandbox ownership
+
+Gateways sharing AIO containers or E2B VMs can store ownership leases in Redis
+Cluster. E2B uses the same connection settings for its deployment-wide capacity
+ledger. Configure the same cluster and key prefix on every Gateway.
+
+```yaml
+sandbox:
+  ownership:
+    type: redis
+    redis_mode: cluster
+    redis_url: $DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL
+    redis_cluster_nodes:
+      - redis-1:6379
+      - redis-2:6379
+```
+
+Set the seed URL to `redis://host:port/0` or `rediss://user:password@host:port/0`
+for TLS and ACL authentication. Percent-encode credentials in the URL. The
+extra discovery nodes are optional and share the URL's credentials and TLS
+settings. Use `[IPv6]:port` for an IPv6 node. When `redis_url` is omitted,
+the first populated variable among `DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL`,
+`DEER_FLOW_STREAM_BRIDGE_REDIS_URL`, and `REDIS_URL` supplies it. Cluster mode
+requires an explicit seed URL from one of these sources and uses database 0.
+
+In cluster mode, the Gateway initializes the sandbox provider on a worker
+thread before accepting requests. Startup fails if slot discovery fails. The Gateway needs connectivity
+to the addresses the cluster advertises. Lease reads use primaries and each
+lease transition runs atomically on the primary holding that sandbox's key.
+Restart the Gateway after changing the topology. Standalone Redis remains the
+default for `type: redis` and connects lazily. Other Redis-backed components,
+including the stream bridge, have their own client configuration.
+
 ## Sandbox & File System
 
 AIO runs commands from independent subagents concurrently, including Lark CLI
@@ -451,6 +484,10 @@ continue to accept URL-encoded paths.
 The `write_file` guidance reflects the active model's output token limit, including custom-agent and thinking-mode overrides. For longer documents, the agent is guided to write sections with `append=True`; models without a known limit receive no numeric budget hint.
 
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. If local command startup fails after spawning a child, DeerFlow attempts to kill and reap that child before propagating the startup error. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
+
+On Windows, relative paths in local commands start in the thread workspace.
+PowerShell supports spaces and typographic apostrophes in the workspace path.
+The `cmd.exe` fallback supports workspace paths on a local or mapped drive.
 
 Docker AIO sandboxes default to their existing open egress behavior for
 compatibility. Operators can set `sandbox.network.mode` to `isolated` or
