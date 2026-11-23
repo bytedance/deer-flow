@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -667,6 +668,8 @@ def _convert_call_tool_result(
     artifact = None
     if call_tool_result.structuredContent is not None:
         artifact = {"structured_content": call_tool_result.structuredContent}
+        if not lc_content:
+            lc_content.append(create_text_block(text=json.dumps(call_tool_result.structuredContent, ensure_ascii=False)))
     if resource_links:
         if artifact is None:
             artifact = {}

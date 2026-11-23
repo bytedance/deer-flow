@@ -1,5 +1,6 @@
 """MCP resource links must reach the persistent artifact registry through the graph."""
 
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -34,6 +35,8 @@ async def session_pool():
         ("stdio", "application/pdf", "pdf"),
         ("stdio", "image/png", "png"),
         ("streamable_http", "image/png", "png"),
+        ("stdio", None, "result"),
+        ("stdio", None, "empty"),
     ],
 )
 async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, monkeypatch, tmp_path, session_pool):
@@ -57,6 +60,8 @@ async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, mo
 
         async def call_tool(self, name, arguments, **kwargs):
             calls.append((name, arguments))
+            if mime is None:
+                return CallToolResult(content=[], structuredContent={"count": 3, "city": "杭州"} if suffix == "result" else {})
             return CallToolResult(
                 content=[
                     ResourceLink(
@@ -111,6 +116,11 @@ async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, mo
     (message,) = [m for m in state["messages"] if isinstance(m, ToolMessage)]
     assert calls == [("export", {})]
     assert message.status == "success"
+    if mime is None:
+        expected = {"count": 3, "city": "杭州"} if suffix == "result" else {}
+        assert json.loads(message.content[0]["text"]) == expected
+        assert message.artifact == {"structured_content": expected}
+        return
     if mime.startswith("image/"):
         assert message.content[0]["type"] == "image"
         assert message.content[0]["url"] == url

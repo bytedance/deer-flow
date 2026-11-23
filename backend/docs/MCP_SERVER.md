@@ -14,6 +14,13 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Structured-only stdio tool results
+
+When a stdio MCP tool returns `structuredContent` with an empty `content` list,
+DeerFlow exposes the JSON result as model-visible text as well as retaining it
+in the tool artifact. Existing content blocks are preserved without adding a
+duplicate JSON rendering. Error results keep their error handling.
+
 ## Stdio Working Directory
 
 Set `cwd` when a stdio server needs to resolve its entrypoint or data files
