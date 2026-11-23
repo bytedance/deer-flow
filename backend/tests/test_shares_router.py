@@ -508,7 +508,74 @@ async def test_copy_whose_import_history_is_unreadable_is_kept_out_of_memory_unt
     assert "And sets?" in [message.content for message in captured]
 
 
-async def test_branch_of_a_copy_with_unreadable_import_history_is_unresolved(share_app, monkeypatch, tmp_path):
+def _fail_import_history_reads(ctx, monkeypatch):
+    """Make reading a thread's checkpoint history raise, as an unavailable checkpoint store does."""
+    checkpointer = ctx.app.state.checkpointer
+
+    class Failing:
+        def alist(self, *args, **kwargs):
+            raise ConnectionError("checkpoint store unavailable")
+
+        def __getattr__(self, name):
+            return getattr(checkpointer, name)
+
+    monkeypatch.setattr(share_fork, "get_checkpointer", lambda request: Failing())
+
+
+async def test_copy_whose_import_history_read_fails_is_kept_out_of_memory(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_UNRESOLVED
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+
+    _fail_import_history_reads(ctx, monkeypatch)
+    result = await ctx.client.post(f"/api/threads/{thread_id}/runs/wait", json={"input": {"messages": [{"type": "human", "content": "And sets?"}]}}, headers=headers("bob"))
+
+    assert result.status_code == 200, result.text
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == IMPORTED_HISTORY_UNRESOLVED
+    manager.aadd.assert_not_called()
+
+
+async def test_run_in_a_copy_is_refused_while_its_provenance_cannot_be_recorded(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    build = share_fork.build_checkpoint_state_mutation_accessor
+
+    class ReadOnly:
+        """The real accessor, failing every state write."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def aupdate(self, *args, **kwargs):
+            raise ConnectionError("checkpoint store unavailable")
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    def read_only_accessor(*args, **kwargs):
+        inner, read_only_config = build(*args, **kwargs)
+        return ReadOnly(inner), read_only_config
+
+    monkeypatch.setattr(share_fork, "build_checkpoint_state_mutation_accessor", read_only_accessor)
+    result = await ctx.client.post(f"/api/threads/{thread_id}/runs/wait", json={"input": {"messages": [{"type": "human", "content": "And sets?"}]}}, headers=headers("bob"))
+
+    assert result.status_code == 503, result.text
+    manager.aadd.assert_not_called()
+    assert IMPORTED_HISTORY_CHANNEL not in (await accessor.aget(config)).values
+
+    # Once provenance can be recorded, the run is admitted again.
+    monkeypatch.setattr(share_fork, "build_checkpoint_state_mutation_accessor", build)
+    captured = await _run_and_capture(ctx, manager, thread_id)
+    assert _follows_copy(captured) and not any("Alice" in str(message.content) for message in captured)
+
+
+@pytest.mark.parametrize("failure", ["missing", "read_error"])
+async def test_branch_of_a_copy_with_unreadable_import_history_is_unresolved(share_app, monkeypatch, tmp_path, failure):
     from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_UNRESOLVED
 
     ctx = share_app
@@ -518,7 +585,10 @@ async def test_branch_of_a_copy_with_unreadable_import_history_is_unresolved(sha
     async def import_checkpoint_unavailable(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(share_fork, "_imported_message_ids", import_checkpoint_unavailable)
+    if failure == "missing":
+        monkeypatch.setattr(share_fork, "_imported_message_ids", import_checkpoint_unavailable)
+    else:
+        _fail_import_history_reads(ctx, monkeypatch)
     branched = await ctx.client.post(f"/api/threads/{thread_id}/branches", json={"message_id": "bob-a"}, headers=headers("bob"))
 
     assert branched.status_code == 200, branched.text

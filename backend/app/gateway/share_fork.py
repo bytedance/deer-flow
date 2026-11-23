@@ -165,14 +165,19 @@ async def fork_share(request: Request, repo: ThreadShareRepository, token: str, 
 async def _imported_message_ids(request: Request, accessor, config: dict) -> set[str] | None:
     """IDs of the history the import wrote as the thread's root checkpoint.
 
-    ``None`` when the root is gone or unreadable: guessing from a later
-    checkpoint would mark the owner's own turns as someone else's.
+    ``None`` when the root is gone or unreadable, including a failed read:
+    guessing from a later checkpoint would mark the owner's own turns as
+    someone else's.
     """
-    tuples = [item async for item in get_checkpointer(request).alist(config)]
-    if not tuples or tuples[-1].parent_config is not None:
+    try:
+        tuples = [item async for item in get_checkpointer(request).alist(config)]
+        if not tuples or tuples[-1].parent_config is not None:
+            return None
+        root_id = tuples[-1].config["configurable"]["checkpoint_id"]
+        snapshot = await accessor.aget({**config, "configurable": {**config["configurable"], "checkpoint_id": root_id}})
+    except Exception:
+        logger.warning("Could not read the import checkpoint of thread %s", sanitize_log_param(config["configurable"].get("thread_id")), exc_info=True)
         return None
-    root_id = tuples[-1].config["configurable"]["checkpoint_id"]
-    snapshot = await accessor.aget({**config, "configurable": {**config["configurable"], "checkpoint_id": root_id}})
     messages = snapshot.values.get("messages") if isinstance(snapshot.values, dict) else None
     ids = {message.id for message in messages or () if getattr(message, "id", None)}
     return ids or None
@@ -248,8 +253,10 @@ async def ensure_share_import_history_marked(request: Request, thread_id: str, *
     reaches memory extraction; copies imported before the state channel
     existed lose their provenance once compaction removes the marked
     messages. Remove the shim once those copies are no longer an upgrade
-    source. A busy or paused thread is left for a later run. The shim is best
-    effort: a failure is logged and never blocks the run.
+    source. A busy or paused thread is left for a later run. Any other failure
+    is logged and retried on a later run, but memory capture reads the
+    provenance from state, so a copy whose state still has none is refused
+    with ``503`` instead of being remembered as an ordinary thread.
     """
     if threads is None:
         return
@@ -260,16 +267,26 @@ async def ensure_share_import_history_marked(request: Request, thread_id: str, *
         return
     if not is_share_copy_metadata(metadata):
         return
+    accessor, config = build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node="branch")
     try:
-        accessor, config = build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node="branch")
         if _has_share_provenance((await accessor.aget(config)).values):
             return
         async with get_run_manager(request).reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=get_trusted_internal_owner_user_id(request)):
             await _store_share_provenance(request, thread_id, threads, accessor, config)
     except ConflictError:
         logger.info("Share copy %s is busy; marking its copied history on a later run", sanitize_log_param(thread_id))
-    except Exception:
+    except Exception as exc:
         logger.warning("Could not mark the copied history of share copy %s; retrying on a later run", sanitize_log_param(thread_id), exc_info=True)
+        if not await _state_records_provenance(accessor, config):
+            raise HTTPException(503, "The history of this copied conversation could not be checked; try again") from exc
+
+
+async def _state_records_provenance(accessor, config: dict) -> bool:
+    """Whether the head carries any provenance, resolved or unresolved, for memory capture to read."""
+    try:
+        return bool(_share_provenance((await accessor.aget(config)).values))
+    except Exception:
+        return False
 
 
 async def prepare_share_copy_compaction(request: Request, thread_id: str, accessor, config: dict, *, as_node: str, metadata_timeout: float) -> bool:

@@ -47,7 +47,9 @@ updated before its next run, before a manual compaction and when it is branched.
 If a manual compaction cannot determine whether the thread is such a copy, it
 compacts without updating memory. When the history the import wrote can no
 longer be read, the copy's own turns cannot be told from the copied ones, so
-memory is not updated from that conversation until a later run can read it. Two
+memory is not updated from that conversation until a later run can read it. When
+the update cannot be stored at all, for example while the checkpoint store is
+unavailable, the run is refused with `503` and can be retried. Two
 cases can still pass the copied turns of such an older copy to memory: a run that
 starts from a checkpoint written before the update, for example an edit of an
 earlier turn, and the run that resumes a tool approval that was pending when the
