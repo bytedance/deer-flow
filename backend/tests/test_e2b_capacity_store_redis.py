@@ -6,6 +6,7 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -81,6 +82,30 @@ def test_factory_is_lazy_and_backend_errors_fail_closed() -> None:
             store.reserve("reservation")
     finally:
         store.close()
+
+
+def test_factory_uses_cluster_client_for_e2b_capacity(monkeypatch) -> None:
+    client = MagicMock()
+    monkeypatch.setattr(
+        "deerflow.community.e2b_sandbox.capacity.redis.make_redis_cluster_client",
+        lambda ownership: client,
+    )
+
+    store = make_e2b_capacity_store(
+        SandboxOwnershipConfig(
+            type="redis",
+            redis_mode="cluster",
+            redis_url="redis://seed:6379/0",
+            key_prefix="test",
+        ),
+        hard_limit=3,
+    )
+
+    assert store is not None
+    assert store._redis is client
+    assert store._owns_client is True
+    store.close()
+    client.close.assert_called_once()
 
 
 def test_two_gateways_atomically_share_one_hash(make_store) -> None:

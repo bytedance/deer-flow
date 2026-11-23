@@ -1612,7 +1612,9 @@ closed. Cluster mode uses `RedisCluster.from_url`, which connects while the
 provider is constructed; an unreachable cluster therefore fails startup instead
 of failing the first lease. Both modes refuse to hand out a sandbox whose
 ownership cannot be published, which is the #4206 cross-instance safety
-contract.
+contract. E2B's deployment-wide capacity ledger uses the same `redis_url` and
+`redis_mode`, so cluster mode applies to both ownership leases and capacity
+reservations.
 
 **E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):
 

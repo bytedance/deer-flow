@@ -90,6 +90,22 @@ def _cluster_startup_nodes(nodes: list[str]) -> list:
     return startup_nodes
 
 
+def make_redis_cluster_client(config: SandboxOwnershipConfig, *, redis_url: str | None = None):
+    """Build the eager cluster client shared by ownership and E2B capacity."""
+    from redis.cluster import RedisCluster
+
+    from .redis import REDIS_STORE_SOCKET_TIMEOUT_SECONDS
+
+    return RedisCluster.from_url(
+        redis_url or resolve_ownership_redis_url(config),
+        startup_nodes=_cluster_startup_nodes(config.redis_cluster_nodes),
+        decode_responses=True,
+        socket_timeout=REDIS_STORE_SOCKET_TIMEOUT_SECONDS,
+        socket_connect_timeout=REDIS_STORE_SOCKET_TIMEOUT_SECONDS,
+        read_from_replicas=False,
+    )
+
+
 def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner_id: str | None = None) -> SandboxOwnershipStore:
     """Build the ownership store for *config*.
 
@@ -109,20 +125,11 @@ def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner
         return MemoryOwnershipStore(owner_id=effective_owner_id, ttl_seconds=ttl)
 
     if resolved.type == "redis":
-        from .redis import REDIS_STORE_SOCKET_TIMEOUT_SECONDS, RedisOwnershipStore
+        from .redis import RedisOwnershipStore
 
         redis_url = resolve_ownership_redis_url(resolved)
         if resolved.redis_mode == "cluster":
-            from redis.cluster import RedisCluster
-
-            client = RedisCluster.from_url(
-                redis_url,
-                startup_nodes=_cluster_startup_nodes(resolved.redis_cluster_nodes),
-                decode_responses=True,
-                socket_timeout=REDIS_STORE_SOCKET_TIMEOUT_SECONDS,
-                socket_connect_timeout=REDIS_STORE_SOCKET_TIMEOUT_SECONDS,
-                read_from_replicas=False,
-            )
+            client = make_redis_cluster_client(resolved, redis_url=redis_url)
             logger.info(
                 "Sandbox ownership store: redis-cluster (ttl=%.1fs, renewal=%.1fs, extra_seeds=%d)",
                 ttl,
