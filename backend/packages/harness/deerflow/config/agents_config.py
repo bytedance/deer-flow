@@ -13,9 +13,16 @@ import unicodedata
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.paths import get_paths
+from deerflow.config.subagents_config import (
+    MAX_CONCURRENT_SUBAGENT_CALLS,
+    MAX_TOTAL_SUBAGENTS_PER_RUN,
+    MIN_CONCURRENT_SUBAGENT_CALLS,
+    MIN_TOTAL_SUBAGENTS_PER_RUN,
+)
 from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -197,6 +204,30 @@ class AgentModelSettings(BaseModel):
     )
 
 
+class AgentSubagentPolicy(BaseModel):
+    """Optional per-Agent ceilings for ordinary task delegation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_concurrent: int | None = Field(
+        default=None,
+        ge=MIN_CONCURRENT_SUBAGENT_CALLS,
+        le=MAX_CONCURRENT_SUBAGENT_CALLS,
+        description="Maximum ordinary task calls per model response, subject to process capacity",
+    )
+    max_total: int | None = Field(
+        default=None,
+        ge=MIN_TOTAL_SUBAGENTS_PER_RUN,
+        le=MAX_TOTAL_SUBAGENTS_PER_RUN,
+        description="Maximum ordinary task delegations per run",
+    )
+
+    @field_validator("max_concurrent", "max_total", mode="before")
+    @classmethod
+    def _reject_boolean_limits(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
+
 class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
@@ -223,6 +254,9 @@ class AgentConfig(BaseModel):
     # The default Lead Agent has no AgentConfig and therefore keeps access to
     # the full catalog.
     allowed_subagents: list[str] | None = None
+    # Per-Agent caps on task tool calls. Each omitted value inherits the
+    # existing runtime behavior. Run requests may lower configured caps.
+    subagent_policy: AgentSubagentPolicy | None = None
     # Per-agent LLM sampling overrides (temperature / max_tokens) layered on top
     # of the referenced model profile. None = no overrides (issue #4336).
     model_settings: AgentModelSettings | None = None
@@ -258,6 +292,7 @@ MANAGED_AGENT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "tool_groups",
         "skills",
         "allowed_subagents",
+        "subagent_policy",
         "model_settings",
         "thinking_enabled",
         "reasoning_effort",

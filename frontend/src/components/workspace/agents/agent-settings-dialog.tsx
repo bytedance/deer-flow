@@ -46,7 +46,10 @@ import {
   DEFAULT_MODEL_VALUE,
   INHERIT_VALUE,
   MAX_AGENT_OUTPUT_TOKENS,
+  MAX_AGENT_SUBAGENT_CONCURRENCY,
+  MAX_AGENT_SUBAGENTS_PER_RUN,
   parseAgentModelSettingsDraft,
+  parseAgentSubagentPolicyDraft,
   resolveEffectiveModel,
   selectionToAllowedSubagents,
   selectionToThinkingEnabled,
@@ -72,9 +75,7 @@ interface AgentSettingsDialogProps {
 }
 
 /**
- * Edits a custom agent's display name and model behavior: default model plus the
- * per-agent temperature / max_tokens overrides and thinking / reasoning
- * defaults. Persists through `PUT /api/agents/{name}`; changes take effect on
+ * Edits a custom agent's defaults and capabilities. Changes take effect on
  * the agent's next run.
  */
 export function AgentSettingsDialog({
@@ -96,6 +97,9 @@ export function AgentSettingsDialog({
   const [knowledgeChanged, setKnowledgeChanged] = useState(false);
   const { subagents } = useSubagents();
   const subagentDescriptionId = useId();
+  const subagentLimitsHintId = useId();
+  const maxConcurrentId = useId();
+  const maxTotalId = useId();
   const modelStatusId = useId();
   const thinkingHintId = useId();
   const effortHintId = useId();
@@ -108,6 +112,8 @@ export function AgentSettingsDialog({
     model: agent.model ?? DEFAULT_MODEL_VALUE,
     thinking: thinkingEnabledToSelection(agent.thinking_enabled),
     reasoningEffort: agent.reasoning_effort ?? INHERIT_VALUE,
+    maxConcurrentSubagents: agent.subagent_policy?.max_concurrent ?? null,
+    maxTotalSubagents: agent.subagent_policy?.max_total ?? null,
   }));
   const [plugins, setPlugins] = useState<string[] | null>(
     agent.mcp_plugins ?? null,
@@ -140,6 +146,12 @@ export function AgentSettingsDialog({
     agent.model_settings?.max_tokens != null
       ? String(agent.model_settings.max_tokens)
       : "",
+  );
+  const [maxConcurrentSubagents, setMaxConcurrentSubagents] = useState(
+    String(initialSelections.maxConcurrentSubagents ?? ""),
+  );
+  const [maxTotalSubagents, setMaxTotalSubagents] = useState(
+    String(initialSelections.maxTotalSubagents ?? ""),
   );
   const [thinking, setThinking] = useState(initialSelections.thinking);
   const [reasoningEffort, setReasoningEffort] = useState(
@@ -229,6 +241,26 @@ export function AgentSettingsDialog({
       );
       return;
     }
+    const parsedSubagentPolicy = parseAgentSubagentPolicyDraft({
+      maxConcurrent: maxConcurrentSubagents,
+      maxTotal: maxTotalSubagents,
+    });
+    if (!parsedSubagentPolicy.ok) {
+      toast.error(
+        parsedSubagentPolicy.error === "max_concurrent"
+          ? t.agents.settingsInvalidMaxConcurrentSubagents
+          : t.agents.settingsInvalidMaxTotalSubagents,
+      );
+      return;
+    }
+
+    const { max_concurrent, max_total } = parsedSubagentPolicy.policy;
+    const subagentPolicyUpdate = {
+      ...(max_concurrent !== initialSelections.maxConcurrentSubagents && {
+        max_concurrent,
+      }),
+      ...(max_total !== initialSelections.maxTotalSubagents && { max_total }),
+    };
 
     try {
       await updateAgent.mutateAsync({
@@ -275,6 +307,9 @@ export function AgentSettingsDialog({
             subagentAccess,
             selectedSubagents,
           ),
+          ...(Object.keys(subagentPolicyUpdate).length > 0 && {
+            subagent_policy: subagentPolicyUpdate,
+          }),
         },
       });
       toast.success(t.agents.settingsSaved);
@@ -570,6 +605,57 @@ export function AgentSettingsDialog({
               )}
             </div>
           )}
+
+          <section className="space-y-2 border-t pt-4">
+            <h3 className="text-sm font-medium">
+              {t.agents.settingsSubagentLimits}
+            </h3>
+            <p
+              id={subagentLimitsHintId}
+              className="text-muted-foreground text-sm"
+            >
+              {t.agents.settingsSubagentLimitsHint}
+            </p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="min-w-0 space-y-1.5">
+                <label
+                  htmlFor={maxConcurrentId}
+                  className="text-sm font-medium"
+                >
+                  {t.agents.settingsMaxConcurrentSubagents}
+                </label>
+                <Input
+                  id={maxConcurrentId}
+                  aria-describedby={subagentLimitsHintId}
+                  type="number"
+                  min={1}
+                  max={MAX_AGENT_SUBAGENT_CONCURRENCY}
+                  step={1}
+                  value={maxConcurrentSubagents}
+                  placeholder={t.agents.settingsSubagentLimitPlaceholder}
+                  onChange={(event) =>
+                    setMaxConcurrentSubagents(event.target.value)
+                  }
+                />
+              </div>
+              <div className="min-w-0 space-y-1.5">
+                <label htmlFor={maxTotalId} className="text-sm font-medium">
+                  {t.agents.settingsMaxTotalSubagents}
+                </label>
+                <Input
+                  id={maxTotalId}
+                  aria-describedby={subagentLimitsHintId}
+                  type="number"
+                  min={1}
+                  max={MAX_AGENT_SUBAGENTS_PER_RUN}
+                  step={1}
+                  value={maxTotalSubagents}
+                  placeholder={t.agents.settingsSubagentLimitPlaceholder}
+                  onChange={(event) => setMaxTotalSubagents(event.target.value)}
+                />
+              </div>
+            </div>
+          </section>
 
           <div className="space-y-2 border-t pt-4">
             <div>

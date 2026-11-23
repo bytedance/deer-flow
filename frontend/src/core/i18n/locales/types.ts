@@ -1409,10 +1409,17 @@ export interface Translations {
     settingsThinkingOn: string;
     settingsThinkingOff: string;
     settingsReasoningEffort: string;
+    settingsSubagentLimits: string;
+    settingsSubagentLimitsHint: string;
+    settingsMaxConcurrentSubagents: string;
+    settingsMaxTotalSubagents: string;
+    settingsSubagentLimitPlaceholder: string;
     settingsInherit: string;
     settingsSaved: string;
     settingsInvalidTemperature: string;
     settingsInvalidMaxTokens: string;
+    settingsInvalidMaxConcurrentSubagents: string;
+    settingsInvalidMaxTotalSubagents: string;
   };
 
   // Breadcrumb

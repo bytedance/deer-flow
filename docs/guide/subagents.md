@@ -378,6 +378,31 @@ When Gateway workers share file storage, concurrent managed-subagent creates for
 
 Native workers support per-subagent `thinking_enabled` and `reasoning_effort` through YAML configuration and the managed-subagent API. Unconfigured workers keep the existing thinking-off request; the selected model's required-thinking policy, supported effort values and aliases still apply. These settings do not inherit the lead agent's thinking preferences.
 
+### Custom Agent delegation limits
+
+Custom Agents can set optional limits in **Agent settings** or in their
+`config.yaml`:
+
+```yaml
+subagent_policy:
+  max_concurrent: 3
+  max_total: 8
+```
+
+`max_concurrent` accepts 1–64 and caps ordinary `task` calls per model response.
+`max_total` accepts 1–50 and caps those calls across the run. The two limits are
+optional and independent. Each run uses the smaller of the requested limit and
+the configured Agent cap. If a request omits a limit, it uses the corresponding
+Agent cap or the server default when no cap is configured. Process capacity also
+limits concurrency. Durable `batch_task` items have their own limits under
+`subagent_batches`.
+
+Agent packages carry the configured caps when exported and imported. In
+`PUT /api/agents/{name}`, omitted fields preserve saved values and a `null`
+field clears that cap. Sending `"subagent_policy": null` clears both caps.
+If the Agent uses an administrator-granted MCP identity, changing its limits
+updates the Agent definition that the administrator must approve.
+
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
 ## Tool restrictions

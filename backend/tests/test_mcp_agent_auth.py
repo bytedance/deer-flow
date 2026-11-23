@@ -67,6 +67,31 @@ def test_admission_pins_the_approved_definition(agent_auth_env):
         capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
 
 
+def test_existing_definition_approval_survives_unset_subagent_limits(agent_auth_env):
+    from deerflow_extension_api import canonical_hash
+
+    from deerflow.config.agents_config import AgentSubagentPolicy
+    from deerflow.mcp.agent_auth import agent_definition_digest, capture_agent_authority
+
+    env = agent_auth_env
+    legacy_config = env.agent.model_dump(mode="json", exclude={"subagent_policy"})
+    legacy_digest = canonical_hash({"version": 1, "config": legacy_config, "soul": env.soul})
+    binding = env.config.mcp_agent_auth["research-tickets"]
+    binding.definition_digests = [legacy_digest]
+
+    for unset in (None, AgentSubagentPolicy(), AgentSubagentPolicy(max_total=None)):
+        definition = env.agent.model_copy(update={"subagent_policy": unset})
+        assert capture_agent_authority(env.config, user_id="alice", agent_config=definition) is not None
+
+    definition = env.agent.model_copy(update={"subagent_policy": AgentSubagentPolicy(max_total=8)})
+    with pytest.raises(ToolException, match="Agent definition is not approved"):
+        capture_agent_authority(env.config, user_id="alice", agent_config=definition)
+
+    binding.definition_digests.append(agent_definition_digest(definition, env.soul))
+    authority = capture_agent_authority(env.config, user_id="alice", agent_config=definition)
+    assert authority.agent_config().subagent_policy.max_total == 8
+
+
 def test_owners_and_agent_names_both_bound_admission(agent_auth_env):
     from deerflow.mcp.agent_auth import capture_agent_authority
 

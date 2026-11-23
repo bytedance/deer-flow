@@ -61,10 +61,7 @@ from deerflow.authz.tool_filter import apply_tool_authorization
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
-from deerflow.config.subagents_config import (
-    effective_subagent_concurrency,
-    effective_total_subagents_per_run,
-)
+from deerflow.config.subagents_config import EffectiveSubagentLimits, resolve_subagent_limits
 from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, AgentMcpAuthority
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
@@ -130,8 +127,7 @@ def _subagent_release_policy(
     app_config: AppConfig,
     *,
     enabled: bool,
-    max_concurrent: int,
-    max_total: int,
+    limits: EffectiveSubagentLimits,
     allowed_subagents: list[str] | None = None,
 ) -> dict[str, object]:
     """Delegation limits as the run will actually enforce them.
@@ -142,11 +138,14 @@ def _subagent_release_policy(
     """
     policy: dict[str, object] = {
         "enabled": enabled,
-        "max_concurrent": max_concurrent,
-        "max_total": max_total,
+        "max_concurrent": limits.max_concurrent,
+        "max_total": limits.max_total,
         "type_allowlist": [],
         "runtime_limits": {},
     }
+    configured = {key: cap for key, cap in (("max_concurrent", limits.agent_max_concurrent), ("max_total", limits.agent_max_total)) if cap is not None}
+    if configured:
+        policy["configured_agent_limits"] = configured
     if not enabled:
         return policy
 
@@ -502,6 +501,7 @@ def build_middlewares(
     skill_authorization=None,
     extensions=None,
     subagent_execution_capacity: int | None = None,
+    resolved_subagent_limits: EffectiveSubagentLimits | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -540,6 +540,7 @@ def build_middlewares(
             providers may distinguish visibility from activation).
         subagent_execution_capacity: Startup-frozen process capacity used to
             keep advertised and enforced task concurrency aligned after reloads.
+        resolved_subagent_limits: One resolved prompt/enforcement snapshot.
         extensions: Loaded extensions whose middleware contributions are merged
             into the final stack. Defaults to the process-wide set.
 
@@ -727,14 +728,14 @@ def build_middlewares(
     subagent_enabled = cfg.get("subagent_enabled", False)
     effective_max_subagents_per_run: int | None = None
     if subagent_enabled:
-        max_concurrent_subagents = effective_subagent_concurrency(
+        limits = resolved_subagent_limits or resolve_subagent_limits(
             cfg.get("max_concurrent_subagents"),
+            cfg.get("max_total_subagents"),
             resolved_app_config,
             execution_capacity=subagent_execution_capacity,
         )
-        max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), resolved_app_config)
-        effective_max_subagents_per_run = max_total_subagents
-        middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
+        effective_max_subagents_per_run = limits.max_total
+        middlewares.append(SubagentLimitMiddleware(max_concurrent=limits.max_concurrent, max_total=limits.max_total))
 
     # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
@@ -1043,12 +1044,6 @@ def _assemble_lead_agent(
     is_plan_mode = cfg.get("is_plan_mode", False)
     requested_subagent_enabled = cfg.get("subagent_enabled", False)
     subagent_execution_capacity = configured_subagent_max_running()
-    max_concurrent_subagents = effective_subagent_concurrency(
-        cfg.get("max_concurrent_subagents"),
-        resolved_app_config,
-        execution_capacity=subagent_execution_capacity,
-    )
-    max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), resolved_app_config)
     is_bootstrap = cfg.get("is_bootstrap", False)
     interaction_policy = resolve_run_interaction_policy(config)
     non_interactive = not interaction_policy.allows_clarification
@@ -1067,6 +1062,15 @@ def _assemble_lead_agent(
             raise ValueError("Admitted MCP agent definition does not match this run")
     else:
         agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    resolved_subagent_limits = resolve_subagent_limits(
+        cfg.get("max_concurrent_subagents"),
+        cfg.get("max_total_subagents"),
+        resolved_app_config,
+        agent_policy=getattr(agent_config, "subagent_policy", None),
+        execution_capacity=subagent_execution_capacity,
+    )
+    max_concurrent_subagents = resolved_subagent_limits.max_concurrent
+    max_total_subagents = resolved_subagent_limits.max_total
     memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
@@ -1296,6 +1300,7 @@ def _assemble_lead_agent(
             authorization_provider=_authz_provider,
             skill_authorization=skill_authorization,
             subagent_execution_capacity=subagent_execution_capacity,
+            resolved_subagent_limits=resolved_subagent_limits,
         )
         middlewares, declared_authorized = narrow_declared_tools(
             middlewares,
@@ -1363,8 +1368,7 @@ def _assemble_lead_agent(
                 "subagents": _subagent_release_policy(
                     resolved_app_config,
                     enabled=subagent_enabled,
-                    max_concurrent=max_concurrent_subagents,
-                    max_total=max_total_subagents,
+                    limits=resolved_subagent_limits,
                     allowed_subagents=allowed_subagents,
                 ),
                 "deferred_tools": {
@@ -1463,6 +1467,7 @@ def _assemble_lead_agent(
         authorization_provider=_authz_provider,
         skill_authorization=skill_authorization,
         subagent_execution_capacity=subagent_execution_capacity,
+        resolved_subagent_limits=resolved_subagent_limits,
     )
     middlewares, declared_authorized = narrow_declared_tools(
         middlewares,
@@ -1524,8 +1529,7 @@ def _assemble_lead_agent(
             "subagents": _subagent_release_policy(
                 resolved_app_config,
                 enabled=subagent_enabled,
-                max_concurrent=max_concurrent_subagents,
-                max_total=max_total_subagents,
+                limits=resolved_subagent_limits,
                 allowed_subagents=allowed_subagents,
             ),
             "deferred_tools": {

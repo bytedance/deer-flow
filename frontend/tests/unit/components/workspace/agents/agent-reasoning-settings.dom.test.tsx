@@ -119,6 +119,59 @@ async function selectOption(label: string, name: string) {
   fireEvent.click(await screen.findByRole("option", { name }));
 }
 
+describe("custom agent subagent limits", () => {
+  const bounded = {
+    ...agent,
+    subagent_policy: { max_concurrent: 4, max_total: 9 },
+  };
+  const concurrentLabel = "Max parallel task calls per response";
+  const totalLabel = "Max task calls per run";
+
+  it("saves only the touched limit after a background refresh", async () => {
+    const { rerender } = renderSettings(bounded);
+    rerender(
+      <AgentSettingsDialog
+        agent={{
+          ...bounded,
+          subagent_policy: { max_concurrent: 4, max_total: 12 },
+        }}
+        open
+        onOpenChange={rs.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(concurrentLabel), {
+      target: { value: "2" },
+    });
+
+    expect((await saveRequest()).subagent_policy).toEqual({
+      max_concurrent: 2,
+    });
+  });
+
+  it("clears a saved limit when the field is emptied", async () => {
+    renderSettings(bounded);
+    fireEvent.change(screen.getByLabelText(totalLabel), {
+      target: { value: "" },
+    });
+
+    expect((await saveRequest()).subagent_policy).toEqual({ max_total: null });
+  });
+
+  it("omits untouched limits on unrelated saves", async () => {
+    renderSettings(bounded);
+    expect(await saveRequest()).not.toHaveProperty("subagent_policy");
+  });
+
+  it("blocks saving a limit outside its range", () => {
+    renderSettings(bounded);
+    fireEvent.change(screen.getByLabelText(totalLabel), {
+      target: { value: "51" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+});
+
 describe("custom agent reasoning update isolation", () => {
   it("preserves saved reasoning while the initial model catalog is pending", async () => {
     loadModels.mockReturnValue(new Promise(() => undefined));

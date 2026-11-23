@@ -71,6 +71,47 @@ async def test_create_persists_model_settings(_agent_env) -> None:
     assert fetched.reasoning_effort == "high"
 
 
+async def test_create_and_update_subagent_policy_round_trip_and_merge(_agent_env) -> None:
+    created = await create_agent_endpoint(
+        AgentCreateRequest(
+            name="bounded",
+            model="agent-model",
+            subagent_policy={"max_concurrent": 4, "max_total": 10},
+        )
+    )
+    assert created.subagent_policy is not None
+    assert created.subagent_policy.max_concurrent == 4
+    assert created.subagent_policy.max_total == 10
+
+    partial = await update_agent("bounded", AgentUpdateRequest(subagent_policy={"max_concurrent": 2}))
+    assert partial.subagent_policy.max_concurrent == 2
+    assert partial.subagent_policy.max_total == 10
+
+    cleared_limit = await update_agent("bounded", AgentUpdateRequest(subagent_policy={"max_total": None}))
+    assert cleared_limit.subagent_policy.max_concurrent == 2
+    assert cleared_limit.subagent_policy.max_total is None
+
+    cleared_policy = await update_agent("bounded", AgentUpdateRequest(subagent_policy=None))
+    assert cleared_policy.subagent_policy is None
+
+
+async def test_update_description_preserves_subagent_policy(_agent_env) -> None:
+    await create_agent_endpoint(
+        AgentCreateRequest(
+            name="bounded",
+            model="agent-model",
+            subagent_policy={"max_concurrent": 3, "max_total": 9},
+        )
+    )
+
+    updated = await update_agent("bounded", AgentUpdateRequest(description="updated"))
+
+    assert updated.description == "updated"
+    assert updated.subagent_policy is not None
+    assert updated.subagent_policy.max_concurrent == 3
+    assert updated.subagent_policy.max_total == 9
+
+
 async def test_create_rejects_unknown_model(_agent_env) -> None:
     with pytest.raises(HTTPException) as excinfo:
         await create_agent_endpoint(AgentCreateRequest(name="bad", model="ghost-model"))

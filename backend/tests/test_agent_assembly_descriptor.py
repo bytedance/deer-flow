@@ -243,6 +243,7 @@ class TestLeadAgentAssembly:
         assert assembly.descriptor.effective_model
         assert assembly.effective_model == assembly.descriptor.effective_model
         assert assembly.descriptor.fingerprint
+        assert "configured_agent_limits" not in assembly.descriptor.effective_policies["subagents"]
 
     def test_descriptor_hashes_the_same_scoped_prompt_passed_to_the_graph(self, monkeypatch):
         from deerflow_extension_api import canonical_hash
@@ -306,6 +307,47 @@ class TestLeadAgentAssembly:
         assert subagent_policy["enabled"] is True
         assert subagent_policy["type_allowlist"] == ["general-purpose"]
         assert list(subagent_policy["runtime_limits"].keys()) == ["general-purpose"]
+
+    def test_custom_agent_limits_match_prompt_middleware_and_descriptor(self, monkeypatch):
+        from langchain_core.messages import AIMessage
+        from langgraph.runtime import Runtime
+
+        from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+        from deerflow.config.agents_config import AgentConfig, AgentSubagentPolicy
+        from deerflow.extensions import bind_agent_build_extensions
+
+        self._isolate_from_the_ambient_config(monkeypatch)
+        monkeypatch.setattr(lead_agent_module, "configured_subagent_max_running", lambda: 3)
+        agent_config = AgentConfig(
+            name="custom",
+            allowed_subagents=["general-purpose"],
+            subagent_policy=AgentSubagentPolicy(max_concurrent=4, max_total=5),
+        )
+        monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
+
+        with bind_agent_build_extensions(self._extensions_with_an_agent_assembly_observer()):
+            assembly = assemble_lead_agent(
+                {
+                    "configurable": {"thread_id": "t-agent-subagent-limits", "agent_name": "custom", "subagent_enabled": True},
+                    "context": {"max_concurrent_subagents": 6, "max_total_subagents": 9},
+                }
+            )
+
+        assert "max 3 `task` calls per response, max 5 per run" in assembly.graph["system_prompt"]
+        policy = assembly.descriptor.effective_policies["subagents"]
+        assert (policy["max_concurrent"], policy["max_total"]) == (3, 5)
+        assert policy["configured_agent_limits"] == {"max_concurrent": 4, "max_total": 5}
+
+        limiter = next(m for m in assembly.graph["middleware"] if isinstance(m, SubagentLimitMiddleware))
+        message = AIMessage(content="", tool_calls=[{"name": "task", "id": f"call-{i}", "args": {}} for i in range(4)])
+        runtime = Runtime(context={"run_id": "current"})
+        assert len(limiter.after_model({"messages": [message]}, runtime)["messages"][0].tool_calls) == 3
+        # Only two more calls fit after three delegations in this run. Older runs do not count.
+        delegations = [{"id": f"prior-{i}", "run_id": "current"} for i in range(3)] + [{"id": "old", "run_id": "older"}]
+        state = {"messages": [message], "delegations": delegations}
+        assert len(limiter.after_model(state, runtime)["messages"][0].tool_calls) == 2
 
     def test_observers_receive_the_descriptor(self, monkeypatch):
         from deerflow.agents.lead_agent.agent import assemble_lead_agent

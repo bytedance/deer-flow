@@ -2164,34 +2164,21 @@ class TestEnsureAgent:
         assert "checkpointer" not in mock_create_agent.call_args.kwargs
 
     def test_reuses_agent_same_config(self, client):
-        """_ensure_agent does not recreate if config key unchanged."""
-        from deerflow.runtime.user_context import get_effective_user_id
-
-        mock_agent = MagicMock()
-        client._agent = mock_agent
-        client._agent_config_key = (
-            None,
-            True,
-            False,
-            False,
-            None,
-            None,
-            None,
-            True,
-            None,
-            None,
-            None,
-            "full",
-            10,
-            get_effective_user_id(),
-            None,
-        )
-
         config = client._get_runnable_config("t1")
-        client._ensure_agent(config)
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent") as create_graph,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+            client._ensure_agent(config)
 
-        # Should still be the same mock — no recreation
-        assert client._agent is mock_agent
+        assert client._agent is create_graph.return_value
+        create_graph.assert_called_once()
 
     def test_recreates_agent_when_subagent_limits_change(self, client):
         """Subagent limit changes alter prompt/middleware and must invalidate the cached agent."""
@@ -2225,6 +2212,34 @@ class TestEnsureAgent:
             client._ensure_agent(config2)
 
         assert mock_create_agent.call_count == 2
+
+    def test_named_agent_caps_reach_embedded_prompt_and_middleware(self, client):
+        from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+        from deerflow.config.agents_config import AgentSubagentPolicy
+        from deerflow.config.app_config import AppConfig
+
+        client._app_config = AppConfig(
+            models=[{"name": "offline", "use": "langchain_openai:ChatOpenAI", "model": "offline"}],
+            sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            summarization={"enabled": False},
+        )
+        client._agent_name = "researcher"
+        client._subagent_execution_capacity = 3
+        agent = AgentConfig(name="researcher", subagent_policy=AgentSubagentPolicy(max_concurrent=4, max_total=8))
+        config = client._get_runnable_config("t1", subagent_enabled=True, max_concurrent_subagents=2, max_total_subagents=10)
+        with (
+            patch("deerflow.client.load_agent_config", return_value=agent),
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=lambda **kwargs: kwargs),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+
+        assert "max 2 `task` calls per response, max 8 per run" in client._agent["system_prompt"]
+        limiter = next(m for m in client._agent["middleware"] if isinstance(m, SubagentLimitMiddleware))
+        assert limiter.release_policy_parameters() == {"max_concurrent": 2, "max_total": 8}
 
     def test_null_subagent_total_limit_falls_back_to_app_config(self, client, mock_app_config):
         """An explicit ``null`` cap means "unset", not a value to hand to the clamp."""

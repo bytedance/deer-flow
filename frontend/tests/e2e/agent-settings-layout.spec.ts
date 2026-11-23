@@ -104,6 +104,22 @@ for (const viewport of [
       dialog.getByRole("button", { name: "Cancel", exact: true }),
     );
 
+    const parallel = dialog.getByRole("spinbutton", {
+      name: "Max parallel task calls per response",
+    });
+    const total = dialog.getByRole("spinbutton", {
+      name: "Max task calls per run",
+    });
+    await parallel.fill("2");
+    await total.fill("8");
+    await expectInsideViewport(total);
+    const limitsScreenshot = testInfo.outputPath("agent-delegation-limits.png");
+    await page.screenshot({ path: limitsScreenshot });
+    await testInfo.attach("agent delegation limits", {
+      path: limitsScreenshot,
+      contentType: "image/png",
+    });
+
     const general = dialog.getByRole("checkbox", {
       name: "general-purpose",
       exact: true,
@@ -148,6 +164,10 @@ for (const viewport of [
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
     await expect(dialog).toBeHidden();
     expect(saved()?.allowed_subagents).toEqual(["general-purpose", "bash"]);
+    expect(saved()?.subagent_policy).toEqual({
+      max_concurrent: 2,
+      max_total: 8,
+    });
   });
 
   test(`collapsed descriptions are accessible at ${viewport.width}x${viewport.height}`, async ({

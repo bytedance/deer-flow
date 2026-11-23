@@ -34,13 +34,25 @@ def store(tmp_path):
 
 
 def test_create_and_get_round_trips_config_and_soul(store):
-    store.create("reviewer", {"name": "reviewer", "description": "reviews code", "model": "gpt-x"}, "You review.", user_id="u1")
+    store.create(
+        "reviewer",
+        {
+            "name": "reviewer",
+            "description": "reviews code",
+            "model": "gpt-x",
+            "subagent_policy": {"max_concurrent": 4, "max_total": 12},
+        },
+        "You review.",
+        user_id="u1",
+    )
 
     cfg = store.get("reviewer", user_id="u1")
     assert isinstance(cfg, AgentConfig)
     assert cfg.name == "reviewer"
     assert cfg.description == "reviews code"
     assert cfg.model == "gpt-x"
+    assert cfg.subagent_policy.max_concurrent == 4
+    assert cfg.subagent_policy.max_total == 12
     assert store.get_soul("reviewer", user_id="u1") == "You review."
 
 

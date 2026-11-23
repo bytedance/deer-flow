@@ -382,6 +382,20 @@ def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, p
     assert out["reasoning_effort"] == "high"
 
 
+def test_update_agent_preserves_subagent_policy_on_description_change(tmp_path, patched_paths):
+    agent_dir = _seed_agent(tmp_path, description="old desc")
+    config_path = agent_dir / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["subagent_policy"] = {"max_concurrent": 3, "max_total": 8}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="")
+
+    update_agent.func(runtime=_runtime(), description="refined desc")
+
+    updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert updated["description"] == "refined desc"
+    assert updated["subagent_policy"] == {"max_concurrent": 3, "max_total": 8}
+
+
 def test_update_agent_skills_empty_list_disables_all(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, skills=["a", "b"])
 

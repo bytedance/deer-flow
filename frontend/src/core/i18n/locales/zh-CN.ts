@@ -1581,10 +1581,19 @@ export const zhCN: Translations = {
     settingsThinkingOn: "开启",
     settingsThinkingOff: "关闭",
     settingsReasoningEffort: "推理强度",
+    settingsSubagentLimits: "子智能体限制",
+    settingsSubagentLimitsHint:
+      "留空时继承服务器默认值。并发数还受服务器运行容量限制。",
+    settingsMaxConcurrentSubagents: "每次响应最多并发任务",
+    settingsMaxTotalSubagents: "每次运行最多任务数",
+    settingsSubagentLimitPlaceholder: "继承服务器默认值",
     settingsInherit: "继承",
     settingsSaved: "智能体设置已保存",
     settingsInvalidTemperature: "温度必须在 0 到 2 之间",
     settingsInvalidMaxTokens: "最大输出 token 必须为不超过 200,000 的正整数",
+    settingsInvalidMaxConcurrentSubagents:
+      "并发任务数必须是 1 到 64 之间的整数",
+    settingsInvalidMaxTotalSubagents: "每次运行任务数必须是 1 到 50 之间的整数",
   },
 
   // Breadcrumb

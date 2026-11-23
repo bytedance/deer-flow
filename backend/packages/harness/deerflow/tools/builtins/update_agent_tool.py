@@ -59,6 +59,7 @@ _UI_OWNED_CONFIG_FIELDS: tuple[str, ...] = (
     "thinking_enabled",
     "reasoning_effort",
     "allowed_subagents",
+    "subagent_policy",
 )
 
 

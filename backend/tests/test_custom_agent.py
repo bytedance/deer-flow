@@ -135,6 +135,41 @@ class TestAgentConfig:
         assert cfg.model == "gpt-4"
         assert cfg.tool_groups is None
 
+    def test_subagent_policy_validates_each_optional_limit(self):
+        from deerflow.config.agents_config import AgentConfig
+
+        cfg = AgentConfig(
+            name="bounded-agent",
+            subagent_policy={"max_concurrent": 4, "max_total": 12},
+        )
+        assert cfg.subagent_policy.max_concurrent == 4
+        assert cfg.subagent_policy.max_total == 12
+
+        partial = AgentConfig(name="partial-agent", subagent_policy={"max_total": 8})
+        assert partial.subagent_policy.max_concurrent is None
+        assert partial.subagent_policy.max_total == 8
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            {"max_concurrent": 0},
+            {"max_concurrent": 65},
+            {"max_total": 0},
+            {"max_total": 51},
+            {"max_concurrent": True},
+            {"max_total": True},
+            {"max_total": 2.5},
+            {"max_totl": 5},
+        ],
+    )
+    def test_subagent_policy_rejects_out_of_range_and_boolean_limits(self, policy):
+        from pydantic import ValidationError
+
+        from deerflow.config.agents_config import AgentConfig
+
+        with pytest.raises(ValidationError):
+            AgentConfig(name="invalid-agent", subagent_policy=policy)
+
 
 # ===========================================================================
 # 3. load_agent_config
@@ -648,6 +683,7 @@ class TestAgentsAPI:
             "mcp_plugins": ["papers"],
             "skills": ["literature-review"],
             "allowed_subagents": ["researcher", "reporter"],
+            "subagent_policy": {"max_concurrent": 4, "max_total": 12},
             "model_settings": {"temperature": 0.2, "max_tokens": 12000},
             "thinking_enabled": True,
             "reasoning_effort": "high",
@@ -673,6 +709,56 @@ class TestAgentsAPI:
         )
         assert imported.status_code == 201
         assert imported.json() == {**payload, "name": "research-lead-copy", "knowledge_scope": None}
+
+    def test_agent_package_round_trips_partial_subagent_policy(self, agent_client):
+        payload = {
+            "format": "deerflow.custom-agent",
+            "version": 1,
+            "agent": {
+                "name": "partial-agent",
+                "subagent_policy": {"max_total": 8},
+                "soul": "Delegate carefully.",
+            },
+        }
+
+        imported = agent_client.post("/api/agents/import", json=payload)
+        assert imported.status_code == 201, imported.text
+        assert imported.json()["subagent_policy"] == {"max_concurrent": None, "max_total": 8}
+        exported = agent_client.get("/api/agents/partial-agent/export")
+        assert exported.status_code == 200
+        assert exported.json()["agent"]["subagent_policy"] == {"max_total": 8}
+
+    def test_invalid_policy_is_rejected_before_writes(self, agent_client):
+        caps = {"max_total": True}
+        invalid = agent_client.post("/api/agents", json={"name": "invalid", "subagent_policy": caps})
+        assert invalid.status_code == 422
+        assert agent_client.get("/api/agents").json()["agents"] == []
+
+        valid = {"max_concurrent": 2, "max_total": 5}
+        created = agent_client.post("/api/agents", json={"name": "reviewer", "subagent_policy": valid})
+        assert created.status_code == 201
+        invalid_update = agent_client.put("/api/agents/reviewer", json={"subagent_policy": caps})
+        assert invalid_update.status_code == 422
+        assert agent_client.get("/api/agents/reviewer").json()["subagent_policy"] == valid
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows does not replace a file open without delete sharing")
+    def test_subagent_policy_update_can_retry_after_config_file_is_released(self, agent_client, tmp_path):
+        created = agent_client.post("/api/agents", json={"name": "reviewer", "subagent_policy": {"max_total": 6}, "soul": "Review.\n报告。\n"})
+        assert created.status_code == 201
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "reviewer"
+        config_path = agent_dir / "config.yaml"
+        original = config_path.read_bytes()
+        update = {"subagent_policy": {"max_concurrent": 2}}
+
+        with config_path.open("rb"):
+            assert agent_client.put("/api/agents/reviewer", json=update).status_code == 500
+        assert config_path.read_bytes() == original
+        assert list(agent_dir.glob("*.tmp")) == []
+
+        retry = agent_client.put("/api/agents/reviewer", json=update)
+        assert retry.status_code == 200
+        assert retry.json()["subagent_policy"] == {"max_concurrent": 2, "max_total": 6}
+        assert (agent_dir / "SOUL.md").read_bytes() == "Review.\n报告。\n".encode()
 
     def test_agent_package_excludes_runtime_state_and_operator_github_binding(self, agent_client, tmp_path):
         assert agent_client.post("/api/agents", json={"name": "portable", "soul": "Portable soul"}).status_code == 201
@@ -765,7 +851,7 @@ class TestAgentsAPI:
         package = {
             "format": "deerflow.custom-agent",
             "version": 1,
-            "agent": {"name": "database-agent", "description": "shared backend", "soul": "database soul"},
+            "agent": {"name": "database-agent", "description": "shared backend", "soul": "database soul", "subagent_policy": {"max_concurrent": 3, "max_total": 7}},
         }
 
         with (
@@ -773,12 +859,18 @@ class TestAgentsAPI:
             patch("deerflow.persistence.agents.get_agent_store", return_value=store),
         ):
             imported = agent_client.post("/api/agents/import", json=package)
+            updated = agent_client.put("/api/agents/database-agent", json={"subagent_policy": {"max_total": None}})
+            listed = agent_client.get("/api/agents")
             exported = agent_client.get("/api/agents/database-agent/export")
 
         assert imported.status_code == 201
+        assert imported.json()["subagent_policy"] == {"max_concurrent": 3, "max_total": 7}
+        assert updated.status_code == 200
+        assert listed.json()["agents"][0]["subagent_policy"] == {"max_concurrent": 3, "max_total": None}
         assert exported.status_code == 200
         assert exported.json()["agent"] == {
             "name": "database-agent",
+            "subagent_policy": {"max_concurrent": 3},
             "description": "shared backend",
             "memory_enabled": True,
             "soul": "database soul",

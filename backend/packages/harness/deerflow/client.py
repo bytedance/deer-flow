@@ -325,6 +325,9 @@ class DeerFlowClient:
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
         }
+        for key in ("max_concurrent_subagents", "max_total_subagents"):
+            if key in overrides:
+                configurable[key] = overrides[key]
         return RunnableConfig(
             configurable=configurable,
             recursion_limit=overrides.get("recursion_limit", 100),
@@ -361,6 +364,7 @@ class DeerFlowClient:
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
         mcp_plugins = getattr(agent_config, "mcp_plugins", None)
         tool_groups = getattr(agent_config, "tool_groups", None)
+        subagent_policy = getattr(agent_config, "subagent_policy", None)
         # Delegation reads this run's metadata, including when the graph is cached.
         config.setdefault("metadata", {})["mcp_plugins"] = mcp_plugins
         config["metadata"]["tool_groups"] = tool_groups
@@ -389,6 +393,10 @@ class DeerFlowClient:
             cfg.get("max_total_subagents"),
             self._agent_name,
             memory_enabled,
+            (
+                getattr(subagent_policy, "max_concurrent", None),
+                getattr(subagent_policy, "max_total", None),
+            ),
             frozenset(mcp_plugins) if mcp_plugins is not None else None,
             frozenset(tool_groups) if tool_groups is not None else None,
             frozenset(self._available_skills) if self._available_skills is not None else None,
@@ -459,7 +467,7 @@ class DeerFlowClient:
             authorization=skill_authorization,
         )
         subagent_enabled = cfg.get("subagent_enabled", False)
-        from deerflow.config.subagents_config import effective_subagent_concurrency, effective_total_subagents_per_run
+        from deerflow.config.subagents_config import resolve_subagent_limits
 
         # Lightweight integrations and older tests may construct a client via
         # ``__new__`` and inject only ``_app_config``. Production clients keep
@@ -470,12 +478,15 @@ class DeerFlowClient:
             "_subagent_execution_capacity",
             int(getattr(getattr(self._app_config, "subagent_runtime", None), "max_running", 3)),
         )
-        max_concurrent_subagents = effective_subagent_concurrency(
+        resolved_subagent_limits = resolve_subagent_limits(
             cfg.get("max_concurrent_subagents"),
+            cfg.get("max_total_subagents"),
             self._app_config,
+            agent_policy=subagent_policy,
             execution_capacity=subagent_execution_capacity,
         )
-        max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), self._app_config)
+        max_concurrent_subagents = resolved_subagent_limits.max_concurrent
+        max_total_subagents = resolved_subagent_limits.max_total
 
         # attach_tracing=False because ``stream()`` injects tracing
         # callbacks at the graph invocation root so a single embedded run
@@ -540,6 +551,7 @@ class DeerFlowClient:
                 authorization_provider=_authz_provider,
                 skill_authorization=skill_authorization,
                 subagent_execution_capacity=subagent_execution_capacity,
+                resolved_subagent_limits=resolved_subagent_limits,
             ),
             outcome=layer_one,
             context=cfg,
@@ -1011,7 +1023,8 @@ class DeerFlowClient:
             emit_values: Serialize and emit full state snapshots for stream consumers.
             thread_id: Thread ID for conversation context. Auto-generated if None.
             **kwargs: Override client defaults (model_name, thinking_enabled,
-                plan_mode, subagent_enabled, recursion_limit). Trusted embedded
+                plan_mode, subagent_enabled, max_concurrent_subagents, max_total_subagents,
+                recursion_limit). Trusted embedded
                 callers may also provide user_id, user_role, oauth_provider,
                 oauth_id, channel_user_id, is_internal, and authz_attributes.
 

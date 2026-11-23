@@ -1,7 +1,9 @@
-import type { AgentModelSettings } from "@/core/agents";
+import type { AgentModelSettings, AgentSubagentPolicy } from "@/core/agents";
 import type { Model } from "@/core/models/types";
 
 export const MAX_AGENT_OUTPUT_TOKENS = 200_000;
+export const MAX_AGENT_SUBAGENT_CONCURRENCY = 64;
+export const MAX_AGENT_SUBAGENTS_PER_RUN = 50;
 
 // Sentinel select values. The empty string is not usable because Radix Select
 // reserves it for the placeholder, so both "inherit" escape hatches use a
@@ -120,4 +122,39 @@ export function parseAgentModelSettingsDraft({
       ? { temperature: temperatureValue, max_tokens: maxTokensValue }
       : null,
   };
+}
+
+type AgentSubagentPolicyValidationError = "max_concurrent" | "max_total";
+
+type ParsedAgentSubagentPolicy =
+  | { ok: true; policy: Required<AgentSubagentPolicy> }
+  | { ok: false; error: AgentSubagentPolicyValidationError };
+
+function parseSubagentLimit(
+  input: string,
+  maximum: number,
+): number | null | undefined {
+  if (input.trim() === "") return null;
+  const value = Number(input);
+  return Number.isInteger(value) && value >= 1 && value <= maximum
+    ? value
+    : undefined;
+}
+
+export function parseAgentSubagentPolicyDraft({
+  maxConcurrent,
+  maxTotal,
+}: {
+  maxConcurrent: string;
+  maxTotal: string;
+}): ParsedAgentSubagentPolicy {
+  const concurrent = parseSubagentLimit(
+    maxConcurrent,
+    MAX_AGENT_SUBAGENT_CONCURRENCY,
+  );
+  if (concurrent === undefined) return { ok: false, error: "max_concurrent" };
+  const total = parseSubagentLimit(maxTotal, MAX_AGENT_SUBAGENTS_PER_RUN);
+  if (total === undefined) return { ok: false, error: "max_total" };
+
+  return { ok: true, policy: { max_concurrent: concurrent, max_total: total } };
 }
