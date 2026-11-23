@@ -11,8 +11,9 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.community.opensandbox import provider as provider_module
-from deerflow.config.app_config import AppConfig, get_app_config, pop_current_app_config, push_current_app_config
+from deerflow.config.app_config import AppConfig, get_app_config, pop_current_app_config, push_current_app_config, reset_app_config, set_app_config
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.skills_config import SkillsConfig
 from scripts.benchmark.sandbox import bench_provider as bench
 from scripts.benchmark.sandbox import summarize
 
@@ -26,7 +27,12 @@ class Remote:
         self.destroy_error = False
         self.command_error = False
         self.commands = SimpleNamespace(run=self.run)
+        self.files = SimpleNamespace(write_file=self.write_file)
+        self.uploads: dict[str, bytes] = {}
         self.state = ""
+
+    def write_file(self, path: str, content: bytes, *, mode: int) -> None:
+        self.uploads[path] = content
 
     def run(self, command, **kwargs):
         if self.command_error:
@@ -66,7 +72,12 @@ def transport(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider_module, "_import_sdk", lambda: (SimpleNamespace(create=create), SimpleNamespace, SimpleNamespace))
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+    skills = tmp_path / "skills"
+    skill = skills / "public" / "bench-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: bench-skill\ndescription: Benchmark fixture\n---\n", encoding="utf-8")
     config = AppConfig(
+        skills=SkillsConfig(path=str(skills)),
         sandbox=SandboxConfig(
             use="deerflow.community.opensandbox:OpenSandboxProvider",
             image="test-image@sha256:fixture",
@@ -77,13 +88,14 @@ def transport(monkeypatch, tmp_path):
             ready_timeout=19,
             use_server_proxy=True,
             environment={"BENCH_SECRET": "sentinel-environment"},
-        )
+        ),
     )
-    push_current_app_config(config)
+    # Replica-pressure workers resolve the same config from separate threads.
+    set_app_config(config)
     try:
         yield SimpleNamespace(remotes=remotes, requests=requests, config=config)
     finally:
-        pop_current_app_config()
+        reset_app_config()
 
 
 def test_factory_preserves_connection_config_without_exporting_secrets(transport):
@@ -92,6 +104,7 @@ def test_factory_preserves_connection_config_without_exporting_secrets(transport
         assert get_app_config() is transport.config
         assert transport.config.sandbox.image == "test-image@sha256:fixture"
         sid = provider.acquire("thread", user_id="owner")
+        assert any(path.endswith("/bench-skill/SKILL.md") for path in transport.remotes[0].uploads)
         request = transport.requests[0]
         assert request["image"] == "test-image@sha256:fixture"
         assert request["env"] == {"BENCH_SECRET": "sentinel-environment"}
