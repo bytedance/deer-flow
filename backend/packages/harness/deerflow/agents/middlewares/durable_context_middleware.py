@@ -14,7 +14,9 @@ new request starts with the entire previous request stopped hitting its prefix
 cache as soon as a tool batch touched the artifact registry. The block after
 the system prompt is therefore a frozen snapshot rendered once into
 ``durable_context_snapshot``. Its projection is byte-stable under an unchanged
-PII policy. Later changes are hidden messages appended after the latest turn,
+PII policy and skill-visibility decision set once the authority contract exists.
+The first durable field on a fresh thread inserts that contract and is an
+intentional cache reset. Later changes are hidden messages appended after the latest turn,
 superseding the fields they restate. Consecutive model requests then share the whole previous
 request as a prefix. Updates never re-key an existing message: the identity,
 injection-guard and artifact-occurrence consumers key on message ids, and the
@@ -33,7 +35,7 @@ import json
 import posixpath
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import replace
-from html import escape
+from html import escape, unescape
 from typing import override
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
@@ -73,6 +75,7 @@ _DATA_BLOCK_OPEN = "<durable_context_data>"
 _DATA_BLOCK_CLOSE = "</durable_context_data>"
 _UPDATE_BLOCK_OPEN = "<durable_context_update>"
 _UPDATE_BLOCK_CLOSE = "</durable_context_update>"
+_SKILL_SECTION_HEADER = "## Active skills (loaded earlier - re-read the file before applying its instructions)"
 _SUMMARY_RENDER_CHAR_BUDGET = 6000
 # Same cap as ``runtime.goal.MAX_GOAL_OBJECTIVE_CHARS``. The goal routes enforce
 # it, but ``POST /threads/{id}/state`` can write the channel without them.
@@ -196,6 +199,83 @@ def _render_data_block(sections: dict[str, str], names: Collection[str] | None =
 
 def _section_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _rendered_skill_path(line: str) -> str | None:
+    """Read the path from one renderer-owned skill entry, fail closed otherwise."""
+    if not line.startswith("- "):
+        return None
+    candidate = None
+    offset = 0
+    while (separator := line.find(" -> ", offset)) >= 0:
+        raw_path = line[separator + 4 :]
+        if raw_path.endswith("/SKILL.md"):
+            candidate = unescape(raw_path)
+        offset = separator + 4
+    return posixpath.normpath(candidate) if candidate else None
+
+
+def _project_skill_visibility(text: str, visible_paths: frozenset[str], skills_digest: str | None) -> str:
+    """Filter only the recorded skills section, leaving every other byte stable.
+
+    The section digest prevents summary prose that happens to contain the same
+    Markdown heading from being mistaken for framework-owned skill history.
+    Legacy blocks without digests still recognize the exact renderer heading.
+    """
+    if _SKILL_SECTION_HEADER not in text:
+        return text
+    lines = text.split("\n")
+    projected: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index] != _SKILL_SECTION_HEADER:
+            projected.append(lines[index])
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].startswith("## ") and lines[end] not in {_DATA_BLOCK_CLOSE, _UPDATE_BLOCK_CLOSE}:
+            end += 1
+        section_lines = lines[index:end]
+        digest_source = section_lines[:]
+        while digest_source and not digest_source[-1]:
+            digest_source.pop()
+        if skills_digest is not None and _section_digest("\n".join(digest_source)) != skills_digest:
+            projected.extend(section_lines)
+            index = end
+            continue
+        kept = []
+        visible_entries = 0
+        for line in section_lines[1:]:
+            if line.startswith("- "):
+                if _rendered_skill_path(line) in visible_paths:
+                    kept.append(line)
+                    visible_entries += 1
+            else:
+                kept.append(line)
+        if visible_entries:
+            projected.append(_SKILL_SECTION_HEADER)
+            projected.extend(kept)
+        elif end < len(lines) and lines[end] in {_DATA_BLOCK_CLOSE, _UPDATE_BLOCK_CLOSE} and projected and not projected[-1]:
+            # Removing a trailing section must not leave an extra blank line
+            # before the durable block's closing tag.
+            projected.pop()
+        index = end
+    return "\n".join(projected)
+
+
+def _project_skill_visibility_in_content(content: object, visible_paths: frozenset[str], skills_digest: str | None) -> object:
+    if isinstance(content, str):
+        return _project_skill_visibility(content, visible_paths, skills_digest)
+    if not isinstance(content, list):
+        return content
+    projected = []
+    for block in content:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            text = _project_skill_visibility(block["text"], visible_paths, skills_digest)
+            projected.append({**block, "text": text} if text != block["text"] else block)
+        else:
+            projected.append(block)
+    return projected
 
 
 def _last_durable_data_message(messages: list[AnyMessage]) -> HumanMessage | None:
@@ -546,6 +626,14 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             "skill_entry_render_filter": bool(self._skill_authorization),
         }
 
+    def _skill_entry_decisions(self, runtime: Runtime | None) -> dict[str, bool] | None:
+        if self._skill_authorization is None or not self._entry_decisions_owner_token:
+            return None
+        from deerflow.runtime.secret_context import read_skill_entry_decisions
+
+        context = getattr(runtime, "context", None)
+        return read_skill_entry_decisions(context, owner_token=self._entry_decisions_owner_token)
+
     def _renderable_skills(self, runtime: Runtime | None, entries: list) -> list:
         """Filter persisted ``skill_context`` entries the provider now denies.
 
@@ -559,15 +647,20 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         permissive, matching the other run-context carriers. A published
         ``False`` hides the entry from the reminder only; state is untouched.
         """
-        if not entries or self._skill_authorization is None or not self._entry_decisions_owner_token:
+        if not entries:
             return entries
-        from deerflow.runtime.secret_context import read_skill_entry_decisions
-
-        context = getattr(runtime, "context", None)
-        decisions = read_skill_entry_decisions(context, owner_token=self._entry_decisions_owner_token)
+        decisions = self._skill_entry_decisions(runtime)
         if decisions is None:
             return entries
         return [entry for entry in entries if isinstance(entry, dict) and decisions.get(posixpath.normpath(entry.get("path") or ""), False)]
+
+    def _project_outgoing_content(self, content: object, runtime: Runtime | None, skills_digest: str | None) -> object:
+        """Apply current visibility before PII projection, without changing state."""
+        decisions = self._skill_entry_decisions(runtime)
+        if decisions is not None:
+            visible_paths = frozenset(posixpath.normpath(path) for path, allowed in decisions.items() if allowed)
+            content = _project_skill_visibility_in_content(content, visible_paths, skills_digest)
+        return redact_content(content, self._pii_redaction_config)
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -639,8 +732,10 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         """Return (frozen block for the request, snapshot write, appended updates).
 
         The frozen block is rendered once per session, then projected under the
-        current PII policy after the system prompt. With a stable policy, its
-        byte-stable prefix lets a provider reuse the cached prompt (#7320). Anything
+        current PII and skill-visibility policy after the system prompt. With a
+        stable authority contract and policies, its byte-stable prefix lets a
+        provider reuse the cached prompt (#7320). The first durable field inserts
+        the authority contract and intentionally resets that prefix. Anything
         that changes afterwards is a new hidden message appended after the whole
         latest turn, so the request stream keeps growing instead of diverging.
         """
@@ -659,7 +754,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         anchor_message = None
         if snapshot.get("content"):
             anchor_message = HumanMessage(
-                content=redact_text(snapshot["content"], self._pii_redaction_config),
+                content=self._project_outgoing_content(snapshot["content"], runtime, (snapshot.get("sections") or {}).get("skills")),
                 additional_kwargs={
                     "hide_from_ui": True,
                     _DURABLE_CONTEXT_DATA_KEY: True,
@@ -740,19 +835,20 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         history = list(request.messages)
         anchor, anchor_write, pending = self._plan_emission(state, history, request.runtime)
         placed = _apply_to_history(history, pending)
-        # A checkpoint can predate the current redaction policy. Project both
-        # old and newly emitted blocks without rewriting their stored contents.
+        # A checkpoint can predate the current visibility or redaction policy.
+        # Project old and newly emitted blocks without rewriting stored contents.
         for index, message in enumerate(placed):
             if is_durable_context_data(message):
-                content = redact_content(message.content, self._pii_redaction_config)
+                content = self._project_outgoing_content(message.content, request.runtime, _recorded_section_digests(message).get("skills"))
                 if content != message.content:
                     placed[index] = message.model_copy(update={"content": content})
         # The authority contract rides only when durable content exists on the
         # wire (a frozen anchor, a pending update, or an earlier data message):
         # sending it on every request would change the effective system prompt
         # of threads that never use durable state, for a fixed token cost each
-        # call (#7334 review). Once any durable block exists the contract is
-        # static, so prefix stability is unaffected.
+        # call (#7334 review). The first durable block therefore causes an
+        # intentional cache reset. Once the contract exists it stays static, so
+        # stable PII and skill visibility preserve the prefix on later calls.
         contract = None
         if anchor is not None or pending or any(is_durable_context_data(message) for message in placed):
             contract = SystemMessage(

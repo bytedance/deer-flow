@@ -25,7 +25,7 @@ from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.durable_context_middleware import durable_context_messages_to_rescue
+from deerflow.agents.middlewares.durable_context_middleware import durable_context_messages_to_rescue, is_durable_context_data
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.model_length_termination_detectors import OllamaLengthDetector, default_detectors
@@ -1126,8 +1126,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         for msg in messages_to_summarize:
             if isinstance(msg, SystemMessage) or is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id) or id(msg) in rescued_durable:
                 rescued.append(msg)
-            else:
+            elif not is_durable_context_data(msg):
                 remaining.append(msg)
+            # Superseded durable projections are framework-owned renderings, not
+            # conversation sources. Drop them instead of letting the summary model
+            # preserve information that the latest refresh retired.
         return remaining, rescued + preserved_messages
 
     def _fire_hooks(
