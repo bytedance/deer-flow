@@ -1646,12 +1646,12 @@ class FeishuChannel(Channel):
     async def _resolve_routing(self, attempt: _RoutingAttempt) -> _Routing:
         """Decide a message's topic on the Gateway loop, consulting and updating the channel store.
 
-        Stored mappings for the root / parent / thread ids win (``_first_stored_topic``);
-        otherwise the route is the root (or the message itself; ``None`` in P2P chats),
-        unless a pending clarification for the sender names a topic — that topic's
-        mapping is then persisted so the manager finds the clarified thread. The
-        pending clarification is consumed once: a retried attempt keeps the decision
-        and only redoes the write.
+        Bound chat replies prefer the parent message so an earlier card can still
+        be followed after ``/new``. Commands and unbound messages prefer the root.
+        The Feishu thread ID is checked last. A miss falls back to the root or
+        the message itself (``None`` in P2P chats). If a pending clarification
+        supplies a topic, persist its mapping so the manager finds that thread.
+        A retry reuses the same clarification and only repeats the write.
         """
         store = self.config.get("channel_store")
         parsed = attempt.parsed
@@ -1667,7 +1667,9 @@ class FeishuChannel(Channel):
             workspace_id=route.workspace_id,
         )
         if attempt.pending is None:
-            candidates = [candidate for candidate in (self._non_empty_str(parsed.root_id), parsed.parent_id, parsed.feishu_thread_id) if candidate]
+            root_id = self._non_empty_str(parsed.root_id)
+            message_ids = (parsed.parent_id, root_id) if route.connection_id and parsed.msg_type == InboundMessageType.CHAT else (root_id, parsed.parent_id)
+            candidates = [candidate for candidate in (*message_ids, parsed.feishu_thread_id) if candidate]
             if candidates:
                 stored = await self._first_stored_topic(store, route, candidates)
                 if stored:

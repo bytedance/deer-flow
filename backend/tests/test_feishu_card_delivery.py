@@ -506,6 +506,8 @@ async def test_explicit_text_answer_keeps_the_new_conversation_route(card_channe
 @pytest.mark.parametrize("reset_conversation", [False, True])
 @pytest.mark.parametrize("topic_id", [None, "source-1"])
 async def test_ordinary_text_uses_current_conversation(card_channel, tmp_path, monkeypatch, bound_identity, reset_conversation, topic_id):
+    from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
+
     from app.channels.manager import ChannelManager
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
@@ -513,6 +515,28 @@ async def test_ordinary_text_uses_current_conversation(card_channel, tmp_path, m
     monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
     store = card_channel.config["channel_store"]
     message = clarification_outbound(topic_id=topic_id)
+
+    async def receive(message_id: str, text: str, parent_id: str | None = None) -> InboundMessage:
+        event = P2ImMessageReceiveV1(
+            {
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou-originator"}},
+                    "message": {
+                        "message_id": message_id,
+                        "chat_id": message.chat_id,
+                        "chat_type": "group" if topic_id else "p2p",
+                        "root_id": topic_id,
+                        "parent_id": parent_id,
+                        "content": json.dumps({"text": text}),
+                    },
+                }
+            }
+        )
+        await asyncio.to_thread(card_channel._on_message, event)
+        inbound = await asyncio.wait_for(card_channel.bus.get_inbound(), timeout=2)
+        card_channel.bus.inbound_task_done()
+        return inbound
+
     repo = None
     try:
         if bound_identity:
@@ -539,43 +563,37 @@ async def test_ordinary_text_uses_current_conversation(card_channel, tmp_path, m
         card_channel.bus.subscribe_outbound(card_channel._on_outbound)
         await card_channel.send(message, _max_retries=1)
         old_button = sent_button(card_channel)
-        command = InboundMessage(
-            channel_name="feishu",
-            chat_id="chat-1",
-            user_id="ou-originator",
-            text="/new",
-            msg_type=InboundMessageType.COMMAND,
-            topic_id=topic_id,
-            connection_id=message.connection_id,
-            owner_user_id=message.owner_user_id,
-            workspace_id="chat-1",
-            metadata={"user_id": "ou-originator", "topic_id": topic_id},
-        )
+        card_channel._main_loop = asyncio.get_running_loop()
         if reset_conversation:
+            command = await receive("source-new", "/new")
             await manager._handle_command(command)
             if bound_identity and topic_id:
                 late_reply = replace(message, text="Earlier answer", thread_ts="earlier-source", metadata={"user_id": command.user_id, "root_id": topic_id})
                 await card_channel.send(late_reply, _max_retries=1)
                 assert await manager._lookup_thread_id(command) == "thread-after-new"
                 assert await repo.get_thread_id(connection["id"], "chat-1", "earlier-source") == "thread-1"
-        parsed = group_message("ordinary-answer")
-        parsed.chat_type = "group" if topic_id else "p2p"
-        parsed.root_id = topic_id
-        parsed.parent_id = "source-new" if topic_id and reset_conversation else None
-        parsed.text = "Beta"
-        card_channel._main_loop = asyncio.get_running_loop()
-        card_channel._dispatch_inbound(parsed, await card_channel._resolve_routing(_RoutingAttempt(parsed)))
-        inbound = await asyncio.wait_for(card_channel.bus.get_inbound(), timeout=2)
-        card_channel.bus.inbound_task_done()
+        inbound = await receive("ordinary-answer", "Beta", parent_id="unknown-parent" if topic_id and reset_conversation else None)
+        topic = replace(inbound, topic_id=topic_id)
         await manager._handle_chat(inbound)
         expected_thread = "thread-after-new" if reset_conversation else "thread-1"
         assert client.runs.stream.call_args.args[0] == expected_thread
-        assert await manager._lookup_thread_id(command) == expected_thread
+        assert await manager._lookup_thread_id(topic) == expected_thread
         if reset_conversation:
             old_answer = await click_button(card_channel, old_button)
             await manager._handle_chat(old_answer)
             assert client.runs.stream.call_args.args[0] == "thread-1"
-            assert await manager._lookup_thread_id(command) == "thread-after-new"
+            assert await manager._lookup_thread_id(topic) == "thread-after-new"
+            if bound_identity and topic_id:
+                card_id = "card-earlier-source"
+                followup = await receive("old-card-followup", "Tell me more", parent_id=card_id)
+                await manager._handle_chat(followup)
+                assert client.runs.stream.call_args.args[0] == "thread-1"
+                assert await manager._lookup_thread_id(topic) == expected_thread
+
+                client.threads.create.return_value = {"thread_id": "next-topic"}
+                await manager._handle_command(await receive("next-reset", "/new", parent_id=card_id))
+                assert await manager._lookup_thread_id(topic) == "next-topic"
+                assert await repo.get_thread_id(connection["id"], message.chat_id, card_id) == "thread-1"
         else:
             event = SimpleNamespace(event=SimpleNamespace(action=SimpleNamespace(value=old_button), operator=SimpleNamespace(open_id="ou-originator")))
             assert card_channel._on_card_action(event).toast.type == "warning"
