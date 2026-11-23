@@ -53,6 +53,10 @@ durable or distributed cost budget. Callers without a thread ID keep only the
 per-pass limit. Other generation failures retain their existing retry behavior.
 Configured/run-model fallback may make two candidate attempts per chunk, and SDK
 retries are separate. This bounds middleware steps, not a monetary bill or deadline.
+If the provider reports an output token limit, including native Ollama's
+`done_reason: length`, the chunk's partial response is discarded and the run-model
+fallback is tried when available. If no candidate produces a complete summary,
+compaction preserves the active history.
 For legitimate histories beyond this limit, increase the existing per-call budget
 within the model's capacity or compact earlier. There is no new configuration.
 Impossibly small budgets that cannot fit a nonempty marked carry or source fail
@@ -243,7 +247,7 @@ keep:
 
 #### `summary_prompt`
 - **Type**: String or null
-- **Default**: `null` (uses LangChain's default prompt)
+- **Default**: `null` (uses DeerFlow's built-in prompt)
 - **Description**: Custom prompt template for generating summaries. The prompt should guide the model to extract the most important context.
 
 #### `skill_file_read_tool_names`
@@ -254,11 +258,12 @@ keep:
 Legacy `preserve_recent_skill_*` settings are no longer used. Loaded skill retention is handled by the durable `skill_context` reference channel instead of by preserving raw skill-read messages in the summarization window.
 
 **Default Prompt Behavior:**
-The default LangChain prompt instructs the model to:
+The built-in DeerFlow prompt extends LangChain's prompt and asks the model to:
 - Extract highest quality/most relevant context
 - Focus on information critical to the overall goal
 - Avoid repeating completed actions
 - Return only the extracted context
+- Preserve current user requirements, literal approval phrases, conditions for acting, and later revisions
 
 ## How It Works
 
@@ -282,6 +287,11 @@ The default LangChain prompt instructs the model to:
 - Uses approximate token counting based on character count
 - For Anthropic models: ~3.3 characters per token
 - For other models: Uses LangChain's default estimation
+- For `VllmChatModel` using Chat Completions: History and token-based retention
+  estimates include the assistant reasoning replayed to vLLM. A non-null `reasoning` field takes
+  precedence over `reasoning_content`, including when it is empty. This applies
+  to both automatic and manual compaction. The estimate is approximate and
+  leaves the summary prompt and its trimming budget unchanged.
 - Can be customized with a custom `token_counter` function
 
 ### Message Preservation

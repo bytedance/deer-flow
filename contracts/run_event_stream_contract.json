@@ -114,7 +114,7 @@
       "content_schema": {
         "type": "object",
         "required": ["status"],
-        "properties": {"status": {"enum": ["success", "error", "interrupted", "timeout"]}},
+        "properties": {"status": {"enum": ["success", "error", "interrupted", "timeout", "waiting_for_input"]}},
         "additionalProperties": false
       },
       "metadata_schema": {
@@ -493,7 +493,7 @@
     {
       "id": "terminal-run-status",
       "status": "split source of truth",
-      "notes": "run.end is only a root graph completion marker and always says success. RunRow.status is authoritative for success, error, interrupted, and timeout; worker loss may leave no terminal run event."
+      "notes": "run.end is only a root graph completion marker and always says success. RunRow.status is authoritative for success, error, interrupted, timeout, and waiting_for_input (added for HITL approval pauses); worker loss may leave no terminal run event."
     },
     {
       "id": "run-end-backend-serialization",

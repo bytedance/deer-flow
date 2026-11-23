@@ -830,7 +830,10 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 /goal finish the implementation and make all tests pass
 /goal              # 查看当前激活的 goal
 /goal clear        # 清除它
+/goal from-chat    # 仅 IM：根据当前对话生成 goal
 ```
+
+在受支持的 IM 渠道里，`/goal from-chat [提示]` 会从当前对话中归纳 goal，而不是把文字当成目标本身。它会保留对话中已经约定的约束和停止条件，展示保存后的目标，并只启动一次 run。命令后的可选提示用于补充约束，不需要重述完整目标。如果对话不足以形成清楚的目标，则不会保存或启动任何内容，回复会说明原因；如果助手还在等你回答，回复会先请你回复。
 
 每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。同一个 checkpoint 会把这次达成记为 `goal_outcome`，保留到下一次修改 goal。
 
@@ -877,12 +880,12 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
-每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。
+沙箱的执行环境取决于配置。本地模式直接在宿主机上运行沙箱代码，Docker 模式在隔离的容器中运行，Kubernetes 模式通过 provisioner 服务在 Pod 中运行。Agent 可以在沙箱中访问 skills、workspace、uploads、outputs，读写和编辑文件，也可以查看图片。所选沙箱提供 shell 时，Agent 可以执行 Bash 命令并运行代码。本地模式默认禁用宿主机 Bash（`sandbox.allow_host_bash: false`）。各模式的配置方式见[沙箱指南](docs/guide/sandbox.md#sandbox-mode)。
 
 这就是“带工具的聊天机器人”和“真正有执行环境的 agent”之间的差别。
 
 ```text
-# sandbox 容器内的路径
+# 沙箱中的虚拟路径
 /mnt/user-data/
 ├── uploads/          ← 你的文件
 ├── workspace/        ← agents 的工作目录

@@ -14,6 +14,7 @@ from functools import lru_cache, partial
 from pathlib import Path
 
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.authz.sandbox_authz import (
@@ -30,8 +31,11 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.command_scope import command_owner
 from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
+    SandboxAuthorizationError,
     SandboxError,
+    SandboxFileNotFoundError,
     SandboxNotFoundError,
+    SandboxPermissionError,
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
@@ -41,7 +45,7 @@ from deerflow.sandbox.lease import (
     sandbox_command_scope,
     sandbox_lease_owner,
 )
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path, escape_powershell_single_quoted
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.prewarm import claim_sandbox_prewarm
@@ -50,10 +54,12 @@ from deerflow.sandbox.read_file_contract import (
     READ_FILE_INVALID_END_LINE,
     READ_FILE_INVALID_RANGE,
     READ_FILE_INVALID_START_LINE,
+    READ_FILE_NO_CONTENT_RESULTS,
+    READ_FILE_NUMBERED_MAX_LINES,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
 )
-from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
@@ -2031,7 +2037,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # boundary above admits PATH-style concatenation, but a tail that ran
         # through the ``:`` swallowed every later entry of the list, leaving
         # those virtual paths unresolved in the command.
-        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
+        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():,]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
             resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
@@ -2044,20 +2050,45 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     return result
 
 
-def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
-    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None, *, shell: str | None = None) -> str:
+    """Anchor relative paths to the thread workspace with a shell-appropriate prefix.
+
+    The syntax has to follow the shell that will actually run the command, not
+    the POSIX one this used to assume unconditionally. ``LocalSandbox._get_shell``
+    falls back to ``powershell.exe`` and then ``cmd.exe`` on Windows, and a
+    ``cd '<path>' && ...`` prefix is unparseable in both: Windows PowerShell
+    before 7 rejects ``&&`` ("not a valid statement separator in this version",
+    surfaced as ``InvalidEndOfLine``), and cmd.exe does not strip single quotes,
+    so it looks for a directory literally named ``'<path>'``. Either way every
+    ``bash`` call fails before the command runs.
+
+    Each form keeps the fail-closed behaviour of ``&&``: the PowerShell variant
+    uses ``-ErrorAction Stop`` because ``Set-Location`` otherwise reports a
+    missing workspace as a non-terminating error and lets the command run from
+    the inherited working directory.
 
     Args:
         command: The bash command to execute.
         thread_data: The thread data containing the workspace path.
+        shell: The shell executable that will run the command. Defaults to the
+            one ``LocalSandbox`` resolves.
 
     Returns:
-        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
+        The command prefixed with a cwd change if workspace_path is available,
         otherwise the original command unchanged.
     """
-    if thread_data and (workspace := thread_data.get("workspace_path")):
-        return f"cd {shlex.quote(workspace)} && {command}"
-    return command
+    if not (thread_data and (workspace := thread_data.get("workspace_path"))):
+        return command
+    resolved_shell = shell or LocalSandbox._get_shell()
+    if LocalSandbox._is_powershell(resolved_shell):
+        # ``-ErrorAction Stop`` keeps the stop-on-failure semantics ``&&`` gives
+        # the POSIX form: ``Set-Location`` reports a missing directory as a
+        # non-terminating error, which would let the ``;``-separated command run
+        # from the gateway's inherited cwd.
+        return f"Set-Location -LiteralPath '{escape_powershell_single_quoted(workspace)}' -ErrorAction Stop; {command}"
+    if LocalSandbox._is_cmd_shell(resolved_shell):
+        return f'cd /d "{workspace}" && {command}'
+    return f"cd {shlex.quote(workspace)} && {command}"
 
 
 def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
@@ -2414,17 +2445,19 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
 
 async def _run_sync_tool_after_async_sandbox_init(
-    func: Callable[..., str] | None,
+    func: Callable[..., str | ToolMessage] | None,
     runtime: Runtime,
     *args: object,
-) -> str:
+    _error_result: Callable[[str, BaseException | None], str | ToolMessage] | None = None,
+) -> str | ToolMessage:
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
         async with sandbox_authorization_scope_async(runtime):
             sandbox = await ensure_sandbox_initialized_async(runtime)
 
             if func is None:
-                return "Error: Tool implementation not available"
+                text = "Error: Tool implementation not available"
+                return _error_result(text, None) if _error_result else text
 
             owner = sandbox_lease_owner(runtime.context)
             signal_cancel = None
@@ -2432,9 +2465,11 @@ async def _run_sync_tool_after_async_sandbox_init(
                 signal_cancel = partial(sandbox.request_command_cancel, owner)
             return await run_sync_lifecycle_operation(func, runtime, *args, _on_cancel=signal_cancel)
     except SandboxError as e:
-        return f"Error: {e}"
+        text = f"Error: {e}"
+        return _error_result(text, e) if _error_result else text
     except Exception as e:
-        return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        text = f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        return _error_result(text, e) if _error_result else text
 
 
 def _execute_bash_command(
@@ -2444,9 +2479,12 @@ def _execute_bash_command(
     runtime: Runtime,
     env: dict[str, str] | None,
     timeout: float | None = None,
+    cwd: str | None = None,
 ) -> str:
     """Route subagent bash calls through their isolated shell-session scope."""
     with command_owner(sandbox, sandbox_lease_owner(runtime.context)):
+        if cwd is not None and isinstance(sandbox, LocalSandbox):
+            return sandbox.execute_command(command, env=env, timeout=timeout, cwd=cwd)
         scope_id = sandbox_command_scope(runtime.context)
         scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
         if scope_id is not None and callable(scoped_execute):
@@ -2854,51 +2892,6 @@ def _user_identity_prefix(runtime: Runtime) -> str:
     return f"unset {USER_ID_ENV}; "
 
 
-def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
-    """Build a per-call env overlay carrying a GitHub App installation token.
-
-    The GitHub channel mints a short-lived installation token in the
-    ``ChannelManager`` (app layer) and threads it through ``run_context``
-    so it lands in ``runtime.context["github_token"]``. We expose it to
-    the agent's bash as both ``GH_TOKEN`` (what the ``gh`` CLI reads) and
-    ``GITHUB_TOKEN`` (the conventional name). Returning ``None`` when no
-    token is present keeps non-GitHub runs identical to before.
-
-    The value at ``runtime.context["github_token"]`` may be either:
-
-    * a ``str`` — the captured token, the simple shape used by tests and
-      by older code paths that don't need refresh; or
-    * a zero-arg sync callable returning ``str`` — a provider that re-mints
-      transparently when the underlying installation token's 1h TTL is
-      nearing expiry. The provider's cache logic lives app-side (see
-      ``app.gateway.github.app_auth.mint_installation_token`` for the
-      cache + leeway semantics); the harness just calls it.
-
-    The callable path is what lets long autonomous runs survive past the
-    60-minute installation-token life: every bash invocation re-asks the
-    provider, which returns the cached token until ~55 min, then mints a
-    fresh one. Without this, a coder agent doing a multi-hour refactor
-    would do most of the work and then 401 on the final ``git push``.
-
-    The token still crosses the harness/app boundary as opaque data — the
-    harness never imports the app-layer minting code, preserving the
-    dependency firewall enforced by ``tests/test_harness_boundary.py``.
-    """
-    context = runtime.context if runtime.context is not None else None
-    value = context.get("github_token") if context else None
-    if callable(value):
-        try:
-            token = value()
-        except Exception:
-            logger.warning("github_token provider raised; skipping env overlay", exc_info=True)
-            return None
-    else:
-        token = value
-    if not isinstance(token, str) or not token:
-        return None
-    return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
-
-
 _LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
 
 
@@ -2927,7 +2920,7 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 
 @tool("bash", parse_docstring=True)
-def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
+def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | ToolMessage:
     """Execute a bash command in the configured execution environment.
 
 
@@ -2952,17 +2945,11 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
     redaction_env = None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
-        # Request-scoped secrets resolved for the active skill (#3861), plus a
-        # short-lived GitHub App installation token threaded through by the
-        # GitHub channel. Both are injected as per-call env into the subprocess,
-        # never placed in the command string.
+        # Only the active skill's explicitly resolved secrets belong here.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
         user_prefix = _user_identity_prefix(runtime)
-        github_env = _github_env_from_runtime(runtime)
         lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
-        if github_env:
-            injected_env = {**(injected_env or {}), **github_env}
         if lark_cli_env:
             injected_env = {**(injected_env or {}), **lark_cli_env}
         redaction_env = injected_env
@@ -2978,7 +2965,12 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             thread_data = get_thread_data(runtime)
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
-            command = _apply_cwd_prefix(command, thread_data)
+            workspace = thread_data.get("workspace_path") if thread_data else None
+            cwd = None
+            if workspace and _is_windows() and isinstance(sandbox, LocalSandbox) and sandbox._is_cmd_shell(sandbox._get_shell()):
+                cwd = workspace
+            else:
+                command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
             # PowerShell/cmd.exe where `export` is not valid syntax, so the id
             # is published through the subprocess environment instead —
@@ -3009,11 +3001,13 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 runtime=runtime,
                 env=local_env,
                 timeout=command_timeout,
+                cwd=cwd,
             )
-            return _truncate_bash_output(
+            content = _truncate_bash_output(
                 mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
                 max_chars,
             )
+            return _bash_command_result(runtime, output, content)
         ensure_thread_directories_exist(runtime)
         command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
         command = user_prefix + (identity_prefix or "") + command
@@ -3026,19 +3020,15 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         except Exception:
             max_chars = 20000
             command_timeout = None
-        return _truncate_bash_output(
-            mask_secret_values(
-                _execute_bash_command(
-                    sandbox,
-                    command,
-                    runtime=runtime,
-                    env=injected_env,
-                    timeout=command_timeout,
-                ),
-                injected_env,
-            ),
-            max_chars,
+        output = _execute_bash_command(
+            sandbox,
+            command,
+            runtime=runtime,
+            env=injected_env,
+            timeout=command_timeout,
         )
+        content = _truncate_bash_output(mask_secret_values(output, injected_env), max_chars)
+        return _bash_command_result(runtime, output, content)
     except SandboxError as e:
         return mask_secret_values(f"Error: {e}", redaction_env)
     except PermissionError as e:
@@ -3047,7 +3037,33 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction_env)
 
 
-async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
+def _bash_command_result(runtime: Runtime, output: str, content: str) -> str | ToolMessage:
+    """Stamp provider execution state before stdout can be interpreted as an error."""
+    call_id = getattr(runtime, "tool_call_id", None)
+    if not isinstance(output, CommandOutput) or not isinstance(call_id, str) or not call_id:
+        # Legacy providers retain their existing error envelopes; direct Python
+        # callers without a tool-call ID retain their string return contract.
+        return content
+    status = "error" if output.exit_code != 0 else "success"
+    return ToolMessage(
+        content=content,
+        name="bash",
+        tool_call_id=call_id,
+        status=status,
+        additional_kwargs={
+            "deerflow_tool_meta": {
+                "status": status,
+                "exit_code": output.exit_code,
+                "error_type": "unknown" if status == "error" else None,
+                "recoverable_by_model": True,
+                "recommended_next_action": "try_alternative" if status == "error" else "continue",
+                "source": "tool_return",
+            }
+        },
+    )
+
+
+async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str | ToolMessage:
     return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description)
 
 
@@ -3222,7 +3238,8 @@ def grep_tool(
 
     Args:
         pattern: The string or regex pattern to search for.
-        path: The **absolute** file or root directory to search.
+        path: The **absolute** file or root directory to search. Naming a file
+            searches it at any size; a directory walk skips files over 1 MB.
         description: Optional short explanation of this search shown in the UI.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.
@@ -3350,6 +3367,40 @@ def _ranged_read_hits_a_line(runtime: Runtime | None, path: str, line: int) -> b
     return "\n" in _read_file_from_sandbox(runtime, path, start_line=line - 1, end_line=line)
 
 
+def _read_file_result(runtime: Runtime, content: str, *, status: str = "success", error_type: str | None = None) -> str | ToolMessage:
+    """Stamp execution state at the producer; file text is never a status signal."""
+    call_id = getattr(runtime, "tool_call_id", None)
+    if not isinstance(call_id, str) or not call_id:
+        # Keep direct Python callers that have no LangChain tool call compatible.
+        return content
+    return ToolMessage(
+        content=content,
+        name="read_file",
+        tool_call_id=call_id,
+        status="error" if status == "error" else "success",
+        additional_kwargs={
+            "deerflow_tool_meta": {
+                "status": status,
+                "error_type": error_type,
+                "recoverable_by_model": True,
+                "recommended_next_action": "try_alternative" if status == "error" else "continue",
+                "source": "tool_return",
+            }
+        },
+    )
+
+
+def _read_file_failure(runtime: Runtime, content: str, exc: BaseException | None = None) -> str | ToolMessage:
+    category = "unknown"
+    if isinstance(exc, (FileNotFoundError, SandboxFileNotFoundError)):
+        category = "not_found"
+    elif isinstance(exc, (PermissionError, SandboxPermissionError, SandboxAuthorizationError)):
+        category = "permission"
+    elif isinstance(exc, (TimeoutError, ConnectionError)):
+        category = "transient"
+    return _read_file_result(runtime, content, status="error", error_type=category)
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -3357,8 +3408,11 @@ def read_file_tool(
     description: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
-) -> str:
+) -> str | ToolMessage:
     """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
+
+    Ranges returning 1-40 lines from uploads or workspace files show source line labels when the labeled output fits the budget.
+    For edits or writes, copy only the text after the first ' | ' on each labeled line.
 
     Args:
         path: The **absolute** path to the file to read.
@@ -3366,18 +3420,19 @@ def read_file_tool(
         start_line: Optional starting line number (1-indexed, inclusive). Omit to start at the first line.
         end_line: Optional ending line number (1-indexed, inclusive). Omit to read through the last line.
     """
+    requested_path = path
     try:
         # Block access to disabled skill files
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
-            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
+            return _read_file_result(runtime, f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it.", status="error", error_type="permission")
         if start_line is not None and start_line < 1:
-            return READ_FILE_INVALID_START_LINE
+            return _read_file_failure(runtime, READ_FILE_INVALID_START_LINE)
         effective_start = start_line or 1
         if end_line is not None and end_line < 1:
-            return READ_FILE_INVALID_END_LINE
+            return _read_file_failure(runtime, READ_FILE_INVALID_END_LINE)
         if end_line is not None and effective_start > end_line:
-            return READ_FILE_INVALID_RANGE
+            return _read_file_failure(runtime, READ_FILE_INVALID_RANGE)
 
         requested_path = path
         use_line_range = start_line is not None or end_line is not None
@@ -3391,9 +3446,9 @@ def read_file_tool(
                 # tell them apart so a continuation named by a truncation
                 # marker is not reported as beyond the file.
                 if _ranged_read_hits_a_line(runtime, path, start_line):
-                    return READ_FILE_EMPTY
-                return READ_FILE_START_LINE_EXCEEDS
-            return READ_FILE_EMPTY
+                    return _read_file_result(runtime, READ_FILE_EMPTY)
+                return _read_file_failure(runtime, READ_FILE_START_LINE_EXCEEDS)
+            return _read_file_result(runtime, READ_FILE_EMPTY)
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -3402,23 +3457,45 @@ def read_file_tool(
         except Exception:
             max_chars = 50000
         # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
-        return _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
+        output = _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
+        call_id = getattr(runtime, "tool_call_id", None)
+        # Leave in-band provider failures and range markers recognizable to consumers.
+        if (
+            use_line_range
+            and isinstance(call_id, str)
+            and call_id
+            and requested_path.startswith((f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/workspace/"))
+            and output == content
+            and not content.startswith("Error:")
+            and content.strip() not in READ_FILE_NO_CONTENT_RESULTS
+        ):
+            # A provider's ranged result joins source lines, including a trailing empty line.
+            lines = content.split("\n")
+            if 1 <= len(lines) <= READ_FILE_NUMBERED_MAX_LINES and (end_line is None or len(lines) <= end_line - effective_start + 1):
+                rows = "\n".join(f"{number} | {line}" for number, line in enumerate(lines, start=effective_start))
+                # Write tools accept literal 'N | ' text. A verbatim write-back of
+                # this display can therefore persist the labels as file content.
+                numbered = "Source lines (for exact edits, copy the text after the first ' | '):\n" + rows
+                if max_chars == 0 or len(numbered) <= max_chars:
+                    output = numbered
+        return _read_file_result(runtime, output, status="partial_success" if max_chars != 0 and len(content) > max_chars else "success")
     except SandboxError as e:
-        return f"Error: {e}"
-    except FileNotFoundError:
-        return f"Error: File not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied reading file: {requested_path}"
-    except IsADirectoryError:
-        return f"Error: Path is a directory, not a file: {requested_path}"
-    except UnicodeDecodeError:
-        return (
+        return _read_file_failure(runtime, f"Error: {e}", e)
+    except FileNotFoundError as e:
+        return _read_file_failure(runtime, f"Error: File not found: {requested_path}", e)
+    except PermissionError as e:
+        return _read_file_failure(runtime, f"Error: Permission denied reading file: {requested_path}", e)
+    except IsADirectoryError as e:
+        return _read_file_failure(runtime, f"Error: Path is a directory, not a file: {requested_path}", e)
+    except UnicodeDecodeError as e:
+        text = (
             f"Error: cannot read '{requested_path}' as text — it appears to be a binary file "
             "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
             "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
         )
+        return _read_file_failure(runtime, text, e)
     except Exception as e:
-        return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
+        return _read_file_failure(runtime, f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}", e)
 
 
 async def _read_file_tool_async(
@@ -3427,8 +3504,8 @@ async def _read_file_tool_async(
     description: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
-) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, path, description, start_line, end_line)
+) -> str | ToolMessage:
+    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, path, description, start_line, end_line, _error_result=partial(_read_file_failure, runtime))
 
 
 read_file_tool.coroutine = _read_file_tool_async

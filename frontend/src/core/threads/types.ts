@@ -1,8 +1,12 @@
-import type { Message, Thread } from "@langchain/langgraph-sdk";
+import type { Message, Run, Thread } from "@langchain/langgraph-sdk";
 
 import type { ReasoningEffortValue } from "@/core/models/reasoning";
 
 import type { Todo } from "../todos";
+
+/** Gateway status outside the SDK's closed RunStatus union. */
+export type AppRunStatus = Run["status"] | "waiting_for_input";
+export type AppRun = Omit<Run, "status"> & { status: AppRunStatus };
 
 export interface GoalState {
   objective: string;
@@ -88,6 +92,7 @@ export interface AgentThreadContext extends Record<string, unknown> {
   is_plan_mode: boolean;
   subagent_enabled: boolean;
   reasoning_effort?: ReasoningEffortValue;
+  tool_approval_mode?: "ask" | "auto" | "full";
   agent_name?: string;
   client?: AgentClientContext;
 }

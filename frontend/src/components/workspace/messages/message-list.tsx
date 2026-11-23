@@ -7,6 +7,7 @@ import {
   MessageCircleIcon,
   MessageSquarePlusIcon,
   RefreshCcwIcon,
+  ShieldCheckIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -23,6 +24,7 @@ import {
   Conversation,
   ConversationContent,
   type ConversationProps,
+  ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
@@ -50,6 +52,8 @@ import {
   deriveHumanInputThreadState,
   extractHumanInputRequest,
   shouldClearPendingHumanInputOnThreadError,
+  type HitlApprovalRequest,
+  type HitlApprovalResponse,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
@@ -101,6 +105,7 @@ import {
   findSubtaskResultMessage,
 } from "@/core/tasks/subtask-render";
 import type { AgentThreadState } from "@/core/threads";
+import { LOCAL_HUMAN_MESSAGE_ID_PREFIX } from "@/core/threads/hooks";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
@@ -113,6 +118,7 @@ import { Tooltip } from "../tooltip";
 import { ConversationOutline } from "./conversation-outline";
 import {
   HumanInputCard,
+  ToolApprovalCard,
   type HumanInputSubmitResult,
 } from "./human-input-card";
 import { MarkdownContent } from "./markdown-content";
@@ -334,6 +340,12 @@ export function MessageList({
   onRegenerateMessage,
   onEditAndRegenerateMessage,
   onSubmitHumanInput,
+  approvalRequests = [],
+  approvalMetadataLoading = false,
+  approvalMetadataError = false,
+  onReloadApprovalMetadata,
+  waitingForInputRunIds = new Set<string>(),
+  onSubmitApproval,
   onBranchTurn,
   canRegenerate = false,
   activeRunId,
@@ -369,6 +381,15 @@ export function MessageList({
   onSubmitHumanInput?: (
     request: HumanInputRequest,
     response: HumanInputResponse,
+  ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
+  approvalRequests?: readonly HitlApprovalRequest[];
+  approvalMetadataLoading?: boolean;
+  approvalMetadataError?: boolean;
+  onReloadApprovalMetadata?: () => unknown;
+  waitingForInputRunIds?: ReadonlySet<string>;
+  onSubmitApproval?: (
+    request: HitlApprovalRequest,
+    responses: HitlApprovalResponse[],
   ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
   onBranchTurn?: (
     messageId: string,
@@ -542,6 +563,64 @@ export function MessageList({
     }
     prevIsLoading.current = thread.isLoading;
   }, [groupedMessages, thread.error, thread.isLoading, threadId]);
+
+  // Pin a freshly sent user turn to the top of the viewport, ChatGPT-style:
+  // the reply then grows downward below the reading position instead of the
+  // viewport chasing the bottom. The list escapes the stick lock and grows a
+  // flexible end spacer so the last row can actually reach the top (see
+  // `pinGroupKey` in VirtualMessageList); scrolling down or the
+  // scroll-to-bottom button re-locks the follow.
+  //
+  // "Freshly sent" is identified by the optimistic message identity
+  // (LOCAL_HUMAN_MESSAGE_ID_PREFIX, minted once per turn in the thread hooks
+  // and shared with the server echo), not by comparing group tails: the
+  // optimistic append can render before `isLoading` flips, and a regenerate
+  // masks the superseded assistant messages first, which exposes an existing
+  // human turn as the last group mid-run. Identity also excludes history
+  // loads (prepend), thread switches and restoring a mid-run thread.
+  const [pinGroupKey, setPinGroupKey] = useState<string | null>(null);
+  const lastSeenThreadIdRef = useRef(threadId);
+  const pinnedKeysRef = useRef<Set<string>>(new Set());
+  // Captured during the first render, not inside the effect: React StrictMode
+  // (the dev default) runs effects mount → cleanup → mount with refs
+  // preserved, so a run-once flag mutated in the effect would let the second
+  // pass fall through and pin a restored mid-run thread. The mount-time tail
+  // absorbs idempotently on every pass.
+  const mountTailKeyRef = useRef<string | null | undefined>(undefined);
+  if (mountTailKeyRef.current === undefined) {
+    const firstGroup = groupedMessages.at(-1);
+    mountTailKeyRef.current =
+      firstGroup?.id ?? firstGroup?.messages[0]?.id ?? null;
+  }
+  useEffect(() => {
+    const lastGroup = groupedMessages.at(-1);
+    const lastGroupKey = lastGroup?.id ?? lastGroup?.messages[0]?.id;
+    if (lastGroupKey != null && lastGroupKey === mountTailKeyRef.current) {
+      // The tail that already existed at mount (restoring a mid-run thread)
+      // is never a fresh send.
+      pinnedKeysRef.current.add(lastGroupKey);
+    }
+    if (lastSeenThreadIdRef.current !== threadId) {
+      lastSeenThreadIdRef.current = threadId;
+      setPinGroupKey(null);
+      if (lastGroupKey) pinnedKeysRef.current.add(lastGroupKey);
+      return;
+    }
+    if (!thread.isLoading) {
+      // The run finished (or never started): drop the pin so the end spacer
+      // collapses with it.
+      setPinGroupKey(null);
+      return;
+    }
+    if (
+      lastGroup?.type === "human" &&
+      lastGroupKey?.startsWith(LOCAL_HUMAN_MESSAGE_ID_PREFIX) &&
+      !pinnedKeysRef.current.has(lastGroupKey)
+    ) {
+      pinnedKeysRef.current.add(lastGroupKey);
+      setPinGroupKey(lastGroupKey);
+    }
+  }, [groupedMessages, thread.isLoading, threadId]);
 
   useEffect(() => {
     const startTime = turnStartTimeRef.current;
@@ -1289,6 +1368,7 @@ export function MessageList({
             ref={virtualMessageListRef}
             groups={groupedMessages}
             isLoading={thread.isLoading}
+            pinGroupKey={pinGroupKey}
             onActiveGroupChange={
               conversationOutlineEnabled ? handleActiveGroupChange : undefined
             }
@@ -1450,11 +1530,29 @@ export function MessageList({
                         ),
                         group.id !== undefined &&
                           branchableAssistantGroupIds.has(group.id),
-                        group.id === latestAssistantGroupId,
+                        !group.messages.some(
+                          (message) =>
+                            message.type === "ai" &&
+                            "run_id" in message &&
+                            typeof message.run_id === "string" &&
+                            waitingForInputRunIds.has(message.run_id),
+                        ) && group.id === latestAssistantGroupId,
                         sidecarSurface
                           ? undefined
                           : skillUsageByGroupIndex.get(groupIndex),
                       )}
+                    {group.type === "assistant" &&
+                    approvalRequests.length > 0 &&
+                    groupIndex === lastGroupIndex ? (
+                      <p
+                        className="text-muted-foreground flex items-center gap-1.5 text-sm"
+                        data-testid="awaiting-approval"
+                        role="status"
+                      >
+                        <ShieldCheckIcon className="size-4" />
+                        {t.humanInput.approval.waiting}
+                      </p>
+                    ) : null}
                   </div>,
                   inlineDurationRunIds,
                 );
@@ -1707,6 +1805,10 @@ export function MessageList({
                       )}
                       showTokenDebugSummaries={showTokenDebugSummaries}
                       toolArtifacts={thread.values?.tool_artifacts}
+                      awaitingApproval={
+                        approvalRequests.length > 0 &&
+                        groupIndex === lastGroupIndex
+                      }
                     />
                   </MessageArtifactPathsContext.Provider>
                   {renderTokenUsage({
@@ -1719,6 +1821,47 @@ export function MessageList({
               );
             }}
           />
+          {approvalRequests.map((request) => (
+            <ToolApprovalCard
+              disabled={thread.isLoading && request.transport !== "live"}
+              key={request.request_id}
+              request={request}
+              onSubmit={onSubmitApproval}
+            />
+          ))}
+          {approvalMetadataError && approvalRequests.length === 0 ? (
+            <div
+              className="border-destructive/30 bg-destructive/5 space-y-3 rounded-lg border p-4"
+              data-testid="approval-metadata-error"
+            >
+              <p className="text-destructive text-sm" role="alert">
+                {t.humanInput.approval.loadFailed}
+              </p>
+              {onReloadApprovalMetadata ? (
+                <Button
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                  onClick={() => void onReloadApprovalMetadata()}
+                >
+                  <RefreshCcwIcon className="size-4" />
+                  {t.humanInput.approval.reload}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          {approvalMetadataLoading &&
+          !approvalMetadataError &&
+          approvalRequests.length === 0 ? (
+            <p
+              className="text-muted-foreground flex items-center gap-1.5 text-sm"
+              data-testid="approval-metadata-loading"
+              role="status"
+            >
+              <ShieldCheckIcon className="size-4" />
+              {t.humanInput.approval.loading}
+            </p>
+          ) : null}
           {renderTaskEventLines(placedTaskEvents?.tail)}
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">
@@ -1727,6 +1870,14 @@ export function MessageList({
           )}
           <div style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
+        <ConversationScrollButton
+          aria-label={t.common.scrollToBottom}
+          className="z-10"
+          // The jump button is explicit user intent that originates outside
+          // the scroll element, so its input events cannot cancel a running
+          // send-pin chain; do it here.
+          onPointerDown={() => virtualMessageListRef.current?.cancelPinFollow()}
+        />
       </Conversation>
       {conversationOutlineEnabled && (
         <ConversationOutline

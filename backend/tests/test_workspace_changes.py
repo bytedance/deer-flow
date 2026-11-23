@@ -478,6 +478,23 @@ def test_get_changed_output_paths_ignores_externalized_tool_results(tmp_path):
     assert get_changed_output_paths(before, after) == ["/mnt/user-data/outputs/report.md"]
 
 
+def test_get_changed_output_paths_ignores_hidden_working_state(tmp_path):
+    """Hidden files and directories under outputs are working state, not deliverables."""
+    roots = _roots(tmp_path)
+    outputs = roots[1].host_path
+    before = scan_workspace_roots(roots)
+
+    (outputs / ".digest_cursor.json").write_text("{}", encoding="utf-8")
+    (outputs / ".work").mkdir()
+    (outputs / ".work" / "chart.png").write_bytes(b"png")
+    (outputs / "sub").mkdir()
+    (outputs / "sub" / ".state.json").write_text("{}", encoding="utf-8")
+    (outputs / "sub" / "report.md").write_text("deliverable", encoding="utf-8")
+    after = scan_workspace_roots(roots)
+
+    assert get_changed_output_paths(before, after) == ["/mnt/user-data/outputs/sub/report.md"]
+
+
 def test_scan_workspace_roots_can_skip_text_loading(tmp_path):
     roots = _roots(tmp_path)
     workspace = roots[0].host_path

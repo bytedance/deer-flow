@@ -6,6 +6,26 @@ from collections.abc import Sequence
 from typing import Any
 
 
+def task_interrupts_by_id(snapshot: Any) -> dict[str, list[Any]]:
+    """Group non-empty task interrupts of one snapshot by task id."""
+    grouped: dict[str, list[Any]] = {}
+    for task in getattr(snapshot, "tasks", None) or ():
+        interrupts = list(getattr(task, "interrupts", ()) or ())
+        if interrupts:
+            grouped[task.id] = interrupts
+    return grouped
+
+
+def is_hitl_approval_payload(value: Any) -> bool:
+    """Whether an interrupt payload is a HITL tool-approval request."""
+    return isinstance(value, dict) and value.get("kind") == "hitl_approval"
+
+
+def hitl_approval_payloads(grouped: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    """Flatten approval payloads from task_interrupts_by_id output."""
+    return [interrupt.value for interrupts in grouped.values() for interrupt in interrupts if is_hitl_approval_payload(interrupt.value)]
+
+
 class CheckpointLineageError(RuntimeError):
     """Raised when a requested checkpoint ancestor cannot be resolved safely."""
 
@@ -54,6 +74,21 @@ def _has_postgres_stamps(metadata: dict[str, Any]) -> bool:
     if metadata.get("source") != "update":
         return False
     return "run_durations" in metadata or "run_message_ids" in metadata
+
+
+def channel_versions_match(
+    versions: dict[str, Any] | None,
+    parent_versions: dict[str, Any] | None,
+) -> bool:
+    """Whether two checkpoint version maps match channel-for-channel.
+
+    LangGraph versions are scoped to their channels, not globally unique.
+    Comparing only the values can mistake a state-changing checkpoint for a
+    metadata-only copy when two channels exchange their versions.
+    """
+
+    # Empty maps are equal too; markerless inference applies its own non-empty guard.
+    return isinstance(versions, dict) and isinstance(parent_versions, dict) and versions == parent_versions
 
 
 def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = None, stamp_fallback: bool = True, versions: dict[str, Any] | None = None, parent_versions: dict[str, Any] | None = None) -> bool:
@@ -248,7 +283,7 @@ def _copies_parent_verbatim(checkpoint_tuple: Any, parent: Any, *, versions: dic
     parent_versions = parent_versions if isinstance(parent_versions, dict) else _snapshot_versions(parent)
     if not isinstance(versions, dict) or not isinstance(parent_versions, dict) or not versions:
         return False
-    return frozenset(versions.values()) == frozenset(parent_versions.values())
+    return channel_versions_match(versions, parent_versions)
 
 
 def history_parent_index(checkpoints: Sequence[Any]) -> dict[tuple[str, str], Any]:

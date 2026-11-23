@@ -1,16 +1,20 @@
-# Knowledge center
+# Knowledge center example
 
-Keep this browser-only package independent of management/backend activation.
-Consume platform routes through host `requestBackend`; never import host modules,
-duplicate Provider logic or store credentials/content in browser storage.
-Follow semantic tokens, system UI type, 8px controls, en/zh copy and 375px layouts.
+A browser-only extension package. It stays independent of the management
+extension and of backend activation.
 
-Capability is not authorization or observed execution. Preserve real resource
-identities, unknown states and explicit false options. Never invent directories,
-task IDs, percentages or Trace. Missing entry/version/graph APIs stay unavailable.
-
-Observe page/selection cancellation, keep one selector listener, order document
-reads and invalidate them before writes. Use textContent for external text.
-Never retry writes; failed submitted writes require explicit reconciliation.
-Update ui_manifest.json for every asset and verify wheel contents. Tests belong
-in backend/tests and frontend/tests/e2e/knowledge-center.spec.ts.
+- **Reach the platform through the host's `requestBackend`.** Do not import host
+  modules, copy Provider logic, or keep credentials or content in browser
+  storage.
+- **A capability is not an authorization and not an observed execution.** Show
+  real resource identities, unknown states and explicit false options. Do not
+  invent directories, task IDs, percentages or traces. A missing entry, version
+  or graph API is shown as unavailable.
+- **Order document reads and invalidate them before a write.** Honor page and
+  selection cancellation, and keep one selector listener.
+- **A write is never retried.** A submitted write that failed needs explicit
+  reconciliation.
+- **Render external text through `textContent`.**
+- **Update `ui_manifest.json` for every asset** and verify the wheel contents.
+- **Follow the host UI rules**: semantic tokens, system UI type, English and
+  Chinese copy, and a 375px layout.

@@ -9,6 +9,7 @@ from deerflow.agents.middlewares.summarization_middleware import SummarizationEv
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.utils.messages import without_imported_history
 
 
 def memory_flush_hook(event: SummarizationEvent, pii_redaction_config: PiiRedactionConfig | None = None) -> None:
@@ -20,15 +21,19 @@ def memory_flush_hook(event: SummarizationEvent, pii_redaction_config: PiiRedact
     correction/reinforcement detection. The queued payload is redacted at
     this boundary (#3190 vector 5): compaction removes these messages from
     state right after, so the later after-agent redaction cannot repair a
-    raw batch queued here.
+    raw batch queued here. History imported from another person's
+    conversation is left out, as in ``MemoryMiddleware``.
     """
     if not get_memory_config().enabled or not event.thread_id:
         return
 
+    messages = without_imported_history(list(event.messages_to_summarize))
+    if not messages:
+        return
     user_id = resolve_runtime_user_id(event.runtime)
     get_memory_manager().add_nowait(
         event.thread_id,
-        with_memory_locale(redact_queued_messages(list(event.messages_to_summarize), pii_redaction_config), getattr(event.runtime, "context", None)),
+        with_memory_locale(redact_queued_messages(messages, pii_redaction_config), getattr(event.runtime, "context", None)),
         agent_name=event.agent_name,
         user_id=user_id,
     )

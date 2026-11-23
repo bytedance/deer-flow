@@ -12,7 +12,13 @@ import {
   XIcon,
   ZapIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import { toast } from "sonner";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
@@ -48,6 +54,10 @@ import {
   DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
+import {
+  isArtifactRewriteClarification,
+  type ArtifactSelectionEdit,
+} from "@/core/artifacts/selection";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useI18n } from "@/core/i18n/hooks";
@@ -70,10 +80,12 @@ import {
   buildParentConversationContext,
   buildReferenceMessageMetadata,
   buildSidecarContextPrompt,
+  isSameSidecarContext,
 } from "@/core/sidecar";
 import { createSidecarThread } from "@/core/sidecar/api";
 import {
   useDeleteThread,
+  useThreadMetadata,
   useThreadStream,
   type ThreadStreamOptions,
 } from "@/core/threads/hooks";
@@ -97,6 +109,7 @@ import {
 } from "../model-picker-content";
 import { Tooltip } from "../tooltip";
 
+import { ArtifactRewriteReview } from "./artifact-rewrite-review";
 import { type SidecarReference, useSidecar } from "./context";
 import { ReferenceAttachmentSummary } from "./reference-attachments";
 
@@ -142,6 +155,8 @@ export function SidecarPanel({ className }: { className?: string }) {
   const [queuedSubmit, setQueuedSubmit] = useState<{
     message: PromptInputMessage;
     references: SidecarReference[];
+    artifactEdit: ArtifactSelectionEdit | null;
+    onSent: () => void;
     // Settles the composer's submit with the queued send's outcome.
     resolve: () => void;
     reject: (error: unknown) => void;
@@ -160,6 +175,11 @@ export function SidecarPanel({ className }: { className?: string }) {
     );
   }, [models, sidecar.context.model_name]);
 
+  const threadMetadata = useThreadMetadata(sidecar.sidecarThreadId, {
+    enabled: !sidecar.isMock,
+    isMock: sidecar.isMock,
+  });
+
   const {
     thread,
     sendMessage,
@@ -167,6 +187,10 @@ export function SidecarPanel({ className }: { className?: string }) {
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    approvalRequests,
+    hasPendingApproval,
+    submitHitlApproval,
+    waitingForInputRunIds,
   } = useThreadStream({
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
@@ -175,6 +199,9 @@ export function SidecarPanel({ className }: { className?: string }) {
     onStart: (createdThreadId) => {
       sidecar.setSidecarThreadId(createdThreadId);
     },
+    restInterrupts: threadMetadata.data?.interrupts,
+    restInterruptsLoading: threadMetadata.isLoading,
+    restInterruptsError: threadMetadata.isError,
   });
 
   const referenceCountLabel = useMemo(() => {
@@ -203,6 +230,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     isUploading ||
     (hasSidecarThread && isHistoryLoading) ||
     (sidecar.isMock ?? false) ||
+    hasPendingApproval ||
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
 
   useEffect(() => {
@@ -329,17 +357,31 @@ export function SidecarPanel({ className }: { className?: string }) {
       threadId: string,
       message: PromptInputMessage,
       references: SidecarReference[],
+      artifactEdit: ArtifactSelectionEdit | null,
       onSent?: () => void,
       additionalKwargs?: Record<string, unknown>,
     ) => {
-      const contexts = references.map((reference) => reference.context);
+      const referencedContexts = references.map(
+        (reference) => reference.context,
+      );
+      const contexts = artifactEdit
+        ? [
+            artifactEdit.context,
+            ...referencedContexts.filter(
+              (context) => !isSameSidecarContext(context, artifactEdit.context),
+            ),
+          ]
+        : referencedContexts;
       const parentConversation = buildParentConversationContext(
         parentThread.messages,
       );
-      const hiddenContextPrompt =
+      let hiddenContextPrompt =
         contexts.length > 0 || parentConversation.length > 0
           ? buildSidecarContextPrompt(contexts, { parentConversation })
           : null;
+      if (artifactEdit) {
+        hiddenContextPrompt = `${hiddenContextPrompt ?? ""}\n\nRewrite only the first referenced passage (the artifact selection) according to the user's request. Other references provide context. Return the replacement text itself, without explanations or an enclosing code fence. Preserve surrounding Markdown structure when relevant. The user will review the replacement and apply it to the original file's draft; do not write or recreate that file in this side chat.`;
+      }
       await sendMessage(threadId, message, undefined, {
         additionalInputMessages: hiddenContextPrompt
           ? [
@@ -351,6 +393,7 @@ export function SidecarPanel({ className }: { className?: string }) {
           : [],
         additionalKwargs: {
           sidecar_visible_message: true,
+          ...(artifactEdit ? { artifact_selection_edit: artifactEdit.id } : {}),
           ...(contexts.length > 0
             ? buildReferenceMessageMetadata(contexts)
             : {}),
@@ -370,6 +413,7 @@ export function SidecarPanel({ className }: { className?: string }) {
 
       let sent = false;
       const pendingReferences = [...sidecar.activeReferences];
+      const edit = sidecar.artifactEdit;
       await submitToSidecarThread(
         sidecar.sidecarThreadId,
         {
@@ -377,6 +421,14 @@ export function SidecarPanel({ className }: { className?: string }) {
           files: [],
         },
         pendingReferences,
+        edit &&
+          isArtifactRewriteClarification(
+            thread.messages,
+            edit.id,
+            request.request_id,
+          )
+          ? edit
+          : null,
         () => {
           sent = true;
           if (pendingReferences.length > 0) {
@@ -390,7 +442,18 @@ export function SidecarPanel({ className }: { className?: string }) {
       );
       return sent;
     },
-    [sidecar, submitToSidecarThread],
+    [sidecar, submitToSidecarThread, thread.messages],
+  );
+
+  const handleSubmitApproval = useCallback(
+    (
+      request: (typeof approvalRequests)[number],
+      responses: Parameters<typeof submitHitlApproval>[2],
+    ) =>
+      sidecar.sidecarThreadId
+        ? submitHitlApproval(sidecar.sidecarThreadId, request, responses)
+        : false,
+    [sidecar.sidecarThreadId, submitHitlApproval],
   );
 
   useEffect(() => {
@@ -404,13 +467,8 @@ export function SidecarPanel({ className }: { className?: string }) {
       sidecar.sidecarThreadId,
       nextSubmit.message,
       nextSubmit.references,
-      // Clear references only once the send genuinely proceeds; a send dropped
-      // by the in-flight guard leaves them attached instead of losing them.
-      () => {
-        if (nextSubmit.references.length > 0) {
-          sidecar.clearActiveReferences();
-        }
-      },
+      nextSubmit.artifactEdit,
+      nextSubmit.onSent,
     ).then(nextSubmit.resolve, nextSubmit.reject);
   }, [
     queuedSubmit,
@@ -421,7 +479,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   ]);
 
   const handleSubmit = useCallback(
-    async (message: PromptInputMessage) => {
+    async (message: PromptInputMessage, event: FormEvent<HTMLFormElement>) => {
       const text = message.text.trim();
       const files = promptMessageFiles(message);
       if ((!text && message.files.length === 0) || disabled) {
@@ -434,6 +492,14 @@ export function SidecarPanel({ className }: { className?: string }) {
       }
 
       const pendingReferences = [...sidecar.activeReferences];
+      const edit = sidecar.artifactEdit;
+      const submitter = (event.nativeEvent as SubmitEvent).submitter;
+      const artifactEdit =
+        submitter?.getAttribute("value") === "rewrite" ? edit : null;
+      const onSent = () => {
+        if (pendingReferences.length > 0) sidecar.clearActiveReferences();
+        if (edit && !artifactEdit) sidecar.clearArtifactEdit(edit.id);
+      };
       try {
         if (!sidecar.sidecarThreadId) {
           await ensureSidecarThread(pendingReferences);
@@ -443,6 +509,8 @@ export function SidecarPanel({ className }: { className?: string }) {
             setQueuedSubmit({
               message,
               references: pendingReferences,
+              artifactEdit,
+              onSent,
               resolve,
               reject,
             });
@@ -454,11 +522,8 @@ export function SidecarPanel({ className }: { className?: string }) {
           sidecar.sidecarThreadId,
           message,
           pendingReferences,
-          () => {
-            if (pendingReferences.length > 0) {
-              sidecar.clearActiveReferences();
-            }
-          },
+          artifactEdit,
+          onSent,
         );
       } catch (error) {
         toast.error(
@@ -479,11 +544,16 @@ export function SidecarPanel({ className }: { className?: string }) {
     ],
   );
 
-  const discardDraftAndClose = useCallback(() => {
+  const clearSelectedReferences = useCallback(() => {
+    sidecar.clearArtifactEdit();
     sidecar.clearActiveReferences();
+  }, [sidecar]);
+
+  const discardDraftAndClose = useCallback(() => {
+    clearSelectedReferences();
     sidecar.setSidecarThreadId(null);
     sidecar.close();
-  }, [sidecar]);
+  }, [clearSelectedReferences, sidecar]);
 
   const handleDelete = useCallback(async () => {
     const threadId = sidecar.sidecarThreadId;
@@ -574,6 +644,18 @@ export function SidecarPanel({ className }: { className?: string }) {
             sidecarSurface
             initialScroll="instant"
             resizeScroll="instant"
+            approvalRequests={approvalRequests}
+            approvalMetadataLoading={
+              hasPendingApproval && approvalRequests.length === 0
+            }
+            approvalMetadataError={
+              hasPendingApproval &&
+              approvalRequests.length === 0 &&
+              threadMetadata.isError
+            }
+            onReloadApprovalMetadata={() => threadMetadata.refetch()}
+            waitingForInputRunIds={waitingForInputRunIds}
+            onSubmitApproval={handleSubmitApproval}
             onSubmitHumanInput={
               sidecar.isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
                 ? undefined
@@ -589,6 +671,15 @@ export function SidecarPanel({ className }: { className?: string }) {
         )}
       </div>
 
+      {sidecar.artifactEdit && (
+        <ArtifactRewriteReview
+          key={sidecar.artifactEdit.id}
+          edit={sidecar.artifactEdit}
+          messages={thread.messages}
+          disabled={disabled || !!thread.error || parentThread.isLoading}
+          onCancel={() => sidecar.clearArtifactEdit()}
+        />
+      )}
       <div className="bg-background/95 shrink-0 px-3 pt-3 pb-4 sm:px-4">
         <PromptInputProvider key={sidecar.parentThreadId}>
           <PromptInput
@@ -609,7 +700,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 <ReferenceAttachmentSummary
                   references={sidecar.activeReferences}
                   testId="sidecar-reference-attachment"
-                  onClear={() => sidecar.clearActiveReferences()}
+                  onClear={clearSelectedReferences}
                 />
               )}
             </PromptInputHeader>
@@ -640,6 +731,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 />
                 <Tooltip content={t.sidecar.send}>
                   <PromptInputSubmit
+                    aria-label={t.sidecar.send}
                     className="rounded-full"
                     disabled={disabled}
                     status={
@@ -650,6 +742,16 @@ export function SidecarPanel({ className }: { className?: string }) {
                     variant="outline"
                   />
                 </Tooltip>
+                {sidecar.artifactEdit && (
+                  <Button
+                    type="submit"
+                    value="rewrite"
+                    size="sm"
+                    disabled={disabled}
+                  >
+                    {t.artifactSelection.rewrite}
+                  </Button>
+                )}
               </PromptInputTools>
             </PromptInputFooter>
           </PromptInput>

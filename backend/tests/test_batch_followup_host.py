@@ -232,7 +232,7 @@ async def test_resumed_native_batch_preserves_admitted_scope_in_followup(batch_h
     monkeypatch.setattr(services, "resolve_agent_factory", lambda _: graph_factory(factory, answer))
     thread = await runs.create_thread(thread_id="scoped-resume")
     first = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "scoped work", "additional_kwargs": {KNOWLEDGE_SCOPE_KEY: scope}}]})
-    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "success"
+    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "waiting_for_input"
     resumed = await runs.resume(thread_id=thread, resume="yes")
     assert (await runs.wait(thread_id=thread, run_id=resumed.run_id, timeout=5)).status == "success"
     assert observed == [scope]

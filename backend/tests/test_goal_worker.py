@@ -1506,3 +1506,89 @@ async def test_rollback_restores_the_met_goal_record_a_cancelled_run_dropped(mod
     assert restored is True
     assert values["goal_outcome"] == record
     assert values.get("goal") is None
+
+
+@pytest.mark.asyncio
+async def test_participation_callback_fires_before_the_goal_verdict_is_persisted(monkeypatch):
+    """Delivery enforcement must not depend on the verdict write succeeding."""
+    saver = InMemorySaver()
+    thread_id = "participation-before-verdict"
+    await _seed_goal_thread(saver, thread_id=thread_id, goal_text="Finish the controlled task")
+    participated: list[dict] = []
+
+    async def failing_persist(*_args, **_kwargs):
+        raise RuntimeError("checkpoint write failed")
+
+    monkeypatch.setattr(worker, "_persist_goal_evaluation", failing_persist)
+
+    with pytest.raises(RuntimeError, match="checkpoint write failed"):
+        await worker._prepare_goal_continuation_input(
+            accessor=_full_accessor(saver),
+            bridge=_CollectingBridge(),
+            checkpointer=saver,
+            thread_id=thread_id,
+            run_id="run-1",
+            model_name=None,
+            app_config=None,
+            participation_callback=participated.append,
+        )
+
+    assert participated and participated[0]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_participation_callback_skips_a_run_without_a_goal():
+    saver = InMemorySaver()
+    thread_id = "participation-no-goal"
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"messages": [HumanMessage(content="hello")]}
+    checkpoint["channel_versions"] = {"messages": 1}
+    saver.put(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        checkpoint,
+        {"step": 1},
+        {"messages": 1},
+    )
+    participated: list[dict] = []
+
+    result = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(saver),
+        bridge=_CollectingBridge(),
+        checkpointer=saver,
+        thread_id=thread_id,
+        run_id="run-1",
+        model_name=None,
+        app_config=None,
+        participation_callback=participated.append,
+    )
+
+    assert result is None
+    assert participated == []
+
+
+@pytest.mark.asyncio
+async def test_participation_callback_fires_when_the_goal_read_fails(monkeypatch):
+    """An unreadable goal is unknown, not absent: delivery stays required."""
+    saver = InMemorySaver()
+    thread_id = "participation-goal-read-fails"
+    await _seed_goal_thread(saver, thread_id=thread_id, goal_text="Finish the controlled task")
+    participated: list = []
+
+    async def failing_read(*_args, **_kwargs):
+        raise RuntimeError("checkpoint read failed")
+
+    monkeypatch.setattr(worker, "read_thread_goal", failing_read)
+
+    result = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(saver),
+        bridge=_CollectingBridge(),
+        checkpointer=saver,
+        thread_id=thread_id,
+        run_id="run-1",
+        model_name=None,
+        app_config=None,
+        participation_callback=participated.append,
+    )
+
+    assert result is None
+    assert participated == [None]

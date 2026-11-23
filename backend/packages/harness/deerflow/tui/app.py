@@ -618,6 +618,13 @@ class DeerFlowTUI(App):
             self._dispatch(SystemMessage("Goal cleared."))
             return
 
+        if command.kind == "from_chat":
+            # Synthesis lives on the Gateway and is wired for the IM surfaces
+            # first; falling through to `set` would silently save the guidance
+            # text as a literal objective. Wiring is a follow-up.
+            self._dispatch(SystemMessage("/goal from-chat is not supported in the TUI yet. Set the full objective with /goal <text>."))
+            return
+
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())
             self._refresh_header()
@@ -792,7 +799,7 @@ class DeerFlowTUI(App):
         self._refresh_status()
 
     def _flush_transcript(self) -> None:
-        if self._transcript_dirty:
+        if self.is_running and self._transcript_dirty:
             self._transcript_dirty = False
             self._refresh_transcript()
 
@@ -865,7 +872,7 @@ class DeerFlowTUI(App):
         self._refresh_status()
 
     def _tick_spinner(self) -> None:
-        if self._streaming:
+        if self.is_running and self._streaming:
             self._spinner_idx = (self._spinner_idx + 1) % len(SYMBOLS["spinner"])
             self._refresh_status()
 

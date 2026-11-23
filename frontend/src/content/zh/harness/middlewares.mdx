@@ -37,8 +37,8 @@ import { Callout } from "nextra/components";
 10. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
 11. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
 12. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
-13. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
-14. `LoopDetectionMiddleware` — 打破重复工具调用循环
+13. `LoopDetectionMiddleware` — 打破重复工具调用循环
+14. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
 15. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
 16. 自定义中间件（如有）
 17. 配置的扩展中间件（如有）
@@ -113,7 +113,7 @@ title:
 
 ### TodoMiddleware
 
-当计划模式激活时，维护一个对用户可见的结构化任务列表。Agent 使用 `write_todos` 工具，随着完成复杂目标，将任务标记为 `pending`、`in_progress` 或 `completed`。
+当计划模式激活时，维护一个对用户可见的结构化任务列表。Agent 使用 `write_todos` 工具在有意义的里程碑更新任务。状态包括 `pending`、`in_progress`、`completed`、`blocked` 和 `waiting`；只有完全完成并验证过的工作才能标记为 `completed`。
 
 **激活**：在请求配置中设置 `is_plan_mode: true` 时自动启用。不需要 `config.yaml` 条目。
 
@@ -200,7 +200,7 @@ summarization:
   # 为摘要器准备消息时要裁剪的最大 token 数
   trim_tokens_to_summarize: 15564
 
-  # 自定义摘要提示词（null = 使用默认 LangChain 提示词）
+  # 自定义摘要提示词（null = 使用 DeerFlow 内置提示词）
   summary_prompt: null
 ```
 

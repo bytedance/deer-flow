@@ -24,7 +24,7 @@ class ProjectsConfig(BaseModel):
     ``trash_retention_days`` is the window after which trashed documents become
     eligible for the retention purge. The ``summary_*`` knobs govern the
     best-effort per-document LLM summary pipeline;
-    summaries are off by default and rendering of stored summaries is always
+    summaries are on by default and rendering of stored summaries is always
     on regardless of the generation switch.
     """
 
@@ -53,10 +53,10 @@ class ProjectsConfig(BaseModel):
         description="Days a trashed project document stays recoverable before the retention sweep may purge it.",
     )
     summaries_enabled: bool = Field(
-        default=False,
+        default=True,
         description=format_field_description(
             "projects.summaries_enabled",
-            field_doc="Master switch for per-document LLM summary generation (default off, opt-in). Rendering of already-stored summaries is unaffected by this switch.",
+            field_doc="Master switch for per-document LLM summary generation (default on). Rendering of already-stored summaries is unaffected by this switch.",
         ),
     )
     summary_max_bytes: int = Field(

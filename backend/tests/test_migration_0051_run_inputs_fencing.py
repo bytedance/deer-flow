@@ -56,7 +56,7 @@ async def test_both_migration_branches_upgrade_to_one_head(tmp_path, backend, pr
             )
         await asyncio.to_thread(command.upgrade, cfg, "head")
         async with engine.connect() as conn:
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all() == ["0053_scheduled_traceparent"]
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all() == [bootstrap._get_head_revision()]
             assert (await conn.execute(text("SELECT status,traceparent FROM scheduled_task_runs WHERE id='queued'"))).one() == ("queued", None)
             columns = await conn.run_sync(lambda sync: {c["name"] for c in inspect(sync).get_columns("runs")})
             assert {"run_inputs_json", "run_incarnation", "producer_epoch", "producer_state"} <= columns

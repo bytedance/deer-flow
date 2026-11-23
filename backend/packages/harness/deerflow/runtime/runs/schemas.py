@@ -24,6 +24,7 @@ class RunStatus(StrEnum):
     pending = "pending"
     running = "running"
     success = "success"
+    waiting_for_input = "waiting_for_input"
     error = "error"
     timeout = "timeout"
     interrupted = "interrupted"
