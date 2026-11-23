@@ -171,12 +171,13 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         session = events[0]["payload"]["sessionId"]
         (log,) = (self.root / "state" / "sessions").rglob("*.jsonl")
         before = [json.loads(line) for line in log.read_text().splitlines()]
+        before_ends = [e["data"]["reason"]["kind"] for e in before if e["type"] == "turn/end"]
+        self.assertEqual(before_ends, ["aborted"])
         result, reopened = await self.invoke("Probe: recall quote", session=session)
         self.assertEqual(result.status, "success", (result, reopened))
         self.assertEqual(reopened[-1]["payload"]["sessionId"], session)
         after = [json.loads(line) for line in log.read_text().splitlines()]
         ends = [e["data"]["reason"]["kind"] for e in after if e["type"] == "turn/end"]
-        before_ends = [e["data"]["reason"]["kind"] for e in before if e["type"] == "turn/end"]
         if os.environ.get("SPIKE_EVIDENCE"):
             print(json.dumps({"cancel_log_before": before_ends, "after_reopen": ends}), flush=True)
         self.assertEqual(ends, ["aborted", "completed"])
