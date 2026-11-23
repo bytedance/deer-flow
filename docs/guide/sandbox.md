@@ -7,10 +7,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
-Bash tool status follows the process exit code, including timeout failures.
-Successful commands may print `Error:` or JSON containing an `error` field without
-being marked as failed. Output is still subject to the configured redaction and
-size limits; those transformations do not change the execution status.
+When a provider returns a structured exit code, Bash tool status follows that
+code, including timeout failures. Providers that return plain text, including
+AIO, use output-based status detection. A command that exits successfully can be
+reported as a failure if it prints `Error:` or JSON with an `error` field.
+Configured redaction and output limits still apply.
 
 The optional [Tenki provider](../../backend/packages/harness/deerflow/community/tenki/README.md)
 retains failed termination handles for retry and rejects late acquisitions after
@@ -39,8 +40,9 @@ and thread before a tool can reuse it. A missing runtime thread ID raises an
 error even when the referenced sandbox is cached.
 
 Local workspaces use the dedicated file tools. Switch to an isolated sandbox
-provider for workflows that need Bash. Existing configs with `allow_host_bash`
-still load, and the deprecated setting has no effect.
+provider for workflows that need Bash. A config that opts into host Bash with
+`allow_host_bash: true` still loads with the local provider and logs a migration
+warning.
 
 For Docker development and production, service startup follows the configured
 sandbox mode, including when the `sandbox:` header or `use` field has a trailing

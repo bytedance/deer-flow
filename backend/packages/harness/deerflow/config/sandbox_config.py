@@ -1,10 +1,13 @@
 import ipaddress
+import logging
 import math
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
+
+logger = logging.getLogger(__name__)
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -15,6 +18,11 @@ SandboxNetworkApproval = Literal["deny", "prompt"]
 # Reserving half the signed range for that timestamp keeps accepted TTLs usable
 # without making config validation depend on the current clock.
 _REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
+
+
+def is_local_sandbox_use(use: str) -> bool:
+    """Identify the built-in local provider by its configured class path."""
+    return use.endswith(":LocalSandboxProvider") and "deerflow.sandbox.local" in use
 
 
 def normalize_container_path(value: str) -> str:
@@ -202,9 +210,7 @@ class SandboxConfig(BaseModel):
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are
             resolved from host env when config is loaded; providers use them verbatim). Injected
-            entries bypass the env-policy scrubber as operator-authorized values;
-            LocalSandboxProvider masks injected credentials from bash tool output and command
-            errors while preserving benign configuration values.
+            entries bypass the env-policy scrubber as operator-authorized values.
 
     BoxliteProvider specific options:
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
@@ -249,6 +255,14 @@ class SandboxConfig(BaseModel):
         deprecated=True,
         description="Legacy setting accepted for compatibility. Bash requires an isolated sandbox provider.",
     )
+
+    @field_validator("allow_host_bash")
+    @classmethod
+    def _warn_legacy_host_bash(cls, value: bool, info: ValidationInfo) -> bool:
+        if value and is_local_sandbox_use(info.data.get("use", "")):
+            logger.warning("LocalSandboxProvider ignores deprecated sandbox.allow_host_bash. To run Bash commands, select an isolated sandbox provider such as AioSandboxProvider via sandbox.use and remove sandbox.allow_host_bash.")
+        return value
+
     prewarm: bool = Field(
         default=False,
         description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),

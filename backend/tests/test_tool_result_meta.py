@@ -37,7 +37,7 @@ from deerflow.agents.middlewares.tool_result_meta import (
     ],
 )
 @pytest.mark.asyncio
-async def test_bash_provider_status_reaches_graph_and_receipt(tmp_path, monkeypatch, mode, progress_enabled, stdout, exit_code):
+async def test_bash_structured_exit_code_reaches_graph_and_receipt(tmp_path, monkeypatch, mode, progress_enabled, stdout, exit_code):
     from langchain.agents import create_agent
     from langchain_core.callbacks import BaseCallbackHandler
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -88,6 +88,7 @@ async def test_bash_provider_status_reaches_graph_and_receipt(tmp_path, monkeypa
     output = "Command timed out" if exit_code == 124 else stdout
     if exit_code:
         output = f"{output}\nExit Code: {exit_code}"
+    # This double models a provider with a structured exit code. AIO emits text.
     execute_command = Mock(return_value=CommandOutput(output, exit_code))
     sandbox = Mock(spec=Sandbox, id="fixture:status", execute_command=execute_command, supports_command_cancellation=False)
     provider = Mock(spec=sandbox_provider.SandboxProvider)

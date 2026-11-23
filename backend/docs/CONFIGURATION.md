@@ -1891,7 +1891,10 @@ sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 ```
 
-The local provider serves workspace file operations. To run shell commands, use an isolated provider such as `AioSandboxProvider`. Existing configurations can still contain the deprecated `allow_host_bash` setting, which has no effect.
+The local provider serves workspace file operations. To run shell commands, set
+`sandbox.use` to an isolated provider such as `AioSandboxProvider`. Existing
+configurations can still contain the deprecated `allow_host_bash` setting. The
+local provider ignores it and logs migration guidance when it is set to `true`.
 
 When `LocalSandboxProvider` runs under `make up`, it runs inside the `deer-flow-gateway` container. In that mode, `sandbox.mounts[].host_path` is resolved from the gateway container's filesystem, not from your Docker host. If you need a local-sandbox custom mount in production Docker, bind the host directory into the gateway service first, then use the in-container path in `config.yaml`:
 
