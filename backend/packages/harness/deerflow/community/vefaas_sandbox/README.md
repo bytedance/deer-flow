@@ -7,6 +7,9 @@ Runs each DeerFlow thread sandbox on **BytePlus Function Service (veFaaS) Cloud 
 - **Per-agent skills isolation**: Advertises `supports_agent_skill_isolation = True` and uploads bounded `tar.gz` skill projections into the remote sandbox.
 - **Persistent storage**: Supports optional scoped `InstanceTosMountConfig` mounts (bucket prefix derived from `derive_sandbox_scope_token(user_id, thread_id)`) or automatic output mirroring on release.
 
+If shutdown overlaps an output mirror, it reports incomplete cleanup and keeps
+the sandbox available for the copy. Retry shutdown after release finishes.
+
 ## Configuration
 
 ```yaml

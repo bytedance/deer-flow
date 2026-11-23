@@ -238,6 +238,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         self._pending_destroys: dict[str, _TrackedVeFaaSSandbox] = {}
         self._pending_rollbacks: dict[str, _PendingRollback] = {}
         self._destroying_remote_ids: set[str] = set()
+        self._mirroring_output_ids: set[str] = set()
         # Same-process exclusion against warm-pool reaping and stale lease renewals:
         # - _local_teardown: refcount of teardowns currently active in this process
         # - _acquire_inflight: refcount of acquires currently publishing ownership
@@ -1309,7 +1310,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 return False
             if still_reapable is not None and (sandbox_id in self._local_teardown or not still_reapable()):
                 return False
-            if remote_id in self._destroying_remote_ids:
+            if remote_id in self._destroying_remote_ids or remote_id in self._mirroring_output_ids:
                 return False
             self._local_teardown[sandbox_id] = self._local_teardown.get(sandbox_id, 0) + 1
             self._destroying_remote_ids.add(remote_id)
@@ -1549,10 +1550,18 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         # pending -> ambiguous transition cannot slip into the warm pool.
         needs_recycle = getattr(tracked.sandbox, "has_pending_session_creates", False) is True or getattr(tracked.sandbox, "requires_container_recycle", False) is True
         if not needs_recycle and not self._uses_tos_for_user_data() and tracked.thread_id and tracked.user_id:
+            remote_id = tracked.remote_sandbox_id
+            with self._lock:
+                if self._shutdown_called or self._sandboxes.get(sandbox_id) is not tracked:
+                    return
+                self._mirroring_output_ids.add(remote_id)
             try:
                 self._sync_outputs_to_host(tracked.sandbox, thread_id=tracked.thread_id, user_id=tracked.user_id)
             except Exception:
                 logger.warning("Failed to synchronize veFaaS outputs for %s", sandbox_id, exc_info=True)
+            finally:
+                with self._lock:
+                    self._mirroring_output_ids.remove(remote_id)
             needs_recycle = getattr(tracked.sandbox, "has_pending_session_creates", False) is True or getattr(tracked.sandbox, "requires_container_recycle", False) is True
 
         with self._lock:
@@ -1655,6 +1664,9 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     return
                 self._shutdown_called = True
                 self._accepting = False
+                if self._mirroring_output_ids:
+                    # Keep clients and lease renewal alive until release finishes copying.
+                    raise _VeFaaSShutdownIncompleteError(f"veFaaS shutdown incomplete: {len(self._mirroring_output_ids)} output mirror(s) active, retry shutdown")
 
             self._acquire_serializer.close()
 

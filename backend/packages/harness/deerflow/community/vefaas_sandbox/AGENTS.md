@@ -23,6 +23,8 @@ uv run pytest tests/test_vefaas_sandbox_provider.py tests/blocking_io/test_vefaa
   blocking work on the serializer's executor.
 - **Confirm absence via `DescribeSandbox` before clearing quarantine.** An
   accepted `KillSandbox` or a failed probe never proves absence.
+- **Fence output mirrors from teardown.** Keep clients and lease renewal active
+  until release finishes the copy. Shutdown remains retryable during the mirror.
 - **Route credentials through `provider_credentials`.** Use `resolve_api_key`,
   `redact_secret`, and `reject_url_userinfo` rather than restating them.
 - **Scope TOS mounts by `derive_sandbox_scope_token`.** Never pass raw

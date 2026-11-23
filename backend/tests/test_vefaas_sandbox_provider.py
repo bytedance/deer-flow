@@ -16,6 +16,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1140,6 +1141,53 @@ class TestVeFaaSSandboxProviderLifecycle:
         finally:
             provider.shutdown()
 
+    @pytest.mark.parametrize("retire_first", [False, True], ids=["active", "retired"])
+    def test_shutdown_leaves_an_in_progress_output_mirror_retryable(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retire_first: bool) -> None:
+        from deerflow.config.paths import get_paths
+
+        provider, server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        provider._client_override = None
+        sandbox_id = provider.acquire("mirror-thread", user_id="mirror-user")
+        remote = aio_instances[0]
+        remote.remote_outputs["/mnt/user-data/outputs/report.txt"] = b"completed report"
+        original_download = remote.download_file
+        download_started = threading.Event()
+        finish_download = threading.Event()
+
+        def paused_download(path: str, *, max_bytes: int | None = None) -> bytes:
+            download_started.set()
+            assert finish_download.wait(timeout=5)
+            if remote.closed or not server.sandboxes:
+                raise OSError("Sandbox was torn down before download completed")
+            return original_download(path, max_bytes=max_bytes)
+
+        monkeypatch.setattr(remote, "download_file", paused_download)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                release = executor.submit(provider.release, sandbox_id)
+                try:
+                    assert download_started.wait(timeout=5)
+                    if retire_first:
+                        provider.reset()
+                        assert provider._evict_oldest_warm() is None
+                    with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError, match="output mirror"):
+                        provider.shutdown()
+                    assert not remote.closed
+                    assert len(server.sandboxes) == 1
+                    assert provider._client is not None and not provider._client._closed
+                finally:
+                    finish_download.set()
+                release.result(timeout=5)
+
+            mirrored = get_paths().sandbox_outputs_dir("mirror-thread", user_id="mirror-user") / "report.txt"
+            assert mirrored.read_bytes() == b"completed report"
+            provider.shutdown()
+            assert provider._shutdown_complete
+            assert remote.closed
+            assert not server.sandboxes
+        finally:
+            provider.shutdown()
+
     def test_recycling_release_remains_visible_to_concurrent_shutdown(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         provider, server, aio_instances = _install_provider(monkeypatch, tmp_path)
         provider._client_override = None
@@ -1444,13 +1492,13 @@ class TestVeFaaSSandboxProviderLifecycle:
         monkeypatch.setattr(provider_1, "_initialize_remote_sandbox", paused_init_1)
         monkeypatch.setattr(store_2, "claim", spy_claim_2)
 
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
         results: dict[str, str] = {}
 
         def run_worker(name: str, prov: VeFaaSSandboxProvider) -> None:
             try:
                 results[name] = prov.acquire("t-peer-race", user_id="u1")
-            except BaseException as exc:  # pragma: no cover - surfaced via assertion
+            except Exception as exc:  # pragma: no cover - surfaced via assertion
                 errors.append(exc)
 
         try:
@@ -1544,13 +1592,13 @@ class TestVeFaaSSandboxProviderLifecycle:
 
         monkeypatch.setattr(provider_c1, "_initialize_remote_sandbox", paused_init_c1)
 
-        c_errors: list[BaseException] = []
+        c_errors: list[Exception] = []
         c_results: dict[str, str] = {}
 
         def run_c(name: str, prov: VeFaaSSandboxProvider) -> None:
             try:
                 c_results[name] = prov.acquire("t-inproc-lock", user_id="u1")
-            except BaseException as exc:  # pragma: no cover - surfaced via assertion
+            except Exception as exc:  # pragma: no cover - surfaced via assertion
                 c_errors.append(exc)
 
         try:
