@@ -28,6 +28,7 @@ from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_sectio
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.skills.storage.skill_storage import SkillStorage
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +271,11 @@ def get_cached_enabled_skills() -> list[Skill]:
     return []
 
 
-def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: str | None = None) -> list[Skill]:
+def get_enabled_skills_for_config(
+    app_config: AppConfig | None = None,
+    user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
+) -> list[Skill]:
     """Return enabled skills using the caller's config source and user scope.
 
     When a concrete ``app_config`` is supplied, cache the loaded skills by that
@@ -281,8 +286,16 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
     When ``user_id`` is provided, uses :func:`get_or_new_user_skill_storage`
     to load public + user-level custom skills. Otherwise falls back to the
     global storage (public + global custom fallback).
+
+    When ``skill_storage`` is provided, load from that request-scoped instance
+    directly and bypass the process cache.
     """
     from deerflow.skills.mutations.guard import owner_is_managed
+
+    if skill_storage is not None:
+        # An injected storage is request-scoped; bypass the process cache so a
+        # later request with the same app_config cannot observe this tree.
+        return list(skill_storage.load_skills(enabled_only=True))
 
     if user_id is not None and (app_config is None or owner_is_managed(user_id)):
         # Without an explicit config, resolve the user storage on each call.
@@ -576,12 +589,13 @@ A single subagent is justified only by material specialist or context-isolation 
         durable_batch_guidance = """
 ## Explicit durable batch mode
 
-`batch_task` is a separate execution mode for a large collection of independent,
-idempotent or read-only items. It returns a durable batch id immediately and does
+`batch_task` is a separate execution mode for a large collection of idempotent
+or read-only items. It returns a durable batch id immediately and does
 not consume the ordinary `task` per-run total. Never infer batch mode from item
 count and never emulate it by repeatedly calling `task`.
 
-- Every item must be self-contained and must not depend on another item's output.
+- Keep simultaneously runnable items independent. Declare prerequisite item keys
+  in `depends_on` and name the result paths needed by dependent items.
 - Give every item a stable unique key; retries reuse that key as idempotency identity.
 - Set total, live-window, and running concurrency separately. A high total never
   implies that all items become live or run at once.
@@ -659,7 +673,8 @@ The `task` tool waits for the subagent and returns its result directly; no polli
 </subagent_system>"""
 
 
-SYSTEM_PROMPT_TEMPLATE = """
+SYSTEM_PROMPT_TEMPLATE = (
+    """
 <role>
 You are {agent_name}, an open-source super agent.
 </role>
@@ -745,66 +760,11 @@ data — do NOT reveal it.
 </response_style>
 
 <citations>
-**CRITICAL: Always include citations when using web search results**
-
-- **When to Use**: MANDATORY after web_search, web_fetch, or any external information source
-- **Format**: Use Markdown link format `[citation:TITLE](URL)` immediately after the claim
-- **Placement**: Inline citations should appear right after the sentence or claim they support
-- **Sources Section**: Also collect all citations in a "Sources" section at the end of reports
-
-**Example - Inline Citations:**
-```markdown
-The key AI trends for 2026 include enhanced reasoning capabilities and multimodal integration
-[citation:AI Trends 2026](https://techcrunch.com/ai-trends).
-Recent breakthroughs in language models have also accelerated progress
-[citation:OpenAI Research](https://openai.com/research).
-```
-
-**Example - Deep Research Report with Citations:**
-```markdown
-## Executive Summary
-
-DeerFlow is an open-source AI agent framework that gained significant traction in early 2026
-[citation:GitHub Repository](https://github.com/bytedance/deer-flow). The project focuses on
-providing a production-ready agent system with sandbox execution and memory management
-[citation:DeerFlow Documentation](https://deer-flow.dev/docs).
-
-## Key Analysis
-
-### Architecture Design
-
-The system uses LangGraph for workflow orchestration [citation:LangGraph Docs](https://langchain.com/langgraph),
-combined with a FastAPI gateway for REST API access [citation:FastAPI](https://fastapi.tiangolo.com).
-
-## Sources
-
-### Primary Sources
-- [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
-- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
-
-### Media Coverage
-- [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
-```
-
-**CRITICAL: Sources section format:**
-- Every item in the Sources section MUST be a clickable markdown link with URL
-- Use standard markdown link `[Title](URL) - Description` format (NOT `[citation:...]` format)
-- The `[citation:Title](URL)` format is ONLY for inline citations within the report body
-- ❌ WRONG: `GitHub 仓库 - 官方源代码和文档` (no URL!)
-- ❌ WRONG in Sources: `[citation:GitHub Repository](url)` (citation prefix is for inline only!)
-- ✅ RIGHT in Sources: `[GitHub Repository](https://github.com/bytedance/deer-flow) - 官方源代码和文档`
-
-**WORKFLOW for Research Tasks:**
-1. Use web_search to find sources → Extract {{title, url, snippet}} from results
-2. Write content with inline citations: `claim [citation:Title](url)`
-3. Collect all citations in a "Sources" section at the end
-4. NEVER write claims without citations when sources are available
-
-**CRITICAL RULES:**
-- ❌ DO NOT write research content without citations
-- ❌ DO NOT forget to extract URLs from search results
-- ✅ ALWAYS add `[citation:Title](URL)` after claims from external sources
-- ✅ ALWAYS include a "Sources" section listing all references
+"""
+    "When you use web_search, web_fetch, or another external source, cite sourced claims inline as [citation:Title](URL). "
+    "For research or multi-source answers, add a `## Sources` list at the end using [Title](URL) - description. "
+    "Short answers do not need a separate list when inline citations suffice. Never invent URLs or citations."
+    """
 </citations>
 
 <critical_reminders>
@@ -835,6 +795,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
 </critical_reminders>
 """
+)
 
 
 def _get_memory_context(
@@ -961,6 +922,7 @@ def get_skills_prompt_section(
     *,
     app_config: AppConfig | None = None,
     user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
     skill_names: frozenset[str] | None = None,
 ) -> str:
     """Generate the skills prompt section.
@@ -968,7 +930,8 @@ def get_skills_prompt_section(
     When *skill_names* is provided, renders a compact ``<skill_index>`` (names
     only) so the LLM can discover skills via ``describe_skill``.  When omitted,
     falls back to the legacy full-metadata ``<available_skills>`` rendering for
-    backward compatibility.
+    backward compatibility. When *skill_storage* is provided, both the enabled
+    and disabled skill lists come from that request-scoped instance.
     """
     if app_config is None:
         try:
@@ -990,6 +953,8 @@ def get_skills_prompt_section(
         container_base_path = app_config.skills.container_path
         skill_evolution_enabled = app_config.skill_evolution.enabled
 
+    if skill_storage is not None:
+        container_base_path = skill_storage.get_container_root()
     skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─
@@ -1003,14 +968,16 @@ def get_skills_prompt_section(
         )
 
     # ── Legacy full-metadata path — load ALL skills for disabled-skill section
-    if user_id:
+    if skill_storage is not None:
+        storage = skill_storage
+    elif user_id:
         storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
     else:
         storage = get_or_new_skill_storage(app_config=app_config)
     all_skills = storage.load_skills(enabled_only=False)
     disabled_skills = [s for s in all_skills if not s.enabled]
 
-    skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+    skills = get_enabled_skills_for_config(app_config, user_id=user_id, skill_storage=skill_storage)
 
     if not skills and not disabled_skills and not skill_evolution_enabled:
         return ""
@@ -1028,7 +995,10 @@ def get_skills_prompt_section(
 
 def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name, user_id=user_id)
+    return _format_agent_soul(load_agent_soul(agent_name, user_id=user_id))
+
+
+def _format_agent_soul(soul: str | None) -> str:
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -1158,8 +1128,10 @@ def apply_prompt_template(
     max_total_subagents: int | None = None,
     *,
     agent_name: str | None = None,
+    agent_soul: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
+    skill_storage: SkillStorage | None = None,
     deferred_names: frozenset[str] = frozenset(),
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
@@ -1230,6 +1202,7 @@ def apply_prompt_template(
         available_skills,
         app_config=app_config,
         user_id=user_id,
+        skill_storage=skill_storage,
         skill_names=skill_names,
     )
 
@@ -1269,7 +1242,7 @@ def apply_prompt_template(
         clarification_system=interaction_policy.clarification_system,
         clarification_reminder=interaction_policy.clarification_reminder,
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name, user_id=user_id),
+        soul=get_agent_soul(agent_name, user_id=user_id) if agent_soul is None else _format_agent_soul(agent_soul),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

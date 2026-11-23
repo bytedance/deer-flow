@@ -503,6 +503,7 @@ def test_registered_last_so_request_secrets_win():
     interceptors = build_mcp_tool_interceptors(config, oauth_builder=lambda _cfg: oauth)
     assert [getattr(i, "__name__", type(i).__name__) for i in interceptors] == [
         "oauth",
+        "agent_auth_interceptor",
         "user_scoped_auth_interceptor",
         "context_headers_interceptor",
     ]
@@ -513,7 +514,7 @@ def test_shared_assembly_skips_when_not_configured():
         mcp_servers={"plain": McpServerConfig(enabled=True, type="http", url="https://x.example.com")},
         skills={},
     )
-    assert build_mcp_tool_interceptors(config, oauth_builder=lambda _cfg: None) == []
+    assert [i.__name__ for i in build_mcp_tool_interceptors(config, oauth_builder=lambda _cfg: None)] == ["agent_auth_interceptor"]
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import copy
+import dataclasses
 import logging
 import threading
 import time
@@ -14,11 +16,13 @@ from deerflow_extension_api import (
     EXTENSION_TASK_STORE_KEY,
     CompactionEvent,
     ExtensionData,
+    ReadOnlyDict,
     SystemModelRequest,
     SystemModelResult,
     SystemOperationKind,
     TaskInfo,
     TaskOutcome,
+    TaskStopDetail,
 )
 
 from deerflow.extensions.registry import LoadedExtensions
@@ -48,6 +52,35 @@ def subagent_task_outcome(*, cancelled: bool, succeeded: bool) -> TaskOutcome:
     if succeeded:
         return TaskOutcome.COMPLETED
     return TaskOutcome.FAILED
+
+
+def read_only_copy(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Detach host-owned run data before handing it to extensions.
+
+    Every nested level is frozen, so observers that share one snapshot cannot
+    change what the next observer reads.
+    """
+    return ReadOnlyDict(copy.deepcopy(dict(value or {})))
+
+
+def stopped_task_info(
+    info: TaskInfo,
+    *,
+    status: str,
+    error: str | None = None,
+    goal_verdict: Mapping[str, Any] | None = None,
+    persisted: bool = True,
+) -> TaskInfo:
+    """Return ``info`` carrying the task's final state, for ``on_task_stop``."""
+    return dataclasses.replace(
+        info,
+        stop=TaskStopDetail(
+            status=status,
+            error=error,
+            goal_verdict=read_only_copy(goal_verdict) if goal_verdict is not None else None,
+            persisted=persisted,
+        ),
+    )
 
 
 def _host_is_cancelling() -> bool:
@@ -529,7 +562,11 @@ def dispatch_system_model_observation(
             coro.close()
 
 
-def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtensions | None = None) -> None:
+def notify_context_compacted(
+    event: CompactionEvent,
+    extensions: LoadedExtensions | None = None,
+    task_store: ExtensionData | None = None,
+) -> None:
     """Fan a completed compaction out to observers, fire-and-forget.
 
     The compaction seam sits in the summarization middleware's ``before_model`` /
@@ -539,10 +576,12 @@ def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtension
     loop the same non-blocking way a synchronous system-model-call cancellation does,
     reusing the same fail-open cancellation containment inside ``_notify_each``.
 
-    There is no live task for this hook to attach observers to (unlike lifecycle or
-    system-model-call notification, which run from an awaited call site holding the
-    real task store), so observers receive a detached store — the same fallback
-    ``notify_system_model_call`` uses when its caller has none.
+    Inside a lead run or subagent the caller passes the live task store it recovered
+    from the runtime context — the same store the summary system call is observed
+    with. Observers receive it, and the event's ``task_id``/``run_id``/``thread_id``
+    are filled from the ``TaskInfo`` the host seeded into it. A compaction outside any
+    task (manual ``/compact``) passes none, so observers receive a detached store —
+    the same fallback ``notify_system_model_call`` uses — and the ids stay ``None``.
     """
     resolved = extensions
     if resolved is None:
@@ -553,7 +592,12 @@ def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtension
     if not observers:
         return
     app_store = resolved.app_store
-    task_store = ExtensionData("detached")
+    if task_store is None:
+        task_store = ExtensionData("detached")
+    else:
+        info = task_store.get(TaskInfo)
+        if info is not None:
+            event = dataclasses.replace(event, task_id=info.task_id, run_id=info.run_id, thread_id=info.thread_id)
     what = f"compaction ({event.transform_kind})"
     dispatch_system_model_observation(
         _notify_each(

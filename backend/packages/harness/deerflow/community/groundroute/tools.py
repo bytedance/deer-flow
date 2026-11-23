@@ -24,7 +24,8 @@ import os
 import httpx
 from langchain.tools import tool
 
-from deerflow.community.url_safety import safe_public_result_url
+from deerflow.community.provider_credentials import resolve_api_key
+from deerflow.community.url_safety import safe_public_result_url, validate_hosted_fetch_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -56,11 +57,9 @@ def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object]:
     if tool_config is not None:
         extra = tool_config.model_extra or {}
         max_results = extra.get("max_results")
-        candidate = extra.get("api_key")
-        if isinstance(candidate, str) and candidate.strip():
-            api_key = candidate.strip()
+        api_key = resolve_api_key(extra.get("api_key"))
     if api_key is None:
-        api_key = os.getenv("GROUNDROUTE_API_KEY")
+        api_key = resolve_api_key(os.getenv("GROUNDROUTE_API_KEY"))
     return api_key, max_results
 
 
@@ -112,7 +111,7 @@ def _response_results(data: object) -> list[dict] | None:
 
 
 async def _post_search(api_key: str, body: dict) -> dict:
-    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+    async with await asyncio.to_thread(httpx.AsyncClient, timeout=_TIMEOUT_S) as client:
         response = await client.post(
             _GROUNDROUTE_ENDPOINT,
             json=body,
@@ -184,6 +183,9 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    target_error = validate_hosted_fetch_url(url)
+    if target_error:
+        return target_error
     api_key, _ = await asyncio.to_thread(_resolve_tool_settings, "web_fetch")
     if not api_key:
         return _missing_key_error("web_fetch", url=url)

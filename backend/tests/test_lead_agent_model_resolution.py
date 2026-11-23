@@ -177,7 +177,7 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
         captured["agent_config_user_id"] = user_id
         return AgentConfig(name=name)
 
-    def _load_skills(available_skills, *, app_config, user_id=None):
+    def _load_skills(available_skills, *, app_config, user_id=None, skill_storage=None):
         captured["skills_user_id"] = user_id
         return []
 
@@ -232,7 +232,7 @@ def test_make_lead_agent_applies_custom_agent_memory_opt_out(monkeypatch):
         "load_agent_config",
         lambda name, *, user_id=None: AgentConfig(name=name, memory_enabled=False),
     )
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None, skill_storage=None: [])
 
     def _build_middlewares(*args, **kwargs):
         captured["middleware_memory_enabled"] = kwargs.get("memory_enabled")
@@ -290,6 +290,22 @@ def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatc
     assert middleware_calls[0]["available_skills"] == {"bootstrap"}
     assert middleware_calls[0]["owns_agent_skill_projection"] is False
     assert len(prompt_calls) == 1
+
+
+def test_bootstrap_hitl_tools_fail_closed_without_resume_support(model_control_assembly):
+    from deerflow.approvals.middleware import ToolApprovalMiddleware
+
+    app_config, _strict, _fallback, _model_factory = model_control_assembly
+    app_config.hitl_approval.enabled = True
+    app_config.hitl_approval.tools = ["setup_agent"]
+    app_config.hitl_approval.max_actions = 7
+
+    assembly = lead_agent_module._make_lead_agent({"configurable": {"is_bootstrap": True}}, app_config=app_config)
+    hitl = next(middleware for middleware in assembly["middleware"] if isinstance(middleware, ToolApprovalMiddleware))
+    assert hitl.supports_resume is False
+    assert hitl.policy.max_actions == 7
+    # Real unresumable execution is exercised in test_tool_approval_runtime;
+    # this assembly test pins the bootstrap's gate and policy binding.
 
 
 def test_make_lead_agent_attaches_tracing_callbacks_at_graph_root(monkeypatch):
@@ -475,9 +491,10 @@ def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypa
 
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
 
-    def _capture(config, *, app_config):
+    def _capture(config, *, app_config, skill_storage=None):
         captured["config"] = config
         captured["app_config"] = app_config
+        captured["skill_storage"] = skill_storage
         return lead_agent_module.LeadAgentAssembly(graph=object(), descriptor=object())
 
     monkeypatch.setattr(lead_agent_module, "_assemble_lead_agent", _capture)
@@ -493,6 +510,60 @@ def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypa
 
     assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "full"
     assert captured["app_config"] is app_config
+
+
+def test_assemble_lead_agent_threads_skill_storage_to_build_middlewares(model_control_assembly, monkeypatch, tmp_path):
+    """The public embedding entrypoint must preserve the injected storage through
+    both assembly hops, not only in `build_middlewares`."""
+    from deerflow.runtime import checkpoint_mode
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    app_config, *_ = model_control_assembly
+    captured: dict[str, object] = {}
+
+    def _capture(*args, **kwargs):
+        captured["skill_storage"] = kwargs.get("skill_storage")
+        return []
+
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _capture)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+
+    app_config.skills.container_path = "/mnt/request-skills"
+    app_config.skills.deferred_discovery = True
+    skill_file = tmp_path / "public" / "request-only" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("---\nname: request-only\ndescription: Request-only skill\n---\n\nSkill body.\n", encoding="utf-8")
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: ExtensionsConfig())
+    injected = LocalSkillStorage(host_path=str(tmp_path), container_path=app_config.skills.container_path)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: kwargs["skill_storage"].load_skills(enabled_only=True))
+    result = lead_agent_module.assemble_lead_agent(
+        {"context": {"model_name": "default"}},
+        app_config=app_config,
+        skill_storage=injected,
+    )
+
+    assert captured["skill_storage"] is injected
+    describe = next(tool for tool in result.graph["tools"] if tool.name == "describe_skill")
+    result = describe.invoke({"args": {"name": "select:request-only"}, "name": "describe_skill", "type": "tool_call", "id": "describe-request"})
+    assert "/mnt/request-skills/public/request-only/SKILL.md" in result.update["messages"][0].content
+
+
+def test_assemble_lead_agent_rejects_mismatched_skill_mount(model_control_assembly, monkeypatch, tmp_path):
+    from deerflow.runtime import checkpoint_mode
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    app_config, *_ = model_control_assembly
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    storage = LocalSkillStorage(host_path=str(tmp_path), container_path="/mnt/request-skills")
+
+    with pytest.raises(ValueError, match=r"skills\.container_path"):
+        lead_agent_module.assemble_lead_agent(
+            {"context": {"model_name": "default"}},
+            app_config=app_config,
+            skill_storage=storage,
+        )
 
 
 def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_read(monkeypatch):

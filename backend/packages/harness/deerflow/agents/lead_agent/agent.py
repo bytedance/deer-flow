@@ -65,6 +65,7 @@ from deerflow.config.subagents_config import (
     effective_subagent_concurrency,
     effective_total_subagents_per_run,
 )
+from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, AgentMcpAuthority
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.runtime.checkpoint_mode import (
@@ -74,7 +75,9 @@ from deerflow.runtime.checkpoint_mode import (
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
+from deerflow.runtime.context_keys import MCP_BROWSER_USER_CONTEXT_KEY
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability
+from deerflow.skills.storage.skill_storage import SkillStorage, validate_injected_skill_storage
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.tracing import build_tracing_callbacks
@@ -374,9 +377,9 @@ def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.
 
 **CRITICAL RULES:**
-- Mark todos as completed IMMEDIATELY after finishing each step - do NOT batch completions
-- Keep EXACTLY ONE task as `in_progress` at any time (unless tasks can run in parallel)
-- Update the todo list in REAL-TIME as you work - this gives users visibility into your progress
+- Update todos at meaningful milestones; group related status changes in one call
+- Mark a task `completed` only after it is fully finished and verified
+- Use `in_progress` only for work that is actively underway; do not keep a task active just to show progress
 - DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
 
 **When to Use:**
@@ -428,16 +431,18 @@ Skip this tool when:
 
 ## How to Use
 
-1. **Starting a task**: Mark it as `in_progress` BEFORE beginning work
-2. **Completing a task**: Mark it as `completed` IMMEDIATELY after finishing
+1. **Starting a task**: Mark it as `in_progress` when work begins
+2. **Completing a task**: Mark it as `completed` after it is fully finished and verified
 3. **Updating the list**: Add new tasks, remove irrelevant ones, or update descriptions as needed
 4. **Multiple updates**: You can make several updates at once (e.g., complete one task and start the next)
 
 ## Task States
 
 - `pending`: Task not yet started
-- `in_progress`: Currently working on (can have multiple if tasks run in parallel)
-- `completed`: Task finished successfully
+- `in_progress`: Currently being worked on
+- `blocked`: Work cannot continue because a dependency or error must be resolved; terminal for this run
+- `waiting`: Waiting for the user or an external resource; terminal for this run
+- `completed`: Task fully finished and verified
 
 ## Task Completion Requirements
 
@@ -450,18 +455,15 @@ Never mark a task as completed if:
 - You couldn't find necessary resources or dependencies
 - Quality standards haven't been met
 
-If blocked, keep the task as `in_progress` and create a new task describing what needs to be resolved.
+If blocked or waiting, record that status and keep the reason in the task description. The run may finish with those statuses; do not relabel them as completed.
 
 ## Best Practices
 
 - Create specific, actionable items
 - Break complex tasks into smaller, manageable steps
 - Use clear, descriptive task names
-- Update task status in real-time as you work
-- Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
+- Update task status at meaningful milestones and group related changes when practical
 - Remove tasks that are no longer relevant
-- **IMPORTANT**: When you write the todo list, mark your first task(s) as `in_progress` immediately
-- **IMPORTANT**: Unless all tasks are completed, always have at least one task `in_progress` to show progress
 
 Being proactive with task management demonstrates thoroughness and ensures all requirements are completed successfully.
 
@@ -492,6 +494,7 @@ def build_middlewares(
     memory_enabled: bool = True,
     owns_agent_skill_projection: bool = True,
     app_config: AppConfig | None = None,
+    skill_storage: SkillStorage | None = None,
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
@@ -518,10 +521,14 @@ def build_middlewares(
             thread's physical skill projection. Prompt-only bootstrap agents do
             not; their narrow skill set must not replace the thread view.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
+        skill_storage: Optional storage instance for skill resolution. It is
+            shared by slash activation, skill-read canonicalization and the
+            lead-owned sandbox projection. Its container root must match
+            ``app_config.skills.container_path``.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
-        mcp_routing_middleware: Optional PR2 middleware that auto-promotes
-            deferred MCP schemas before the deferred filter runs.
+        mcp_routing_middleware: Compatibility middleware for advisory MCP
+            capability metadata; schema selection requires tool_search.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
         authorization_provider: Provider already resolved for assembly-time
@@ -558,9 +565,12 @@ def build_middlewares(
         # skill-file-load stamp on the same skill:activate decision the
         # activation middleware enforces for slash commands).
         runtime_middleware_kwargs["skill_authorization"] = skill_authorization
+    if skill_storage is not None:
+        validate_injected_skill_storage(skill_storage, container_root=resolved_app_config.skills.container_path, user_id=user_id)
+        runtime_middleware_kwargs["skill_storage"] = skill_storage
     if user_id is not None:
-        # ToolErrorHandlingMiddleware canonicalizes skill-read paths through
-        # the same user-scoped registry the activation/policy middlewares use.
+        # User-scoped fallback for hosts that do not inject a request-scoped
+        # storage instance.
         runtime_middleware_kwargs["user_id"] = user_id
     if authorization_provider is not None and deferred_setup is not None:
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
@@ -591,6 +601,7 @@ def build_middlewares(
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
             skill_authorization=skill_authorization,
+            skill_storage=skill_storage,
         )
     )
 
@@ -706,6 +717,12 @@ def build_middlewares(
 
     middlewares.append(SystemMessageCoalescingMiddleware())
 
+    # after_model runs in reverse order. Apply the delegation limit first
+    # so loop observations use the same batch that reaches the tools node.
+    loop_detection_config = resolved_app_config.loop_detection
+    if loop_detection_config.enabled:
+        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     effective_max_subagents_per_run: int | None = None
@@ -718,11 +735,6 @@ def build_middlewares(
         max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), resolved_app_config)
         effective_max_subagents_per_run = max_total_subagents
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
-
-    # LoopDetectionMiddleware — detect and break repetitive tool call loops
-    loop_detection_config = resolved_app_config.loop_detection
-    if loop_detection_config.enabled:
-        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
     # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
@@ -750,7 +762,7 @@ def build_middlewares(
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
-    configured_middlewares = load_configured_extension_middlewares(resolved_app_config)
+    configured_middlewares = load_configured_extension_middlewares(resolved_app_config, scope="lead")
     if configured_middlewares:
         middlewares.extend(configured_middlewares)
 
@@ -776,6 +788,17 @@ def build_middlewares(
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
+
+    from deerflow.runtime.runs.input_control import run_input_control
+
+    if run_input_control(cfg) is not None:
+        from deerflow.agents.middlewares.run_input_middleware import RunInputAdmissionMiddleware, RunInputMiddleware
+
+        # New direct input goes through the ordinary sanitization chain.
+        middlewares.insert(0, RunInputAdmissionMiddleware())
+        # after_agent runs in reverse order: decide whether to continue before
+        # sandbox and other terminal cleanup hooks execute.
+        middlewares.append(RunInputMiddleware())
 
     # Extension contributions are merged only here, once the full stack exists.
     # Doing it inside build_lead_runtime_middlewares() would place
@@ -817,11 +840,40 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     return None
 
 
-def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
+def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool, model_name: str | None = None) -> None:
+    hitl_config = getattr(app_config, "hitl_approval", None)
+    if hitl_config is None or hitl_config.enabled is not True:
+        return
+    from deerflow.approvals.middleware import ToolApprovalMiddleware
+
+    known_tool_names = {tool.name for tool in final_tools}
+    unknown_names = set(hitl_config.tools) - known_tool_names
+    if unknown_names:
+        logger.warning("hitl_approval.tools contains names not present in this build's tool set: %s", sorted(unknown_names))
+    logger.info(
+        "hitl_approval enabled: tools=%s non_interactive=%s max_actions=%s",
+        hitl_config.tools,
+        hitl_config.non_interactive,
+        hitl_config.max_actions,
+    )
+    # Resolve artifact handles first, then approve the concrete operation.
+    # Authorization remains inside this wrapper so edited arguments are checked
+    # by the same mandatory guardrails before reaching the bound tool.
+    index = next((i + 1 for i, middleware in enumerate(middlewares) if type(middleware).__name__ == "ArtifactResolutionMiddleware"), 0)
+    middlewares.insert(index, ToolApprovalMiddleware(hitl_config, app_config=app_config, supports_resume=supports_resume, model_name=model_name))
+
+
+def _load_enabled_available_skills(
+    available_skills: set[str] | None,
+    *,
+    app_config: AppConfig,
+    user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
+) -> list[Skill]:
     try:
         from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-        skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+        skills = get_enabled_skills_for_config(app_config, user_id=user_id, skill_storage=skill_storage)
     except Exception:
         logger.exception("Failed to load enabled skills")
         raise
@@ -840,6 +892,7 @@ def assemble_lead_agent(
     config: RunnableConfig,
     *,
     app_config: AppConfig | None = None,
+    skill_storage: SkillStorage | None = None,
 ) -> LeadAgentAssembly:
     """Return the compiled lead graph together with its assembly descriptor.
 
@@ -847,6 +900,11 @@ def assemble_lead_agent(
     built from does not have to be recovered from LangGraph private runtime
     keys or mutable graph attributes. ``make_lead_agent`` remains the
     graph-only LangGraph Server ABI declared in ``langgraph.json``.
+
+    ``skill_storage`` lets an embedding host supply request-scoped skill
+    storage for skill discovery, activation, skill reads and the lead-owned
+    sandbox projection. Use the configured sandbox skills mount as the storage's
+    container root. The sandbox provider must support thread skill projections.
     """
     runtime_config = _get_runtime_config(config)
     runtime_app_config = app_config or runtime_config.get("app_config")
@@ -874,7 +932,7 @@ def assemble_lead_agent(
     # configurable key must not recompile the channel table either).
     freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
     inject_checkpoint_mode(config, mode)
-    return _assemble_lead_agent(config, app_config=runtime_app_config)
+    return _assemble_lead_agent(config, app_config=runtime_app_config, skill_storage=skill_storage)
 
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
@@ -953,7 +1011,12 @@ def _complete_assembly(
     return LeadAgentAssembly(graph=graph, descriptor=descriptor, effective_model=effective_model)
 
 
-def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> LeadAgentAssembly:
+def _assemble_lead_agent(
+    config: RunnableConfig,
+    *,
+    app_config: AppConfig,
+    skill_storage: SkillStorage | None = None,
+) -> LeadAgentAssembly:
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
@@ -973,6 +1036,8 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     from deerflow.runtime.user_context import resolve_config_user_id
 
     resolved_user_id = resolve_config_user_id(config)
+    if skill_storage is not None:
+        validate_injected_skill_storage(skill_storage, container_root=resolved_app_config.skills.container_path, user_id=resolved_user_id)
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -994,7 +1059,14 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         scheduler_capability = None
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    agent_authority = runtime_context.get(AGENT_AUTH_CONTEXT_KEY) if isinstance(runtime_context, Mapping) else None
+    pinned_agent = isinstance(agent_authority, AgentMcpAuthority) and not is_bootstrap and not cfg.get("is_subagent")
+    if pinned_agent:
+        agent_config = agent_authority.agent_config()
+        if agent_authority.user_id != resolved_user_id or agent_config is None or agent_config.name != agent_name:
+            raise ValueError("Admitted MCP agent definition does not match this run")
+    else:
+        agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
     memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
@@ -1032,7 +1104,14 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         try:
             from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-            candidate_skill_names = [s.name for s in get_enabled_skills_for_config(resolved_app_config, user_id=resolved_user_id)]
+            candidate_skill_names = [
+                s.name
+                for s in get_enabled_skills_for_config(
+                    resolved_app_config,
+                    user_id=resolved_user_id,
+                    skill_storage=skill_storage,
+                )
+            ]
         except Exception:
             logger.warning("Failed to pre-load enabled skills for authorization candidates", exc_info=True)
             # Leave None: the filter resolves candidates itself and applies
@@ -1146,7 +1225,12 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
+    enabled_skills = _load_enabled_available_skills(
+        available_skills,
+        app_config=resolved_app_config,
+        user_id=resolved_user_id,
+        skill_storage=skill_storage,
+    )
 
     # Build skill search setup (deferred skill discovery).
     # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
@@ -1220,6 +1304,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             app_config=resolved_app_config,
             authorization_provider=_authz_provider,
         )
+        _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=False, model_name=model_name)
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
@@ -1229,6 +1314,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             # the full-metadata rendering advertise a policy-denied skill.
             available_skills=available_skills,
             app_config=resolved_app_config,
+            skill_storage=skill_storage,
             deferred_names=setup.deferred_names,
             user_id=resolved_user_id,
             # Preserve the (possibly empty) index when deferred discovery is
@@ -1324,6 +1410,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         mcp_plugins=getattr(agent_config, "mcp_plugins", None),
         subagent_enabled=subagent_enabled,
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
+        **({"mcp_browser_user": runtime_context[MCP_BROWSER_USER_CONTEXT_KEY]} if isinstance(runtime_context, Mapping) and runtime_context.get(MCP_BROWSER_USER_CONTEXT_KEY) and not cfg.get("is_subagent") else {}),
         **({"scheduler_capability": scheduler_capability} if scheduler_capability is not None else {}),
         app_config=resolved_app_config,
         chat_model=chat_model,
@@ -1369,6 +1456,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         available_skills=available_skills,
         memory_enabled=memory_enabled,
         app_config=resolved_app_config,
+        skill_storage=skill_storage,
         deferred_setup=setup,
         mcp_routing_middleware=mcp_routing_middleware,
         user_id=resolved_user_id,
@@ -1383,13 +1471,16 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         app_config=resolved_app_config,
         authorization_provider=_authz_provider,
     )
+    _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False), model_name=model_name)
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,
         max_total_subagents=max_total_subagents,
         agent_name=agent_name,
+        agent_soul=agent_authority.soul if pinned_agent else None,
         available_skills=available_skills,
         app_config=resolved_app_config,
+        skill_storage=skill_storage,
         deferred_names=setup.deferred_names,
         mcp_routing_hints_section=mcp_routing_hints_section,
         user_id=resolved_user_id,

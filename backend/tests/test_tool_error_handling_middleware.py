@@ -1,3 +1,4 @@
+import base64
 import posixpath
 import re
 import sys
@@ -7,6 +8,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import ToolException
 from langgraph.errors import GraphInterrupt
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
@@ -201,6 +203,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
             "deerflow.agents.middlewares.input_sanitization_middleware",
             InputSanitizationMiddleware=FakeInputSanitizationMiddleware,
             neutralize_untrusted_tags=lambda value: value,
+            frame_untrusted_text=lambda value: value,
         ),
     )
 
@@ -222,6 +225,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # (tool_artifacts enabled by default, #4676).
     # + 1 ModelContentCompatibilityMiddleware (unconditional read-time
     # sanitizer between DurableContext and the date/coalescer tail).
+    # + 1 HarnessGuardMiddleware (enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
@@ -232,7 +236,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 23
+    assert len(middlewares) == 24
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
@@ -451,6 +455,7 @@ def test_lead_runtime_middlewares_pass_agent_skills_to_sandbox(
         "lazy_init": True,
         "available_skills": {"allowed-skill"},
         "owns_agent_skill_projection": True,
+        "skill_storage": None,
     }
 
 
@@ -480,6 +485,7 @@ def test_lead_runtime_middlewares_can_delegate_skill_projection_ownership(
         "lazy_init": True,
         "available_skills": {"bootstrap"},
         "owns_agent_skill_projection": False,
+        "skill_storage": None,
     }
 
 
@@ -692,6 +698,130 @@ def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():
     assert result.tool_call_id == "missing_tool_call_id"
     assert result.name == "mcp_tool"
     assert result.status == "error"
+
+
+def _adapter_image_error(payload: str) -> ToolException:
+    """The ToolException langchain-mcp-adapters raises for an image-only error.
+
+    The ``sse``/``http`` path keeps the adapter's conversion, which falls back
+    to ``str(content)`` when an error result has no text block; that string
+    embeds the inline base64 payload.
+    """
+    from langchain_mcp_adapters.tools import _convert_call_tool_result
+    from mcp.types import CallToolResult, ImageContent
+
+    with pytest.raises(ToolException) as excinfo:
+        _convert_call_tool_result(CallToolResult(content=[ImageContent(type="image", data=payload, mimeType="image/png")], isError=True))
+    return excinfo.value
+
+
+def test_error_message_redacts_inline_base64_before_truncation():
+    """A ~100 KB image-only MCP error becomes a short message without the payload."""
+    payload = base64.b64encode(b"deerflow-inline-payload-" + bytes(range(256)) * 400).decode("ascii")
+    assert len(payload) > 100_000
+    exc = _adapter_image_error(payload)
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="mcp_tool", tool_call_id="tc-img")
+
+    def _boom(_req):
+        raise exc
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert "<omitted>" in result.text
+    assert payload[:256] not in result.text
+    assert payload not in result.text
+    assert "image/png" in result.text
+    assert len(result.text) < 600
+
+
+# Encodes to "-_" in the URL-safe alphabet, so the payload only redacts once
+# the pattern accepts base64url characters as well as standard base64.
+_BASE64URL_PROBE = b"\xfb\xff"
+
+
+@pytest.mark.parametrize("encode", [base64.b64encode, base64.urlsafe_b64encode], ids=["standard", "urlsafe"])
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_error_message_redacts_python_and_json_base64_fields(quote, encode):
+    payload = encode(_BASE64URL_PROBE + b"field payload " * 20).decode("ascii")
+    detail = f"{{{quote}base64{quote}: {quote}{payload}{quote}}}"
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="mcp_tool", tool_call_id="tc-field")
+
+    def _boom(_req):
+        raise ToolException(detail)
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert f"{quote}base64{quote}: {quote}<omitted>{quote}" in result.text
+    assert payload[:64] not in result.text
+
+
+@pytest.mark.parametrize("encode", [base64.b64encode, base64.urlsafe_b64encode], ids=["standard", "urlsafe"])
+def test_error_message_redacts_data_uri_payloads_case_insensitively(encode):
+    payload = encode(_BASE64URL_PROBE + b"svg payload " * 200).decode("ascii")
+    detail = f"render failed: DATA:IMAGE/SVG+XML;charset=utf-8;BASE64,{payload}"
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_fetch", tool_call_id="tc-data-uri")
+
+    def _boom(_req):
+        raise ToolException(detail)
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert "DATA:IMAGE/SVG+XML;charset=utf-8;BASE64,<omitted>" in result.text
+    assert payload[:64] not in result.text
+
+
+def test_error_message_does_not_backtrack_quadratically_on_comma_free_text():
+    r"""The data-URI params window is bounded, so many `data:` starts stay linear.
+
+    `[^,\s]*` rescanned to the end of one comma-free run for every start
+    position; 160K characters of crafted text took seconds before the bound.
+    """
+    import time
+
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_fetch", tool_call_id="tc-adversarial")
+    detail = "data:x;y" * 20_000
+
+    def _boom(_req):
+        raise ToolException(detail)
+
+    started = time.perf_counter()
+    result = middleware.wrap_tool_call(req, _boom)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 2.0, f"redaction took {elapsed:.2f}s on a 160K comma-free string"
+    assert "data:x;y" in result.text
+
+
+def test_error_message_leaves_plain_text_unchanged():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_search", tool_call_id="tc-plain")
+
+    def _boom(_req):
+        raise ToolException("server refused: bad token")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert result.content == "Error: Tool 'web_search' failed with ToolException: server refused: bad token. Continue with available context, or choose an alternative tool."
+
+
+def test_error_message_keeps_base64_values_below_the_redaction_threshold():
+    """Payloads shorter than 64 characters cannot be a meaningful inline image
+    or file, so short diagnostics that mention a small base64 value survive."""
+    short_value = base64.b64encode(b"short").decode("ascii")
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="mcp_tool", tool_call_id="tc-short")
+
+    def _boom(_req):
+        raise ToolException(f"{{'type': 'image', 'base64': '{short_value}'}}")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert short_value in result.text
+    assert "<omitted>" not in result.text
 
 
 def test_wrap_tool_call_reraises_graph_interrupt():

@@ -112,6 +112,31 @@ def test_end_at_preserves_an_aware_second_fold():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update", "resume"])
+@pytest.mark.parametrize("end_at", ["9999-12-31T23:59:00", "9999-12-31T23:59:00-05:00"])
+async def test_end_at_past_the_utc_range_is_rejected(operation, end_at):
+    with pytest.raises(HTTPException) as caught:
+        if operation == "create":
+            body = ScheduledTaskCreateRequest(
+                title="Report",
+                prompt="Write the report",
+                schedule_type="once",
+                schedule_spec={"run_at": "2027-01-01T09:00:00"},
+                timezone="America/New_York",
+                end_at=end_at,
+            )
+            await validate_scheduled_task_create(body, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(return_value="lead_agent"), now=NOW)
+        elif operation == "update":
+            body = ScheduledTaskUpdateRequest(end_at=end_at)
+            await validate_scheduled_task_update(_existing("America/New_York"), body.model_dump(exclude_unset=True), user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), used=0, now=NOW)
+        else:
+            prepare_resume_updates(_existing("America/New_York", status="paused"), {"end_at": end_at}, used=0, now=NOW)
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "invalid_request"
+    assert caught.value.detail["message"].startswith("end_at: ")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["enabled", "paused"])
 async def test_unchanged_legacy_gap_schedule_keeps_its_already_accepted_instant(status):
     timezone, wall_time = GAPS[0]
@@ -141,15 +166,23 @@ async def test_gap_schedule_is_revalidated_when_reinterpreted_or_rearmed(change)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["create", "update", "reactivate"])
-@pytest.mark.parametrize("run_at", ["not-a-date", "2027-02-30T09:00:00"])
-async def test_invalid_once_date_names_run_at_in_the_admission_error(operation, run_at):
+@pytest.mark.parametrize(
+    ("timezone", "run_at"),
+    [
+        ("UTC", "not-a-date"),
+        ("UTC", "2027-02-30T09:00:00"),
+        ("America/New_York", "9999-12-31T23:59:00"),
+        ("UTC", "9999-12-31T23:59:00-05:00"),
+    ],
+)
+async def test_invalid_once_date_names_run_at_in_the_admission_error(operation, timezone, run_at):
     spec = {"run_at": run_at}
     with pytest.raises(HTTPException) as caught:
         if operation == "create":
-            body = ScheduledTaskCreateRequest(title="Report", prompt="Write the report", schedule_type="once", schedule_spec=spec, timezone="UTC")
+            body = ScheduledTaskCreateRequest(title="Report", prompt="Write the report", schedule_type="once", schedule_spec=spec, timezone=timezone)
             await validate_scheduled_task_create(body, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), now=NOW)
         else:
-            existing = _existing("UTC", status="completed" if operation == "reactivate" else "enabled")
+            existing = _existing(timezone, status="completed" if operation == "reactivate" else "enabled")
             await validate_scheduled_task_update(existing, {"schedule_spec": spec}, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), used=0, now=NOW)
     assert caught.value.status_code == 422
     assert caught.value.detail["code"] == "invalid_schedule"

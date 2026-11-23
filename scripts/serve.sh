@@ -31,14 +31,6 @@ set -e
 REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
 cd "$REPO_ROOT"
 
-# ── Load .env ────────────────────────────────────────────────────────────────
-
-if [ -f "$REPO_ROOT/.env" ]; then
-    set -a
-    source "$REPO_ROOT/.env"
-    set +a
-fi
-
 _pick_python() {
     local candidate
     for candidate in python3 python py; do
@@ -57,6 +49,23 @@ _pick_python() {
     done
     return 1
 }
+
+# ── Load .env ────────────────────────────────────────────────────────────────
+
+# .env is data, not a script: sourcing it turned `$$` into this shell's PID, ran
+# backticks and `$(...)`, and ran the second word of an unquoted value with a
+# space as a command. dotenv_exports.py parses it like python-dotenv, keeping the
+# launcher's `$NAME` / `${NAME:-default}` / leading `~` expansion and its
+# precedence over inherited variables, and prints shell-quoted exports.
+if [ -f "$REPO_ROOT/.env" ]; then
+    if ! DOTENV_PYTHON="$(_pick_python)"; then
+        echo "✗ Python 3 is required to read .env." >&2
+        exit 1
+    fi
+    DOTENV_EXPORTS="$("$DOTENV_PYTHON" "$REPO_ROOT/scripts/dotenv_exports.py" "$REPO_ROOT/.env")" || exit 1
+    eval "$DOTENV_EXPORTS"
+    unset DOTENV_PYTHON DOTENV_EXPORTS
+fi
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 

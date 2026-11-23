@@ -49,6 +49,34 @@ explicit destruction. `warm_hit` comes from the actual reclaim path. Keep differ
 images, pool settings, replica limits, user counts and concurrency levels separate;
 the summary's default grouping does so. Percentiles use inclusive interpolation.
 
+## Comparing AIO Docker service profiles
+
+For `bench_provider.py --provider aio-docker`, select a disposable DeerFlow YAML
+with `DEER_FLOW_CONFIG_PATH`. You can export it in the shell or set it in the
+default `.env` or the file selected by `DEER_FLOW_ENV_FILE`. Set the service
+switches under `sandbox.environment`:
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  environment:
+    DISABLE_CODE_SERVER: "true"
+    DISABLE_JUPYTER: "true"
+```
+
+The benchmark forwards these two switches and any of `DISABLE_BROWSER`,
+`DISABLE_MCP_BROWSER`, `DISABLE_NODEJS_REPL`, and `DISABLE_VNC` that are present.
+Use the strings `"true"` and `"false"`, or a DeerFlow `$VAR` reference that
+resolves to one of them. Other sandbox environment entries stay out of the
+benchmark container and result rows.
+
+Run the same command and pinned image once per config, using a fresh run ID and
+output file each time. For the baseline, omit the switches. Each JSONL row
+records the requested overrides in `aio_service_profile`. A run with no
+overrides (including an unset `DEER_FLOW_CONFIG_PATH`) records `image-defaults`.
+The default summary groups by profile and shows `?` for older rows without it.
+Verify that the pinned image honors each switch before interpreting timings.
+
 ## OpenSandbox
 
 `--provider opensandbox` uses the production OpenSandbox provider and reads its
@@ -75,13 +103,20 @@ Python and POSIX utilities required by the selected workload and output sync.
 The normal warm-up creates and destroys a separate remote before measurement.
 
 CLI `--replicas` and `--idle-timeout` override their YAML values, including their
-CLI defaults (3 and 600). All providers reject negative `--idle-timeout` values
-before provider creation. Zero disables idle reaping, except that the
-`idle_timeout` scenario requires a positive value. `--image` overrides YAML only
-when supplied. Connection settings, including HTTPS and `use_server_proxy`, are retained. The exported
-configuration dimensions contain only image, replicas and idle timeout; credentials,
-endpoint and environment are not copied into result rows. Record non-secret SDK,
-server and deployment versions separately for reproducibility.
+CLI defaults (3 and 600). All providers reject negative and NaN
+`--idle-timeout` values before provider creation. BoxLite and AIO likewise reject
+negative and NaN `--health-check-skip-seconds`; zero, positive finite values,
+and positive infinity remain accepted. OpenSandbox still rejects every nonzero
+health-check skip value as unsupported. Zero idle timeout disables idle reaping,
+except that the `idle_timeout` scenario requires a finite positive value because
+it sleeps past the timeout. `--image` overrides YAML only when supplied.
+Connection settings, including HTTPS and `use_server_proxy`, are retained. The
+exported configuration dimensions contain only image, replicas, idle timeout,
+and the health-check skip window; credentials, endpoint and environment are not
+copied into result rows. BoxLite consumes the skip window during warm reclaim;
+AIO accepts and records it for comparison but does not currently alter provider
+behavior. Record non-secret SDK, server and deployment versions separately for
+reproducibility.
 
 `release_ms` includes production best-effort output synchronization. Successful
 command/release timing does not prove that every artifact was mirrored. Warm hits

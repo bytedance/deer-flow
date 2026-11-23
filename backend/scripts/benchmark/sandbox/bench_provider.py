@@ -50,6 +50,7 @@ import argparse
 import importlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import statistics
@@ -230,6 +231,36 @@ def _make_boxlite_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]
     return provider, sandbox_attrs
 
 
+# Keep benchmark inputs and public profile labels limited to the AIO service switches.
+_AIO_SERVICE_FLAGS = ("DISABLE_BROWSER", "DISABLE_CODE_SERVER", "DISABLE_JUPYTER", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL", "DISABLE_VNC")
+
+
+def _aio_service_environment() -> dict[str, str]:
+    import yaml
+
+    from deerflow.config.app_config import AppConfig
+
+    # Importing app_config loads the dotenv file that can select the benchmark YAML.
+    config_path = os.getenv("DEER_FLOW_CONFIG_PATH")
+    if not config_path:
+        return {}
+    with AppConfig.resolve_config_path(config_path).open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    if config is None:
+        return {}
+    if not isinstance(config, dict) or not isinstance(sandbox := config.get("sandbox", {}), dict):
+        raise ValueError("Expected a config mapping with a sandbox mapping")
+    environment = sandbox.get("environment", {})
+    if not isinstance(environment, dict):
+        raise ValueError("sandbox.environment must be a mapping")
+
+    flags = {key: AppConfig.resolve_env_variables(environment[key]) for key in _AIO_SERVICE_FLAGS if key in environment}
+    for key, value in flags.items():
+        if value not in ("true", "false"):
+            raise ValueError(f"sandbox.environment.{key} must be 'true' or 'false' for the AIO benchmark")
+    return flags
+
+
 def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     """Create an AioSandboxProvider with stub config."""
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
@@ -241,6 +272,7 @@ def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         "container_prefix": config.get("container_prefix"),
         "replicas": config.get("replicas", 3),
         "idle_timeout": config.get("idle_timeout", 600),
+        "health_check_skip_seconds": config.get("health_check_skip_seconds", 0.0),
         "mounts": config.get("mounts", []),
         "environment": config.get("environment", {}),
         "provisioner_url": config.get("provisioner_url", ""),
@@ -560,7 +592,11 @@ def _write_results(results: list[BenchResult], output_path: Path, config_used: d
         result.image = config_used.get("image")
     with output_path.open("a", encoding="utf-8") as stream:
         for result in results:
-            stream.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
+            row = asdict(result)
+            if result.provider == "aio-docker":
+                environment = config_used.get("environment", {})
+                row["aio_service_profile"] = ",".join(f"{key}={environment[key]}" for key in _AIO_SERVICE_FLAGS if key in environment) or "image-defaults"
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _run_scenario(
@@ -751,18 +787,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if math.isnan(args.idle_timeout) or args.idle_timeout < 0:
+        raise SystemExit("idle timeout must be nonnegative and not NaN")
+    if math.isnan(args.health_check_skip_seconds) or args.health_check_skip_seconds < 0:
+        raise SystemExit("health-check skip seconds must be nonnegative and not NaN")
     if args.provider == "opensandbox" and (args.fault_inject is not None or args.health_check_skip_seconds != 0):
         raise SystemExit("opensandbox benchmarks do not support --fault-inject or nonzero --health-check-skip-seconds")
     if min(args.concurrency, args.users, args.replicas) < 1 or min(args.iterations, args.warmup_iterations) < 0:
         raise SystemExit("concurrency, users and replicas must be positive; iteration counts must be nonnegative")
-    if args.idle_timeout < 0:
-        raise SystemExit("idle timeout must be nonnegative")
     if args.fault_inject is not None and (args.concurrency != 1 or args.no_warmpool or args.scenario != "warm_same_thread"):
         raise SystemExit("fault injection requires warm_same_thread, concurrency=1 and an enabled warm pool")
     if args.fault_inject is not None and not 0 <= args.fault_inject < args.iterations:
         raise SystemExit("fault injection iteration must be inside the measured batch")
-    if args.scenario == "idle_timeout" and (args.concurrency != 1 or args.idle_timeout <= 0):
-        raise SystemExit("idle_timeout requires concurrency=1 and a positive idle timeout")
+    if args.scenario == "idle_timeout" and (args.concurrency != 1 or not math.isfinite(args.idle_timeout) or args.idle_timeout <= 0):
+        raise SystemExit("idle_timeout requires concurrency=1 and a finite positive idle timeout")
     if args.workload == "state_reuse" and (args.scenario != "warm_same_thread" or args.concurrency != 1):
         raise SystemExit("state_reuse requires --scenario warm_same_thread --concurrency 1")
     args.run_id = args.run_id or uuid.uuid4().hex[:12]
@@ -777,6 +815,9 @@ def main(argv: list[str] | None = None) -> int:
         # Never discover/clean containers belonging to a user's regular stack.
         "container_prefix": f"deerflow-bench-{args.run_id}",
     }
+
+    if args.provider == "aio-docker":
+        config["environment"] = _aio_service_environment()
 
     factory = PROVIDER_FACTORIES[args.provider]
     provider, config_used = factory(config)

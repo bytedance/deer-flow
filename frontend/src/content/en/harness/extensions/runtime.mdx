@@ -107,7 +107,7 @@ The app store is shared by every extension in the process. It is safe because st
 
 ### Detached stores
 
-Some notifications have no live task. Memory extraction normally runs on a background thread after the run, and compaction observers are always dispatched outside the turn. These receive a fresh store whose `scope_id` is `"detached"`. Anything written to it is discarded as soon as the notification finishes, so write to the app store if the value must outlive the call.
+Some notifications have no live task. Memory extraction normally runs on a background thread after the run, and a manual `/compact` runs outside any run. These receive a fresh store whose `scope_id` is `"detached"`. Anything written to it is discarded as soon as the notification finishes, so write to the app store if the value must outlive the call.
 
 ## ExtensionData
 

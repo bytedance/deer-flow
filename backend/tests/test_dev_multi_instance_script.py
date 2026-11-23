@@ -191,7 +191,14 @@ def test_overlay_points_explicit_sandbox_ownership_at_the_harness_redis():
     base = {
         "sandbox": {
             "use": "deerflow.sandbox.local:LocalSandboxProvider",
-            "ownership": {"type": "redis", "redis_url": "redis://prod-redis:6379/3", "renewal_interval_seconds": 7.5, "ttl_multiplier": 3},
+            "ownership": {
+                "type": "redis",
+                "redis_url": "rediss://ops:example-password@prod-redis:6379/0",
+                "redis_mode": "cluster",
+                "redis_cluster_nodes": ["prod-backup:6379"],
+                "renewal_interval_seconds": 7.5,
+                "ttl_multiplier": 3,
+            },
         }
     }
 
@@ -199,6 +206,7 @@ def test_overlay_points_explicit_sandbox_ownership_at_the_harness_redis():
 
     assert config["sandbox"]["ownership"] == {"type": "redis", "redis_url": REDIS_URL, "renewal_interval_seconds": 7.5, "ttl_multiplier": 3}
     assert any("sandbox.ownership" in note for note in notes)
+    assert all("example-password" not in note for note in notes)
 
 
 def test_overlay_gives_local_aio_sandboxes_a_harness_container_prefix():
@@ -605,6 +613,47 @@ def test_shell_script_rejects_unknown_commands(tmp_path):
 
     assert result.returncode != 0
     assert "Unknown command" in result.stderr
+
+
+_GATEWAY_LOGS = ("gateway-a.log", "gateway-b.log")
+_NGINX_LOGS = ("nginx.log", "nginx-error.log", "nginx-access.log")
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [((), _GATEWAY_LOGS), (("b",), ("gateway-b.log",)), (("nginx",), _NGINX_LOGS), (("all",), _GATEWAY_LOGS + _NGINX_LOGS)],
+    ids=["default", "b", "nginx", "all"],
+)
+def test_shell_script_logs_prints_the_selected_files(tmp_path, args, expected):
+    logs = tmp_path / "state" / "logs"
+    logs.mkdir(parents=True)
+    for name in _GATEWAY_LOGS + _NGINX_LOGS:
+        (logs / name).write_text(f"line from {name}\n", encoding="utf-8")
+    env = {**os.environ, "DEERFLOW_MI_STATE_DIR": str(tmp_path / "state")}
+
+    result = subprocess.run([require_script_bash(), str(SHELL_PATH), "logs", *args], capture_output=True, text=True, timeout=30, env=env)
+
+    assert result.returncode == 0, result.stderr
+    headers = [line.removeprefix("==> ").removesuffix(" <==") for line in result.stdout.splitlines() if line.startswith("==> ")]
+    assert [Path(header).name for header in headers] == list(expected)
+    for name in expected:
+        assert f"line from {name}" in result.stdout
+
+
+@pytest.mark.parametrize(("args", "expected"), [(("all",), _GATEWAY_LOGS), (("nginx",), ())], ids=["all", "nginx"])
+def test_shell_script_logs_skips_nginx_files_when_nginx_never_started(tmp_path, args, expected):
+    # start_nginx bails on a missing binary or busy port, leaving only Gateway logs.
+    logs = tmp_path / "state" / "logs"
+    logs.mkdir(parents=True)
+    for name in _GATEWAY_LOGS:
+        (logs / name).write_text(f"line from {name}\n", encoding="utf-8")
+    env = {**os.environ, "DEERFLOW_MI_STATE_DIR": str(tmp_path / "state")}
+
+    result = subprocess.run([require_script_bash(), str(SHELL_PATH), "logs", *args], capture_output=True, text=True, timeout=30, env=env)
+
+    assert result.returncode == 0, result.stderr
+    headers = [line.removeprefix("==> ").removesuffix(" <==") for line in result.stdout.splitlines() if line.startswith("==> ")]
+    assert [Path(header).name for header in headers] == list(expected)
 
 
 def test_makefile_exposes_harness_targets():

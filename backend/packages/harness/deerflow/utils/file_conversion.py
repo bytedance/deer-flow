@@ -8,9 +8,9 @@ PDF conversion strategy (auto mode):
      total when page count is unavailable), treat as image-based and fall back to MarkItDown.
   3. If pymupdf4llm is not installed, use MarkItDown directly (existing behaviour).
 
-All document parsing runs in a thread pool via asyncio.to_thread() so compressed
-Office files and small PDFs cannot block the serving event loop. Source byte
-size does not bound parsing time.
+Configuration resolution and all document parsing run in a thread pool via
+asyncio.to_thread() so config reads, compressed Office files and small PDFs cannot
+block the serving event loop. Source byte size does not bound parsing time.
 
 No FastAPI or HTTP dependencies — pure utility functions.
 """
@@ -154,12 +154,17 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
     Returns:
         Path to the generated .md file, or None if conversion failed.
     """
+
+    def convert_source() -> str:
+        return _do_convert(file_path, _get_pdf_converter())
+
     try:
-        pdf_converter = _get_pdf_converter()
+        # Config resolution also stats and hashes files, including cache hits.
+        # Keep it in the same drained worker as parsing.
         # Compressed size cannot predict parsing cost (e.g. a small XLSX can
         # contain many cells). Always offload, and drain across cancellation so
         # the caller retains its source until the converter finishes reading.
-        text = await await_drained(asyncio.to_thread(_do_convert, file_path, pdf_converter))
+        text = await await_drained(asyncio.to_thread(convert_source))
 
         md_path = output_path if output_path is not None else file_path.with_suffix(".md")
         # Drain the write-back across caller cancellation: run_file_io awaits

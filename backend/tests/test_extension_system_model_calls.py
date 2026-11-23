@@ -342,7 +342,7 @@ async def test_title_middleware_uses_build_bound_snapshot_and_live_task_store(mo
         ]
     }
 
-    result = await middleware.aafter_model(
+    result = await middleware.aafter_agent(
         state,
         Runtime(context={EXTENSION_TASK_STORE_KEY: store}),
     )
@@ -381,7 +381,11 @@ async def test_async_summarization_observes_each_provider_attempt_and_live_store
     middleware.trim_tokens_to_summarize = None
     middleware._generation_candidate_names = lambda: ["first", "second"]
     models = {"first": _Failing(), "second": _Working()}
-    middleware._model_for = lambda name: models[name]
+
+    async def _amodel_for(name):
+        return models[name]
+
+    middleware._amodel_for = _amodel_for
 
     result = await middleware._asummarize_prompt("prompt", task_store=store)
 

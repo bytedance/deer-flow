@@ -10,6 +10,7 @@ import re
 import stat
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -112,26 +113,23 @@ def _extract_text_from_rich_text(rich_text_list: list) -> str:
 
 
 _FENCED_CODE_BLOCK_RE = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+# Match complete backtick runs of equal length so shorter runs stay inside the code.
+_INLINE_CODE_RE = re.compile(r"(?<!`)(?P<delimiter>`+)(?!`)(?P<code>[^\n]+?)(?<!`)(?P=delimiter)(?!`)")
 _HORIZONTAL_RULE_RE = re.compile(r"^-{3,}$", re.MULTILINE)
-_TABLE_SEPARATOR_RE = re.compile(r"^\|[-:| ]+\|$", re.MULTILINE)
+_TABLE_SEPARATOR_RE = re.compile(r"^\|[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|$", re.MULTILINE)
 
 
 def _split_markdown_table_row(row: str) -> list[str]:
-    r"""Keep escaped pipes and empty cells when removing the outer borders.
-
-    Known boundary: the single-character lookbehind in the split pattern
-    cannot distinguish an escaped pipe (``\|``) from an escaped backslash
-    immediately followed by a real separator (``\\|``). A cell ending in a
-    literal backslash therefore absorbs the next cell: ``| foo\\ | bar |``
-    splits as one cell instead of two. GFM counts consecutive backslashes
-    for this reason; doing so is out of scope here — this helper is
-    intentionally not a general Markdown parser.
-    """
-    # ``(?<!\\)`` inspects only one preceding character, so the second
-    # backslash of ``\\|`` is mistaken for an escaping backslash and the
-    # pipe is kept whole. See the boundary note in the docstring above.
-    cells = re.split(r"(?<!\\)\|", row.strip())
+    """Split at unescaped pipes, preserving the original cell text."""
+    row = row.strip()
+    cells = []
+    start = 0
+    # Consume backslash escapes in pairs so only an unescaped pipe ends a cell.
+    for match in re.finditer(r"\\.|[|]", row):
+        if match[0] == "|":
+            cells.append(row[start : match.start()])
+            start = match.end()
+    cells.append(row[start:])
     if cells and cells[0] == "":
         cells.pop(0)
     if cells and cells[-1] == "":
@@ -149,6 +147,10 @@ def _convert_markdown_table(text: str) -> str:
         # Detect table: header row followed by separator row
         if i + 1 < len(lines) and line.strip().startswith("|") and _TABLE_SEPARATOR_RE.match(lines[i + 1].strip()):
             headers = _split_markdown_table_row(line)
+            if len(headers) != len(_split_markdown_table_row(lines[i + 1])):
+                result.append(line)
+                i += 1
+                continue
             i += 2  # skip header + separator
             while i < len(lines) and lines[i].strip().startswith("|"):
                 cells = _split_markdown_table_row(lines[i])
@@ -172,8 +174,15 @@ def _adapt_markdown_for_dingtalk(text: str) -> str:
         quoted_lines = "\n".join(f"> {line}" for line in code.split("\n"))
         return f"{prefix}{quoted_lines}\n"
 
+    def _inline_code_to_bold(match: re.Match) -> str:
+        code = match.group("code")
+        # CommonMark drops one padding space from each end of a nonblank span.
+        if code.startswith(" ") and code.endswith(" ") and code.strip(" "):
+            code = code[1:-1]
+        return f"**{code}**"
+
     text = _FENCED_CODE_BLOCK_RE.sub(_code_block_to_quote, text)
-    text = _INLINE_CODE_RE.sub(r"**\1**", text)
+    text = _INLINE_CODE_RE.sub(_inline_code_to_bold, text)
     text = _convert_markdown_table(text)
     text = _HORIZONTAL_RULE_RE.sub("───────────", text)
     return text
@@ -202,7 +211,6 @@ class DingTalkChannel(Channel):
         self._stream_lock = threading.Lock()
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
-        self._card_repliers: dict[str, Any] = {}
         # Serialize inbound-file writes into the uploads directory to avoid
         # racing writers clobbering one another (mirrors FeishuChannel).
         self._file_write_lock = threading.Lock()
@@ -263,7 +271,6 @@ class DingTalkChannel(Channel):
         self._dingtalk_client = None
         with self._incoming_messages_lock:
             self._incoming_messages.clear()
-        self._card_repliers.clear()
         self._card_track_ids.clear()
         if self._thread:
             # The thread exits once its loop has stopped; keep the join off the
@@ -351,12 +358,10 @@ class DingTalkChannel(Channel):
                 logger.warning("[DingTalk] card stream failed, falling back to sampleMarkdown")
                 if msg.is_final:
                     self._card_track_ids.pop(source_key, None)
-                    self._card_repliers.pop(out_track_id, None)
                     await self._send_markdown_fallback(robot_code, conversation_type, sender_staff_id, conversation_id, msg.text)
                     return
             if msg.is_final:
                 self._card_track_ids.pop(source_key, None)
-                self._card_repliers.pop(out_track_id, None)
             return
 
         async def send_markdown() -> None:
@@ -441,6 +446,24 @@ class DingTalkChannel(Channel):
                         },
                     )
                 response.raise_for_status()
+                data = response.json()
+                process_key = data.get("processQueryKey") if isinstance(data, dict) else None
+                if not isinstance(process_key, str) or not process_key.strip():
+                    logger.warning(
+                        "[DingTalk] file send response missing processQueryKey for %s; treating as not delivered",
+                        attachment.filename,
+                    )
+                    return False
+                if conversation_type != _CONVERSATION_TYPE_GROUP:
+                    target = sender_staff_id
+                    for field in ("invalidStaffIdList", "flowControlledStaffIdList"):
+                        failed = data.get(field, [])
+                        if not isinstance(failed, list):
+                            logger.warning("[DingTalk] unexpected %s in file send response for %s", field, attachment.filename)
+                            return False
+                        if target in failed:
+                            logger.warning("[DingTalk] file not delivered for %s (%s)", attachment.filename, field)
+                            return False
 
             logger.info("[DingTalk] file sent: %s", attachment.filename)
             return True
@@ -1244,27 +1267,41 @@ class DingTalkChannel(Channel):
             logger.warning("[DingTalk] SDK client or chatbot_message unavailable, skipping AI card")
             return None
 
+        out_track_id = uuid.uuid4().hex
         try:
-            from dingtalk_stream.card_replier import AICardReplier
-        except ImportError:
-            logger.warning("[DingTalk] dingtalk-stream card_replier not available")
-            return None
-
-        try:
-            replier = AICardReplier(self._dingtalk_client, chatbot_message)
-            card_instance_id = await replier.async_create_and_deliver_card(
-                card_template_id=self._card_template_id,
-                card_data={"content": initial_text},
-            )
-            if not card_instance_id:
-                return None
-
-            self._card_repliers[card_instance_id] = replier
-            logger.info("[DingTalk] AI card created: outTrackId=%s", card_instance_id)
-            return card_instance_id
+            await self._card_request("POST", "/v1.0/card/instances/createAndDeliver", self._card_create_body(out_track_id, chatbot_message, initial_text))
         except Exception:
             logger.exception("[DingTalk] failed to create AI card")
             return None
+
+        logger.info("[DingTalk] AI card created: outTrackId=%s", out_track_id)
+        return out_track_id
+
+    def _card_create_body(self, out_track_id: str, chatbot_message: Any, initial_text: str) -> dict[str, Any]:
+        """The ``createAndDeliver`` body dingtalk-stream's ``AICardReplier`` sends."""
+        body: dict[str, Any] = {
+            "cardTemplateId": self._card_template_id,
+            "outTrackId": out_track_id,
+            "cardData": {"cardParamMap": {"content": initial_text}},
+            "callbackType": "STREAM",
+            "imGroupOpenSpaceModel": {"supportForward": True},
+            "imRobotOpenSpaceModel": {"supportForward": True},
+        }
+        hosting_context = getattr(chatbot_message, "hosting_context", None)
+        conversation_type = str(chatbot_message.conversation_type)
+        if conversation_type == _CONVERSATION_TYPE_GROUP:
+            body["openSpaceId"] = f"dtv1.card//IM_GROUP.{chatbot_message.conversation_id}"
+            deliver_model: dict[str, Any] = {"robotCode": self._client_id}
+            body["imGroupOpenDeliverModel"] = deliver_model
+        elif conversation_type == _CONVERSATION_TYPE_P2P:
+            body["openSpaceId"] = f"dtv1.card//IM_ROBOT.{chatbot_message.sender_staff_id}"
+            deliver_model = {"spaceType": "IM_ROBOT"}
+            body["imRobotOpenDeliverModel"] = deliver_model
+        else:
+            return body
+        if hosting_context is not None:
+            deliver_model["extension"] = {"hostingRepliedContext": json.dumps({"userId": hosting_context.user_id})}
+        return body
 
     async def _stream_update_card(
         self,
@@ -1274,18 +1311,34 @@ class DingTalkChannel(Channel):
         is_finalize: bool = False,
         is_error: bool = False,
     ) -> None:
-        replier = self._card_repliers.get(out_track_id)
-        if not replier:
-            raise RuntimeError(f"No AICardReplier found for track ID {out_track_id}")
-
-        await replier.async_streaming(
-            card_instance_id=out_track_id,
-            content_key="content",
-            content_value=content,
-            append=False,
-            finished=is_finalize,
-            failed=is_error,
+        await self._card_request(
+            "PUT",
+            "/v1.0/card/streaming",
+            {
+                "outTrackId": out_track_id,
+                "guid": str(uuid.uuid4()),
+                "key": "content",
+                "content": content,
+                "isFull": True,
+                "isFinalize": is_finalize,
+                "isError": is_error,
+            },
         )
+
+    async def _card_request(self, method: str, path: str, body: dict[str, Any]) -> None:
+        """Send an AI card request with the channel token; raise if it fails.
+
+        dingtalk-stream's ``AICardReplier`` logs a failed card request and
+        returns as if it succeeded; its create call even returns the card ID.
+        Neither the running reply's text fallback nor the sampleMarkdown
+        fallback in ``send`` could then run, so the reply was lost.
+        """
+        token = await self._get_access_token()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            response = await client.request(method, f"{DINGTALK_API_BASE}{path}", headers=self._api_headers(token), json=body)
+            if response.is_error:
+                logger.warning("[DingTalk] card request %s %s returned %s: %s", method, path, response.status_code, response.text[:500])
+            response.raise_for_status()
 
     # -- media upload --------------------------------------------------------
 

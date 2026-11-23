@@ -13,8 +13,15 @@ SCRIPT = Path(__file__).resolve().parents[2] / "skills/public/video-generation/s
 
 
 @pytest.fixture(autouse=True)
-def clean_credentials(monkeypatch):
-    for key in ("GEMINI_API_KEY", "MINIMAX_API_KEY", "VIDEO_GENERATION_PROVIDER"):
+def clean_env(monkeypatch):
+    for key in (
+        "GEMINI_API_KEY",
+        "MINIMAX_API_KEY",
+        "VIDEO_GENERATION_PROVIDER",
+        "MINIMAX_API_HOST",
+        "MINIMAX_VIDEO_RESOLUTION",
+        "MINIMAX_VIDEO_DURATION",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -57,6 +64,7 @@ def test_cli_provider_result(monkeypatch, tmp_path, capsys, provider, http_error
     monkeypatch.setenv("VIDEO_GENERATION_PROVIDER", provider)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+    download_url = "https://filecdn.minimax.chat/video.mp4" if provider == "minimax" else "https://generativelanguage.googleapis.com/video.mp4"
     prompt = tmp_path / "prompt.json"
     prompt.write_text('{"prompt": "A cat runs"}', encoding="utf-8")
     output = tmp_path / "video.mp4"
@@ -79,10 +87,10 @@ def test_cli_provider_result(monkeypatch, tmp_path, capsys, provider, http_error
         if url.endswith("/query/video_generation"):
             return response({"status": "Success", "file_id": "file-1"})
         if url.endswith("/files/retrieve"):
-            return response({"file": {"download_url": "https://example.test/video.mp4"}})
+            return response({"file": {"download_url": download_url}})
         if url.endswith("/operations/test"):
-            return response({"done": True, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": "https://example.test/video.mp4"}}]}}})
-        assert url == "https://example.test/video.mp4"
+            return response({"done": True, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": download_url}}]}}})
+        assert url == download_url
         return response(content=b"test video")
 
     monkeypatch.setattr(requests, "post", post)

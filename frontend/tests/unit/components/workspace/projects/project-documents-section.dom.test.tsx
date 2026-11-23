@@ -39,6 +39,7 @@ const mocks = rs.hoisted(() => {
     }),
     deleteMutate: rs.fn(),
     attachMutate: rs.fn(),
+    routerPush: rs.fn(),
     promoteMutate: rs.fn(),
     fetchPreview:
       rs.fn<
@@ -158,7 +159,7 @@ rs.mock("@/env", () => ({
 }));
 
 rs.mock("next/navigation", () => ({
-  useRouter: () => ({ push: rs.fn() }),
+  useRouter: () => ({ push: mocks.routerPush }),
 }));
 
 // The real preview pulls Streamdown/KaTeX into the worker bundle (several GB
@@ -268,10 +269,51 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  rs.restoreAllMocks();
   rs.clearAllMocks();
+  window.sessionStorage.clear();
 });
 
 describe("ProjectDocumentsSection", () => {
+  it.each(["getItem", "setItem"] as const)(
+    "closes the attach picker and navigates after ingestion succeeds even if %s fails",
+    async (method) => {
+      mocks.documents = [makeDocument()];
+      mocks.threadsPages = [
+        [makeAgentThread({ values: { title: "Target chat" } })],
+      ];
+      mocks.attachMutate.mockImplementationOnce((_variables, options) => {
+        options.onSuccess?.({
+          filename: "roadmap.md",
+          size_bytes: 2048,
+          virtual_path: "/mnt/user-data/uploads/roadmap.md",
+          artifact_url:
+            "/api/threads/thread-a/artifacts/mnt/user-data/uploads/roadmap.md",
+        });
+      });
+      render(<ProjectDocumentsSection project={makeProject()} threads={[]} />, {
+        wrapper: Wrapper,
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Attach to chat/ }));
+      const dialog = await screen.findByRole("dialog");
+      rs.spyOn(window.sessionStorage, method).mockImplementation(() => {
+        throw new DOMException(
+          "Storage unavailable",
+          method === "setItem" ? "QuotaExceededError" : "SecurityError",
+        );
+      });
+
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Target chat" }),
+      );
+
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(mocks.routerPush).toHaveBeenCalledWith(
+        "/workspace/chats/thread-a",
+      );
+    },
+  );
+
   it("renders shelf rows with the provenance badge for thread-sourced documents", () => {
     mocks.documents = [
       makeDocument({
@@ -300,7 +342,7 @@ describe("ProjectDocumentsSection", () => {
       wrapper: Wrapper,
     });
     expect(screen.getByText("No documents yet")).toBeDefined();
-    expect(screen.getByText(/Memory stays global for now/)).toBeDefined();
+    expect(screen.queryByText(/Memory stays global for now/)).toBeNull();
     expect(screen.getByRole("button", { name: "Upload" })).toBeDefined();
   });
 

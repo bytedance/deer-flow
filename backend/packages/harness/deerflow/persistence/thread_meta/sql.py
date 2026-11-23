@@ -90,9 +90,11 @@ class ThreadMetaRepository(ThreadMetaStore):
                 updated_at=now,
             )
             session.add(row)
+            await session.flush()
+            # A refresh after commit could observe a replacement incarnation.
+            created = self._row_to_dict(row)
             await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
+            return created
 
     async def claim_unowned(self, thread_id: str, owner: str) -> bool:
         claim_target = table(
@@ -213,6 +215,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         self,
         *,
         metadata: dict[str, Any] | None = None,
+        query: str | None = None,
         status: str | None = None,
         archived: bool | None = None,
         project_id: str | None | _ProjectFilterUnset = PROJECT_FILTER_UNSET,
@@ -266,17 +269,31 @@ class ThreadMetaRepository(ThreadMetaStore):
             else:
                 stmt = stmt.where(ThreadMetaRow.project_id == project_id)
 
-        stmt = stmt.limit(limit).offset(offset)
+        needle = query.strip().casefold() if query else ""
         async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(r) for r in result.scalars()]
-
-    async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
-        """Return True if the row exists and is owned (or filter bypassed)."""
-        if resolved_user_id is None:
-            return True  # explicit bypass
-        row = await session.get(ThreadMetaRow, thread_id)
-        return row is not None and row.user_id == resolved_user_id
+            if not needle:
+                result = await session.execute(stmt.limit(limit).offset(offset))
+                return [self._row_to_dict(r) for r in result.scalars()]
+            # Casefold is dialect-independent (including ß -> ss). Scan bounded
+            # metadata batches and stop as soon as the requested page is full.
+            matches = []
+            scanned, skipped = 0, 0
+            while len(matches) < limit:
+                result = await session.execute(stmt.limit(200).offset(scanned))
+                batch = list(result.scalars())
+                for row in batch:
+                    if needle not in (row.display_name or "").casefold():
+                        continue
+                    if skipped < offset:
+                        skipped += 1
+                    else:
+                        matches.append(self._row_to_dict(row))
+                        if len(matches) == limit:
+                            break
+                if len(batch) < 200:
+                    break
+                scanned += len(batch)
+            return matches
 
     async def update_display_name(
         self,
@@ -313,10 +330,14 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_status")
+        # The owner condition stays in the UPDATE itself. A separate ownership
+        # read leaves a window in which the row can move to another owner, and
+        # the write would then land on that owner's thread.
+        stmt = update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
-                return
-            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(status=status, updated_at=datetime.now(UTC)))
+            await session.execute(stmt.values(status=status, updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def update_metadata(

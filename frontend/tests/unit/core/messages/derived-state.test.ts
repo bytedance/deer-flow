@@ -17,6 +17,48 @@ function message(type: Message["type"], id: string, content: string): Message {
 }
 
 describe("incremental message derivation", () => {
+  it("reuses result copies by message id and keeps ID-less results distinct", () => {
+    const assistant = {
+      type: "ai",
+      id: "a1",
+      content: "",
+      tool_calls: [{ id: "call_0", name: "read_file", args: {} }],
+    } as Message;
+    for (const id of ["result-1", undefined]) {
+      const result = {
+        type: "tool",
+        ...(id ? { id } : {}),
+        tool_call_id: "call_0",
+        content: "same output",
+      } as Message;
+      const initial = deriveStableMessageGroups(
+        [assistant, result],
+        false,
+        [],
+        false,
+      );
+      const replay = deriveStableMessageGroups(
+        [assistant, { ...result }],
+        false,
+        initial,
+        false,
+      );
+      if (id) {
+        expect(replay[0]).toBe(initial[0]);
+        const other = deriveStableMessageGroups(
+          [assistant, { ...result, id: "result-2" }],
+          false,
+          initial,
+          false,
+        );
+        expect(other[0]).not.toBe(initial[0]);
+        expect(other[0]?.messages.at(-1)?.id).toBe("result-2");
+      } else {
+        expect(replay[0]).not.toBe(initial[0]);
+      }
+    }
+  });
+
   it("reuses completed groups when only the streaming turn changes", () => {
     const messages = Array.from({ length: 1_000 }, (_, turn) => [
       message("human", `h-${turn}`, `question ${turn}`),

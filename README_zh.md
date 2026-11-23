@@ -109,7 +109,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 管理员可在 **设置 → 模型 → 添加模型** 中选择厂商，仅填写 **API Key** 和
 **模型 ID**。后端预置 OpenAI、Anthropic、DeepSeek、百炼/通义千问、火山/豆包、
-Moonshot/Kimi、智谱/Z.AI 和 MiniMax 的端点、认证与适配器，地域和 Coding Plan
+Moonshot/Kimi、智谱/Z.AI、MiniMax 和阶跃星辰（StepFun）的端点、认证与适配器，地域和 Coding Plan
 使用明确区分的选项。模型 ID 不受内置枚举限制；内部名称自动生成且保持稳定。
 新模型默认启用，保存后自动刷新聊天及 Agent 的模型选择器，无需重启 Gateway。
 
@@ -414,8 +414,9 @@ DeerFlow 的内置自定义事件同时通过两种 LangGraph 流式接口提供
 ### 进阶配置
 #### Sandbox 模式
 
-DeerFlow 支持多种 sandbox 执行方式：
-- **本地执行**（直接在宿主机上运行 sandbox 代码）
+DeerFlow 支持多种沙箱模式。
+
+- **本地工作区**（通过工作区文件工具访问已配置的挂载）
 - **Docker 执行**（在隔离的 Docker 容器里运行 sandbox 代码）
 - **Docker + Kubernetes 执行**（通过 provisioner 服务在 Kubernetes Pod 中运行 sandbox 代码）
 
@@ -712,6 +713,18 @@ DeerFlow 2.0 不再是一个需要你自己拼装的 framework。它是一个开
 
 ## 核心特性
 
+### Token 用量统计
+
+点击侧边栏的 **Token 用量**（`/workspace/usage`），查看近 7/30 天的用量、
+每日输入/输出 Token、各模型的缓存命中输入 Token，以及支持失败筛选和分页的
+运行记录。运行记录包含所有日期，不受图表所选周期限制。
+
+此功能需要 `runs:read` 权限和 SQLite 或 PostgreSQL 数据库，静态演示不提供统计。
+数据来自已持久化的服务商用量；运行过程中或服务商未返回用量时可能不完整，不能
+作为服务商账单。缓存命中 Token 已包含在输入 Token 中。每日分桶使用浏览器当前
+UTC 偏移，并按运行的创建日期归属。页面复用现有 `/api/console` 接口，保留服务端
+价格配置及可选的费用、币种字段。
+
 ### Skills 与 Tools
 
 Skills 是 DeerFlow 能做“几乎任何事”的关键。
@@ -818,7 +831,10 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 /goal finish the implementation and make all tests pass
 /goal              # 查看当前激活的 goal
 /goal clear        # 清除它
+/goal from-chat    # 仅 IM：根据当前对话生成 goal
 ```
+
+在受支持的 IM 渠道里，`/goal from-chat [提示]` 会从当前对话中归纳 goal，而不是把文字当成目标本身。它会保留对话中已经约定的约束和停止条件，展示保存后的目标，并只启动一次 run。命令后的可选提示用于补充约束，不需要重述完整目标。如果对话不足以形成清楚的目标，则不会保存或启动任何内容，回复会说明原因；如果助手还在等你回答，回复会先请你回复。
 
 每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。同一个 checkpoint 会把这次达成记为 `goal_outcome`，保留到下一次修改 goal。
 
@@ -842,6 +858,11 @@ Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为�
 
 ### Sub-Agents
 
+显式后台 `batch_task` 可用 `depends_on` 声明同批条目的前置关系，前置工作完成后即可继续，
+无需等待无关任务。用户已要求后续汇总或交付时，可用可选的 `continuation` 登记一次主 Agent 接续；
+启用 Goal 时仍由 Goal 负责续跑。执行、取消、授权和恢复范围见
+[批次依赖与完成接续说明](backend/docs/BATCH_CONTINUATION.md)。
+
 Sub-agent 是一种执行优化，而不是遇到复杂任务时的默认选择。
 
 lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例如真正缩短耗时的并行工作、专业能力收益或上下文隔离收益。存在跨 Agent 依赖或重叠副作用的工作不会并行分派；当专业能力或上下文隔离收益明显占优时，一条有界的顺序任务链仍可交给一个 sub-agent 完成。lead agent 会使用能取得收益的最少 sub-agents，并在每一批完成后重新评估，而不会仅仅因为任务规模大或步骤多就继续拆分。每个 sub-agent 都有自己独立的上下文、工具和终止条件，返回结构化结果后由 lead agent 验证并汇总成完整输出。
@@ -860,12 +881,12 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
-每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。
+沙箱的运行方式取决于配置。本地工作区使用专用文件工具，Docker 模式在隔离的容器中运行，Kubernetes 模式通过 provisioner 服务在 Pod 中运行。Agent 可以在沙箱中访问 skills、workspace、uploads、outputs，读写和编辑文件，也可以查看图片。需要执行 Bash 命令或通过 Shell 运行代码时，请选择提供 Shell 的隔离沙箱。各模式的配置方式见[沙箱指南](docs/guide/sandbox.md#sandbox-mode)。
 
 这就是“带工具的聊天机器人”和“真正有执行环境的 agent”之间的差别。
 
 ```text
-# sandbox 容器内的路径
+# 沙箱中的虚拟路径
 /mnt/user-data/
 ├── uploads/          ← 你的文件
 ├── workspace/        ← agents 的工作目录

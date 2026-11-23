@@ -189,7 +189,6 @@ def build_minimal_config(
     web_fetch_tool_name: str = "web_fetch",
     web_fetch_extra_config: dict | None = None,
     sandbox_use: str = "deerflow.sandbox.local:LocalSandboxProvider",
-    allow_host_bash: bool = False,
     include_bash_tool: bool = False,
     include_write_tools: bool = True,
     channel_connection_providers: list[str] | None = None,
@@ -210,8 +209,8 @@ def build_minimal_config(
     if env_var:
         model_entry[api_key_field] = f"${env_var}"
     extra_model_fields = dict(extra_model_config or {})
-    if "base_url" in extra_model_fields and not base_url:
-        base_url = extra_model_fields.pop("base_url")
+    configured_base_url = extra_model_fields.pop("base_url", None)
+    base_url = base_url or configured_base_url
     if base_url:
         model_entry["base_url"] = base_url
     if extra_model_fields:
@@ -231,16 +230,13 @@ def build_minimal_config(
         web_fetch_use=web_fetch_use,
         web_fetch_tool_name=web_fetch_tool_name,
         web_fetch_extra_config=web_fetch_extra_config,
-        include_bash_tool=include_bash_tool,
+        include_bash_tool=include_bash_tool and not sandbox_use.endswith(":LocalSandboxProvider"),
         include_write_tools=include_write_tools,
     )
     data["tools"] = tools
     sandbox_config = deepcopy(data.get("sandbox") if isinstance(data.get("sandbox"), dict) else {})
     sandbox_config["use"] = sandbox_use
-    if sandbox_use == "deerflow.sandbox.local:LocalSandboxProvider":
-        sandbox_config["allow_host_bash"] = allow_host_bash
-    else:
-        sandbox_config.pop("allow_host_bash", None)
+    sandbox_config.pop("allow_host_bash", None)
     data["sandbox"] = sandbox_config
     if channel_connection_providers is not None:
         data["channel_connections"] = _build_channel_connections_config(channel_connection_providers)
@@ -272,7 +268,6 @@ def write_config_yaml(
     web_fetch_tool_name: str = "web_fetch",
     web_fetch_extra_config: dict | None = None,
     sandbox_use: str = "deerflow.sandbox.local:LocalSandboxProvider",
-    allow_host_bash: bool = False,
     include_bash_tool: bool = False,
     include_write_tools: bool = True,
     channel_connection_providers: list[str] | None = None,
@@ -307,7 +302,6 @@ def write_config_yaml(
         web_fetch_tool_name=web_fetch_tool_name,
         web_fetch_extra_config=web_fetch_extra_config,
         sandbox_use=sandbox_use,
-        allow_host_bash=allow_host_bash,
         include_bash_tool=include_bash_tool,
         include_write_tools=include_write_tools,
         channel_connection_providers=channel_connection_providers,

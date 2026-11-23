@@ -11,11 +11,11 @@ None and fall back to in-memory implementations.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from deerflow.persistence.json_compat import dumps_json_safe
 from deerflow.utils.file_io import await_drained
 
 # Recycle pooled Postgres connections before stale idle sockets can hang
@@ -25,8 +25,15 @@ POSTGRES_COMMAND_TIMEOUT_SECONDS = 30
 
 
 def _json_serializer(obj: object) -> str:
-    """JSON serializer with ensure_ascii=False for Chinese character support."""
-    return json.dumps(obj, ensure_ascii=False)
+    """JSON serializer for every JSON column written through the ORM engine.
+
+    ensure_ascii=False keeps Chinese character support; non-finite floats are
+    normalized to ``None`` first — PostgreSQL jsonb rejects the bare
+    ``NaN`` / ``Infinity`` token as invalid JSON, so a lenient dump turns a
+    reachable non-finite value (caller metadata, model verdict JSON, provider
+    usage numbers) into a ``DataError`` on the whole write.
+    """
+    return dumps_json_safe(obj)
 
 
 def _postgres_engine_kwargs(

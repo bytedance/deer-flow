@@ -1,4 +1,5 @@
 import asyncio
+import signal
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -23,6 +24,41 @@ class SandboxProvider(ABC):
     # provider's current Agent-accessible tool surface. Host-backed providers
     # must return False whenever shell access can bypass managed path mappings.
     supports_agent_skill_isolation: bool = False
+    # Opt in only when acquire/reuse itself exposes the prepared thread view,
+    # without a separate sync_agent_skills upload before tools can access it.
+    supports_lazy_agent_skill_isolation: bool = False
+
+    _signal_handlers_deferred = False
+
+    def _register_signal_handlers(self) -> None:
+        """Install process signal handlers for providers that own sandbox resources."""
+
+    def _register_or_defer_signal_handlers(self) -> None:
+        if threading.current_thread() is threading.main_thread():
+            self._register_signal_handlers()
+        else:
+            self._signal_handlers_deferred = True
+
+    @contextmanager
+    def gateway_signal_handlers(self) -> Iterator[None]:
+        """Install a worker-built provider's SIGHUP fallback for the Gateway lifespan."""
+        if not self._signal_handlers_deferred or not hasattr(signal, "SIGHUP") or threading.current_thread() is not threading.main_thread():
+            yield
+            return
+
+        previous = signal.getsignal(signal.SIGHUP)
+        if previous is None:  # A native handler cannot be restored with signal.signal().
+            yield
+            return
+        self._register_signal_handlers()
+        installed = signal.getsignal(signal.SIGHUP)
+        self._signal_handlers_deferred = False
+        try:
+            yield
+        finally:
+            if signal.getsignal(signal.SIGHUP) is installed:
+                signal.signal(signal.SIGHUP, previous)
+            self._signal_handlers_deferred = True
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:

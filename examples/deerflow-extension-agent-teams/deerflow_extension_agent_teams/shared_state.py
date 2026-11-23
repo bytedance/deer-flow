@@ -116,7 +116,13 @@ def publish(team, payload, context):
     }
     state["entries"].append(entry)
     state["revision"] += 1
-    check_budget(team)
+    try:
+        check_budget(team)
+    except BaseException:
+        if state["entries"] and state["entries"][-1] is entry:
+            state["entries"].pop()
+            state["revision"] -= 1
+        raise
     return {"team_id": team["id"], "revision": state["revision"], "entry": {key: entry[key] for key in PUBLIC_FIELDS}}
 
 
@@ -136,7 +142,14 @@ def update(team, payload, context):
     if entry["_update"] != stamp:
         if entry["revision"] != expected:
             return {"team_id": team["id"], "revision": state["revision"], "updated": False, "conflict": True, "entry": {key: entry[key] for key in PUBLIC_FIELDS}}
+        original_entry = dict(entry)
         entry.update(title=title, content=content, status=status, revision=expected + 1, updated_by=member_id, updated_at=datetime.now(UTC).isoformat(), source=source, _update=stamp)
         state["revision"] += 1
-        check_budget(team)
+        try:
+            check_budget(team)
+        except BaseException:
+            entry.clear()
+            entry.update(original_entry)
+            state["revision"] -= 1
+            raise
     return {"team_id": team["id"], "revision": state["revision"], "updated": True, "conflict": False, "entry": {key: entry[key] for key in PUBLIC_FIELDS}}

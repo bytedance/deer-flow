@@ -24,6 +24,7 @@ const LINKABLE_SECTIONS: Record<string, true> = {
   agents: true,
   chats: true,
   "scheduled-tasks": true,
+  usage: true,
 };
 
 export function WorkspaceContainer({
@@ -142,5 +143,6 @@ function nameOfSegment(
   if (segment === "chats") return t.breadcrumb.chats;
   if (segment === "scheduled-tasks") return t.sidebar.scheduledTasks;
   if (segment === "agents") return t.sidebar.agents;
+  if (segment === "usage") return t.usage.title;
   return segment[0]?.toUpperCase() + segment.slice(1);
 }

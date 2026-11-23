@@ -33,6 +33,25 @@ POST /api/threads/{thread_id}/uploads
 
 检查也会拒绝 Windows 去掉末尾点号或空格、忽略大小写后会变成保留名称的别名，例如 `.upload-notes.part.`、`.upload-notes.part `、`.UPLOAD-NOTES.PART` 和 `.Upload-NoTeS.Part .`。这项检查在所有主机上生效，HTTP 上传会在整批文件写入前返回 `400`，提示改名。
 
+规范化后的文件名只要仍含冒号也会被拒绝，避免 Windows 把 `notes.txt:hidden` 当成 `notes.txt` 的 NTFS Alternate Data Stream 而不是新文件。盘符绝对路径会先去掉目录部分，例如 `C:/reports/report.txt` 在 Linux、macOS 和 Windows 上都得到 `report.txt`；盘符相对写法 `C:report.txt` 在 Windows 上去掉盘符后得到 `report.txt`，在 Linux 和 macOS 上则因 basename 仍含冒号而被拒绝。这里拒绝的是会写入宿主或沙箱文件的名称；POSIX 文件系统上的普通文件即使允许冒号，也不应把该名称用于跨平台上传。
+
+其他不安全文件名按文件跳过，不会让单文件上传整批返回 `400`。如果批次里只有不安全文件，HTTP 响应仍为 `200`，但 `success` 为 `false`、`files` 为空，原始名称会列入 `skipped_files`。混合批次只要至少有一个文件成功，`success` 就是 `true`；客户端仍必须检查 `skipped_files` 和 `files`，不能只看 `success`。例如同时上传 `readme.txt` 和 `10:30.txt` 时，响应可以是：
+
+```json
+{
+  "success": true,
+  "files": [
+    {
+      "filename": "readme.txt",
+      "size": 12,
+      "path": ".deer-flow/threads/{thread_id}/user-data/uploads/readme.txt"
+    }
+  ],
+  "message": "Successfully uploaded 1 file(s); skipped 1 unsafe file(s)",
+  "skipped_files": ["10:30.txt"]
+}
+```
+
 嵌入式 `DeerFlowClient.upload_files` 同样在复制前检查整批文件名，保留名称会抛出 `ValueError`。项目资料库上传和从聊天加入资料库时的重命名也遵循这项限制，包括沿用来源文件名和手动指定新名称两种情况；旧资料库中使用保留名称的文件仍可下载，但直接附加到聊天会返回 `400`。请先下载、改名，再上传到聊天。本修复不会迁移或恢复旧聊天目录中已经匹配该临时文件规则的文件。
 
 **响应：**

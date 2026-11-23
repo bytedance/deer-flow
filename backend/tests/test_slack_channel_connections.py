@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.channels.message_bus import MessageBus, OutboundMessage
+from deerflow.persistence.engine import close_engine
 
 
 async def _make_repo(tmp_path):
@@ -63,7 +64,7 @@ def test_slack_connect_command_binds_socket_mode_identity(tmp_path):
         assert connections[0]["workspace_id"] == "T123"
         assert connections[0]["metadata"]["channel_id"] == "C123"
         channel._web_client.chat_postMessage.assert_called_once()
-        await repo.close()
+        await close_engine()
 
     anyio.run(go)
 

@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import ANY, Mock
 
 import pytest
 
@@ -16,6 +17,8 @@ from deerflow.config.sandbox_config import SandboxConfig
 from scripts.benchmark.sandbox import bench_provider as bench
 from scripts.benchmark.sandbox import summarize
 
+pytestmark = pytest.mark.benchmark
+
 
 class Remote:
     def __init__(self, number):
@@ -24,6 +27,7 @@ class Remote:
         self.destroy_error = False
         self.command_error = False
         self.commands = SimpleNamespace(run=self.run)
+        self.files = Mock(spec_set=["write_file"])
         self.state = ""
 
     def run(self, command, **kwargs):
@@ -64,6 +68,11 @@ def transport(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider_module, "_import_sdk", lambda: (SimpleNamespace(create=create), SimpleNamespace, SimpleNamespace))
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+    skills_root = tmp_path / "skills"
+    monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", str(skills_root))
+    skill = skills_root / "public" / "bench-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"---\nname: bench-skill\ndescription: Benchmark fixture\n---\n")
     config = AppConfig(
         sandbox=SandboxConfig(
             use="deerflow.community.opensandbox:OpenSandboxProvider",
@@ -77,9 +86,13 @@ def transport(monkeypatch, tmp_path):
             environment={"BENCH_SECRET": "sentinel-environment"},
         )
     )
+    # Benchmark worker threads load the config from disk outside the caller's context.
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config.model_dump_json(exclude_unset=True), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
     push_current_app_config(config)
     try:
-        yield SimpleNamespace(remotes=remotes, requests=requests, config=config)
+        yield SimpleNamespace(remotes=remotes, requests=requests, config=config, skill=skill)
     finally:
         pop_current_app_config()
 
@@ -90,6 +103,7 @@ def test_factory_preserves_connection_config_without_exporting_secrets(transport
         assert get_app_config() is transport.config
         assert transport.config.sandbox.image == "test-image@sha256:fixture"
         sid = provider.acquire("thread", user_id="owner")
+        transport.remotes[0].files.write_file.assert_any_call(ANY, transport.skill.read_bytes(), mode=644)
         request = transport.requests[0]
         assert request["image"] == "test-image@sha256:fixture"
         assert request["env"] == {"BENCH_SECRET": "sentinel-environment"}
@@ -291,7 +305,8 @@ def test_unsupported_options_fail_before_creating_resources(transport, extra):
 
 
 @pytest.mark.parametrize("provider", ["opensandbox", "boxlite", "aio-docker"])
-def test_negative_idle_timeout_fails_before_provider_creation(monkeypatch, provider):
+@pytest.mark.parametrize("value", ["-5", "nan", "NaN", "-inf"])
+def test_invalid_idle_timeout_fails_before_provider_creation(monkeypatch, provider, value):
     assert provider in bench.PROVIDER_FACTORIES
 
     def unexpected_provider(*args, **kwargs):
@@ -299,4 +314,98 @@ def test_negative_idle_timeout_fails_before_provider_creation(monkeypatch, provi
 
     monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, unexpected_provider)
     with pytest.raises(SystemExit, match="idle timeout must be nonnegative"):
-        bench.main(["--provider", provider, "--scenario", "warm_same_thread", "--idle-timeout", "-5"])
+        bench.main(["--provider", provider, "--scenario", "warm_same_thread", f"--idle-timeout={value}"])
+
+
+@pytest.mark.parametrize("provider", ["boxlite", "aio-docker"])
+@pytest.mark.parametrize("value", ["-5", "nan", "NaN", "-inf"])
+def test_invalid_health_check_skip_fails_before_provider_creation(monkeypatch, provider, value):
+    assert provider in bench.PROVIDER_FACTORIES
+
+    def unexpected_provider(*args, **kwargs):
+        pytest.fail("invalid health-check skip must be rejected before provisioning")
+
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, unexpected_provider)
+    with pytest.raises(SystemExit, match="health-check skip seconds must be nonnegative"):
+        bench.main(["--provider", provider, f"--health-check-skip-seconds={value}"])
+
+
+@pytest.mark.parametrize("provider", ["opensandbox", "boxlite", "aio-docker"])
+def test_idle_timeout_scenario_rejects_infinite_timeout_before_provider_creation(monkeypatch, provider):
+    def unexpected_provider(*args, **kwargs):
+        pytest.fail("an infinite idle_timeout scenario must be rejected before provisioning")
+
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, unexpected_provider)
+
+    with pytest.raises(SystemExit, match="finite positive idle timeout"):
+        bench.main(["--provider", provider, "--scenario", "idle_timeout", "--idle-timeout=inf"])
+
+
+@pytest.mark.parametrize("provider", ["boxlite", "aio-docker"])
+@pytest.mark.parametrize("option", ["--idle-timeout", "--health-check-skip-seconds"])
+@pytest.mark.parametrize("value", [None, "0", "2.5", "inf"])
+def test_nonnegative_timing_values_reach_provider_factory(monkeypatch, tmp_path, provider, option, value):
+    captured = []
+
+    class FakeSandbox:
+        def execute_command(self, command, timeout=None):
+            return "ok"
+
+    class FakeProvider:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._warm_pool = {}
+
+        def acquire(self, thread_id, *, user_id=None):
+            return "sandbox-id"
+
+        def get(self, sandbox_id):
+            return FakeSandbox()
+
+        def release(self, sandbox_id):
+            return None
+
+        def shutdown(self):
+            return None
+
+    def factory(config):
+        captured.append(config)
+        return FakeProvider(), {
+            "image": config["image"],
+            "replicas": config["replicas"],
+            "idle_timeout": config["idle_timeout"],
+            "health_check_skip_seconds": config["health_check_skip_seconds"],
+        }
+
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, factory)
+    output = tmp_path / f"{provider}-{option[2:]}-{value or 'default'}.jsonl"
+    args = ["--provider", provider, "--iterations", "1", "--warmup-iterations", "0", "--output", str(output)]
+    if value is not None:
+        args.append(f"{option}={value}")
+
+    assert bench.main(args) == 0
+    key = option[2:].replace("-", "_")
+    expected = float(value) if value is not None else {"idle_timeout": 600.0, "health_check_skip_seconds": 0.0}[key]
+    assert captured[0][key] == expected
+    assert json.loads(output.read_text(encoding="utf-8"))[key] == expected
+
+
+@pytest.mark.parametrize("value", [0.0, 7.5, float("inf")])
+def test_aio_factory_forwards_health_check_skip_to_config_and_snapshot(monkeypatch, value):
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as aio_module
+
+    captured = {}
+
+    class FakeAioProvider:
+        def __init__(self):
+            captured.update(vars(aio_module.get_app_config().sandbox))
+            self._config = {"image": "resolved-aio-image"}
+
+    monkeypatch.setattr(aio_module, "AioSandboxProvider", FakeAioProvider)
+
+    provider, snapshot = bench._make_aio_provider({"health_check_skip_seconds": value})
+
+    assert isinstance(provider, FakeAioProvider)
+    assert captured["health_check_skip_seconds"] == value
+    assert snapshot["health_check_skip_seconds"] == value
+    assert snapshot["image"] == "resolved-aio-image"

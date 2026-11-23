@@ -62,6 +62,9 @@ docker/
 skills/
 frontend/.next
 frontend/node_modules
+# Frontend unit tests can import fixtures outside frontend/ (for example, examples/),
+# so exclude them from the frontend-only Docker build context.
+frontend/tests
 backend/.venv
 backend/htmlcov
 backend/.coverage
@@ -73,6 +76,23 @@ backend/.coverage
 # root that the build client cannot read.
 **/.deer-flow/
 backend/sandbox/
+
+# Local configuration holds model API keys, MCP credentials, frontend secrets and
+# local HTTPS keys (frontend/*.pem, the frontend .gitignore's mkcert pair).
+# Compose and Helm supply it at runtime. The config resolvers still read the legacy
+# backend/ copies, and `COPY backend ./backend` / `COPY frontend ./frontend` would
+# otherwise bake them into every image layer built from this checkout.
+config.yaml
+config.yaml.bak
+extensions_config.json
+mcp_config.json
+backend/config.yaml
+backend/config.yaml.bak
+backend/extensions_config.json
+backend/mcp_config.json
+**/.env*.local
+frontend/*.pem
+
 *.md
 !README.md
 !frontend/README.md
@@ -84,3 +104,17 @@ backend/sandbox/
 !backend/extensions/
 !backend/extensions/sources/
 !backend/extensions/sources/**
+
+# The re-inclusion above wins over every earlier rule, so the files the extension
+# manager refuses to snapshot (deerflow/extensions/manager.py) are excluded again
+# here. A snapshot the manager wrote never contains them; one edited by hand
+# must not carry credentials into the image either.
+backend/extensions/sources/**/.env
+backend/extensions/sources/**/.env.*
+backend/extensions/sources/**/.npmrc
+backend/extensions/sources/**/.pypirc
+backend/extensions/sources/**/credentials.json
+backend/extensions/sources/**/*.key
+backend/extensions/sources/**/*.pem
+backend/extensions/sources/**/*.p12
+backend/extensions/sources/**/*.pfx

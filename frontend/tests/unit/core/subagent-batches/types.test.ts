@@ -31,6 +31,22 @@ const BATCH: SubagentBatch = {
 };
 
 describe("subagent batch progress", () => {
+  it("keeps a completed batch observable while its requested follow-up is pending", () => {
+    expect(
+      isActiveSubagentBatch({
+        ...BATCH,
+        status: "completed",
+        continuation_status: "pending",
+      }),
+    ).toBe(true);
+    expect(
+      isActiveSubagentBatch({
+        ...BATCH,
+        status: "completed",
+        continuation_status: "cancelled",
+      }),
+    ).toBe(false);
+  });
   it("counts only terminal items as completed progress", () => {
     expect(completedSubagentBatchItems(BATCH)).toBe(4);
     expect(subagentBatchProgress(BATCH)).toBe(40);

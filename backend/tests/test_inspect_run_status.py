@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
@@ -23,7 +24,13 @@ def test_snapshot_counts_only_the_current_run_and_uses_reported_usage():
     state = {
         "messages": [old, current, call, result, final],
         "summary_text": "private summary",
-        "todos": [{"content": "private todo", "status": "pending"}, {"content": "another", "status": "in_progress"}, {"content": "done", "status": "completed"}],
+        "todos": [
+            {"content": "private todo", "status": "pending"},
+            {"content": "another", "status": "in_progress"},
+            {"content": "blocked", "status": "blocked"},
+            {"content": "waiting", "status": "waiting"},
+            {"content": "done", "status": "completed"},
+        ],
     }
     context = {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"old"})}
 
@@ -35,7 +42,7 @@ def test_snapshot_counts_only_the_current_run_and_uses_reported_usage():
     assert snapshot["tool_calls_this_run"] == 1
     assert snapshot["context_fill"] == {"used_input_tokens": 80, "limit_tokens": 200, "fraction": 0.4, "basis": "last_reported_model_input"}
     assert snapshot["has_summary"] is True
-    assert snapshot["todos"] == {"pending": 1, "in_progress": 1}
+    assert snapshot["todos"] == {"pending": 1, "in_progress": 1, "blocked": 1, "waiting": 1}
     serialized = json.dumps(snapshot)
     assert "private" not in serialized
     assert "echo secret" not in serialized
@@ -52,7 +59,7 @@ def test_snapshot_marks_missing_boundary_and_usage_as_unknown():
     assert snapshot["usage_missing_messages"] == 2
     assert snapshot["context_fill"] is None
     assert snapshot["has_summary"] is False
-    assert snapshot["todos"] == {"pending": 0, "in_progress": 0}
+    assert snapshot["todos"] == {"pending": 0, "in_progress": 0, "blocked": 0, "waiting": 0}
 
 
 def test_compaction_that_removes_run_boundary_reports_visible_state():
@@ -95,7 +102,12 @@ def test_bound_tool_has_no_model_supplied_arguments():
     assert tool.args == {}
 
 
-def test_tool_reads_live_graph_state_without_exposing_message_content():
+@pytest.mark.parametrize(
+    "todo",
+    [{"content": "private task"}, {"content": "private task", "status": None}, {"content": "private task", "status": "pending"}],
+    ids=["missing-status", "null-status", "pending-status"],
+)
+def test_tool_reads_live_graph_state_without_exposing_message_content(todo):
     from langchain.agents import create_agent
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 
@@ -116,7 +128,7 @@ def test_tool_reads_live_graph_state_without_exposing_message_content():
     graph = create_agent(model=model, tools=[build_inspect_run_status_tool(context_window=100)], state_schema=ThreadState)
     result = asyncio.run(
         graph.ainvoke(
-            {"messages": [HumanMessage(content="secret request")]},
+            {"messages": [HumanMessage(content="secret request")], "todos": [todo]},
             {"configurable": {"thread_id": "status-test"}},
             context={CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset()},
         )
@@ -127,6 +139,8 @@ def test_tool_reads_live_graph_state_without_exposing_message_content():
     assert snapshot["tool_calls_this_run"] == 1
     assert snapshot["scope"] == "current_run_visible"
     assert snapshot["token_usage"] == {"input": 25, "output": 5, "total": 30}
+    assert snapshot["todos"]["pending"] == 1
+    assert "private task" not in tool_output
     assert "secret request" not in tool_output
 
 

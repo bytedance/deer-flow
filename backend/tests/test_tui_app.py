@@ -11,6 +11,7 @@ import time
 import pytest
 from textual import events
 from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
 
 from deerflow.client import StreamEvent
 from deerflow.tui.app import DeerFlowTUI
@@ -82,6 +83,39 @@ async def test_app_runs_a_turn_and_renders_streamed_assistant():
     assistant = [r for r in app.state.rows if r.kind == "assistant"][-1]
     assert assistant.text == "Hello world"
     assert app.state.usage == {"total_tokens": 3}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("callback_name", "pending_flag", "widget"),
+    [
+        pytest.param("_tick_spinner", "_streaming", "#status", id="spinner"),
+        pytest.param("_flush_transcript", "_transcript_dirty", "#scroll", id="transcript"),
+    ],
+)
+async def test_periodic_refresh_skips_shutdown(monkeypatch, callback_name, pending_flag, widget):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    original_close_all = app._close_all
+    errors: list[str] = []
+
+    async def close_all_with_late_tick():
+        # Force the callback after its widget is gone, while the app's message
+        # pump is still open. Let Textual finish teardown even on regression.
+        await app.query_one(widget).remove()
+        setattr(app, pending_flag, True)
+        try:
+            getattr(app, callback_name)()
+        except NoMatches as exc:
+            errors.append(str(exc))
+        finally:
+            setattr(app, pending_flag, False)
+            await original_close_all()
+
+    monkeypatch.setattr(app, "_close_all", close_all_with_late_tick)
+    async with app.run_test():
+        assert app.is_running
+
+    assert not errors, errors
 
 
 @pytest.mark.asyncio
@@ -800,6 +834,27 @@ async def test_goal_set_failure_shows_error_tone():
         await pilot.pause()
     errors = [r for r in _system_rows(app) if r.tone == "error"]
     assert any("Could not set goal." in r.text for r in errors)
+
+
+@pytest.mark.asyncio
+async def test_goal_from_chat_is_explained_not_saved_as_literal():
+    """The shared parser yields from_chat; the TUI must not fall through to set.
+
+    Saving the guidance as a literal objective would be the exact bug the
+    first-PR design calls out: the TUI has no synthesis wiring yet, so it
+    explains instead, and makes no gateway call.
+    """
+    session = _GoalSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._conv_thread_id = "t-1"
+        app._handle_goal("from-chat focus on the vendor total")
+        await pilot.pause()
+    assert session.client.calls == []
+    rows = _system_rows(app)
+    assert any("from-chat" in r.text and "/goal" in r.text for r in rows)
+    assert not any("Goal set" in r.text for r in rows)
 
 
 @pytest.mark.asyncio

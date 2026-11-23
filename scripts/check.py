@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -194,4 +195,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Parsed here rather than inside main(): the dependency-check tests call
+    # main() in-process under pytest, whose argv must not reach argparse.
+    parser = argparse.ArgumentParser(
+        prog="python scripts/check.py",
+        description=(
+            "DeerFlow dependency check (make check): probes the host tools the "
+            "local development setup needs and prints install hints for the "
+            "missing ones. Takes no arguments."
+        ),
+    )
+    parser.parse_args()
     sys.exit(main())

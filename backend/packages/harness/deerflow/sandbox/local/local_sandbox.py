@@ -11,22 +11,31 @@ import stat
 import subprocess
 import sys
 import threading
-from contextlib import suppress
+import time
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, current_command_scope
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
 
 logger = logging.getLogger(__name__)
+
+
+def _is_user_data_container(container_path: str) -> bool:
+    """Whether a mount's container path belongs to the user-data tree."""
+    normalized = container_path.rstrip("/")
+    return normalized == VIRTUAL_PATH_PREFIX or normalized.startswith(VIRTUAL_PATH_PREFIX + "/")
+
 
 # Default wall-clock timeout (seconds) for a single host bash command. A
 # blocking foreground command (for example a server started without
@@ -285,6 +294,11 @@ class ResolvedPath(NamedTuple):
 _POWERSHELL_QUOTE_TRANSLATION = str.maketrans("\u2018\u2019\u201c\u201d", "''\"\"")
 
 
+def escape_powershell_single_quoted(value: str) -> str:
+    """Escape text inside a PowerShell single-quoted string."""
+    return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, value)
+
+
 def escape_powershell_path(match: re.Match[str], path: str) -> str:
     """Keep mapped paths literal in the caller's quote context, preserving wildcards."""
     quote = None
@@ -330,12 +344,36 @@ def escape_powershell_path(match: re.Match[str], path: str) -> str:
     if closing_quote:
         path = path[:-1]
     if quote == "'":
-        return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, path) + closing_quote
+        return escape_powershell_single_quoted(path) + closing_quote
     characters = r'[`$"\u201c\u201d]' if quote is not None else r"[ \t`$'\";&,()@{}#\u2018\u2019\u201c\u201d]"
     return re.sub(characters, lambda char: "`" + char.group(), path) + closing_quote
 
 
 class LocalSandbox(Sandbox):
+    supports_command_cancellation = os.name == "posix"
+
+    def cancel_command_scope(self, scope_id: str) -> None:
+        scope = self._command_scopes.find(scope_id)
+        if scope is None:
+            return
+        self.request_command_cancel(scope_id)
+        with scope.lock:
+            processes = list(scope.processes)
+        for process in processes:
+            if process.poll() is None:
+                self._terminate_process_group(process, process.pid)
+                continue
+            # A returned shell may leave nohup children. Verify the execution
+            # marker in this recorded group before signalling a recycled PGID.
+            members = subprocess.run(["pgrep", "-g", str(process.pid)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2)
+            pids = ",".join(x for x in members.stdout.split() if x.isdecimal())
+            if not pids:
+                continue
+            result = subprocess.run(["ps", "eww", "-o", "command=", "-p", pids], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2)
+            if f"{COMMAND_OWNER_ENV}={scope.token}" in result.stdout:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
     #: Every call is a fresh ``subprocess.run([shell, "-c", ...])`` process —
     #: no shell state survives into the next command.
     persistent_shell_sessions = False
@@ -507,7 +545,7 @@ class LocalSandbox(Sandbox):
         # substitution resumes after a match, so a tail that ran through a
         # ":"-joined list ($PATH, $PYTHONPATH) swallowed every later entry and
         # left those container paths unresolved.
-        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():,]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -520,7 +558,7 @@ class LocalSandbox(Sandbox):
         # write_file content regularly stores PATH-style exports, and a tail
         # that ran through the ":" left the later list entries virtual in the
         # host file (read_file masked them back, so the corruption was hidden).
-        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():,]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -562,6 +600,25 @@ class LocalSandbox(Sandbox):
             return False
 
         return best_mapping.read_only
+
+    def _is_user_data_path(self, path: str) -> bool:
+        """Whether *path* is the user's own files rather than repository noise.
+
+        The public ls/glob/grep tools resolve ``/mnt/user-data/...`` to host
+        paths before they call a provider, so the virtual prefix alone would miss
+        every real entry point. Ask the mount table instead: a container path
+        under ``/mnt/user-data``, or a host path inside the local root of that
+        mapping.
+        """
+        mapping = self._find_path_mapping(path)
+        if mapping is not None:
+            return _is_user_data_container(mapping[0].container_path)
+        resolved = os.path.realpath(path)
+        for candidate in self._mappings_by_local_specificity:
+            root = self._resolved_local_paths[candidate]
+            if resolved == root or resolved.startswith(root + os.sep):
+                return _is_user_data_container(candidate.container_path)
+        return False
 
     def _find_path_mapping(self, path: str) -> tuple[PathMapping, str] | None:
         path_str = str(path)
@@ -829,7 +886,9 @@ class LocalSandbox(Sandbox):
         command: str,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
-    ) -> str:
+        *,
+        cwd: str | None = None,
+    ) -> CommandOutput:
         # Validate ``env`` keys against the POSIX env-var rule. Defense in
         # depth: ``subprocess.run(env=...)`` does not go through a shell so a
         # metachar in a key here would not actually inject — but the public
@@ -840,6 +899,8 @@ class LocalSandbox(Sandbox):
         _validate_extra_env(env)
         # Resolve container paths in command before execution
         shell = self._get_shell()
+        if cwd is not None and (os.name != "nt" or not self._is_cmd_shell(shell)):
+            raise ValueError("A process working directory is only supported for the cmd.exe fallback")
         resolved_command = self._resolve_paths_in_command(command, shell=shell)
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
@@ -861,6 +922,12 @@ class LocalSandbox(Sandbox):
                 args = [shell, "-NoProfile", "-Command", utf8_preamble + resolved_command]
             elif self._is_cmd_shell(shell):
                 args = [shell, "/c", resolved_command]
+                if cwd is not None:
+                    if ntpath.splitdrive(cwd)[0].startswith(("\\\\", "//")):
+                        raise ValueError("cmd.exe requires a workspace on a local or mapped drive")
+                    # /d disables AutoRun (which could change cwd). /s strips
+                    # the outer quotes and preserves the command's own quotes.
+                    args = f'{subprocess.list2cmdline([shell])} /d /s /c "{resolved_command}"'
             else:
                 args = [shell, "-c", resolved_command]
                 if self._is_msys_shell(shell):
@@ -922,6 +989,7 @@ class LocalSandbox(Sandbox):
                     timeout,
                     sandbox_env,
                     encoding=self._get_cmd_output_encoding(),
+                    cwd=cwd,
                 )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
@@ -944,16 +1012,17 @@ class LocalSandbox(Sandbox):
 
         final_output = output if output else "(no output)"
         # Reverse resolve local paths back to container paths in output
-        return self._reverse_resolve_paths_in_output(final_output)
+        return CommandOutput(self._reverse_resolve_paths_in_output(final_output), 124 if timed_out else returncode)
 
     @staticmethod
     def _run_windows_command(
-        args: list[str],
+        args: list[str] | str,
         timeout: float,
         env: dict[str, str] | None = None,
         *,
         encoding: str | None = None,
         fallback_encoding: str | None = None,
+        cwd: str | None = None,
     ) -> tuple[str, str, int, bool]:
         """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
@@ -969,6 +1038,7 @@ class LocalSandbox(Sandbox):
                 stderr=stderr_write_fd,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 env=env,
+                cwd=cwd,
             )
         except BaseException:
             # Include interruptions during and after Popen; the read ends have
@@ -1091,20 +1161,29 @@ class LocalSandbox(Sandbox):
 
         Returns ``(stdout, stderr, returncode, timed_out)``.
         """
+        scope = current_command_scope()
+        if scope is not None:
+            scope.check()
+            env = {**(os.environ if env is None else env), COMMAND_OWNER_ENV: scope.token}
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
         process = None
         try:
-            process = subprocess.Popen(
-                args,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_write_fd,
-                stderr=stderr_write_fd,
-                start_new_session=True,
-                env=env,
-            )
+            with scope.lock if scope is not None else nullcontext():
+                if scope is not None:
+                    scope.check()
+                process = subprocess.Popen(
+                    args,
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_write_fd,
+                    stderr=stderr_write_fd,
+                    start_new_session=True,
+                    env=env,
+                )
+                if scope is not None:
+                    scope.processes.append(process)
             # With start_new_session=True, the new process is also the
             # process-group leader, so its PID is the stable group identifier.
             process_group_id = process.pid
@@ -1138,7 +1217,19 @@ class LocalSandbox(Sandbox):
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
         try:
             try:
-                process.wait(timeout=timeout)
+                if scope is None:
+                    process.wait(timeout=timeout)
+                else:
+                    deadline = time.monotonic() + timeout
+                    while process.poll() is None:
+                        if scope.cancelled.is_set():
+                            LocalSandbox._terminate_process_group(process, process_group_id)
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(args, timeout)
+                        with suppress(subprocess.TimeoutExpired):
+                            process.wait(timeout=min(0.1, remaining))
             except subprocess.TimeoutExpired:
                 timed_out = True
                 LocalSandbox._terminate_process_group(process, process_group_id)
@@ -1194,7 +1285,7 @@ class LocalSandbox(Sandbox):
                 pass
 
         try:
-            entries = list_dir(resolved_path, max_depth)
+            entries = list_dir(resolved_path, max_depth, user_data=self._is_user_data_path(path))
         except FileNotFoundError:
             # The requested path may exist only in the container, as the
             # parent of mounted sub-directories (e.g. /mnt/skills with only
@@ -1369,6 +1460,9 @@ class LocalSandbox(Sandbox):
         return mounts
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        # /mnt/user-data is the user's own files: their ``*.log`` upload is
+        # content, not repository noise, even if the host path sits in a checkout.
+        user_data = self._is_user_data_path(path)
         try:
             mounts = self._virtual_search_mounts(path)
             if mounts is not None:
@@ -1380,13 +1474,20 @@ class LocalSandbox(Sandbox):
                     if len(results) <= max_results:
                         # One lookahead match proves whether the combined view
                         # exceeds the cap, without collecting a cap per mount.
-                        matches, _ = find_glob_matches(root, pattern, include_dirs=include_dirs, max_results=max_results - len(results) + 1, relative_prefix=child)
+                        matches, _ = find_glob_matches(
+                            root,
+                            pattern,
+                            include_dirs=include_dirs,
+                            max_results=max_results - len(results) + 1,
+                            relative_prefix=child,
+                            user_data=user_data,
+                        )
                         results.extend(f"{virtual_dir}/{Path(match).relative_to(root).as_posix()}" for match in matches)
                     if len(results) > max_results:
                         return results[:max_results], True
                 return results, False
             resolved_path = Path(self._resolve_path(path))
-            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results, user_data=user_data)
         except OSError as e:
             if e.filename is None:
                 raise
@@ -1406,6 +1507,7 @@ class LocalSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
+        user_data = self._is_user_data_path(path)
         try:
             mounts = self._virtual_search_mounts(path)
             if mounts is not None:
@@ -1419,6 +1521,7 @@ class LocalSandbox(Sandbox):
                         case_sensitive=case_sensitive,
                         max_results=max_results - len(results) + 1,
                         relative_prefix=child,
+                        user_data=user_data,
                     )
                     results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
                     if len(results) > max_results:
@@ -1432,6 +1535,7 @@ class LocalSandbox(Sandbox):
                 literal=literal,
                 case_sensitive=case_sensitive,
                 max_results=max_results,
+                user_data=user_data,
             )
         except OSError as e:
             if e.filename is None:

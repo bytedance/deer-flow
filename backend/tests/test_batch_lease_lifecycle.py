@@ -253,6 +253,7 @@ async def test_initialization_keeps_renewing_for_other_workers(repository, monke
     started, release = threading.Event(), threading.Event()
     setup_executor(monkeypatch, started, release)
     service = make_service(repository)
+    service._config = SubagentBatchesConfig.model_construct(lease_seconds=3)
     renewals, twice = [], asyncio.Event()
     original = repository.renew_item_lease
 
@@ -274,8 +275,8 @@ async def test_initialization_keeps_renewing_for_other_workers(repository, monke
         except TimeoutError:
             pytest.fail("a blocked tool assembly received no periodic lease heartbeat")
         # Just beyond the first renewal's expiry, but before the second one's.
-        peer_time = renewals[0] + timedelta(seconds=10, milliseconds=1)
-        assert await repository.claim_items(now=peer_time, lease_owner="peer", lease_seconds=10, limit=1) == []
+        peer_time = renewals[0] + timedelta(seconds=3, milliseconds=1)
+        assert await repository.claim_items(now=peer_time, lease_owner="peer", lease_seconds=3, limit=1) == []
     finally:
         release.set()
         await asyncio.wait_for(asyncio.gather(*tasks), 3)
@@ -308,17 +309,31 @@ async def test_each_scheduler_claim_has_a_fresh_ownership_generation(repository,
 
 
 @pytest.mark.asyncio
-async def test_recovery_does_not_overwrite_a_renewal_after_its_expiry_read(repository, monkeypatch):
+@pytest.mark.parametrize("batch_paused", [False, True])
+async def test_recovery_does_not_overwrite_a_renewal_after_its_expiry_read(repository, monkeypatch, batch_paused):
     await create_batch(repository)
     now = datetime.now(UTC)
     item = (await repository.claim_items(now=now, lease_owner="live-worker", lease_seconds=10, limit=1))[0]
+    if batch_paused:
+        await repository.pause_batch("batch-lease-test", user_id="user-1")
     paused, release = asyncio.Event(), asyncio.Event()
     original = AsyncSession.execute
     recovery = None
+    recovery_update_rowcounts = []
 
     async def execute(session, statement, *args, **kwargs):
         result = await original(session, statement, *args, **kwargs)
-        if asyncio.current_task() is recovery and not paused.is_set() and getattr(statement, "is_select", False) and "lease_expires_at <" in str(statement):
+        if asyncio.current_task() is recovery and getattr(statement, "is_update", False) and statement.table.name == SubagentBatchItemRow.__tablename__:
+            recovery_update_rowcounts.append(result.rowcount)
+        if (
+            asyncio.current_task() is recovery
+            and not paused.is_set()
+            and getattr(statement, "is_select", False)
+            and "lease_expires_at <" in str(statement)
+            and any(getattr(column, "table", None) is SubagentBatchItemRow.__table__ for column in statement.selected_columns)
+        ):
+            # The parent SELECT also contains the expiry predicate via EXISTS.
+            # Park only after the expired item itself has been read.
             paused.set()
             await release.wait()
         return result
@@ -332,6 +347,7 @@ async def test_recovery_does_not_overwrite_a_renewal_after_its_expiry_read(repos
     finally:
         release.set()
         claimed = await asyncio.wait_for(recovery, 3)
+    assert recovery_update_rowcounts == [0], "recovery must attempt an item update and reject the renewed lease"
     assert claimed == []
     assert await row_snapshot(repository, item["id"]) == expected
 
@@ -343,7 +359,7 @@ async def test_lost_heartbeat_cancels_execution_before_a_long_poll_interval(repo
     release.set()
     setup_executor(monkeypatch, started, release)
     service = make_service(repository)
-    service._config = SubagentBatchesConfig(lease_seconds=10, poll_interval_seconds=60)
+    service._config = SubagentBatchesConfig.model_construct(lease_seconds=3, poll_interval_seconds=60)
     running, cancelled = asyncio.Event(), asyncio.Event()
     mark_running = repository.mark_item_running
 

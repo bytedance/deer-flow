@@ -67,7 +67,8 @@ def test_function_strictness_survives_tool_followup(monkeypatch, shape, strict, 
     requests = []
     clients = []
     responses = []
-    client_class = httpx.Client
+    client_name = "AsyncClient" if invocation == "ainvoke" else "Client"
+    client_class = getattr(httpx, client_name)
 
     def handle(request):
         payload = json.loads(request.content)
@@ -86,7 +87,7 @@ def test_function_strictness_survives_tool_followup(monkeypatch, shape, strict, 
         clients.append(client)
         return client
 
-    monkeypatch.setattr(provider.httpx, "Client", make_client)
+    monkeypatch.setattr(provider.httpx, client_name, make_client)
     history = [HumanMessage(content="Read the quarterly report.")]
 
     if invocation == "invoke":

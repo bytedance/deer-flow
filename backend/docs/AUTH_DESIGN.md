@@ -127,6 +127,7 @@ enum UserScope:
 - `token_version += 1`，使旧 JWT 立即失效。
 - 重新签发 cookie。
 - 如果 `needs_setup=true` 且传了 `new_email`，则更新邮箱并清除 `needs_setup`。
+- `new_email` 已被其他账号使用时返回 `400` `email_already_exists`，不做任何修改；请求进行期间被并发注册的邮箱同样如此。
 
 `python -m app.gateway.auth.reset_admin` 会：
 

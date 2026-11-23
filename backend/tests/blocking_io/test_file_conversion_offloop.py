@@ -93,3 +93,56 @@ async def test_cancelled_conversion_cleanup_failure_preserves_cancellation(
         finish.set()
 
     assert any("partial conversion output" in record.getMessage() for record in caplog.records), "cleanup failure should be logged inside the handler, not escaped"
+
+
+@pytest.mark.parametrize("pdf_converter", ["markitdown", "pymupdf4llm"])
+@pytest.mark.parametrize("warm_cache", [False, True], ids=["cold_config", "cached_config"])
+async def test_conversion_resolves_real_config_in_the_parser_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pdf_converter: str, warm_cache: bool) -> None:
+    from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
+    from deerflow.config.extensions_config import reset_extensions_config
+    from deerflow.utils import file_conversion
+
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    source = tmp_path / "document.pdf"
+
+    def seed_files() -> None:
+        config_path.write_text(f"sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\nuploads:\n  pdf_converter: {pdf_converter}\n", encoding="utf-8")
+        extensions_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+        source.write_text("synthetic source", encoding="utf-8")
+
+    await asyncio.to_thread(seed_files)
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+    reset_extensions_config()
+    config_threads: list[int] = []
+    parser_threads: list[int] = []
+    selected: list[str] = []
+    loop_thread = threading.get_ident()
+
+    def load_config() -> AppConfig:
+        config_threads.append(threading.get_ident())
+        return get_app_config()
+
+    def parse_document(path: Path, converter: str) -> str:
+        parser_threads.append(threading.get_ident())
+        selected.append(converter)
+        return path.read_text(encoding="utf-8") + " converted"
+
+    monkeypatch.setattr(file_conversion, "get_app_config", load_config)
+    monkeypatch.setattr(file_conversion, "_do_convert", parse_document)
+    try:
+        if warm_cache:
+            await asyncio.to_thread(get_app_config)
+        output = await file_conversion.convert_file_to_markdown(source)
+    finally:
+        reset_app_config()
+        reset_extensions_config()
+
+    assert config_threads == parser_threads
+    assert len(config_threads) == 1 and config_threads[0] != loop_thread
+    assert selected == [pdf_converter]
+    assert output is not None
+    assert output == source.with_suffix(".md")
+    assert output.read_text(encoding="utf-8") == "synthetic source converted"

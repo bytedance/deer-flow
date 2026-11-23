@@ -23,12 +23,10 @@ import {
   type InputBoxSubmitOptions,
 } from "@/components/workspace/input-box";
 import { KnowledgeScopeSelector } from "@/components/workspace/knowledge-scope-selector";
-import {
-  MessageList,
-  MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
-} from "@/components/workspace/messages";
+import { MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
+import { SearchableMessageList as MessageList } from "@/components/workspace/search-message-window";
 import {
   SidecarProvider,
   SidecarTrigger,
@@ -36,6 +34,7 @@ import {
 import { ThreadArchiveStatus } from "@/components/workspace/thread-archive-status";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
 import { ThreadExtensionActions } from "@/components/workspace/thread-extension-actions";
+import { ThreadRunInputs } from "@/components/workspace/thread-run-inputs";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
@@ -192,12 +191,21 @@ export default function AgentChatPage() {
     thread,
     pendingUsageMessages,
     sendMessage,
+    sendInput,
+    runInputs,
+    canSendInput,
+    activeRunId,
+    activeRunStartedAt,
     regenerateMessage,
     editAndRegenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    approvalRequests,
+    hasPendingApproval,
+    submitHitlApproval,
+    waitingForInputRunIds,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
@@ -230,6 +238,9 @@ export default function AgentChatPage() {
         });
       }
     },
+    restInterrupts: threadMetadata.data?.interrupts,
+    restInterruptsLoading: threadMetadata.isLoading,
+    restInterruptsError: threadMetadata.isError,
   });
 
   const hasThreadMessages = thread.messages.length > 0;
@@ -358,6 +369,17 @@ export default function AgentChatPage() {
       }
       const executionOptions = {
         ...scopedOptions,
+        onSent: () => {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("message");
+          url.searchParams.delete("message_seq");
+          history.replaceState(
+            null,
+            "",
+            `${url.pathname}${url.search}${url.hash}`,
+          );
+          scopedOptions?.onSent?.();
+        },
         additionalKwargs: {
           ...scopedOptions?.additionalKwargs,
           ...modelInput.additionalKwargs,
@@ -415,6 +437,13 @@ export default function AgentChatPage() {
     },
     [agent_name, currentKnowledgeScopeSnapshot, sendMessage, threadId],
   );
+  const handleSubmitApproval = useCallback(
+    (
+      request: (typeof approvalRequests)[number],
+      responses: Parameters<typeof submitHitlApproval>[2],
+    ) => submitHitlApproval(threadId, request, responses),
+    [submitHitlApproval, threadId],
+  );
 
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -467,7 +496,8 @@ export default function AgentChatPage() {
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
     !isUploading &&
     !thread.isLoading &&
-    !hasOpenHumanInputCard;
+    !hasOpenHumanInputCard &&
+    !hasPendingApproval;
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -563,6 +593,8 @@ export default function AgentChatPage() {
             <main className="flex min-h-0 max-w-full grow flex-col">
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
+                  activeRunId={activeRunId}
+                  activeRunStartedAt={activeRunStartedAt}
                   archiveDownloadsEnabled={
                     isNewThread || isMock || threadMetadata.data != null
                   }
@@ -577,12 +609,25 @@ export default function AgentChatPage() {
                   loadMoreHistory={loadMoreHistory}
                   isHistoryLoading={isHistoryLoading}
                   tokenUsageInlineMode={tokenUsageInlineMode}
+                  approvalRequests={approvalRequests}
+                  approvalMetadataLoading={
+                    hasPendingApproval && approvalRequests.length === 0
+                  }
+                  approvalMetadataError={
+                    hasPendingApproval &&
+                    approvalRequests.length === 0 &&
+                    threadMetadata.isError
+                  }
+                  onReloadApprovalMetadata={() => threadMetadata.refetch()}
+                  waitingForInputRunIds={waitingForInputRunIds}
+                  onSubmitApproval={handleSubmitApproval}
                   canRegenerate={
                     !isNewThread &&
                     !isMock &&
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
                     !isUploading &&
-                    !thread.isLoading
+                    !thread.isLoading &&
+                    !hasPendingApproval
                   }
                   onRegenerateMessage={handleRegenerate}
                   canEdit={editBase && !hasGoal}
@@ -630,6 +675,12 @@ export default function AgentChatPage() {
                           outcome={goalOutcome}
                           isRunning={thread.isLoading}
                           hasOpenHumanInputCard={hasOpenHumanInputCard}
+                          hasPendingApproval={hasPendingApproval}
+                          approvalMetadataError={
+                            hasPendingApproval &&
+                            approvalRequests.length === 0 &&
+                            threadMetadata.isError
+                          }
                         />
                         {hasTodos && (
                           <TodoList
@@ -650,6 +701,13 @@ export default function AgentChatPage() {
                       />
                     </div>
                   )}
+                  <ThreadRunInputs
+                    inputs={runInputs}
+                    threadId={isNewThread || isMock ? undefined : threadId}
+                    isRunning={thread.isLoading}
+                    canCreate={canCreateRuns}
+                    canCancel={canStopStreaming}
+                  />
                   <InputBox
                     className={cn(
                       "bg-background/5 w-full",
@@ -671,7 +729,11 @@ export default function AgentChatPage() {
                       selectorVisible && knowledgeScope ? (
                         <KnowledgeScopeSelector
                           agentName={agent_name}
-                          disabled={thread.isLoading || isUploading}
+                          disabled={
+                            thread.isLoading ||
+                            isUploading ||
+                            hasPendingApproval
+                          }
                           selection={knowledgeScope}
                           unavailableReason={
                             agentKnowledgeEnabled
@@ -703,8 +765,10 @@ export default function AgentChatPage() {
                       isUploading ||
                       modelControl.busy ||
                       (selectorVisible && agent === null) ||
-                      (!isNewThread && isHistoryLoading)
+                      (!isNewThread && isHistoryLoading) ||
+                      hasPendingApproval
                     }
+                    inputLocked={hasPendingApproval}
                     onContextChange={(context, options) => {
                       if (options?.automatic)
                         resolveThreadContext(threadId, context);
@@ -712,6 +776,7 @@ export default function AgentChatPage() {
                     }}
                     onGoalChange={setLocalGoal}
                     onSubmit={handleSubmit}
+                    onBusySubmit={canSendInput ? sendInput : undefined}
                     onStop={handleStop}
                     canStopStreaming={canStopStreaming}
                     canCreateRuns={canCreateRuns}

@@ -267,13 +267,16 @@ def _expand_launcher_variables(value: str, environment: dict[str, str]) -> str:
     """Expand simple shell references in one pass, without executing shell syntax."""
 
     def replace(match: re.Match[str]) -> str:
-        if match[0].startswith("\\"):
-            return match[0][1:]
+        if match[0] == "\\$":
+            return "$"
+        if match[0] == "$$":
+            # One token, as in the shell: its second `$` never starts a reference.
+            return "$$"
         name = match[1] or match[3]
         resolved = environment.get(name, "")
         return match[2] if match[2] is not None and not resolved else resolved
 
-    return re.sub(r"\\?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
+    return re.sub(r"\\\$|\$\$|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
 
 
 def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:

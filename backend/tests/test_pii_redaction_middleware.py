@@ -6,7 +6,11 @@ that the rewrite is request-scoped without mutating the original request or
 messages, the tool-boundary allowlist, and the pinned detector registry.
 """
 
+import random
 import re
+from statistics import median
+from time import process_time
+from timeit import Timer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -20,7 +24,9 @@ from pydantic import Field, ValidationError
 
 from deerflow.agents.middlewares.pii_redaction_middleware import (
     _DETECTORS,
+    _EMAIL_PATTERN,
     PiiRedactionMiddleware,
+    _iter_email_matches,
     _redact_content,
     _Redactor,
     redact_text,
@@ -121,6 +127,57 @@ class TestDetectors:
         )
         assert messages[0].content == f"{EMAIL_ALICE} here"
         assert messages[1].content == f"reply to {EMAIL_ALICE}"
+
+    def test_glued_emails_are_both_redacted(self):
+        # Each second address starts inside the run the first one ended in.
+        messages, _ = _run_model_call(
+            _make_middleware(),
+            [HumanMessage("cc alice@example.com+bob@example.org, alice@example.com_carol@example.com")],
+        )
+        bob_glued = redact_text("+bob@example.org", _PII_CFG)
+        carol_glued = redact_text("_carol@example.com", _PII_CFG)
+        assert messages[0].content == f"cc {EMAIL_ALICE}{bob_glued}, {EMAIL_ALICE}{carol_glued}"
+
+    def test_email_scan_matches_the_reference_pattern(self):
+        rng = random.Random(3190)
+        corpus = ["a@b.cc+c@d.org", "a@b.cc+c@d.org_e@f.gh-g@h.ij", "x.y@a.b.cc.d@e.ff", "a@b.c", "@@a@b.cc", "a" * 64 + "@b.cc"]
+        for alphabet in ("ab.%+-_@xy1. Z", "a@.b-+", "aA1@.-_%+ ,;\n"):
+            corpus += ["".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40))) for _ in range(5000)]
+        for text in corpus:
+            expected = [match.span() for match in _EMAIL_PATTERN.finditer(text)]
+            assert [match.span() for match in _iter_email_matches(text)] == expected, text
+
+    @pytest.mark.parametrize(
+        "make_payload",
+        [
+            pytest.param(lambda n: "a" * n, id="letters"),
+            pytest.param(lambda n: ("0123456789abcdef" * n)[:n], id="hex"),
+            # One worst shape per other detector, so the AGENTS.md rule that
+            # every detector stays linear is pinned, not only stated.
+            pytest.param(lambda n: ("sk-ghp_xoxb-AIzaAKIA" * n)[:n], id="api-key-prefixes"),
+            pytest.param(lambda n: "1" * n, id="digits"),
+            pytest.param(lambda n: ("1 1-1." * n)[:n], id="digit-separators"),
+            pytest.param(lambda n: ("+1 (212) " * n)[:n], id="phone-prefixes"),
+            pytest.param(lambda n: ("ABCD123456" * n)[:n], id="rfc-letters-digits"),
+        ],
+    )
+    def test_redaction_stays_linear_on_whitespace_free_text(self, make_payload):
+        # The quadratic email scan took ~6 s for 100 KB of hex. Doubling the
+        # input takes ~4x as much work for that scan and ~2x for a linear scan.
+        def redaction_timer(size):
+            payload = make_payload(size)
+            return Timer(lambda: redact_text(payload, _PII_CFG), timer=process_time)
+
+        small_timer = redaction_timer(32768)
+        large_timer = redaction_timer(65536)
+        # CPU time excludes runner pauses. Calibrate the batch size above the
+        # clock's resolution and sample both sizes together to limit drift.
+        repeats, _ = small_timer.autorange()
+        samples = [(small_timer.timeit(repeats), large_timer.timeit(repeats)) for _ in range(3)]
+        small_elapsed, large_elapsed = (median(times) / repeats for times in zip(*samples))
+
+        assert small_elapsed < 1.0, f"redaction took {small_elapsed:.2f}s"
+        assert large_elapsed / small_elapsed < 3, f"redaction looks superlinear: 32K took {small_elapsed:.4f}s, 64K took {large_elapsed:.4f}s"
 
     def test_openai_style_api_key_redacted(self):
         messages, _ = _run_model_call(

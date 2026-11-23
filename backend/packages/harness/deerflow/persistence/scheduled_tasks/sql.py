@@ -316,7 +316,12 @@ class ScheduledTaskRepository:
         error: str,
         now: datetime,
     ) -> str:
-        """Delete a task only before queue execution begins."""
+        """Delete a task only before queue execution begins.
+
+        This is the repository's only delete. Occurrences carry no foreign key
+        to their task, so a plain row delete would also remove a task whose
+        occurrence is already launching or running.
+        """
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
@@ -430,15 +435,6 @@ class ScheduledTaskRepository:
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
-
-    async def delete(self, task_id: str, *, user_id: str) -> bool:
-        async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            if row is None or row.user_id != user_id:
-                return False
-            await session.delete(row)
-            await session.commit()
-            return True
 
     async def claim_due_tasks(
         self,
@@ -1031,7 +1027,14 @@ class ScheduledTaskRepository:
         finally:
             if self._recovery_terminal_publisher is not None:
                 for target in recovery_targets:
-                    await self._recovery_terminal_publisher.publish(target)
+                    confirmation = await self._recovery_terminal_publisher.publish(target)
+                    if not confirmation.confirmed:
+                        logger.warning(
+                            "Scheduled recovery terminal publication for run %s returned %s",
+                            target.run_id,
+                            confirmation.value,
+                            extra={"run_id": target.run_id, "recovery_path": "reconcile_stuck_once_tasks", "confirmation": confirmation.value},
+                        )
 
     async def _reconcile_stuck_once_tasks(
         self,
@@ -1087,6 +1090,8 @@ class ScheduledTaskRepository:
                             run_id=candidate.run_id,
                             user_id=candidate.user_id,
                             operation_kind=candidate.operation_kind,
+                            run_incarnation=candidate.run_incarnation,
+                            retention_revision=candidate.evidence_retention_revision,
                         )
                         if target is not None:
                             recovery_targets.append(target)
