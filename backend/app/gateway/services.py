@@ -3050,6 +3050,9 @@ async def start_run(
                     message = _current_human_message(graph_input)
                     assert message is not None
                     stage = queued_attachments.stage
+                    # Persist the fence before any copy. Recovery and a late
+                    # publisher must agree on which attempt owns this stage.
+                    await queued_attachments.source.begin_attachment_publication(queued_attachments.input_id, record.run_id, attempt=queued_attachments.attempt)
                     try:
                         files = await publish_input_files(thread_id, record.user_id, stage["id"], stage["files"], request=request, config=app_config, on_published=record_attachment_publication)
                     except Exception as exc:
@@ -3152,7 +3155,7 @@ async def start_run(
                             kwargs={
                                 "input": run_record_input,
                                 **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
-                                **({"queued_input_request_hash": knowledge_default_request_hash} if queued_attachments is not None else {}),
+                                **({"queued_input_request_hash": knowledge_default_request_hash, "queued_input_checks_publication": True} if queued_attachments is not None else {}),
                                 "config": redact_config_secrets(body.config),
                                 **({"conversation_references": conversation_references} if conversation_references else {}),
                             },

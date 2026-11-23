@@ -87,14 +87,37 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
     fixing the langgraph route does not accidentally touch the upload route's
     existing configuration."""
     content = _read(path)
-    selector = r"^/api/threads/[^/]+/(uploads|runs/[^/]+/inputs$)"
-    block = _extract_location_block(content, f"~ {selector}")
+    block = _extract_location_block(content, r"~ ^/api/threads/[^/]+/uploads")
 
     assert "client_max_body_size 100M;" in block
     assert "proxy_request_buffering off;" in block
-    assert re.match(selector, "/api/threads/t/uploads")
-    assert re.match(selector, "/api/threads/t/runs/r/inputs")
-    assert not re.match(selector, "/api/threads/t/runs/r/inputs/i/retry")
+
+
+def _matching_thread_location(content: str, request_path: str) -> str:
+    for pattern in re.findall(r"^\s*location ~ (\S+) \{", content, re.M):
+        if re.match(pattern, request_path):
+            return _extract_location_block(content, f"~ {pattern}")
+    raise AssertionError(f"no regex location matched {request_path}")
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_run_input_submission_allows_multipart_framing(path):
+    content = _read(path)
+    block = _matching_thread_location(content, "/api/threads/t/runs/r/inputs")
+
+    assert _parse_body_size_bytes(block) == 101 * 1024**2
+    assert "proxy_request_buffering off;" in block
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_run_input_submission_preserves_threads_read_timeout(path):
+    content = _read(path)
+    block = _matching_thread_location(content, "/api/threads/t/runs/r/inputs")
+    generic = _extract_location_block(content, "~ ^/api/threads")
+
+    assert _parse_read_timeout_seconds(block) >= _parse_read_timeout_seconds(generic)
+    assert _matching_thread_location(content, "/api/threads/t/runs/r/inputs/i/retry") == generic
+    assert _matching_thread_location(content, "/api/threads/t/runs/r/inputs/i") == generic
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)

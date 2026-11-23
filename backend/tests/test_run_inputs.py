@@ -324,6 +324,8 @@ async def test_attachment_publication_failure_ignores_a_late_dispatch_receipt(in
     item = (await inputs.read())["items"][0]
     assert item["status"] == "not_applied"
     assert "run_id" not in item
+    with pytest.raises(InputConflict):
+        await inputs.begin_attachment_publication("q", "failed-run", attempt=0)
 
     retry = await inputs.claim("q", retry=True)
     assert retry["attachment_attempt"] == 1
@@ -333,6 +335,11 @@ async def test_attachment_publication_failure_ignores_a_late_dispatch_receipt(in
     retry = await inputs.claim("q", retry=True)
     assert retry["run_id"] == "next-run"
     assert "published" not in retry["attachment_stage"]
+
+    await inputs.begin_attachment_publication("q", "next-run", attempt=1)
+    uncertain = await inputs.publication_failed("q", "next-run", attempt=1, require_unstarted=True)
+    assert uncertain["status"] == "dispatching"
+    assert uncertain["run_id"] == "next-run"
 
     await inputs.publication_succeeded("q", "next-run", attempt=1)
     await inputs.publication_failed("q", "next-run", attempt=1)

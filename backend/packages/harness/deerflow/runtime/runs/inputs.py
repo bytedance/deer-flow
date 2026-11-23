@@ -143,11 +143,27 @@ class RunInputs:
                 return
             if item.get("run_id") not in (None, run_id):
                 raise InputConflict("Queued input already belongs to another Run")
-            item.update(status="applied", run_id=run_id)
+            item["run_id"] = run_id
+            stage = item.get("attachment_stage")
+            # Keep polling admitted attachments until the worker publishes them.
+            if not stage or stage.get("published") is True:
+                item["status"] = "applied"
 
         await self._change(change)
 
-    async def publication_failed(self, input_id: str, run_id: str, *, attempt: int) -> None:
+    async def begin_attachment_publication(self, input_id: str, run_id: str, *, attempt: int) -> None:
+        def change(state, row):
+            item = next(x for x in state["items"] if x["id"] == input_id)
+            stage = item.get("attachment_stage")
+            if not stage or stage.get("published") is True or item["status"] not in ("dispatching", "applied"):
+                raise InputConflict("Queued attachment is no longer dispatching")
+            if item.get("attachment_attempt", 0) != attempt or item.get("run_id") not in (None, run_id) or stage.get("publishing_attempt") == attempt:
+                raise InputConflict("Queued attachment dispatch changed")
+            stage["publishing_attempt"] = attempt
+
+        await self._change(change)
+
+    async def publication_failed(self, input_id: str, run_id: str, *, attempt: int, require_unstarted: bool = False) -> dict:
         def change(state, row):
             item = next(x for x in state["items"] if x["id"] == input_id)
             stage = item.get("attachment_stage")
@@ -155,10 +171,13 @@ class RunInputs:
                 return
             if item.get("attachment_attempt", 0) != attempt or item.get("run_id") not in (None, run_id):
                 return
+            if require_unstarted and stage.get("publishing_attempt") == attempt:
+                return
             item.pop("run_id", None)
             item.update(status="not_applied", attachment_attempt=attempt + 1)
 
-        await self._change(change)
+        state = await self._change(change)
+        return next(x for x in state["items"] if x["id"] == input_id)
 
     async def publication_succeeded(self, input_id: str, run_id: str, *, attempt: int) -> None:
         def change(state, row):
@@ -166,6 +185,8 @@ class RunInputs:
             stage = item.get("attachment_stage")
             if stage and item["status"] in ("dispatching", "applied") and item.get("attachment_attempt", 0) == attempt and item.get("run_id") in (None, run_id):
                 stage["published"] = True
+                if item.get("run_id") == run_id:
+                    item["status"] = "applied"
 
         await self._change(change)
 

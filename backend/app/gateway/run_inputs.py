@@ -16,6 +16,7 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_agent_runs, get_config, get_current_user, get_run_manager
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
+from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,20 @@ def _input_receipt(item: dict, run_id: str) -> dict:
     return {**receipt, "target_run_id": run_id}
 
 
+async def _recover_unpublished_input(inputs: RunInputs, thread_id: str, entry: dict) -> dict:
+    stage = entry.get("attachment_stage")
+    child_id = entry.get("run_id")
+    attempt = entry.get("attachment_attempt", 0)
+    if not stage or not child_id or entry["status"] not in ("dispatching", "applied") or stage.get("published") is True or stage.get("publishing_attempt") == attempt:
+        return entry
+    child = await inputs.store.get(child_id, user_id=inputs.user_id)
+    # Older admission records never fenced publication. Missing proof is
+    # ambiguous for those runs, as it is when the worker crossed the fence.
+    if child is None or child["thread_id"] != thread_id or child["status"] not in (RunStatus.error, RunStatus.interrupted, RunStatus.timeout) or (child.get("kwargs") or {}).get("queued_input_checks_publication") is not True:
+        return entry
+    return await inputs.publication_failed(entry["id"], child_id, attempt=attempt, require_unstarted=True)
+
+
 def _worker_input_receipt(item, run_id, request_id, consuming_run=None, cancelled=False):
     return {
         "id": request_id,
@@ -204,10 +219,13 @@ async def list_thread_inputs(thread_id: str, request: Request):
             _, run, key = item["request_id"].split(":", 2)
             items.append(_worker_input_receipt(item, run, key, consuming_run, cancelled))
         return {"items": items, "active_run_id": active}
-    rows = await _store(request).list_input_runs(thread_id, user_id=user_id)
+    store = _store(request)
+    rows = await store.list_input_runs(thread_id, user_id=user_id)
     items = []
     for row in reversed(rows):
+        inputs = RunInputs(store, row["run_id"], user_id)
         for entry in (row.get("run_inputs") or {}).get("items", []):
+            entry = await _recover_unpublished_input(inputs, thread_id, entry)
             status = entry["status"]
             if status in ("pending", "applying") and (row["status"] not in ("pending", "running", "success") or row.get("stop_reason")):
                 status = "not_applied"
@@ -222,7 +240,7 @@ async def list_thread_inputs(thread_id: str, request: Request):
     # returns 32 unresolved rows and no receipts for submission reconciliation;
     # that trade-off follows the priority the issue asks for.
     keep = sorted(range(len(items)), key=lambda i: (items[i]["status"] in ("applied", "cancelled"), -i))[:32]
-    return {"items": [items[i] for i in sorted(keep)], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
+    return {"items": [items[i] for i in sorted(keep)], "active_run_id": await store.active_input_run(thread_id, user_id=user_id)}
 
 
 async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: str):
@@ -273,10 +291,15 @@ async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=Fals
     user_id = await get_current_user(request)
     if user_id is None:
         raise HTTPException(401, "Authentication required")
-    source = await _store(request).get(run_id, user_id=user_id)
+    store = _store(request)
+    source = await store.get(run_id, user_id=user_id)
     if source is None or source["thread_id"] != thread_id:
         raise HTTPException(404, "Run not found")
-    inputs = RunInputs(_store(request), run_id, user_id)
+    inputs = RunInputs(store, run_id, user_id)
+    if retry:
+        original = next((entry for entry in (source.get("run_inputs") or {}).get("items", []) if entry["id"] == input_id), None)
+        if original is not None:
+            await _recover_unpublished_input(inputs, thread_id, original)
     entry = await inputs.claim(input_id, retry=retry)
     if entry.get("run_id"):
         run = await get_run(thread_id, entry["run_id"], request)
@@ -331,6 +354,9 @@ async def change_run_input(thread_id: str, run_id: str, input_id: str, request: 
                 raise HTTPException(403, "An unapplied input requires an explicit user retry")
             dispatched = await dispatch_one_input(thread_id, run_id, input_id, request, retry=True)
             return {"run_id": dispatched.run_id}
+        original = next((entry for entry in (await inputs.read())["items"] if entry["id"] == input_id), None)
+        if original is not None:
+            await _recover_unpublished_input(inputs, thread_id, original)
         await await_drained(_cancel_input(inputs, thread_id, user_id, input_id))
         return {"removed": True}
     except InputConflict as exc:

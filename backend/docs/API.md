@@ -280,9 +280,11 @@ The input receipt and `GET /api/threads/{thread_id}/inputs` show attachment
 names and sizes. Files become readable by the Agent when the queued message's
 run starts. An available filename is preserved. If a name is taken, the
 Gateway picks an available name and remembers it for publication retries.
-If publication fails before the Agent receives the message, the same input
-can be removed or retried without another upload. Retrying after a lost
-dispatch receipt still reuses the accepted run. On startup, the Gateway
+An attachment input stays dispatching until the files are published. If its
+run stops before publication starts, or publication fails before the Agent
+receives the message, the same input can be removed or retried without another
+upload. An uncertain dispatch or publication outcome reuses the accepted run.
+On startup, the Gateway
 cleans up abandoned staging directories older than 24 hours.
 Remote sandboxes without thread-data mounts need Python 3 to publish queued
 attachments and reconcile partial transfers.

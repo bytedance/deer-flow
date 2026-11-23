@@ -1063,6 +1063,86 @@ async def test_attachment_only_queue_retry_reconciles_a_lost_dispatch_receipt(wo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["list_then_retry", "retry", "remove"])
+async def test_queued_attachment_can_recover_when_child_stops_before_publication(worker_gateway, monkeypatch, action):
+    import asyncio
+
+    from deerflow.config.paths import get_paths
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="queue-unstarted-child")
+    screenshot = _png("purple")
+    paths = get_paths()
+    staging = paths.thread_dir(thread, user_id=owner) / ".queued-uploads"
+    start_child = asyncio.Event()
+    pending_child = asyncio.Event()
+    receipt_written = asyncio.Event()
+    first_child = None
+    try_start = state.run_manager.try_start
+    dispatched = RunInputs.dispatched
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    thread_inputs = f"/api/threads/{thread}/inputs"
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    input_url = f"{inputs_url}/attachment"
+
+    async def hold_first_child(run_id):
+        nonlocal first_child
+        if first_child is None:
+            first_child = run_id
+            pending_child.set()
+            await start_child.wait()
+        return await try_start(run_id)
+
+    async def observe_receipt(self, input_id, run_id, *, attempt=0):
+        await dispatched(self, input_id, run_id, attempt=attempt)
+        if input_id == "attachment":
+            receipt_written.set()
+
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        monkeypatch.setattr(state.run_manager, "try_start", hold_first_child)
+        monkeypatch.setattr(RunInputs, "dispatched", observe_receipt)
+        (await _submit_screenshot(client, inputs_url, "attachment", "read screenshot", screenshot)).raise_for_status()
+        (stage,) = staging.iterdir()
+        state.release_worker.set()
+        await asyncio.wait_for(pending_child.wait(), 5)
+        await asyncio.wait_for(receipt_written.wait(), 5)
+        assert (await runs.get(thread_id=thread, run_id=first_child)).status == "pending"
+        (receipt,) = (await client.get(thread_inputs)).raise_for_status().json()["items"]
+        assert receipt["status"] == "dispatching"
+        assert receipt["run_id"] == first_child
+
+        if action == "remove":
+            # A restarted Gateway sees the durable child but has no worker for it.
+            restarted = RunManager(store=state.run_store)
+            recovered = await restarted.reconcile_orphaned_inflight_runs(error="Gateway restarted", stop_reason="orphan_recovered")
+            assert [run.run_id for run in recovered] == [first_child]
+            (await client.delete(input_url)).raise_for_status()
+            assert not stage.exists()
+        else:
+            await runs.cancel(thread_id=thread, run_id=first_child)
+            start_child.set()
+            child = await state.run_manager.get(first_child, user_id=owner)
+            await asyncio.wait_for(asyncio.shield(child.task), 5)
+            if action == "list_then_retry":
+                (receipt,) = (await client.get(thread_inputs)).raise_for_status().json()["items"]
+                assert receipt["status"] == "not_applied"
+                assert "run_id" not in receipt
+            assert stage.is_dir()
+            reply = (await client.post(f"{input_url}/retry")).raise_for_status().json()
+            assert reply["run_id"] != first_child
+            assert (await client.post(f"{input_url}/retry")).raise_for_status().json() == reply
+            assert (await runs.wait(thread_id=thread, run_id=reply["run_id"], timeout=5)).status == "success"
+            assert (paths.sandbox_uploads_dir(thread, user_id=owner) / "screenshot.png").read_bytes() == screenshot
+            assert not stage.exists()
+    finally:
+        state.release_worker.set()
+        start_child.set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["retry", "remove"])
 async def test_queued_attachment_publication_failure_leaves_input_actionable(worker_gateway, monkeypatch, action):
     import asyncio
