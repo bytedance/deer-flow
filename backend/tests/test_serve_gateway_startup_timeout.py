@@ -93,7 +93,9 @@ def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, a
         capture_output=True,
         encoding="utf-8",
         errors="replace",
-        timeout=20,
+        # Each simulated second may also run the netstat fallback. On Windows
+        # that command substitution is slow enough that 145 polls exceed 20s.
+        timeout=60,
         check=False,
     )
 
@@ -326,3 +328,83 @@ source "$@"
     assert "port 8001 is already in use" in result.stdout
     assert not marker.exists()
     assert not (tmp_path / "started").exists()
+
+
+# German netstat translates LISTENING to ABHÖREN and ESTABLISHED to HERGESTELLT.
+# The foreign address of a listener stays 0.0.0.0:0 or [::]:0.
+_GERMAN_NETSTAT = """
+  TCP    127.0.0.1:8001         0.0.0.0:0              ABHÖREN         9
+  TCP    [::1]:8001             [::]:0                 ABHÖREN         9
+  TCP    10.0.0.1:50000         1.2.3.4:8001           HERGESTELLT     9
+"""
+
+
+def test_windows_netstat_accepts_a_localized_listening_state(tmp_path: Path) -> None:
+    result = _run_port_probe(tmp_path, "port-listening.sh", ["8001"], uname_s="MINGW64_NT-10.0", netstat_flag="-ano", netstat_stdout=_GERMAN_NETSTAT)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_windows_netstat_ignores_a_localized_established_connection(tmp_path: Path) -> None:
+    established = "  TCP    10.0.0.1:50000         1.2.3.4:8001           HERGESTELLT     9\n"
+    result = _run_port_probe(tmp_path, "port-listening.sh", ["8001"], uname_s="MINGW64_NT-10.0", netstat_flag="-ano", netstat_stdout=established)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def _run_fallback_probe(tmp_path: Path, prelude: str) -> subprocess.CompletedProcess[str]:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copy2(REPO_ROOT / "scripts" / "port-listening.sh", scripts / "port-listening.sh")
+    hung = tmp_path / "hung-helper"
+    bash = require_script_bash()
+    env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV"}}
+    env.update(
+        OSTYPE="linux-gnu",
+        TEST_HUNG=hung.as_posix(),
+        TEST_SCRIPT=(scripts / "port-listening.sh").as_posix(),
+    )
+    result = subprocess.run(
+        [bash, "-c", prelude, "fallback-probe", "8001"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=8,
+        check=False,
+    )
+    assert not hung.exists(), result.stdout + result.stderr
+    return result
+
+
+def test_lsof_miss_falls_through_to_ss(tmp_path: Path) -> None:
+    result = _run_fallback_probe(
+        tmp_path,
+        r"""
+lsof() { return 1; }
+ss() {
+    printf '%s\n' 'State Recv-Q Send-Q Local Address:Port Peer Address:Port'
+    printf '%s\n' 'LISTEN 0 128 127.0.0.1:8001 0.0.0.0:*'
+}
+netstat() { printf hung > "$TEST_HUNG"; sleep 30; }
+export -f lsof ss netstat
+bash "$TEST_SCRIPT" "$@"
+""",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_lsof_and_ss_miss_falls_through_to_netstat(tmp_path: Path) -> None:
+    result = _run_fallback_probe(
+        tmp_path,
+        r"""
+lsof() { return 1; }
+ss() { return 1; }
+netstat() {
+    printf '%s\n' 'tcp 0 0 127.0.0.1:8001 0.0.0.0:* LISTEN'
+    return 0
+}
+export -f lsof ss netstat
+bash "$TEST_SCRIPT" "$@"
+""",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

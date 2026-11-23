@@ -8,7 +8,8 @@
 # Git Bash has no lsof or ss. Get-NetTCPConnection does not return when
 # powershell.exe stdout is redirected, which freezes the wait loop before its
 # timeout can start. Windows netstat -ano reports the listener directly: the
-# local address is column 2 and the state is column 4.
+# local address is column 2 and a listening socket's foreign address is
+# 0.0.0.0:0 or [::]:0. The state word is translated (LISTENING, ABHÖREN, …).
 #
 # Detect Windows from $OSTYPE and parse netstat in the shell. uname(1) and
 # awk(1) are MSYS programs, and the same make → cmd → Git Bash session that
@@ -23,24 +24,26 @@ _is_windows_shell() {
     return 1
 }
 
-# Windows columns: Proto Local Foreign State PID. Match the local port only,
-# so an established connection to :8001 or a listener on :18001 does not count.
+# Windows columns: Proto Local Foreign State PID. A listener's foreign address
+# is 0.0.0.0:0 or [::]:0 in every locale. Match that and the local port, so an
+# established connection to :8001 or a listener on :18001 does not count.
 _windows_netstat_listening() {
-    local port="$1" line state addr listing
+    local port="$1" line foreign addr listing
     # Capture netstat in one substitution. A process substitution here never
     # returns under the Git Bash that `make` starts from cmd.exe.
     listing="$(netstat -ano 2>/dev/null || true)"
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"
         [ -n "$line" ] || continue
+        set -f
         # shellcheck disable=SC2086
         set -- $line
+        set +f
         [ "$1" = "TCP" ] || [ "$1" = "TCP6" ] || continue
-        state=$4
-        case "$state" in
-            [Ll][Ii][Ss][Tt][Ee][Nn]|[Ll][Ii][Ss][Tt][Ee][Nn][Ii][Nn][Gg]) ;;
-            *) continue ;;
-        esac
+        foreign=$3
+        if [ "$foreign" != "0.0.0.0:0" ] && [ "$foreign" != "[::]:0" ]; then
+            continue
+        fi
         addr=$2
         if [ "${addr##*:}" = "$port" ]; then
             return 0
@@ -64,19 +67,18 @@ port_is_listening() {
         return 1
     fi
 
-    # lsof and ss answer on their own. Falling through to netstat on every
-    # miss makes the startup wait pay for a full netstat scan per second, and
-    # on Git Bash that scan is slow enough to blow the launcher's real timeout.
+    # A miss is not final. lsof can be installed and still fail to see another
+    # user's listener, while ss or netstat can see it.
     if command -v lsof >/dev/null 2>&1; then
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1
-        return $?
+        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+            return 0
+        fi
     fi
 
     if command -v ss >/dev/null 2>&1; then
         if ss -ltn "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .; then
             return 0
         fi
-        return 1
     fi
 
     if command -v netstat >/dev/null 2>&1; then
