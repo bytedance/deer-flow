@@ -173,7 +173,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             if execution is None or execution.task_id != task_id or execution.epoch != task.execution_epoch or task.status != TaskStatus.RUNNING:
                 raise TaskConflict("Task no longer accepts this execution")
             worker = await session.get(Assignment, (task_id, execution.epoch))
-            return worker.to_dict(), execution.frozen_input, task.project_id
+            return worker.to_dict(), execution.frozen_input, task.project_id, task.run_settings
 
     async def list_artifacts(self, owner, task_id, *, limit, offset):
         async with self._sessions() as session:
