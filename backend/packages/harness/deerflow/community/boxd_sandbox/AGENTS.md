@@ -31,3 +31,6 @@ cd backend && python -m pytest tests -q -k "boxd"
 - **Claims decide when a cancelled acquire releases.** Each caller that
   receives a sandbox holds a claim; a cancelled caller gives its claim back
   under the scope serializer, and the last one releases the sandbox.
+  Sandbox IDs include the machine generation so stale releases cannot consume
+  a replacement's claims. Serialize lifecycle work and find warm machines by
+  the stable scope token.

@@ -1348,11 +1348,13 @@ class TestCheckSandbox:
         assert results[0].status == "ok"
         assert results[0].detail == "Local sandbox"
 
-    def test_local_sandbox_with_disabled_host_bash_warns(self, tmp_path):
+    @pytest.mark.parametrize("legacy_setting", ["false", "true"])
+    def test_local_sandbox_with_bash_tool_points_to_isolated_provider(self, tmp_path, legacy_setting):
         cfg = tmp_path / "config.yaml"
-        cfg.write_text("config_version: 5\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\n  allow_host_bash: false\ntools:\n  - name: bash\n    use: deerflow.sandbox.tools:bash_tool\n")
+        cfg.write_text(f"config_version: 5\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\n  allow_host_bash: {legacy_setting}\ntools:\n  - name: bash\n    use: deerflow.sandbox.tools:bash_tool\n", encoding="utf-8")
         results = doctor.check_sandbox(cfg)
-        assert any(result.status == "warn" for result in results)
+        [warning] = [result for result in results if result.status == "warn"]
+        assert "isolated sandbox provider" in warning.fix
 
     def test_container_sandbox_without_runtime_warns(self, tmp_path, monkeypatch):
         cfg = tmp_path / "config.yaml"

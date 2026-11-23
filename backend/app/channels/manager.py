@@ -2327,10 +2327,7 @@ class ChannelManager:
           ``ClarificationMiddleware`` would otherwise dead-end a webhook
           run waiting for a synchronous reply that only arrives as a
           later, separate webhook delivery.
-        * Channel-specific credentials provider — e.g. the GitHub channel
-          installs a token-mint callable so ``bash_tool`` can resolve a
-          fresh installation token on every invocation (longer than the
-          1h GitHub TTL).
+        * Optional channel-specific credentials provider.
 
         ``recursion_limit`` is applied inside :meth:`_resolve_run_params`
         instead because it lives on ``run_config`` (not ``run_context``)
@@ -3411,11 +3408,7 @@ class ChannelManager:
         pinned_model_value = run_context.get("model_name")
         expected_pin = pinned_model_value.strip() if isinstance(pinned_model_value, str) and pinned_model_value.strip() else None
 
-        # Apply per-channel policy: credentials provider (e.g. GitHub
-        # installation-token mint) and the non-interactive flag for
-        # webhook channels. Driven by CHANNEL_RUN_POLICY so each new
-        # webhook channel is a one-row registration, not a fresh
-        # if-branch here.
+        # Apply the run policy registered by the channel.
         policy = await self._apply_channel_policy(msg, run_context)
 
         # If the inbound message contains file attachments, let the channel

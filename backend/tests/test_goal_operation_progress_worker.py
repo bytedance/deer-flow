@@ -6,7 +6,6 @@ progress counting, and all existing worker guards execute production code.
 
 from __future__ import annotations
 
-import os
 import socket
 from types import SimpleNamespace
 
@@ -34,6 +33,7 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.runs import worker
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.sandbox.sandbox import CommandOutput
 from deerflow.sandbox.tools import bash_tool, read_file_tool, write_file_tool
 
 
@@ -296,16 +296,18 @@ def _native_tool_graph(tmp_path, monkeypatch, *, receipts):
     (tmp_path / "workspace").mkdir()
     (tmp_path / "workspace/input.txt").write_text("Stable input contents.\n", encoding="utf-8")
     sandbox = LocalSandbox("local", path_mappings=[PathMapping("/mnt/user-data/workspace", str(tmp_path / "workspace"))])
-    monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.build_sandbox_env", lambda _injected: {"PATH": os.defpath})
-    # Bind only execution policy and the test-owned sandbox; tools, their real
-    # results, normalization, receipt stamping and worker decisions stay native.
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    command_sandbox = SimpleNamespace(execute_command=lambda command, **kwargs: CommandOutput("Exit Code: 2", exit_code=2))
 
-    async def initialized(_runtime):
+    def initialized(runtime):
+        if runtime.state["sandbox"]["sandbox_id"] == "fixture:command":
+            return command_sandbox
         return sandbox
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized_async", initialized)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+    async def initialized_async(runtime):
+        return initialized(runtime)
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", initialized)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized_async", initialized_async)
     errors = ToolErrorHandlingMiddleware()
     receipt = ToolReceiptMiddleware() if receipts else None
 
@@ -324,7 +326,7 @@ def _native_tool_graph(tmp_path, monkeypatch, *, receipts):
 
 async def _native_tool_turn(graph, tmp_path, *, thread_id, turn, kind):
     args = (
-        {"command": f"env -i /bin/sh -c 'exit 2' # attempt-{turn}", "description": "Controlled failing command"}
+        {"command": f"exit 2 # attempt-{turn}", "description": "Controlled failing command"}
         if kind == "failed-bash"
         else {"path": "/mnt/user-data/workspace/input.txt", "description": f"Read attempt {turn}"}
         if kind == "same-read"
@@ -333,7 +335,7 @@ async def _native_tool_turn(graph, tmp_path, *, thread_id, turn, kind):
     tool_name = {"failed-bash": "bash", "same-read": "read_file", "same-write": "write_file"}[kind]
     state = await graph.ainvoke(
         {
-            "sandbox": {"sandbox_id": "local"},
+            "sandbox": {"sandbox_id": "fixture:command" if kind == "failed-bash" else "local"},
             "thread_data": {f"{name}_path": str(tmp_path / name) for name in ("workspace", "uploads", "outputs")},
             "messages": [AIMessage(content="", tool_calls=[{"id": f"native-{turn}", "name": tool_name, "args": args}])],
         },
@@ -343,7 +345,6 @@ async def _native_tool_turn(graph, tmp_path, *, thread_id, turn, kind):
     return [*state["messages"], AIMessage(content="Work remains.", id=f"native-final-{turn}")], result
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Controlled native LocalSandbox commands use a POSIX shell")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["full", "delta"])
 @pytest.mark.parametrize("receipts", [False, True], ids=["receipts-off", "receipts-on"])
@@ -374,7 +375,6 @@ async def test_native_tool_results_cannot_buy_goal_continuations(tmp_path, monke
         assert (tmp_path / "workspace/input.txt").read_text(encoding="utf-8") == "Stable input contents.\n"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Controlled native LocalSandbox commands use a POSIX shell")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["full", "delta"])
 @pytest.mark.parametrize("receipts", [False, True], ids=["receipts-off", "receipts-on"])

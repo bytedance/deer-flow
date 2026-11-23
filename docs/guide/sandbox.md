@@ -3,14 +3,15 @@
 ## Sandbox Mode
 
 DeerFlow supports multiple sandbox execution modes:
-- **Local Execution** (runs sandbox code directly on the host machine)
+- **Local Workspace** (files through workspace tools and configured mounts)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
-Local bash tool status follows the process exit code, including timeout failures.
-Successful commands may print `Error:` or JSON containing an `error` field without
-being marked as failed. Output is still subject to the configured redaction and
-size limits; those transformations do not change the execution status.
+When a provider returns a structured exit code, Bash tool status follows that
+code, including timeout failures. Providers that return plain text, including
+AIO, use output-based status detection. A command that exits successfully can be
+reported as a failure if it prints `Error:` or JSON with an `error` field.
+Configured redaction and output limits still apply.
 
 The optional [Tenki provider](../../backend/packages/harness/deerflow/community/tenki/README.md)
 retains failed termination handles for retry and rejects late acquisitions after
@@ -38,7 +39,10 @@ checkpoint, the runtime resolves the reference against the authenticated user
 and thread before a tool can reuse it. A missing runtime thread ID raises an
 error even when the referenced sandbox is cached.
 
-When host Bash is enabled for Local Execution, DeerFlow starts OS detection with `uname -s`, then uses `sw_vers` on Darwin. On Linux, it reads host system files such as `/etc/os-release` only when the active sandbox policy permits it. Host filesystem path checks still apply; after a blocked path, the agent is directed to use a permitted command-only probe or virtual path instead of repeating the rejected command.
+Local workspaces use the dedicated file tools. Switch to an isolated sandbox
+provider for workflows that need Bash. A config that opts into host Bash with
+`allow_host_bash: true` still loads with the local provider and logs a migration
+warning.
 
 For Docker development and production, service startup follows the configured
 sandbox mode, including when the `sandbox:` header or `use` field has a trailing
@@ -125,6 +129,39 @@ saved API error responses and avoids blocking later reads when the optional
 `tool_progress` guard is enabled. Actual read failures and output truncation
 still retain their error or partial-result status.
 
+## Redis Cluster for shared sandbox ownership
+
+Gateways sharing AIO containers or E2B VMs can store ownership leases in Redis
+Cluster. E2B uses the same connection settings for its deployment-wide capacity
+ledger. Configure the same cluster and key prefix on every Gateway.
+
+```yaml
+sandbox:
+  ownership:
+    type: redis
+    redis_mode: cluster
+    redis_url: $DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL
+    redis_cluster_nodes:
+      - redis-1:6379
+      - redis-2:6379
+```
+
+Set the seed URL to `redis://host:port/0` or `rediss://user:password@host:port/0`
+for TLS and ACL authentication. Percent-encode credentials in the URL. The
+extra discovery nodes are optional and share the URL's credentials and TLS
+settings. Use `[IPv6]:port` for an IPv6 node. When `redis_url` is omitted,
+the first populated variable among `DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL`,
+`DEER_FLOW_STREAM_BRIDGE_REDIS_URL`, and `REDIS_URL` supplies it. Cluster mode
+requires an explicit seed URL from one of these sources and uses database 0.
+
+In cluster mode, the Gateway initializes the sandbox provider on a worker
+thread before accepting requests. Startup fails if slot discovery fails. The Gateway needs connectivity
+to the addresses the cluster advertises. Lease reads use primaries and each
+lease transition runs atomically on the primary holding that sandbox's key.
+Restart the Gateway after changing the topology. Standalone Redis remains the
+default for `type: redis` and connects lazily. Other Redis-backed components,
+including the stream bridge, have their own client configuration.
+
 ## Sandbox & File System
 
 AIO runs commands from independent subagents concurrently, including Lark CLI
@@ -143,12 +180,6 @@ Scope release waits for in-flight execution and cleanup without a separate drain
 deadline. Allow for the remaining command timeout (600 seconds by default), plus
 session/transport/recovery/cleanup time when setting operator-facing release
 budgets; the HTTP cleanup timeout does not bound the preceding lock wait.
-
-With local host bash enabled, the path guard permits division in simple shell
-arithmetic and recognized single-quoted Python, Node.js and Perl programs.
-Variable-built paths remain checked even when the filename is numeric or a
-glob precedes the slash. This is a best-effort guard; host filesystem isolation
-requires an isolated sandbox provider.
 
 Local `grep` reports file permission and I/O failures as errors rather than
 successful empty or partial searches. Binary files and files that disappear
@@ -450,7 +481,8 @@ continue to accept URL-encoded paths.
 
 The `write_file` guidance reflects the active model's output token limit, including custom-agent and thinking-mode overrides. For longer documents, the agent is guided to write sections with `append=True`; models without a known limit receive no numeric budget hint.
 
-With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. If local command startup fails after spawning a child, DeerFlow attempts to kill and reap that child before propagating the startup error. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
+With `AioSandboxProvider`, shell execution runs inside the sandbox container.
+With `LocalSandboxProvider`, the file tools map to per-thread directories.
 
 Docker AIO sandboxes default to their existing open egress behavior for
 compatibility. Operators can set `sandbox.network.mode` to `isolated` or
