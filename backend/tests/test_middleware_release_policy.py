@@ -346,6 +346,35 @@ def test_todo_completion_reminder_template_changes_assembly_identity(monkeypatch
     assert _middleware_fingerprint(TodoMiddleware()) != baseline
 
 
+def test_todo_reminder_template_changes_assembly_identity(monkeypatch):
+    """Model-visible persisted reminder text belongs in the assembly fingerprint.
+
+    The edited / truncated / cleared templates are hashed with an empty item
+    list, so per-run todo content stays out while a wording change still
+    changes the descriptor.
+    """
+    from deerflow_extension_api import canonical_hash
+
+    from deerflow.agents.middlewares import todo_middleware
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    baseline_params = TodoMiddleware().release_policy_parameters()
+    assert baseline_params["todo_reminder_template_hash"] == canonical_hash(
+        "\n".join(
+            (
+                todo_middleware._build_todo_reminder("", edited_after_write=True).content,
+                todo_middleware._build_todo_reminder("", edited_after_write=False).content,
+                todo_middleware._build_todo_cleared_notice().content,
+            )
+        )
+    )
+    baseline = _middleware_fingerprint(TodoMiddleware())
+
+    monkeypatch.setattr(todo_middleware, "_TODO_REMINDER_FOOTER", "changed footer")
+
+    assert _middleware_fingerprint(TodoMiddleware()) != baseline
+
+
 def test_safety_text_only_stop_policy_changes_assembly_identity(monkeypatch):
     current = _make_safety_finish_reason_middleware()
     previous = _make_safety_finish_reason_middleware()

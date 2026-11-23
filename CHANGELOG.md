@@ -68,6 +68,21 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **agents:** A todo list revised after the last `write_todos` call (for
+  example an approved plan edited on resume) is shown to the model again
+  instead of being silently skipped, and a stale injected reminder is
+  refreshed in place, or removed when the visible call already shows the
+  current list. Injected reminders are stamped with middleware
+  provenance, and caller-edited todo text is neutralized before rendering so
+  it cannot forge framework tags. Reminders persisted before provenance
+  stamps existed are migrated or superseded instead of being left next to
+  a fresh one, an explicitly cleared list keeps a stamped clear-state
+  notice only while a superseded non-empty write is still visible, and a
+  hidden caller message that only wraps text in
+  reminder tags is never treated as a pre-stamp reminder,
+  and todo items render as data after the framework block rather than
+  inside it. ([#8168](https://github.com/bytedance/deer-flow/issues/8168))
+
 - **scheduler:** Scheduled-task IM notices no longer forward a credential that
   carries no secret-like key. A URL's user info
   (`postgres://admin:hunter2@host`) and an `Authorization` or `Cookie` header
