@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import copy
 import dataclasses
 import logging
 import threading
@@ -15,11 +16,13 @@ from deerflow_extension_api import (
     EXTENSION_TASK_STORE_KEY,
     CompactionEvent,
     ExtensionData,
+    ReadOnlyDict,
     SystemModelRequest,
     SystemModelResult,
     SystemOperationKind,
     TaskInfo,
     TaskOutcome,
+    TaskStopDetail,
 )
 
 from deerflow.extensions.registry import LoadedExtensions
@@ -49,6 +52,35 @@ def subagent_task_outcome(*, cancelled: bool, succeeded: bool) -> TaskOutcome:
     if succeeded:
         return TaskOutcome.COMPLETED
     return TaskOutcome.FAILED
+
+
+def read_only_copy(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Detach host-owned run data before handing it to extensions.
+
+    Every nested level is frozen, so observers that share one snapshot cannot
+    change what the next observer reads.
+    """
+    return ReadOnlyDict(copy.deepcopy(dict(value or {})))
+
+
+def stopped_task_info(
+    info: TaskInfo,
+    *,
+    status: str,
+    error: str | None = None,
+    goal_verdict: Mapping[str, Any] | None = None,
+    persisted: bool = True,
+) -> TaskInfo:
+    """Return ``info`` carrying the task's final state, for ``on_task_stop``."""
+    return dataclasses.replace(
+        info,
+        stop=TaskStopDetail(
+            status=status,
+            error=error,
+            goal_verdict=read_only_copy(goal_verdict) if goal_verdict is not None else None,
+            persisted=persisted,
+        ),
+    )
 
 
 def _host_is_cancelling() -> bool:

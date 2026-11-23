@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = ["deerflow-extension-api>=0.2.11,<0.3", "langchain>=1.2,<2"]
 
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.3.3,<4"]
+
 [project.entry-points."deerflow.extensions"]
 agent-teams = "deerflow_extension_agent_teams:install"
 

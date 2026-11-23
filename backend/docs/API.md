@@ -92,8 +92,11 @@ Content-Type: application/json
 ```
 
 - `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
-  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`. A PAT can only
-  *narrow* its owning user's permissions, never widen them.
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`, `projects:read`,
+  `projects:write`, `projects:delete`, `agents:read`, `agents:write`; plus the
+  PAT-only scopes `schedules:read`, `schedules:write`, `subagents:read`,
+  `subagents:write` (see [Agent configuration](#agent-configuration-by-pat)).
+  A PAT can only *narrow* its owning user's permissions, never widen them.
 - `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
 
 **Response (`201`):**
@@ -149,16 +152,43 @@ Revocation is immediate.
   `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
-  Every other authenticated route — memory, agents, models, MCP/skills
+  Besides those, only the routes under [Agent configuration by
+  PAT](#agent-configuration-by-pat) are admitted, each behind its scope.
+  Every other authenticated route — memory, models, MCP/skills
   config, integrations, channels, uploads — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
   permission-decorated routes, so the allowlist is the outer boundary;
   session-cookie callers are unaffected.
 - PAT credentials never carry admin capability, even when the owning user is
   an admin. This includes extension-contributed admin routes: the extension
-  principal projection suppresses every admin signal for PAT callers.
+  principal projection suppresses every admin signal for PAT callers. The one
+  opt-in exception is the managed-subagent writes below.
 - Revoking or deleting the owning user invalidates their PATs on the next
   request.
+
+### Agent configuration by PAT
+
+A pipeline that deploys agents, their managed subagents and schedules can use a
+PAT instead of a password session. Set `agents_api.enabled` to `true` in
+`config.yaml` to use the agent management API. The deployment routes require
+the scopes and permissions below.
+
+| Routes | Scope | Also required |
+|---|---|---|
+| `GET /api/v1/auth/me` | any | — |
+| `GET /api/agents`, `GET /api/agents/check`, `GET /api/agents/{name}` | `agents:read` | — |
+| `POST /api/agents`, `PUT`/`DELETE /api/agents/{name}` | `agents:write` | — |
+| `GET /api/scheduled-tasks`, `GET /api/scheduled-tasks/{task_id}`, `GET .../{task_id}/runs`, `POST /api/scheduled-tasks/preview-cron` | `schedules:read` | `threads:read` |
+| `POST /api/scheduled-tasks`, `PATCH /api/scheduled-tasks/{task_id}`, `POST .../{task_id}/resume`, `POST .../{task_id}/trigger` | `schedules:write` | `threads:write`, `runs:create` |
+| `DELETE /api/scheduled-tasks/{task_id}`, `POST .../{task_id}/pause` | `schedules:write` | `threads:write` |
+| `GET /api/subagents` | `subagents:read` | — (prompts stay hidden, as for non-admins) |
+| `POST /api/subagents`, `PUT`/`DELETE /api/subagents/{name}` | `subagents:write` | the token's owner is an admin |
+
+A denied scope answers `403` with `Permission denied: <scope>`. The user
+profile (`/api/user-profile`), agent import and export stay session-only.
+`subagents:write` is the only scope that carries admin capability, and only on
+the three managed-subagent write routes: an admin's token holding it still
+gets `403` on every other admin route.
 
 ## LangGraph-compatible API
 
@@ -229,6 +259,12 @@ GET /api/langgraph/threads/{thread_id}/state
 POST /api/langgraph/threads/{thread_id}/history
 ```
 
+Set `before` to the last checkpoint ID from the previous page. The next page
+includes that checkpoint if it still exists, followed by older checkpoints,
+up to `limit` entries total. If checkpoint retention removed the cursor, the
+page starts with the first surviving older checkpoint, if any. Skip the first
+entry only when its `checkpoint_id` equals `before`.
+
 Only the newest entry carries `messages`, the `goal` while it is active, and
 `goal_outcome` (the latest met goal, kept until the next goal change). Older
 entries carry only `title` and `thread_data`. `goal_outcome` is server-owned:
@@ -247,6 +283,11 @@ Goal payloads must be state values, not reducer control wrappers: the reserved
 external boundaries. Ordinary `type`/`value` fields remain compatible.
 `goal: null` retains its existing semantics: it clears a state update's goal,
 but does not replace a goal through run input.
+
+A state update's optional `as_node` names the graph node recorded as the
+writer, and defaults to `manual_state_update`. It must be a name LangGraph can
+register as a node: `__start__`, `__end__`, LangGraph's other reserved names and
+names containing `:` or `|` are rejected with 422 before anything is written.
 
 Replaying messages from an earlier root checkpoint, including response regeneration, preserves
 the thread's current goal and continuation budget. A cleared or achieved goal
@@ -356,7 +397,7 @@ does not accept this header and keeps the existing missing-stream close of
 **Run Option Compatibility:**
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
-- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option. A run failed this way is stored as `error`, and its stream carries an `error` event (name `RunError`) with the delivery message before `end`, matching the `/wait` error envelope and the step-limit event described under `recursion_limit`. Any other terminal `error` the worker commits after the graph ends — an unpersisted delivery receipt, or a scheduled-goal cleanup that failed — publishes the same event with that error message.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
@@ -510,10 +551,15 @@ Gateway API callers can attach up to three explicit references to create/stream/
 
 A reference is a valid thread ID or an absolute `/workspace/chats/{thread_id}` URL
 (also `/workspace/agents/{agent_name}/chats/{thread_id}` for custom agents)
-with the same scheme and authority as the run request, without query or fragment.
-URLs are parsed as local selectors and are never fetched. For split-origin clients
-or internal proxies, pass the thread ID. The field is separate from message text:
-links in pasted documents, tool results, or previous messages grant no access.
+on the host and port the client sent the run request to, without query or fragment.
+Gateway takes that host from `Forwarded` / `X-Forwarded-Host` / `Host`, as the CSRF
+check does, and appends `X-Forwarded-Port` when that host carries no port of its own.
+A stray `X-Forwarded-Port: 8443` therefore turns `deerflow.example` into
+`deerflow.example:8443`, and a link without that port gets a 422. The scheme is
+not compared, since behind a TLS proxy Gateway can see `http` for an `https` link. URLs are parsed as local selectors and are never fetched.
+For split-origin clients or internal proxies, pass the thread ID. The field is
+separate from message text: links in pasted documents, tool results, or previous
+messages grant no access.
 The server supplies source IDs to the model as background user-role data and
 binds the reader to this run's references and authenticated identity.
 
@@ -1766,6 +1812,8 @@ specified instant. Unchanged live once definitions keep their previously
 accepted execution time; a changed definition or a PATCH that rearms a terminal
 task is validated again. Ordinary Resume retains the admitted stored schedule
 without revalidating its wall time; a renewed `end_at` is still checked.
+Values outside the supported date-time range after UTC conversion return the
+same 422 codes, with the offending field named in the message.
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
 `stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:
@@ -1976,7 +2024,7 @@ DeerFlow enforces authentication for all non-public HTTP routes. Public routes a
 The authenticated auth endpoints are:
 
 - `GET /api/v1/auth/me` returns the current user.
-- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
+- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie. A `new_email` that another account already uses returns `400` `email_already_exists`, including an address registered while the request runs, and changes nothing.
 
 Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
 

@@ -123,7 +123,12 @@ class ClarificationCardRequest:
 
 def build_button_card(request: ClarificationCardRequest) -> str:
     """Render the clarification as a Feishu interactive card with one button per option."""
+    # Imported here because feishu.py imports this module, and the markdown rewrite
+    # lives beside the card it was written for.
+    from app.channels.feishu import _card_markdown
+
     content = f"{request.context}\n\n{request.question}" if request.context else request.question
+    content = _card_markdown(content)
     card = {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "需要你的选择"}},

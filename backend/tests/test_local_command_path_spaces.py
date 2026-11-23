@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.sandbox.tools import bash_tool, replace_virtual_paths_in_command
+from deerflow.sandbox.tools import replace_virtual_paths_in_command
 
 
 @pytest.fixture
@@ -190,20 +190,51 @@ def test_powershell_redirects_to_mapped_path_with_spaces(powershell, mounted):
 
 @pytest.mark.parametrize("quote", ["", '"', "'"])
 @pytest.mark.parametrize("upload_directory", ["thread data", "O'Brien", "cost$USER", "a;b"])
-def test_public_bash_tool_preserves_thread_path_argument(powershell, tmp_path, monkeypatch, quote, upload_directory):
-    from deerflow.config.sandbox_config import SandboxConfig
-
+def test_local_sandbox_preserves_thread_path_argument(powershell, tmp_path, quote, upload_directory):
     dirs = {f"{name}_path": str(tmp_path / "thread data" / name) for name in ("workspace", "uploads", "outputs")}
     dirs["uploads_path"] = str(tmp_path / upload_directory / "uploads")
     for directory in dirs.values():
         Path(directory).mkdir(parents=True)
     Path(dirs["uploads_path"], "marker.txt").write_text("needle", encoding="utf-8")
     sandbox = LocalSandbox("local", [PathMapping(f"/mnt/user-data/{name}", dirs[f"{name}_path"]) for name in ("workspace", "uploads", "outputs")])
-    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}, "thread_data": dirs}, context={"thread_id": "space-test"})
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: sandbox)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
-    monkeypatch.setattr("deerflow.sandbox.tools.get_app_config", lambda: SimpleNamespace(sandbox=SandboxConfig()))
-    result = bash_tool.func(runtime=runtime, command=f"Get-Content {quote}/mnt/user-data/uploads/marker.txt{quote}")
+    result = sandbox.execute_command(f"Get-Content {quote}/mnt/user-data/uploads/marker.txt{quote}")
     assert "needle" in result
     assert "Exit Code:" not in result
     assert not result.startswith("Error:"), result
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows cmd.exe execution")
+def test_local_cmd_honors_an_explicit_working_directory(tmp_path, monkeypatch):
+    shell = shutil.which("cmd.exe")
+    assert shell is not None
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: shell))
+    workspace = tmp_path / "workspace with spaces"
+    workspace.mkdir()
+    (workspace / "marker file.txt").write_text("workspace-marker", encoding="utf-8")
+    sandbox = LocalSandbox("local")
+
+    command = 'type "marker file.txt"'
+    assert sandbox.execute_command(command, cwd=str(workspace)).strip() == "workspace-marker"
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "marker file.txt").write_text("inherited-directory-marker", encoding="utf-8")
+    workspace.rename(tmp_path / "renamed workspace")
+    with pytest.raises(OSError):
+        sandbox.execute_command(command, cwd=str(workspace))
+
+
+def test_local_cmd_passes_explicit_working_directory_to_process_launch(tmp_path, monkeypatch):
+    from deerflow.sandbox.local import local_sandbox
+
+    workspace = tmp_path / "workspace with spaces"
+    monkeypatch.setattr(local_sandbox, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "cmd.exe"))
+    calls = []
+
+    def run(args, timeout, env, **kwargs):
+        calls.append((args, kwargs.get("cwd")))
+        return "workspace-marker", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(run))
+    assert LocalSandbox("local").execute_command('type "marker file.txt"', cwd=str(workspace)) == "workspace-marker"
+    assert calls == [('cmd.exe /d /s /c "type "marker file.txt""', str(workspace))]

@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Install a skill and link it to the project's skills/custom directory
-# Usage: ./skills/install-skill.sh <owner/repo@skill-name>
-# Example: ./skills/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
+# Usage: bash skills/public/find-skills/scripts/install-skill.sh <owner/repo@skill-name>
+# Example: bash skills/public/find-skills/scripts/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
 
 set -e
 
@@ -36,18 +36,26 @@ find_project_root() {
   return 1
 }
 
-PROJECT_ROOT=$(find_project_root)
-
-if [[ -z "$PROJECT_ROOT" ]]; then
-  echo "Error: Could not find project root (deer-flow.code-workspace not found)"
+if ! PROJECT_ROOT="$(find_project_root)"; then
+  printf '%s\n' \
+    'Error: Could not find a DeerFlow checkout (deer-flow.code-workspace not found).' \
+    "This installer only links skills into a checkout's skills/custom directory." \
+    'In a sandbox or Web session, ask an administrator to install a .skill archive through Capability Center → Skills → My skills → Install .skill.' >&2
   exit 1
 fi
 
 SKILL_SOURCE="$HOME/.agents/skills/$SKILL_NAME"
 SKILL_TARGET="$PROJECT_ROOT/skills/custom"
 
-# Step 1: Install the skill using npx
-npx skills add "$FULL_SKILL_NAME" -g -y > /dev/null 2>&1
+# Step 1: Install the skill using npx. Preserve the original quiet success path,
+# but return the command's status and output when installation fails.
+if NPX_OUTPUT="$(npx skills add "$FULL_SKILL_NAME" -g -y 2>&1)"; then
+  :
+else
+  NPX_STATUS=$?
+  printf 'Error: npx skills add failed for %s (exit %d).\n%s\n' "$FULL_SKILL_NAME" "$NPX_STATUS" "$NPX_OUTPUT" >&2
+  exit "$NPX_STATUS"
+fi
 
 # Step 2: Verify installation
 if [[ ! -d "$SKILL_SOURCE" ]]; then

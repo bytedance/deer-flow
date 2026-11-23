@@ -80,8 +80,8 @@ make test-blocking-io                                  # channels share the Gate
 
 - The webhook route skips session auth and CSRF because the HMAC signature
   authenticates it. It is mounted only when `GITHUB_WEBHOOK_SECRET` is set.
-- Outbound is log-only by design. Each agent posts its own comment with `gh` from
-  its sandbox, so the manager starts the run and does not wait for it.
+- Outbound is log-only. The agent uses configured GitHub tools for outbound
+  actions. Webhook admission stays independent of tool authentication.
 - Follow-up buffering while a thread is busy is process-local. Read
   [the contract](../../docs/GITHUB_AGENTS.md#follow-up-buffering-while-busy-4121)
   before you change it.

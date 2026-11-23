@@ -10,7 +10,7 @@ spec:
   replicas: {{ .Values.gateway.replicas }}
   {{- with .Values.gateway.strategy }}
   strategy:
-    {{- toYaml . | nindent 4 }}
+    {{- include "deer-flow.strategy" . | nindent 4 }}
   {{- end }}
   selector:
     matchLabels:

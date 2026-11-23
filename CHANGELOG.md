@@ -68,6 +68,39 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **agents:** A todo list revised after the last `write_todos` call (for
+  example an approved plan edited on resume) is shown to the model again
+  instead of being silently skipped, and a stale injected reminder is
+  refreshed in place, or removed when the visible call already shows the
+  current list. Injected reminders are stamped with middleware
+  provenance, and caller-edited todo text is neutralized before rendering so
+  it cannot forge framework tags. Reminders persisted before provenance
+  stamps existed are migrated or superseded instead of being left next to
+  a fresh one, an explicitly cleared list keeps a stamped clear-state
+  notice only while a superseded non-empty write is still visible, and a
+  hidden caller message that only wraps text in
+  reminder tags is never treated as a pre-stamp reminder,
+  and todo items render as data after the framework block rather than
+  inside it. ([#8168](https://github.com/bytedance/deer-flow/issues/8168))
+
+- **scheduler:** Scheduled-task IM notices no longer forward a credential that
+  carries no secret-like key. A URL's user info
+  (`postgres://admin:hunter2@host`) and an `Authorization` or `Cookie` header
+  value (`Authorization: Bearer ...`) used to reach the platform verbatim; both
+  now read `[redacted]`, and the scheme with the rest of the sentence stays
+  readable. A URL without credentials is unchanged. A `Cookie` header or a
+  `Digest` credential is replaced through the end of the line, so text that
+  follows it on the same line is removed as well. ([#8250])
+
+- **frontend:** Cron presets in the task form now require minute 0-59, hour
+  0-23 and day of month 1-31, so an out-of-range expression such as
+  `0 24 * * *` stays a custom schedule and keeps its original text. Previously,
+  it was parsed as a preset and could be clamped to a different time when
+  serialized for submission. Creating or duplicating a task with an invalid
+  expression, or updating its schedule configuration while the expression is
+  invalid, returns the Gateway's `422`; edits to other fields do not revalidate
+  an unchanged schedule. ([#8020])
+
 - **gateway:** Creating a thread with checkpoint-owned keys such as `step`,
   `parents` or `counters_since_delta_snapshot` in its metadata no longer
   leaves the thread broken. Those keys used to land on the thread's first
@@ -14574,8 +14607,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3810]: https://github.com/bytedance/deer-flow/pull/3810
 [#3812]: https://github.com/bytedance/deer-flow/pull/3812
 [#3821]: https://github.com/bytedance/deer-flow/pull/3821
-[#3823]: https://github.com/bytedance/deer-flow/pull/3823
-[#3824]: https://github.com/bytedance/deer-flow/pull/3824
+[#3823]: https://github.com/bytedance/deer-flow/commit/a0d9744d5af14c520efdb45a2988691d59ef246e
+[#3824]: https://github.com/bytedance/deer-flow/commit/904cee4a7248dcd3e57de9b56677bb1386e0fcbb
 [#3826]: https://github.com/bytedance/deer-flow/pull/3826
 [#3828]: https://github.com/bytedance/deer-flow/pull/3828
 [#3833]: https://github.com/bytedance/deer-flow/pull/3833
@@ -14998,11 +15031,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4817]: https://github.com/bytedance/deer-flow/pull/4817
 [#4820]: https://github.com/bytedance/deer-flow/pull/4820
 [#4822]: https://github.com/bytedance/deer-flow/pull/4822
-[#4823]: https://github.com/bytedance/deer-flow/pull/4823
-[#4825]: https://github.com/bytedance/deer-flow/pull/4825
+[#4823]: https://github.com/bytedance/deer-flow/commit/3a967d4f9abee1272c1b3f142310120367c38fb3
+[#4825]: https://github.com/bytedance/deer-flow/commit/9668b35b1a66e22358b2447e3de256d9138ad5ad
 [#4826]: https://github.com/bytedance/deer-flow/pull/4826
 [#4827]: https://github.com/bytedance/deer-flow/pull/4827
-[#4830]: https://github.com/bytedance/deer-flow/pull/4830
+[#4830]: https://github.com/bytedance/deer-flow/commit/adf6c422c2aa2aa023d6534369999981594f12e3
 [#4833]: https://github.com/bytedance/deer-flow/pull/4833
 [#4834]: https://github.com/bytedance/deer-flow/pull/4834
 [#4836]: https://github.com/bytedance/deer-flow/pull/4836
@@ -15037,7 +15070,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4918]: https://github.com/bytedance/deer-flow/pull/4918
 [#4919]: https://github.com/bytedance/deer-flow/pull/4919
 [#4921]: https://github.com/bytedance/deer-flow/pull/4921
-[#4928]: https://github.com/bytedance/deer-flow/pull/4928
+[#4928]: https://github.com/bytedance/deer-flow/commit/f1f4af99bbf1cffb83a80744bf6e4a44ee8f24be
 [#4929]: https://github.com/bytedance/deer-flow/pull/4929
 [#4933]: https://github.com/bytedance/deer-flow/pull/4933
 [#4936]: https://github.com/bytedance/deer-flow/pull/4936
@@ -15087,7 +15120,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5039]: https://github.com/bytedance/deer-flow/pull/5039
 [#5041]: https://github.com/bytedance/deer-flow/pull/5041
 [#5045]: https://github.com/bytedance/deer-flow/pull/5045
-[#5047]: https://github.com/bytedance/deer-flow/pull/5047
+[#5047]: https://github.com/bytedance/deer-flow/commit/c6f6a01f56b04b6c99d73df82ed6053beb8c1a10
 [#5049]: https://github.com/bytedance/deer-flow/pull/5049
 [#5050]: https://github.com/bytedance/deer-flow/pull/5050
 [#5051]: https://github.com/bytedance/deer-flow/pull/5051
@@ -16415,6 +16448,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8019]: https://github.com/bytedance/deer-flow/pull/8019
+[#8020]: https://github.com/bytedance/deer-flow/pull/8020
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
@@ -16431,3 +16465,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8151]: https://github.com/bytedance/deer-flow/pull/8151
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
+[#8250]: https://github.com/bytedance/deer-flow/pull/8250

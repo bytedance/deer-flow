@@ -484,6 +484,9 @@ def render_artifact_registry(entries: list[ArtifactEntry], *, max_chars: int = _
     handles are marked so the model prefers unused artifacts. The output is
     escaped so untrusted tool-provided values cannot forge framework context.
     """
+    # Checkpoints can contain legacy or integration-written presentation values.
+    # Omit unusable rows from this projection without rewriting stored artifacts.
+    entries = [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("handle"), str) and entry["handle"] and all(isinstance(entry.get(key, ""), str) for key in ("artifact_type", "display_name", "tool_name"))]
     if not entries:
         return ""
 
@@ -499,7 +502,7 @@ def render_artifact_registry(entries: list[ArtifactEntry], *, max_chars: int = _
         return omitted_marker[: max(0, max_chars)]
     shown = 0
     for entry in reversed(entries):
-        handle = escape(entry.get("handle", ""))
+        handle = escape(entry["handle"])
         artifact_type = escape(entry.get("artifact_type", ""))
         display_name = escape(entry.get("display_name", ""))
         consumed = bool(entry.get("consumed_by"))

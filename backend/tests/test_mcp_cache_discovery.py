@@ -383,6 +383,36 @@ async def test_unchanged_server_is_reused_by_identity(discovery_cache, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_browser_oauth_server_is_excluded_from_global_discovery_after_toggle(discovery_cache, monkeypatch):
+    standard = {"type": "http", "url": "https://tools.example.com/mcp"}
+    delegated = {
+        **standard,
+        "user_oauth": {
+            "issuer": "https://auth.example.com",
+            "client_id": "deerflow",
+            "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback",
+        },
+    }
+    _write_config(discovery_cache, {"A": standard, "B": _stdio("B"), "C": delegated})
+    discovery = _install(monkeypatch, _Discovery())
+    original = await cache_module.initialize_mcp_tools()
+    assert _names(original) == ["A", "B"]
+    assert discovery.calls == [("A", "B")]
+
+    _write_config(discovery_cache, {"A": delegated, "B": _stdio("B"), "C": delegated})
+    assert cache_module.refresh_mcp_cache_if_active()
+    assert _names(await cache_module.initialize_mcp_tools()) == ["B"]
+    assert set(cache_module._server_tool_cache) == {"B"}
+    assert discovery.calls == [("A", "B")]
+
+    _write_config(discovery_cache, {"A": delegated, "C": delegated})
+    assert cache_module.refresh_mcp_cache_if_active()
+    assert await cache_module.initialize_mcp_tools() == []
+    assert not cache_module._server_tool_cache
+    assert discovery.calls == [("A", "B")]
+
+
+@pytest.mark.asyncio
 async def test_metadata_only_change_rebuilds_only_that_server(discovery_cache, monkeypatch):
     """A presentation-only change rebuilds A but reuses B's entry."""
     cfg = discovery_cache

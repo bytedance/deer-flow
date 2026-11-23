@@ -78,6 +78,16 @@ export const extensionCatalog = [
     package: "deerflow-extension-knowledge-center",
     namespace: "knowledge-center",
   },
+  {
+    key: "skillEvolution",
+    package: "deerflow-extension-skill-evolution",
+    namespace: null,
+  },
+  {
+    key: "runPostmortem",
+    package: "deerflow-extension-run-postmortem",
+    namespace: "community.run-postmortem",
+  },
   { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
   { key: "weknora", package: "deerflow-extension-weknora", namespace: null },
   { key: "example", package: "deerflow-extension-example", namespace: null },
