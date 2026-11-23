@@ -19,6 +19,7 @@ MINIMAX_VIDEO_HOSTS = {
 }
 MINIMAX_OSS_ENDPOINTS = {"oss-cn-wulanchabu.aliyuncs.com", "oss-cn-shanghai.aliyuncs.com"}
 MAX_DOWNLOAD_REDIRECTS = 5
+MAX_MINIMAX_API_REDIRECTS = 5
 
 
 def _resolve_provider(override_env: str, existing_provider: str, has_existing_creds: bool) -> str:
@@ -56,6 +57,45 @@ def _require_success(response: requests.Response) -> None:
         raise ValueError(f"Unexpected HTTP status {response.status_code} from video provider")
 
 
+def _api_origin(url: str) -> tuple[str, str, int]:
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise ValueError("Invalid MiniMax API redirect origin")
+    port = parsed.port
+    # Check the entire authority, including brackets for an IPv6 literal.
+    # hostname/port alone would discard user information or stray delimiters.
+    host_field = parsed.netloc if port is None else parsed.netloc.rsplit(":", 1)[0]
+    expected = f"[{host}]" if ":" in host else host
+    if host_field.lower() != expected.lower():
+        raise ValueError("Invalid MiniMax API redirect authority")
+    default_port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, host, default_port if port is None else port
+
+
+def _minimax_api_request(send, url: str, *, timeout: int, **kwargs) -> requests.Response:
+    response = send(url, timeout=timeout, allow_redirects=False, **kwargs)
+    if response.status_code in (307, 308):
+        origin = _api_origin(response.request.url)
+        with requests.Session() as session:
+            for _ in range(MAX_MINIMAX_API_REDIRECTS):
+                # Requests prepares the redirect with the original method and body,
+                # and resolves Location against the full URL (including GET params).
+                target = response.next
+                if target is None:
+                    raise ValueError("MiniMax API redirect has no destination")
+                if _api_origin(target.url) != origin:
+                    raise ValueError("MiniMax API redirect changes origin")
+                settings = session.merge_environment_settings(target.url, {}, None, None, None)
+                response = session.send(target, timeout=timeout, allow_redirects=False, **settings)
+                if response.status_code not in (307, 308):
+                    break
+            else:
+                raise ValueError("Too many MiniMax API redirects")
+    _require_success(response)
+    return response
+
+
 def _guess_mime(image_path: str) -> str:
     ext = os.path.splitext(image_path)[1].lower()
     mime_types = {
@@ -80,14 +120,13 @@ def _to_data_url(image_path: str) -> str:
 
 def _poll_video_task(host: str, auth: str, task_id: str, max_attempts: int = 120, interval: int = 3) -> str:
     for _ in range(max_attempts):
-        response = requests.get(
+        response = _minimax_api_request(
+            requests.get,
             f"{host}/v1/query/video_generation",
             headers={"Authorization": auth},
             params={"task_id": task_id},
             timeout=30,
-            allow_redirects=False,
         )
-        _require_success(response)
         payload = response.json()
         status = payload.get("status")
         if status == "Success":
@@ -139,14 +178,13 @@ def _poll_gemini_operation(api_key: str, operation_name: str, max_attempts: int 
 
 
 def _retrieve_file_url(host: str, auth: str, file_id: str) -> str:
-    response = requests.get(
+    response = _minimax_api_request(
+        requests.get,
         f"{host}/v1/files/retrieve",
         headers={"Authorization": auth},
         params={"file_id": file_id},
         timeout=30,
-        allow_redirects=False,
     )
-    _require_success(response)
     payload = response.json()
     _check_base_resp(payload)
     return payload["file"]["download_url"]
@@ -223,14 +261,13 @@ def _generate_video_minimax(prompt: str, reference_images: list[str], output_fil
             raise ValueError(error) from exc
     if reference_images:
         body["first_frame_image"] = _to_data_url(reference_images[0])
-    response = requests.post(
+    response = _minimax_api_request(
+        requests.post,
         f"{host}/v1/video_generation",
         headers={"Authorization": auth, "Content-Type": "application/json"},
         json=body,
         timeout=60,
-        allow_redirects=False,
     )
-    _require_success(response)
     payload = response.json()
     _check_base_resp(payload)
     task_id = payload["task_id"]

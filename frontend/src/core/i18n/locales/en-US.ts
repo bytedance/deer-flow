@@ -205,6 +205,7 @@ export const enUS: Translations = {
         "en-US",
       ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
+      runPostmortem: bundledCopy("deerflow-extension-run-postmortem", "en-US"),
       weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
       example: bundledCopy("deerflow-extension-example", "en-US"),
     },
@@ -624,19 +625,22 @@ export const enUS: Translations = {
     voiceInputStartLabel: "Dictate with voice",
     voiceInputStopLabel: "Stop voice input",
     voiceInputStart:
-      "Dictate with voice. DeerFlow receives only transcribed text; audio is handled by your browser or system speech service.",
+      "Record audio and send it to the configured transcription service.",
     voiceInputStop: "Stop voice input",
-    voiceInputListening: "Listening... Click to stop voice input.",
+    voiceInputListening: "Recording… Finish to review or polish your text.",
+    voiceInputStarting: "Waiting for microphone…",
+    voiceInputFinishing: "Transcribing audio…",
+    voiceInputCancel: "Cancel voice input",
     voiceInputUnsupported:
-      "Voice input is not supported in this browser. Try Chrome or Edge.",
+      "Recording requires HTTPS (or localhost) and a browser that supports microphone recording.",
     voiceInputPermissionDenied:
       "Microphone access was denied. Allow microphone access and try again.",
     voiceInputMicrophoneUnavailable:
       "No microphone was detected. Check your device input and try again.",
-    voiceInputUnsupportedLanguage:
-      "Voice input does not support the current language in this browser.",
-    voiceInputNetworkError:
-      "Voice input could not reach the browser speech service.",
+    voiceInputTooLarge:
+      "Recording exceeds the size limit. Please try a shorter recording.",
+    voiceInputUnavailable:
+      "Voice input is no longer enabled. Your draft has been kept.",
     voiceInputNoSpeech: "No speech was detected. Please try again.",
     voiceInputFailed: "Voice input failed. Please try again.",
     mode: "Mode",

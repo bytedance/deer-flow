@@ -35,10 +35,11 @@ from packaging.version import Version
 
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.runtime.journal import RunJournal
 from deerflow.sandbox.lease import SandboxLeaseManager
 from deerflow.skills.types import Skill
-from deerflow.subagents.capacity import SubagentCapacityRejected
+from deerflow.subagents.capacity import SubagentCapacityRejected, SubagentExecutionCapacity
 from deerflow.trace_context import request_trace_context
 
 # Module names that need to be mocked to break circular imports
@@ -5008,8 +5009,8 @@ class TestCooperativeCancellation:
         """Test that the real timeout handler does not overwrite CANCELLED status.
 
         This exercises the actual execute_async → run_task → FuturesTimeoutError
-        code path in executor.py.  We make execute() block so the timeout fires
-        deterministically, pre-set the task to CANCELLED, and verify the RUNNING
+        code path in executor.py.  We block after admission so the execution
+        timeout runs, pre-set the task to CANCELLED, and verify the RUNNING
         guard preserves it.  Uses threading.Event for synchronisation instead of
         wall-clock sleeps.
         """
@@ -5021,13 +5022,14 @@ class TestCooperativeCancellation:
             description="Test agent",
             system_prompt="You are a test agent.",
             max_turns=10,
-            timeout_seconds=0.05,  # 50ms – just enough for the future to time out
+            timeout_seconds=0.2,  # long enough for admission, short enough for the test
         )
 
         # Synchronisation primitives
-        execute_entered = threading.Event()  # signals that _aexecute() has started
+        execute_entered = threading.Event()  # signals that admission has happened
 
-        # A blocking _aexecute() replacement so we control the timing exactly.
+        # Block inside the admitted execution so the timeout still fires; the
+        # admission clock needs the real _aexecute() to acquire its slot first.
         async def blocking_aexecute(task, result_holder=None):
             execute_entered.set()
             await asyncio.Event().wait()
@@ -5039,14 +5041,14 @@ class TestCooperativeCancellation:
             trace_id="test-trace",
         )
 
-        with patch.object(executor, "_aexecute", side_effect=blocking_aexecute):
+        with patch.object(executor, "_aexecute_admitted", side_effect=blocking_aexecute):
             task_id = executor.execute_async("Task")
 
-            # Wait until _aexecute() is entered on the persistent loop.
-            assert execute_entered.wait(timeout=3), "_aexecute() was never called"
+            # Wait until the admitted execution is entered on the persistent loop.
+            assert execute_entered.wait(timeout=3), "_aexecute_admitted() was never called"
 
             # Set CANCELLED on the result before the timeout handler runs.
-            # The 50ms timeout will fire while execute() is blocked.
+            # The 200ms timeout will fire while the admitted execution is blocked.
             with executor_module._background_tasks_lock:
                 executor_module._background_tasks[task_id].status = SubagentStatus.CANCELLED
                 executor_module._background_tasks[task_id].error = "Cancelled by user"
@@ -7757,7 +7759,6 @@ class TestSubagentCancellationLifecycle:
         executor = classes["SubagentExecutor"](config=replace(base_config, timeout_seconds=0.2), tools=[], run_id="run", extensions=lifecycle.extensions)
         holder = classes["SubagentResult"](task_id="sync-timeout", trace_id="trace", status=classes["SubagentStatus"].PENDING) if shared_holder else None
         original_execute = executor._aexecute
-        original_submit = module._submit_to_isolated_loop_in_context
 
         async def initial_state(task):
             if stage == "setup":
@@ -7777,24 +7778,9 @@ class TestSubagentCancellationLifecycle:
             worker_holders.append(result_holder)
             return await original_execute(task, result_holder)
 
-        def submit(context, factory):
-            future = original_submit(context, factory)
-            original_cancel = future.cancel
-
-            def cancel_and_drain():
-                cancelled = original_cancel()
-                # Force cancellation handling to finish before execute() catches
-                # the timeout, so a shared-holder race cannot pass by scheduling luck.
-                assert lifecycle.stopped.wait(timeout=5)
-                return cancelled
-
-            monkeypatch.setattr(future, "cancel", cancel_and_drain)
-            return future
-
         monkeypatch.setattr(executor, "_build_initial_state", initial_state)
         monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=stream)))
         monkeypatch.setattr(executor, "_aexecute", track_worker)
-        monkeypatch.setattr(module, "_submit_to_isolated_loop_in_context", submit)
         monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
         monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
         try:
@@ -8047,3 +8033,468 @@ class TestSubagentCompactionIdentity:
         info = store.get(TaskInfo)
         assert info == TaskInfo(task_id="exec-1", run_id=run_id, thread_id="sub-thread", kind="subagent", parent_task_id=run_id, agent_name=base_config.name)
         assert (event.task_id, event.run_id, event.thread_id) == (info.task_id, info.run_id, info.thread_id)
+
+
+class TestExecutionTimeoutStartsAtAdmission:
+    """Execution time is bounded separately from time spent queued for a slot.
+
+    The execution clock must not start at delegation: the capacity controller
+    already bounds queue wait with ``queue_timeout_seconds``, and charging that
+    wait against the execution timeout ends queued subagents with ``timed_out``
+    before they run a single turn.
+    """
+
+    @staticmethod
+    def _capacity() -> SubagentExecutionCapacity:
+        return SubagentExecutionCapacity(
+            SubagentRuntimeConfig(
+                max_running=1,
+                max_queued=4,
+                queue_timeout_seconds=5,
+            )
+        )
+
+    @staticmethod
+    def _executor(classes, config, *, thread_id, capacity, stream, monkeypatch):
+        executor = classes["SubagentExecutor"](
+            config=config,
+            tools=[],
+            thread_id=thread_id,
+            execution_capacity=capacity,
+        )
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=stream)))
+        return executor
+
+    @pytest.mark.anyio
+    async def test_async_queue_wait_does_not_consume_execution_timeout(self, classes, base_config, monkeypatch):
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        capacity = self._capacity()
+        holder_started, release_holder, queued_started = threading.Event(), threading.Event(), threading.Event()
+
+        async def holding_stream(*args, **kwargs):
+            holder_started.set()
+            while not release_holder.is_set():
+                await asyncio.sleep(0.01)
+            yield {"messages": [classes["AIMessage"](content="held")]}
+
+        async def queued_stream(*args, **kwargs):
+            queued_started.set()
+            yield {"messages": [classes["AIMessage"](content="queued done")]}
+
+        holder = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=5),
+            thread_id="slot-holder",
+            capacity=capacity,
+            stream=holding_stream,
+            monkeypatch=monkeypatch,
+        )
+        queued = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=0.2),
+            thread_id="slot-waiter",
+            capacity=capacity,
+            stream=queued_stream,
+            monkeypatch=monkeypatch,
+        )
+
+        holder_id = holder.execute_async("hold the slot")
+        queued_id = queued.execute_async("wait for the slot")
+        holder_result = module.get_background_task_result(holder_id)
+        queued_result = module.get_background_task_result(queued_id)
+        try:
+            assert holder_result is not None
+            assert queued_result is not None
+            assert holder_started.wait(timeout=5), "the slot holder never started"
+
+            # Stay queued for longer than the waiting execution's own timeout.
+            await asyncio.sleep(0.6)
+            assert queued_result.status is classes["SubagentStatus"].PENDING
+            assert not queued_started.is_set()
+
+            release_holder.set()
+            assert queued_result.execution_done_event.wait(timeout=5), "queued execution never settled"
+            assert queued_started.is_set(), "queued execution never got a slot after the holder released it"
+            assert queued_result.status is classes["SubagentStatus"].COMPLETED
+            assert holder_result.execution_done_event.wait(timeout=5), "slot holder never settled"
+            assert holder_result.status is classes["SubagentStatus"].COMPLETED
+        finally:
+            release_holder.set()
+            module.request_cancel_background_task(holder_id)
+            module.request_cancel_background_task(queued_id)
+            module.force_cleanup_background_task(holder_id)
+            module.force_cleanup_background_task(queued_id)
+
+    @pytest.mark.anyio
+    async def test_queue_timeout_still_bounds_waiting_executions(self, classes, base_config, monkeypatch):
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1, max_queued=4, queue_timeout_seconds=1))
+        holder_started, release_holder, queued_started = threading.Event(), threading.Event(), threading.Event()
+
+        async def holding_stream(*args, **kwargs):
+            holder_started.set()
+            while not release_holder.is_set():
+                await asyncio.sleep(0.01)
+            yield {"messages": [classes["AIMessage"](content="held")]}
+
+        async def queued_stream(*args, **kwargs):
+            queued_started.set()
+            yield {"messages": [classes["AIMessage"](content="queued done")]}
+
+        holder = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=5),
+            thread_id="queue-timeout-holder",
+            capacity=capacity,
+            stream=holding_stream,
+            monkeypatch=monkeypatch,
+        )
+        queued = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=5),
+            thread_id="queue-timeout-waiter",
+            capacity=capacity,
+            stream=queued_stream,
+            monkeypatch=monkeypatch,
+        )
+
+        holder_id = holder.execute_async("hold the slot")
+        queued_id = queued.execute_async("wait for the slot")
+        queued_result = module.get_background_task_result(queued_id)
+        try:
+            assert queued_result is not None
+            assert holder_started.wait(timeout=5), "the slot holder never started"
+            assert queued_result.execution_done_event.wait(timeout=5), "queued execution never settled"
+        finally:
+            release_holder.set()
+            module.request_cancel_background_task(holder_id)
+            module.request_cancel_background_task(queued_id)
+            module.force_cleanup_background_task(holder_id)
+            module.force_cleanup_background_task(queued_id)
+
+        assert not queued_started.is_set()
+        assert queued_result.status is classes["SubagentStatus"].FAILED
+        assert queued_result.admission_failure is True
+        assert queued_result.error == "Timed out after 1s waiting for a subagent execution slot"
+
+    @pytest.mark.anyio
+    async def test_execution_timeout_still_fires_after_admission(self, classes, base_config, monkeypatch):
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        capacity = self._capacity()
+        entered = threading.Event()
+
+        async def blocked_stream(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+            yield {}
+
+        executor = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=0.2),
+            thread_id="execution-timeout",
+            capacity=capacity,
+            stream=blocked_stream,
+            monkeypatch=monkeypatch,
+        )
+
+        execution_id = executor.execute_async("run forever")
+        result = module.get_background_task_result(execution_id)
+        try:
+            assert result is not None
+            assert entered.wait(timeout=5), "admitted execution never reached the agent"
+
+            deadline = time.monotonic() + 5
+            while not result.status.is_terminal and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            assert result.status is classes["SubagentStatus"].TIMED_OUT
+            assert result.error == "Execution timed out after 0.2 seconds"
+            assert result.execution_done_event.wait(timeout=5)
+        finally:
+            module.request_cancel_background_task(execution_id)
+            module.force_cleanup_background_task(execution_id)
+
+    def test_sync_queue_wait_does_not_consume_execution_timeout(self, classes, base_config, monkeypatch):
+        import concurrent.futures
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        capacity = self._capacity()
+        holder_started, release_holder = threading.Event(), threading.Event()
+
+        async def holding_stream(*args, **kwargs):
+            holder_started.set()
+            while not release_holder.is_set():
+                await asyncio.sleep(0.01)
+            yield {"messages": [classes["AIMessage"](content="held")]}
+
+        async def queued_stream(*args, **kwargs):
+            yield {"messages": [classes["AIMessage"](content="queued done")]}
+
+        holder = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=5),
+            thread_id="sync-slot-holder",
+            capacity=capacity,
+            stream=holding_stream,
+            monkeypatch=monkeypatch,
+        )
+        queued = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=0.2),
+            thread_id="sync-slot-waiter",
+            capacity=capacity,
+            stream=queued_stream,
+            monkeypatch=monkeypatch,
+        )
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        try:
+            holder_future = pool.submit(holder.execute, "hold the slot")
+            assert holder_started.wait(timeout=5), "the sync slot holder never started"
+
+            queued_future = pool.submit(queued.execute, "wait for the slot")
+            # Stay queued for longer than the waiting execution's own timeout.
+            time.sleep(0.6)
+            assert not queued_future.done(), "queued sync execution timed out before admission"
+
+            release_holder.set()
+            queued_result = queued_future.result(timeout=5)
+            holder_result = holder_future.result(timeout=5)
+        finally:
+            release_holder.set()
+            pool.shutdown(wait=True)
+
+        assert queued_result.status is classes["SubagentStatus"].COMPLETED
+        assert holder_result.status is classes["SubagentStatus"].COMPLETED
+
+    def test_sync_backstop_uses_injected_capacity_queue_timeout(self, classes, base_config, monkeypatch):
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "configured_subagent_queue_timeout_seconds", lambda: 300)
+        capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(queue_timeout_seconds=1800))
+        executor = classes["SubagentExecutor"](
+            config=replace(base_config, timeout_seconds=10),
+            tools=[],
+            execution_capacity=capacity,
+        )
+
+        assert executor._sync_timeout_backstop_seconds() == 1870
+
+        # Without an injected controller the startup snapshot applies.
+        global_only = classes["SubagentExecutor"](config=replace(base_config, timeout_seconds=10), tools=[])
+        assert global_only._sync_timeout_backstop_seconds() == 370
+
+    def test_sync_backstop_fails_when_admission_never_settles(self, classes, base_config, monkeypatch):
+        """The outer bound still terminates a synchronous call stuck before admission."""
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        executor = classes["SubagentExecutor"](config=replace(base_config, timeout_seconds=60), tools=[])
+
+        async def never_admitted(task, result_holder=None):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(executor, "_aexecute", never_admitted)
+        monkeypatch.setattr(executor, "_sync_timeout_backstop_seconds", lambda: 0.2)
+        try:
+            result = executor.execute("wait forever")
+        finally:
+            module._shutdown_isolated_subagent_loop()
+
+        assert result.status is classes["SubagentStatus"].FAILED
+        assert result.error == ""  # Preserve the synchronous TimeoutError result.
+        assert result.cancel_event.is_set()
+
+    @pytest.mark.anyio
+    async def test_principal_revalidation_runs_inside_the_execution_timeout(self, classes, base_config, monkeypatch):
+        """A resolver that never returns must not hang the delegation.
+
+        The execution clock starts at slot admission, which is before the
+        durable batch principal revalidation. Otherwise that await sits outside
+        every timeout the delegating wrapper applies.
+        """
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        resolver_entered = threading.Event()
+
+        async def hanging_resolver():
+            resolver_entered.set()
+            await asyncio.Event().wait()
+
+        executor = classes["SubagentExecutor"](
+            config=replace(base_config, timeout_seconds=0.2),
+            tools=[],
+            thread_id="principal-timeout",
+            execution_capacity=self._capacity(),
+            principal_resolver=hanging_resolver,
+        )
+
+        execution_id = executor.execute_async("hold in revalidation")
+        result = module.get_background_task_result(execution_id)
+        try:
+            assert result is not None
+            assert resolver_entered.wait(timeout=5), "principal revalidation never started"
+
+            deadline = time.monotonic() + 5
+            while not result.status.is_terminal and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            assert result.status is classes["SubagentStatus"].TIMED_OUT
+            assert result.error == "Execution timed out after 0.2 seconds"
+            assert result.execution_done_event.wait(timeout=5)
+        finally:
+            module.request_cancel_background_task(execution_id)
+            module.force_cleanup_background_task(execution_id)
+
+    @pytest.mark.anyio
+    async def test_admission_gap_counts_against_the_execution_timeout(self, classes, base_config, monkeypatch):
+        """Synchronous work after admission must not extend the execution clock.
+
+        The admission signal is set immediately before the principal resolver
+        is awaited. Blocking the loop there keeps the supervisor from running
+        until the budget is already spent; the deadline must therefore come
+        from the admission timestamp, not from the supervisor's wakeup.
+        """
+        from dataclasses import replace
+
+        from deerflow.authz.provider import Principal
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+
+        async def blocking_resolver():
+            time.sleep(0.4)
+            return Principal(user_id="alice", role="user")
+
+        async def never_reached_stream(*args, **kwargs):
+            yield {"messages": [classes["AIMessage"](content="should not run")]}
+
+        executor = classes["SubagentExecutor"](
+            config=replace(base_config, timeout_seconds=0.2),
+            tools=[],
+            thread_id="admission-gap",
+            user_id="alice",
+            execution_capacity=self._capacity(),
+            principal_resolver=blocking_resolver,
+        )
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=never_reached_stream)))
+
+        execution_id = executor.execute_async("block after admission")
+        result = module.get_background_task_result(execution_id)
+        try:
+            assert result is not None
+            assert result.execution_done_event.wait(timeout=5)
+            assert result.status is classes["SubagentStatus"].TIMED_OUT
+            assert result.error == "Execution timed out after 0.2 seconds"
+        finally:
+            module.request_cancel_background_task(execution_id)
+            module.force_cleanup_background_task(execution_id)
+
+    def test_sync_admission_gap_counts_against_the_execution_timeout(self, classes, base_config, monkeypatch):
+        """The synchronous wrapper uses the same admission deadline."""
+        from dataclasses import replace
+
+        from deerflow.authz.provider import Principal
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+
+        async def blocking_resolver():
+            time.sleep(0.4)
+            return Principal(user_id="alice", role="user")
+
+        async def never_reached_stream(*args, **kwargs):
+            yield {"messages": [classes["AIMessage"](content="should not run")]}
+
+        executor = classes["SubagentExecutor"](
+            config=replace(base_config, timeout_seconds=0.2),
+            tools=[],
+            thread_id="sync-admission-gap",
+            user_id="alice",
+            execution_capacity=self._capacity(),
+            principal_resolver=blocking_resolver,
+        )
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=never_reached_stream)))
+
+        result = executor.execute("block after admission")
+
+        assert result.status is classes["SubagentStatus"].FAILED
+        assert result.error == ""  # Preserve the synchronous timeout result.
+        assert result.execution_done_event.wait(timeout=5)
+
+    @pytest.mark.parametrize("background", [False, True], ids=["sync", "background"])
+    @pytest.mark.parametrize("finalization_seconds", [0.5, 1.5], ids=["within-budget", "after-deadline"])
+    def test_execution_deadline_fences_success_during_finalization(self, classes, base_config, monkeypatch, background, finalization_seconds):
+        from dataclasses import replace
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        clock = 100.0
+        monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock))
+        extract = module._extract_final_result
+
+        def finalize(*args, **kwargs):
+            nonlocal clock
+            clock += finalization_seconds
+            return extract(*args, **kwargs)
+
+        async def stream(*args, **kwargs):
+            yield {"messages": [classes["AIMessage"](content="finished answer")]}
+
+        monkeypatch.setattr(module, "_extract_final_result", finalize)
+        executor = self._executor(
+            classes,
+            replace(base_config, timeout_seconds=1),
+            thread_id="finalization-deadline",
+            capacity=self._capacity(),
+            stream=stream,
+            monkeypatch=monkeypatch,
+        )
+        if background:
+            execution_id = executor.execute_async("finish at the deadline")
+            result = module.get_background_task_result(execution_id)
+        else:
+            execution_id = None
+            result = executor.execute("finish at the deadline")
+
+        try:
+            assert result is not None
+            assert result.execution_done_event.wait(timeout=5)
+            assert clock == 100 + finalization_seconds
+            if finalization_seconds < 1:
+                assert result.status is classes["SubagentStatus"].COMPLETED
+                assert result.result == "finished answer"
+            else:
+                expected = classes["SubagentStatus"].TIMED_OUT if background else classes["SubagentStatus"].FAILED
+                assert result.status is expected
+                assert result.result is None
+                assert result.error == ("Execution timed out after 1 seconds" if background else "")
+        finally:
+            if execution_id is not None:
+                module.request_cancel_background_task(execution_id)
+                module.force_cleanup_background_task(execution_id)

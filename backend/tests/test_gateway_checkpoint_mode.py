@@ -26,7 +26,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
 from langgraph.store.memory import InMemoryStore
 
-from app.gateway import context_usage
+from app.gateway import checkpoint_retention, context_usage
 from app.gateway import services as gateway_services
 from app.gateway.routers import thread_runs, threads
 from deerflow.agents.thread_state import get_thread_state_schema
@@ -35,6 +35,7 @@ from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime import RunManager
 from deerflow.runtime.checkpoint_mode import checkpoint_metadata_uses_delta, inject_checkpoint_mode
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import persist_run_history_metadata
 
 _THREAD_ID = "thread-gateway-parity"
 
@@ -114,6 +115,51 @@ def test_thread_state_endpoints_are_mode_invariant(_stub_app_config, monkeypatch
     # Guard against a vacuous pass: the flow must have observed real messages.
     assert full["thread_messages"], "expected seeded messages in the thread response"
     assert any(full["history_messages"]), "expected history snapshots with messages"
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_before_cursor_continues_the_walk(mode: str, _stub_app_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A history page includes its cursor only while the checkpoint survives."""
+    app = make_authed_test_app()
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    app.state.store = store
+    app.state.checkpointer = checkpointer
+    app.state.thread_store = MemoryThreadMetaStore(store)
+    app.state.checkpoint_channel_mode = mode
+    app.state.run_event_store = SimpleNamespace()
+    app.include_router(threads.router)
+
+    graph = _build_reply_graph(mode, checkpointer)
+    monkeypatch.setattr(gateway_services, "resolve_agent_factory", lambda assistant_id=None: lambda config: graph)
+
+    config: dict[str, Any] = {"configurable": {"thread_id": _THREAD_ID}}
+    inject_checkpoint_mode(config, mode)
+    for i in range(2):
+        asyncio.run(graph.ainvoke({"messages": [HumanMessage(content=f"question-{i}", id=f"h{i}")]}, config))
+
+    with TestClient(app) as client:
+        full_page = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 10})
+        assert full_page.status_code == 200, full_page.text
+        all_ids = [entry["checkpoint_id"] for entry in full_page.json()]
+        assert len(all_ids) >= 4
+
+        anchor_id = all_ids[1]
+        paged = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 10, "before": anchor_id})
+        assert paged.status_code == 200, paged.text
+        assert [entry["checkpoint_id"] for entry in paged.json()] == all_ids[1:]
+
+        assert asyncio.run(persist_run_history_metadata(checkpointer=checkpointer, thread_id=_THREAD_ID, durations={"run-1": 3}))
+        first_page = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 1})
+        assert first_page.status_code == 200, first_page.text
+        cursor = first_page.json()[0]["checkpoint_id"]
+        assert cursor not in all_ids
+        report = asyncio.run(checkpoint_retention.enforce_trailing_duration_retention(checkpointer, _THREAD_ID))
+        assert report.deleted_checkpoint_ids == [cursor]
+
+        paged = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 2, "before": cursor})
+        assert paged.status_code == 200, paged.text
+        assert [entry["checkpoint_id"] for entry in paged.json()] == all_ids[:2]
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import subprocess
 import sys
 import tempfile
@@ -8078,6 +8079,13 @@ class TestDiscordChannel:
             pytest.param("x" * 2000 + "\n" + "y" * 2000, id="newline-mid-message"),
             pytest.param(("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3, id="multibyte-paragraphs"),
             pytest.param("x" * 4500, id="unbroken-run"),
+            pytest.param("```py\nprint(1)\n```\n" + "x" * 1990 + "\n" + "y" * 30, id="code-block-closed-before-split"),
+            pytest.param("use ```inline``` here " * 200, id="inline-backticks"),
+            pytest.param("```inline``` opens no block\n" * 150, id="code-block-closed-on-its-opening-line"),
+            pytest.param("```python\nprint(1)```\n\n" + "This is ordinary prose after the example.\n" * 100, id="code-block-closed-right-after-its-code"),
+            pytest.param("~~~js\n" + "let a = 1;\n" * 400 + "~~~", id="tildes-open-no-code-block"),
+            pytest.param("\\```py\n" + "not code\n" * 400, id="escaped-backticks-open-no-code-block"),
+            pytest.param("```" + "i" * 600 + "\n" + "code line\n" * 400 + "```", id="language-tag-too-long-to-carry"),
         ],
     )
     def test_split_text_preserves_content_within_discord_limit(self, text: str):
@@ -8093,6 +8101,193 @@ class TestDiscordChannel:
 
         assert DiscordChannel._split_text("") == [""]
         assert DiscordChannel._split_text("hello\n\nworld") == ["hello\n\nworld"]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param(
+                "intro\n```py\n" + "".join(f"line {i:02d} of code\n" for i in range(8)) + "```\nafter\n",
+                [
+                    "intro\n```py\nline 00 of code\nline 01 of code\nline 02 of code\nline 03 of code\n```",
+                    "```py\nline 04 of code\nline 05 of code\nline 06 of code\nline 07 of code\n```\nafter\n",
+                ],
+                id="closed-and-reopened",
+            ),
+            pytest.param(
+                "```py\n" + "".join(f"line {i:02d} of code\n" for i in range(6)) + "print(9)```\nafter\n",
+                [
+                    "```py\nline 00 of code\nline 01 of code\nline 02 of code\nline 03 of code\n```",
+                    "```py\nline 04 of code\nline 05 of code\nprint(9)```\nafter\n",
+                ],
+                id="block-closing-right-after-its-last-code",
+            ),
+            pytest.param(
+                "```py\nprint(1)```\n" + "".join(f"prose line {i:02d}\n" for i in range(8)),
+                [
+                    "```py\nprint(1)```\n" + "".join(f"prose line {i:02d}\n" for i in range(4)),
+                    "".join(f"prose line {i:02d}\n" for i in range(4, 8)),
+                ],
+                id="prose-after-a-closed-block-stays-prose",
+            ),
+            pytest.param(
+                "Run this: ```sh\n" + "echo step\n" * 12 + "```",
+                ["Run this: ```sh\n" + "echo step\n" * 6 + "```", "```sh\n" + "echo step\n" * 6 + "```"],
+                id="block-opening-mid-line",
+            ),
+            pytest.param(
+                "x" * 66 + "\n```py\n" + "code\n" * 3 + "```",
+                ["x" * 66 + "\n", "```py\n" + "code\n" * 3 + "```"],
+                id="block-opening-on-the-last-line-moves-to-the-next-message",
+            ),
+            pytest.param(
+                "```py\n" + "x" * 35 + "\n" + "x" * 34 + "\n```\nafter\n",
+                ["```py\n" + "x" * 35 + "\n" + "x" * 34 + "\n```", "\nafter\n"],
+                id="closing-run-ending-at-the-limit-stays-in-the-message",
+            ),
+            pytest.param(
+                "```py\n" + ("x" * 34 + "\n") * 2 + "\n\n```\nafter\n",
+                ["```py\n" + "x" * 34 + "\n```", "```py\n" + "x" * 34 + "\n\n\n```\nafter\n"],
+                id="reopened-block-keeps-code-before-its-closing-run",
+            ),
+            pytest.param(
+                "```\n" + "z" * 170 + "\n```",
+                ["```\n" + "z" * 72 + "\n```", "```\n" + "z" * 72 + "\n```", "```\n" + "z" * 26 + "\n```"],
+                id="unbroken-code-line",
+            ),
+            pytest.param(
+                "```py\n" + "line of code\n" * 10,
+                ["```py\n" + "line of code\n" * 5 + "```", "```py\n" + "line of code\n" * 5],
+                id="unterminated-block-stays-unterminated",
+            ),
+            pytest.param(
+                "w" * 70 + "```python\n" + "print(1)\n" * 8 + "```",
+                ["w" * 70, "```python\n" + "print(1)\n" * 7 + "```", "```python\nprint(1)\n```"],
+                id="cut-in-the-language-tag-moves-the-block-to-the-next-message",
+            ),
+            pytest.param(
+                "w" * 66 + "```python\n" + "print(1)\n" * 8 + "```",
+                ["w" * 66, "```python\n" + "print(1)\n" * 7 + "```", "```python\nprint(1)\n```"],
+                id="cut-before-the-first-code-moves-the-block-to-the-next-message",
+            ),
+            pytest.param(
+                "```py\r\n" + "line of code\r\n" * 8 + "```\r\nafter\r\n",
+                ["```py\r\n" + "line of code\r\n" * 4 + "```", "```py\n" + "line of code\r\n" * 4 + "```\r\nafter\r\n"],
+                id="crlf-block-reopens-with-its-language-tag",
+            ),
+        ],
+    )
+    def test_split_text_closes_and_reopens_a_cut_code_block(self, monkeypatch, text: str, expected: list[str]):
+        """A split inside a code block must leave both messages rendering it as code.
+
+        Without this the first message ends in an unclosed block and the second
+        starts with bare code, so neither renders a code block and the code is
+        read as markdown. Text after a closed block must stay prose.
+        """
+        from app.channels import discord as discord_module
+
+        monkeypatch.setattr(discord_module, "_DISCORD_MAX_MESSAGE_LEN", 80)
+
+        chunks = discord_module.DiscordChannel._split_text(text)
+
+        assert chunks == expected
+        assert all(len(chunk) <= 80 for chunk in chunks)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param("w" * 78 + "```code```", ["w" * 78, "```code```"], id="backtick-run"),
+            pytest.param("w" * 79 + "\\```code", ["w" * 79, "\\```code"], id="escape"),
+            pytest.param("w" * 79 + "\r\nmore", ["w" * 79, "\r\nmore"], id="crlf"),
+        ],
+    )
+    def test_split_text_cut_inside_a_line_keeps_backtick_runs_escapes_and_crlf_whole(self, monkeypatch, text: str, expected: list[str]):
+        """A cut through ```, a backslash escape or a CRLF would change which runs open a block."""
+        from app.channels import discord as discord_module
+
+        monkeypatch.setattr(discord_module, "_DISCORD_MAX_MESSAGE_LEN", 80)
+
+        assert discord_module.DiscordChannel._split_text(text) == expected
+
+    def test_split_text_keeps_a_long_code_block_rendering_at_discord_limit(self):
+        from app.channels.discord import _DISCORD_MAX_MESSAGE_LEN, DiscordChannel
+
+        code = "".join(f"    result_{i} = compute_value({i}, factor=2)\n" for i in range(150))
+        text = "Here is the script:\n\n```python\n" + code + "```\n\nRun it with python."
+
+        chunks = DiscordChannel._split_text(text)
+
+        assert len(chunks) > 2
+        assert all(len(chunk) <= _DISCORD_MAX_MESSAGE_LEN for chunk in chunks)
+        # Every message closes the block it opens.
+        assert all(sum(line.startswith("```") for line in chunk.split("\n")) == 2 for chunk in chunks)
+        assert chunks[0].startswith("Here is the script:\n\n```python\n")
+        assert all(chunk.endswith("\n```") for chunk in chunks[:-1])
+        assert all(chunk.startswith("```python\n    result_") for chunk in chunks[1:])
+        assert chunks[-1].endswith("```\n\nRun it with python.")
+
+    # Discord's client renders a code block from three backticks to the next
+    # three, with an optional language tag line; it is not CommonMark.
+    _DISCORD_CODE_BLOCK_RE = re.compile(r"```(?:([a-z0-9_+\-.#]+?)\n)?\n*([^\n][\s\S]*?)\n*```", re.IGNORECASE)
+
+    @classmethod
+    def _discord_render(cls, text: str) -> tuple[str, str, bool]:
+        """(prose, code, ends inside a block) of *text* as the Discord client shows it, line breaks dropped."""
+        # The client's parser turns CRLF and a lone CR into LF before it parses.
+        text = re.sub(r"\r\n?", "\n", text)
+        prose, code, index = [], [], 0
+        while index < len(text):
+            if text[index] == "\\" and re.match(r"[^0-9A-Za-z\s]", text[index + 1 : index + 2]):
+                prose.append(text[index : index + 2])
+                index += 2
+                continue
+            if text.startswith("```", index):
+                if block := cls._DISCORD_CODE_BLOCK_RE.match(text, index):
+                    code.append(block.group(2))
+                    index = block.end()
+                    continue
+                if "```" not in text[index + 3 :]:
+                    tail = text[index + 3 :]
+                    language = re.match(r"[a-z0-9_+\-.#]+?\n", tail, re.IGNORECASE)
+                    code.append(tail[language.end() :] if language else tail)
+                    return "".join(prose).replace("\n", ""), "".join(code).replace("\n", ""), True
+            prose.append(text[index])
+            index += 1
+        return "".join(prose).replace("\n", ""), "".join(code).replace("\n", ""), False
+
+    def test_split_text_with_code_blocks_keeps_prose_and_code_apart(self, monkeypatch):
+        """Random replies mixing prose and code blocks render the same prose and code once split.
+
+        The expected rendering comes from Discord's code-block rule applied to
+        the whole reply, independently of the splitter's own parser.
+        """
+        import random
+
+        from app.channels import discord as discord_module
+
+        limit = 120
+        monkeypatch.setattr(discord_module, "_DISCORD_MAX_MESSAGE_LEN", limit)
+        rng = random.Random(8086)
+        pieces = ["```", "```py\n", "```py\r\n", "x```", "\\```", "~~~\n", "````", "\n", "\n\n", "\r\n"]
+
+        for _ in range(300):
+            parts = []
+            for _ in range(rng.randint(1, 60)):
+                # Prose has spaces, so no prose run after backticks reads as a language tag.
+                parts.append(rng.choice(pieces) if rng.random() < 0.2 else "ww " * rng.randint(0, 20) + rng.choice(("\n", "\r\n")))
+            text = "".join(parts)
+
+            chunks = discord_module.DiscordChannel._split_text(text)
+
+            assert all(0 < len(chunk) <= limit for chunk in chunks), text
+            rendered = [self._discord_render(chunk) for chunk in chunks]
+            prose, code, ends_open = self._discord_render(text)
+            if not ends_open:
+                # Discord shows an unclosed block as plain text, so only a reply
+                # that closes its blocks has a rendering to keep: every message
+                # closes its blocks, and none moves text between prose and code.
+                assert not any(part[2] for part in rendered), text
+                assert "".join(part[0] for part in rendered) == prose, text
+                assert "".join(part[1] for part in rendered) == code, text
 
     def test_stop_prevents_queued_typing_starter_from_creating_task(self):
         from app.channels.discord import DiscordChannel
