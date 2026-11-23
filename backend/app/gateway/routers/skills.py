@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.datastructures import FormData, Headers, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
@@ -165,6 +165,13 @@ class CustomSkillHistoryResponse(BaseModel):
 
 class SkillRollbackRequest(BaseModel):
     history_index: int = Field(default=-1, description="History entry index to restore from, defaulting to the latest change.")
+
+    @field_validator("history_index", mode="before")
+    @classmethod
+    def reject_boolean_history_index(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Boolean values are invalid for history_index")
+        return value
 
 
 # Custom-skill mutations (edit, delete, rollback) each span three steps —
