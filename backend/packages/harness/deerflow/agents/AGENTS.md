@@ -18,6 +18,10 @@ python -m pytest tests -q -k "lead_agent or thread_state or assembly or prompt"
   Keep its signature and its bare-graph return type. The Gateway calls
   `assemble_lead_agent`, which also returns the descriptor and the effective
   model.
+- **Injected skill storage uses the configured sandbox mount.** The lead's
+  catalog, activation and thread sandbox projection share the supplied storage.
+  An embedding host supplies a provider with thread skill isolation and
+  serializes lead runs for the same user and thread.
 - **A consumer unwraps through `runtime/runs/worker.py::_agent_graph`**, because
   a third-party factory can return a bare graph.
 - **The graph and the assembly descriptor receive the same rendered prompt and
