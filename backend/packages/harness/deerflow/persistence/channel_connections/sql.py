@@ -72,11 +72,6 @@ class ChannelConnectionRepository:
         self.session_factory = session_factory
         self._cipher = cipher
 
-    async def close(self) -> None:
-        from deerflow.persistence.engine import close_engine
-
-        await close_engine()
-
     @staticmethod
     def _new_id() -> str:
         return uuid.uuid4().hex
