@@ -550,3 +550,82 @@ class TestAsyncParity:
         prepared = await _run_async(ModelContentCompatibilityMiddleware(), request)
 
         assert prepared is request
+
+
+@pytest.mark.parametrize("block", [{"type": "image", "base64": "synthetic-image-payload", "mime_type": "image/png"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,synthetic-image-payload"}}])
+async def test_text_only_image_projection_is_transient_and_idempotent(block):
+    from deerflow_extension_api import collect_release_policies
+
+    message = _tool_message([{"type": "text", "text": "Image description"}, block])
+    request = _model_request([message])
+    middleware = ModelContentCompatibilityMiddleware(supports_vision=False)
+    prepared = await _run_async(middleware, request)
+    assert prepared.messages[0].content[0] == message.content[0]
+    assert prepared.messages[0].content[1]["type"] == "text"
+    assert "synthetic-image-payload" not in str(prepared.messages[0].content)
+    assert message.content[1] == block
+    assert request.state["messages"][0] is message
+    assert await _run_async(middleware, prepared) is prepared
+    assert collect_release_policies([middleware]) != collect_release_policies([ModelContentCompatibilityMiddleware(supports_vision=True)])
+
+
+@pytest.mark.parametrize("chain", ["lead", "subagent"])
+@pytest.mark.parametrize("supports_vision", [False, True])
+def test_mcp_image_result_reaches_configured_model_as_supported_content(chain, supports_vision):
+    import httpx
+    from langchain.agents import create_agent
+    from langchain_core.tools import StructuredTool
+    from langchain_openai import ChatOpenAI
+    from langgraph.checkpoint.memory import InMemorySaver
+    from mcp.types import CallToolResult, ImageContent, TextContent
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.mcp.tools import _convert_call_tool_result
+
+    app_config = AppConfig(models=[{"name": "configured", "use": "langchain_openai:ChatOpenAI", "model": "configured", "supports_vision": supports_vision}], sandbox=SandboxConfig(use="test"))
+    if chain == "lead":
+        from deerflow.agents.lead_agent.agent import build_middlewares
+
+        middlewares = build_middlewares(config={"configurable": {}}, model_name="configured", app_config=app_config)
+    else:
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+
+        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="configured")
+    compatibility = next(m for m in middlewares if isinstance(m, ModelContentCompatibilityMiddleware))
+    image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lH0AAAAASUVORK5CYII="
+    content, artifact = _convert_call_tool_result(CallToolResult(content=[TextContent(type="text", text="Screenshot captured"), ImageContent(type="image", data=image, mimeType="image/png")]))
+
+    def capture():
+        """Capture a screenshot through MCP."""
+        return content, artifact
+
+    payloads = []
+
+    def respond(request):
+        import json
+
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if len(payloads) == 1:
+            message = {"role": "assistant", "content": None, "tool_calls": [{"id": "call_capture", "type": "function", "function": {"name": "capture", "arguments": "{}"}}]}
+        else:
+            images = [block for message in payload["messages"] if isinstance(message.get("content"), list) for block in message["content"] if block.get("type") == "image_url"]
+            if images and not supports_vision:
+                return httpx.Response(400, json={"error": {"message": "This model does not support image inputs", "type": "invalid_request_error"}})
+            assert bool(images) is supports_vision
+            assert "Screenshot captured" in str(payload["messages"])
+            message = {"role": "assistant", "content": "Image result handled"}
+        return httpx.Response(
+            200, json={"id": "chatcmpl-test", "object": "chat.completion", "created": 0, "model": "configured", "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if len(payloads) == 1 else "stop"}]}
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatOpenAI(model="configured", api_key="synthetic-test-key", http_client=client, max_retries=0, use_responses_api=False)
+        graph = create_agent(model, tools=[StructuredTool.from_function(capture, response_format="content_and_artifact")], middleware=[compatibility], checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "mcp-image"}}
+        result = graph.invoke({"messages": [HumanMessage(content="Capture the page")]}, config=config)
+        assert result["messages"][-1].content == "Image result handled"
+        stored = graph.get_state(config).values["messages"]
+        assert next(message for message in stored if isinstance(message, ToolMessage)).content == content
+    assert len(payloads) == 2

@@ -14,6 +14,15 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Image results and model capabilities
+
+For a model configured with `supports_vision: false`, image blocks returned by
+MCP tools are replaced with text placeholders in the model request. Other text
+from the result remains available, and the original images stay in tool messages
+and checkpoints. Models configured with `supports_vision: true` continue to
+receive images. Direct SDK factories without a model capability profile retain
+their existing image handling.
+
 ## Stdio Working Directory
 
 Set `cwd` when a stdio server needs to resolve its entrypoint or data files
