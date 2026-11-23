@@ -35,9 +35,20 @@ def entry(ref="/mnt/user-data/outputs/report.md", handle="art_1234abcd"):
     return {"handle": handle, "tool_name": "mcp_tool", "tool_call_id": "make", "call_index": 0, "artifact_type": "file", "display_name": "report.md", "real_ref": ref, "created_at": "now"}
 
 
-@pytest.mark.parametrize("invalid_label", [{"display_name": None}, {"tool_name": 7}, {"artifact_type": []}])
-def test_resumed_agent_omits_unusable_artifact_labels(invalid_label):
-    stored = [entry(handle="art_valid"), {**entry(handle="art_bad"), **invalid_label}]
+@pytest.mark.parametrize(
+    "unusable",
+    [
+        pytest.param({**entry(handle="art_bad"), "display_name": None}, id="null-display-name"),
+        pytest.param({**entry(handle="art_bad"), "tool_name": 7}, id="numeric-tool-name"),
+        pytest.param({**entry(handle="art_bad"), "artifact_type": []}, id="list-artifact-type"),
+        pytest.param(None, id="non-object"),
+        pytest.param([list(item) for item in entry(handle="art_bad").items()], id="key-value-pairs"),
+        pytest.param({"display_name": "invalid-artifact.md", "real_ref": "/mnt/user-data/outputs/legacy.md"}, id="missing-handle"),
+        pytest.param({**entry(handle=""), "display_name": "invalid-artifact.md"}, id="empty-handle"),
+    ],
+)
+def test_resumed_agent_omits_unusable_artifact_rows(unusable):
+    stored = [entry(handle="art_valid"), unusable]
     requests = []
 
     def respond(request):
@@ -49,8 +60,9 @@ def test_resumed_agent_omits_unusable_artifact_labels(invalid_label):
         agent = create_agent(model, tools=[], middleware=[DurableContextMiddleware(inject_tool_artifacts=True)], state_schema=ThreadState, checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": "artifact-labels"}}
         # State-update routes use Overwrite for reducer-backed channels, so
-        # stored integration/legacy values reach the renderer without merging.
+        # stored integration/legacy rows are restored without merging.
         agent.update_state(config, {"tool_artifacts": Overwrite(stored)})
+        assert agent.get_state(config).values["tool_artifacts"] == stored
         result = agent.invoke({"messages": [HumanMessage("Hello")]}, config=config)
         assert result["messages"][-1].content == "Done"
         assert agent.get_state(config).values["tool_artifacts"] == stored
@@ -59,6 +71,7 @@ def test_resumed_agent_omits_unusable_artifact_labels(invalid_label):
     visible = json.dumps(requests[0]["messages"])
     assert "art_valid" in visible
     assert "art_bad" not in visible
+    assert "invalid-artifact.md" not in visible
 
 
 def request(args, entries=()):
@@ -216,7 +229,7 @@ def test_structured_fallback_keeps_complete_json_within_utf8_budget():
     assert json.loads(captured["real_ref"]) == result.artifact["structured_content"]
 
 
-@pytest.mark.parametrize("unusable", [[], [None, {**entry(), "display_name": None}]])
+@pytest.mark.parametrize("unusable", [[], [None, {**entry(), "display_name": None}, {"display_name": "missing handle"}, entry(handle="")]])
 def test_render_shows_omitted_count_without_exceeding_budget(unusable):
     entries = [entry(handle=f"art_{i:08x}") for i in range(20)]
     rendered = render_artifact_registry([*unusable, *entries, *unusable], max_chars=600)
