@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -285,16 +286,16 @@ async def test_bound_text_clarification_keeps_the_connection_alias(card_channel)
     message.owner_user_id = "owner-1"
     repo = SimpleNamespace(
         find_connection_by_external_identity=AsyncMock(return_value={"id": "conn-1", "owner_user_id": "owner-1"}),
-        set_thread_id=AsyncMock(),
+        claim_thread_id=AsyncMock(),
         get_thread_id=AsyncMock(return_value=None),
     )
     card_channel._connection_repo = repo
     await card_channel.send(message, _max_retries=1)
-    repo.set_thread_id.reset_mock()
+    repo.claim_thread_id.reset_mock()
 
     routed = await card_channel._resolve_routing(_RoutingAttempt(group_message("plain-answer")))
     assert routed.from_pending
-    repo.set_thread_id.assert_awaited_once_with(connection_id="conn-1", owner_user_id="owner-1", provider="feishu", external_conversation_id="chat-1", external_topic_id=routed.topic_id, thread_id=message.thread_id)
+    repo.claim_thread_id.assert_awaited_once_with(connection_id="conn-1", owner_user_id="owner-1", provider="feishu", external_conversation_id="chat-1", external_topic_id=routed.topic_id, thread_id=message.thread_id)
     assert await card_channel.config["channel_store"].list_entries() == []
 
 
@@ -552,6 +553,11 @@ async def test_ordinary_text_uses_current_conversation(card_channel, tmp_path, m
         )
         if reset_conversation:
             await manager._handle_command(command)
+            if bound_identity and topic_id:
+                late_reply = replace(message, text="Earlier answer", thread_ts="earlier-source", metadata={"user_id": command.user_id, "root_id": topic_id})
+                await card_channel.send(late_reply, _max_retries=1)
+                assert await manager._lookup_thread_id(command) == "thread-after-new"
+                assert await repo.get_thread_id(connection["id"], "chat-1", "earlier-source") == "thread-1"
         parsed = group_message("ordinary-answer")
         parsed.chat_type = "group" if topic_id else "p2p"
         parsed.root_id = topic_id

@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, TypeVar
 
 from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, abort_connection_transport, shutdown_private_loop
@@ -122,6 +122,9 @@ class _Routing:
     from_stored_mapping: bool
     from_pending: bool
     clarification_card_id: str | None = None
+    connection_id: str | None = None
+    owner_user_id: str | None = None
+    workspace_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -1209,7 +1212,7 @@ class FeishuChannel(Channel):
         # is reused across a thread's cards without exposing callback tokens.
         topic_id = f"feishu-card:{msg.thread_id}"
         try:
-            await self._set_thread_alias(msg.chat_id, topic_id, msg.thread_id, user_id, msg.connection_id, msg.owner_user_id)
+            await self._record_thread_alias(msg.chat_id, topic_id, msg.thread_id, user_id, msg.connection_id, msg.owner_user_id)
         except Exception:
             logger.exception("[Feishu] cannot bind clarification card to thread %s; using text fallback", msg.thread_id)
             return None
@@ -1348,11 +1351,12 @@ class FeishuChannel(Channel):
 
     # -- internal ----------------------------------------------------------
 
-    async def _set_thread_alias(self, chat_id: str, topic_id: str, thread_id: str, user_id: str, connection_id: str | None, owner_id: str | None) -> None:
+    async def _record_thread_alias(self, chat_id: str, topic_id: str, thread_id: str, user_id: str, connection_id: str | None, owner_id: str | None) -> None:
         if connection_id:
             if self._connection_repo is None or not owner_id:
                 raise ValueError("Missing Feishu connection owner or repository")
-            await self._connection_repo.set_thread_id(connection_id=connection_id, owner_user_id=owner_id, provider=self.name, external_conversation_id=chat_id, external_topic_id=topic_id, thread_id=thread_id)
+            # A late reply can add an alias, but /new owns explicit topic rebinding.
+            await self._connection_repo.claim_thread_id(connection_id=connection_id, owner_user_id=owner_id, provider=self.name, external_conversation_id=chat_id, external_topic_id=topic_id, thread_id=thread_id)
         else:
             store = self.config["channel_store"]
             await store.set_thread_id(fallback_store_channel(self.name, topic_id, self._connection_repo), chat_id, thread_id, topic_id=topic_id, user_id=user_id)
@@ -1362,9 +1366,8 @@ class FeishuChannel(Channel):
 
         Every streamed chunk of a reply carries the same aliases, and each write
         is a full ``store.json`` rewrite or a database upsert, so a non-final
-        chunk only writes the aliases this reply has not stored yet. The final
-        outbound writes all of them again, leaving the store as it was when every
-        chunk wrote them.
+        chunk only records new aliases. The final outbound checks them all again
+        so a missing alias can be restored.
         """
         if not msg.thread_id or (not msg.connection_id and self.config.get("channel_store") is None):
             return
@@ -1393,7 +1396,7 @@ class FeishuChannel(Channel):
             if alias in remembered:
                 continue
             try:
-                await self._set_thread_alias(msg.chat_id, topic_id, msg.thread_id, user_id, msg.connection_id, msg.owner_user_id)
+                await self._record_thread_alias(msg.chat_id, topic_id, msg.thread_id, user_id, msg.connection_id, msg.owner_user_id)
             except Exception:
                 # Not remembered, so the next chunk retries it.
                 logger.exception("[Feishu] failed to remember thread mapping for topic_id=%s", topic_id)
@@ -1655,6 +1658,14 @@ class FeishuChannel(Channel):
         route = InboundMessage(channel_name=self.name, chat_id=parsed.chat_id, user_id=parsed.sender_id, text="")
         if self._connection_repo is not None:
             await self._attach_connection_identity(route)
+        default = _Routing(
+            topic_id=None if parsed.chat_type == "p2p" else (parsed.root_id or parsed.msg_id),
+            from_stored_mapping=False,
+            from_pending=False,
+            connection_id=route.connection_id,
+            owner_user_id=route.owner_user_id,
+            workspace_id=route.workspace_id,
+        )
         if attempt.pending is None:
             candidates = [candidate for candidate in (self._non_empty_str(parsed.root_id), parsed.parent_id, parsed.feishu_thread_id) if candidate]
             if candidates:
@@ -1666,30 +1677,27 @@ class FeishuChannel(Channel):
                         else None
                     )
                     if pending:
-                        return _Routing(pending["topic_id"], True, True, self._non_empty_str(pending.get("card_message_id")))
-                    return _Routing(stored, True, False)
-            topic_id: str | None = parsed.root_id or parsed.msg_id
-            if parsed.chat_type == "p2p":
-                topic_id = None
+                        return replace(default, topic_id=pending["topic_id"], from_stored_mapping=True, from_pending=True, clarification_card_id=self._non_empty_str(pending.get("card_message_id")))
+                    return replace(default, topic_id=stored, from_stored_mapping=True)
             if parsed.msg_type != InboundMessageType.CHAT:
-                return _Routing(topic_id, False, False)
+                return default
             if self._card_interaction_enabled and parsed.chat_type == "p2p" and not candidates:
                 # Unthreaded P2P messages follow the current conversation,
                 # including /new. Only explicit card replies use the old alias.
-                return _Routing(None, False, False)
+                return default
             reply_to_ids = [parsed.parent_id] if self._card_interaction_enabled and parsed.parent_id else None
             pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=reply_to_ids, connection_id=route.connection_id, owner_user_id=route.owner_user_id)
             if not (pending and self._non_empty_str(pending.get("topic_id"))):
-                return _Routing(topic_id, False, False)
+                return default
             attempt.pending = pending
         pending_topic_id = self._non_empty_str(attempt.pending.get("topic_id"))
         thread_id = self._non_empty_str(attempt.pending.get("thread_id"))
         if (attempt.pending.get("connection_id"), attempt.pending.get("owner_user_id")) != (route.connection_id, route.owner_user_id):
             attempt.pending = None
-            return _Routing(None if parsed.chat_type == "p2p" else (parsed.root_id or parsed.msg_id), False, False)
-        if thread_id:
-            await self._set_thread_alias(parsed.chat_id, pending_topic_id, thread_id, parsed.sender_id, route.connection_id, route.owner_user_id)
-        return _Routing(pending_topic_id, False, True, self._non_empty_str(attempt.pending.get("card_message_id")))
+            return default
+        if thread_id and (route.connection_id or store is not None):
+            await self._record_thread_alias(parsed.chat_id, pending_topic_id, thread_id, parsed.sender_id, route.connection_id, route.owner_user_id)
+        return replace(default, topic_id=pending_topic_id, from_pending=True, clarification_card_id=self._non_empty_str(attempt.pending.get("card_message_id")))
 
     async def _resolve_routing_bounded(self, attempt: _RoutingAttempt) -> _Routing | StoreLookupUnresolved:
         """``_resolve_routing`` under the store deadline; no answer in time (or a store error) is *unresolved*.
@@ -1866,6 +1874,9 @@ class FeishuChannel(Channel):
                 metadata=metadata,
             )
             inbound.topic_id = routing.topic_id
+            inbound.connection_id = routing.connection_id
+            inbound.owner_user_id = routing.owner_user_id
+            inbound.workspace_id = routing.workspace_id
 
             if self._is_batchable_file_inbound(
                 msg_type=parsed.msg_type,
@@ -1947,14 +1958,15 @@ class FeishuChannel(Channel):
     def _queue_file_inbound_batch(self, msg_id: str, inbound: InboundMessage) -> bool:
         key = self._pending_key(inbound.chat_id, inbound.user_id)
         should_schedule_flush = False
-        expired_batch: tuple[str, InboundMessage, list[str]] | None = None
+        previous_batch: tuple[str, InboundMessage, list[str]] | None = None
 
         with self._thread_lock:
             batch = self._pending_inbound_batches.get(key)
             now = time.time()
             if batch:
-                if now - batch["created_at"] <= FEISHU_INBOUND_BATCH_WINDOW_SECONDS:
-                    batched_inbound = batch["inbound"]
+                batched_inbound = batch["inbound"]
+                same_binding = (batched_inbound.connection_id, batched_inbound.owner_user_id) == (inbound.connection_id, inbound.owner_user_id)
+                if same_binding and now - batch["created_at"] <= FEISHU_INBOUND_BATCH_WINDOW_SECONDS:
                     batch["message_ids"].append(msg_id)
                     batch["text_parts"].append(inbound.text)
                     batched_inbound.text = "\n\n".join(part for part in batch["text_parts"] if part)
@@ -1970,7 +1982,7 @@ class FeishuChannel(Channel):
                     )
                     return True
 
-                expired_batch = (batch["anchor_message_id"], batch["inbound"], list(batch["message_ids"]))
+                previous_batch = (batch["anchor_message_id"], batch["inbound"], list(batch["message_ids"]))
 
             self._pending_inbound_batches[key] = {
                 "anchor_message_id": msg_id,
@@ -1984,9 +1996,9 @@ class FeishuChannel(Channel):
 
         if should_schedule_flush:
             self._schedule_batch_flush(key, msg_id)
-        if expired_batch:
-            anchor_message_id, expired_inbound, source_message_ids = expired_batch
-            self._schedule_prepare_inbound(anchor_message_id, expired_inbound, source_message_ids=source_message_ids)
+        if previous_batch:
+            anchor_message_id, previous_inbound, source_message_ids = previous_batch
+            self._schedule_prepare_inbound(anchor_message_id, previous_inbound, source_message_ids=source_message_ids)
         return True
 
     def _pop_pending_inbound_batch(self, key: tuple[str, str], *, anchor_message_id: str | None = None) -> tuple[str, InboundMessage, list[str]] | None:
@@ -2046,7 +2058,6 @@ class FeishuChannel(Channel):
         """Kick off Feishu side effects without delaying inbound dispatch."""
         try:
             clarification_card_id = inbound.metadata.pop(_PENDING_CARD_METADATA_KEY, None)
-            inbound = await self._attach_connection_identity(inbound)
             if self._card_interaction_enabled and not clarification_card_id and inbound.msg_type == InboundMessageType.CHAT:
                 # Ordinary answers retire only the current thread's buttons;
                 # older cards cannot redirect a fresh /new conversation.
@@ -2285,7 +2296,7 @@ class FeishuChannel(Channel):
             # topic_id determines which LangGraph thread the message maps to.
             # P2P chats: topic_id=None so all messages share one thread (like Telegram DMs).
             # But check stored mappings first for backward compatibility with pre-upgrade P2P threads.
-            if self.config.get("channel_store") is None:
+            if self.config.get("channel_store") is None and self._connection_repo is None:
                 self._dispatch_inbound(parsed, self._route_without_store(parsed))
                 return
 

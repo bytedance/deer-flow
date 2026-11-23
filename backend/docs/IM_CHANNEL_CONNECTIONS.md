@@ -412,7 +412,8 @@ When `channel_connections.enabled` and `require_bound_identity` are true, auth-e
 Upgrade note: existing auth-enabled deployments that already have `channel_connections.enabled: true` will start rejecting ordinary unbound IM messages after this field is introduced because `require_bound_identity` defaults to true. Legacy operator-owned/open-bot deployments that intentionally allow unbound platform users to create DeerFlow runs should set `require_bound_identity: false` before upgrading and restart the service.
 
 When channel connections are enabled, Feishu stores topic and card aliases
-for bound senders with their connection. Feishu requires the connection
+for bound senders with their connection. After `/new`, the topic follows the new
+conversation even if an earlier reply finishes streaming. Feishu requires the connection
 repository to be available before its transport starts. Unbound chats use a separate topic
 namespace. After upgrading a mixed deployment, unbound replies to older topics
 start a fresh conversation. Unthreaded chats and legacy-only deployments keep
