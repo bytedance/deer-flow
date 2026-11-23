@@ -24,13 +24,18 @@ Content-Type: application/json
 {}
 ```
 
-Each token runs with its owning user's identity (owner filtering and per-user
-memory keep working), carries a scope set that can only narrow that user's
-permissions, and is admitted only to the thread/run lifecycle routes — every
-other route answers `403` to PAT callers, and a PAT never carries admin
-capability. Tokens can be listed and revoked at any time; revocation is
-immediate. PATs require a database backend (SQLite/PostgreSQL). Full
-reference: [API Reference — Personal Access Tokens](../../backend/docs/API.md#personal-access-tokens).
+Each token uses its owner's identity, and its scopes can narrow the owner's
+permissions. The Gateway admits PATs only to allowlisted routes, including
+thread, run, and project operations. A valid PAT can call
+`GET /api/v1/auth/me` to confirm its identity. PATs require SQLite or
+PostgreSQL. Revocation takes effect on the next request.
+[PAT API reference](../../backend/docs/API.md#personal-access-tokens)
+
+A CI pipeline can deploy agents, schedules, and managed subagents with their
+respective scopes. Set `agents_api.enabled` to `true` in `config.yaml` to use
+the agent management API. The PAT exception for admin operations applies only to
+managed-subagent writes and requires `subagents:write` from an admin token owner.
+[Deployment routes and required scopes](../../backend/docs/API.md#agent-configuration-by-pat)
 
 ## Embedded Python Client
 

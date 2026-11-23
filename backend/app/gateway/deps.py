@@ -1572,13 +1572,24 @@ async def is_admin_user(request: Request) -> bool:
     return getattr(user, "system_role", None) == "admin"
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
+async def require_admin_user(request: Request, *, detail: str, pat_scope: str | None = None) -> None:
     """Require the authenticated caller to be an admin user.
 
     ``detail`` is the route-specific 403 message. The shared predicate keeps
     read-side redaction and write authorization on the same admin definition.
-    """
 
+    ``pat_scope`` names the one opt-in exception to "PATs never carry admin
+    capability": a route that passes it also admits a PAT whose owner is an
+    admin *and* which holds that scope. Only routes that pass it are affected;
+    ``is_admin_user`` stays False for every PAT.
+    """
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if pat_scope is not None and getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        user = getattr(request.state, "user", None)
+        if pat_scope in getattr(request.state, "pat_scopes", frozenset()) and getattr(user, "system_role", None) == "admin":
+            return
+        raise HTTPException(status_code=403, detail=detail)
     if not await is_admin_user(request):
         raise HTTPException(status_code=403, detail=detail)
 
