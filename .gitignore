@@ -73,4 +73,4 @@ config.yaml.bak
 .monocle/
 
 backend/scripts/benchmark/search_query/runs/
-backend/scripts/benchmark/search_query/task/dataset-5.csv
+backend/scripts/benchmark/search_query/task/

@@ -21,6 +21,8 @@ from deerflow.runtime.serialization import serialize_channel_values_for_api
 from scripts.benchmark.search_query import run
 from scripts.benchmark.search_query.metrics import lexical
 
+pytestmark = pytest.mark.benchmark
+
 
 def test_parse_quoted_backstories_and_separate_references(tmp_path):
     path = tmp_path / "synthetic.csv"
@@ -30,6 +32,25 @@ def test_parse_quoted_backstories_and_separate_references(tmp_path):
     assert run.load_cases(path, digest) == [run.Case("s1", "First line,\nsecond line", ["moon rock", "lunar rock"])]
     with pytest.raises(ValueError, match="SHA-256"):
         run.load_cases(path, "0" * 64)
+
+
+@pytest.mark.parametrize("missing", ["--dataset", "--dataset-sha256", "--dataset-revision"])
+def test_cli_requires_caller_supplied_dataset_provenance(monkeypatch, capsys, missing):
+    options = {
+        "--dataset": "synthetic.csv",
+        "--dataset-sha256": "0" * 64,
+        "--dataset-revision": "synthetic-v1",
+        "--gateway-revision": "synthetic-gateway",
+        "--runtime-artifact": "config=synthetic.yaml",
+    }
+    monkeypatch.setattr(sys, "argv", ["benchmark", *(value for key, value in options.items() if key != missing for value in (key, value))])
+    monkeypatch.setattr(run, "runtime_artifacts", lambda _: pytest.fail("Missing dataset provenance must fail before reading deployment files"))
+    with pytest.raises(SystemExit) as exc:
+        run.main()
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "the following arguments are required:" in error
+    assert missing in error
 
 
 def test_lexical_metric():
@@ -213,6 +234,8 @@ def test_cli_records_deployment_configuration_and_rejects_snapshot_drift(tmp_pat
             str(dataset),
             "--dataset-sha256",
             hashlib.sha256(dataset.read_bytes()).hexdigest(),
+            "--dataset-revision",
+            "synthetic-v1",
             "--gateway-revision",
             "deployed-revision",
             "--runtime-artifact",
@@ -251,6 +274,8 @@ def test_cli_records_deployment_configuration_and_rejects_snapshot_drift(tmp_pat
     assert config["max_decisions"] == 2
     assert config["provenance"]["gateway_revision"] == {"value": "deployed-revision", "source": "operator"}
     assert config["provenance"]["git_revision"] == "runner-revision"
+    assert config["provenance"]["dataset_revision"] == "synthetic-v1"
+    assert config["provenance"]["dataset_sha256"] == hashlib.sha256(dataset.read_bytes()).hexdigest()
     saved = "".join(path.read_text(encoding="utf-8") for path in output.iterdir())
     assert "private-key" not in saved
     assert "private-token" not in saved

@@ -5,6 +5,13 @@ the lead agent's first web-search query with the human references associated
 with the same dataset backstory. It reports semantic and lexical similarity.
 Human baselines and retrieval effectiveness are outside this evaluation.
 
+Datasets are caller-supplied and are not distributed with the benchmark. Supply
+`--dataset`, its `--dataset-sha256`, and an immutable `--dataset-revision`; the
+runner verifies the CSV hash and records the revision in run provenance. The
+benchmark README documents the pinned UQV100 source, license metadata and
+reproducible five-reference derivation. Keep source files and derived CSVs
+outside the repository; offline tests use synthetic fixtures only.
+
 Capture resumes preparatory tool batches on a fresh thread and stops before
 executing the first batch containing `web_search`. Subagents are disabled so
 delegated searches cannot bypass this breakpoint. A configurable checkpoint

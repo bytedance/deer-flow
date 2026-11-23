@@ -28,6 +28,87 @@ These papers motivate the benchmark creation, dataset, measurements and optimiza
 
 Commands are **Bash**, run from the repo root (on Windows use Git Bash or WSL). Requires Python 3.12+, uv and the prerequisites in [CONTRIBUTING.md](../../../../CONTRIBUTING.md).
 
+### Prepare an external dataset
+
+The benchmark ships no dataset and never downloads one. Supply a CSV with
+`UQV100Id`, `Backstory`, and `Top 5 SpelledNormQueries` columns; quote fields with
+CSV quoting and separate references with `|`. The loader accepts other reference
+counts, so use the same derivation and CSV hash for both comparison runs.
+
+The UQV100 source is Peter Bailey, Alistair Moffat, Falk Scholer and Paul Thomas's
+*UQV100: An IR Test Collection With Query Variability*, DOI
+`10.4225/49/5732E99136E1D`. Pin [Figshare article 3180694, version 4](https://figshare.unimelb.edu.au/articles/dataset/UQV100_An_IR_Test_Collection_With_Query_Variability/3180694/4)
+and retain its metadata and README with the data outside this repository.
+
+License metadata differs: the [publisher's catalog record](https://researchdata.edu.au/from-uqv100-test-query-variability/1307620)
+lists [CC BY-NC-SA 3.0 AU](https://creativecommons.org/licenses/by-nc-sa/3.0/au/),
+while the [version 4 Figshare API record](https://api.figshare.com/v2/articles/3180694/versions/4)
+reports [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Preserve both
+notices and establish the applicable terms with the publisher before use or
+redistribution. The dataset and its derivatives are separate from DeerFlow's
+code license.
+
+Obtain these files from the pinned article yourself and verify their bytes:
+
+| Source file | Figshare file ID | SHA-256 |
+| --- | --- | --- |
+| `uqv100-backstories.tsv` | `5515943` | `08c225c9dc018de6ef5bc8ba02fc51d7a7abbddb802cc9803456370814f7011e` |
+| `uqv100-query-variations-and-estimates.tsv` | `5515937` | `e09413bf5fed8b648c77a23e790bec6a8f910e7a36da65bd45f3e4bcb7e11df0` |
+
+The `top-five-frequency-v1` derivation joins on `UQV100Id`, counts each
+`SpelledNormQuery` occurrence per backstory, sorts by descending frequency then
+ascending query text to break ties, and selects five distinct queries. It trims
+only surrounding backstory whitespace, preserves the backstories TSV's row
+order, joins queries with `|`, and writes UTF-8 CSV with LF newlines. Each
+reference receives equal weight during scoring. These are frequent human query
+variants, not relevance-ranked answers or the complete UQV100 collection.
+
+After obtaining the source files, run from the repo root:
+
+```sh
+export UQV100_SOURCE_DIR="$HOME/datasets/uqv100-v4"
+export UQV100_DATASET="$UQV100_SOURCE_DIR/uqv100_evaluation_dataset.csv"
+export UQV100_REVISION="https://figshare.unimelb.edu.au/articles/dataset/UQV100_An_IR_Test_Collection_With_Query_Variability/3180694/4#top-five-frequency-v1"
+export UQV100_SHA256=92b1dcc723f1fc8967d2906748a6d330aabf702bd0eef5c09cf572f9d86e4a7b
+
+uv run --no-sync --project backend python - "$UQV100_SOURCE_DIR" "$UQV100_DATASET" <<'PY'
+import csv, hashlib, io, sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+source, destination = map(Path, sys.argv[1:])
+hashes = {
+    "uqv100-backstories.tsv": "08c225c9dc018de6ef5bc8ba02fc51d7a7abbddb802cc9803456370814f7011e",
+    "uqv100-query-variations-and-estimates.tsv": "e09413bf5fed8b648c77a23e790bec6a8f910e7a36da65bd45f3e4bcb7e11df0",
+}
+tables = {}
+for name, expected in hashes.items():
+    data = (source / name).read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise SystemExit(f"Source SHA-256 mismatch: {name}")
+    tables[name] = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"), newline=""), delimiter="\t"))
+counts = defaultdict(Counter)
+for row in tables["uqv100-query-variations-and-estimates.tsv"]:
+    counts[row["UQV100Id"]][row["SpelledNormQuery"]] += 1
+with destination.open("x", encoding="utf-8", newline="") as file:
+    writer = csv.writer(file, lineterminator="\n")
+    writer.writerow(["UQV100Id", "Backstory", "Top 5 SpelledNormQueries"])
+    for row in tables["uqv100-backstories.tsv"]:
+        frequencies = counts[row["UQV100Id"]]
+        queries = sorted(frequencies, key=lambda q: (-frequencies[q], q))[:5]
+        if len(queries) != 5:
+            raise SystemExit(f"Expected five references for {row['UQV100Id']}")
+        writer.writerow([row["UQV100Id"], row["Backstory"].strip(), "|".join(queries)])
+expected = "92b1dcc723f1fc8967d2906748a6d330aabf702bd0eef5c09cf572f9d86e4a7b"
+if hashlib.sha256(destination.read_bytes()).hexdigest() != expected:
+    raise SystemExit("Derived CSV SHA-256 mismatch")
+print("Verified 100 backstories and 500 references:", destination)
+PY
+```
+
+Retain the source files, license notices, derivation and resulting CSV privately.
+For a different dataset, provide its own immutable revision and expected SHA-256.
+
 ### 1. Start the Gateway (terminal 1)
 
 ```sh
@@ -56,7 +137,9 @@ GATEWAY_REVISION=YOUR_DEPLOYED_COMMIT_OR_IMAGE_DIGEST   # e.g. `git rev-parse HE
 
 benchmark() {
   uv run --no-sync --with sentence-transformers==5.1.2 \
-    python scripts/benchmark/search_query/run.py "$@"
+    python scripts/benchmark/search_query/run.py \
+    --dataset "$UQV100_DATASET" --dataset-sha256 "$UQV100_SHA256" \
+    --dataset-revision "$UQV100_REVISION" "$@"
 }
 
 # Smoke test first, and check the outcome (exit code 0 can still mean an unscored case)
@@ -168,6 +251,12 @@ Unscored outcomes (direct answer, `decision_limit`) are valid and leave metric c
 
 ## Provenance
 
+`--dataset`, `--dataset-sha256` and `--dataset-revision` are required. The runner
+checks the CSV's bytes before loading the encoder or contacting the Gateway.
+The source revision and derivation identifier are operator assertions recorded
+alongside the verified CSV hash in every run's provenance; retain the pinned
+source metadata to substantiate them.
+
 `--gateway-revision` is an operator assertion identifying the running server; the runner's Git revision does not. Repeat `--runtime-artifact NAME=PATH` for each snapshot you retain (config, prompt overlays, skill manifests, memory). Their SHA-256 hashes are recorded without copying secrets. Files must not change during a run, or the command fails and the run is discarded. For a remote Gateway, use exported snapshots, and keep the originals since a hash cannot restore them.
 
 The Gateway's assembly fingerprints are keyed per process, so they cannot prove equality across restarts or workers; use the retained artifacts for cross-deployment comparisons. They also do not capture the rendered system prompt or arbitrary provider kwargs and retry settings, so keep those in your snapshots. Recorded evidence supports reproducible setup but does not make model calls or live tool results deterministic.
@@ -179,8 +268,8 @@ Each run writes to a new ignored directory under `runs/` (or `--output-dir`). Tr
 | File | Contents |
 | --- | --- |
 | `results.csv` | Case ID, backstory, human queries (JSON list), reference count, captured query, outcome, two metric means, effective model, thread ID, decision count, error diagnostic |
-| `summary.json` | Outcome counts, coverage, runner/encoder revisions |
-| `configuration.json` | Capture policy, budget, requested model/context, client timeout/retries, runner/encoder revisions, artifact hashes, Gateway revision |
+| `summary.json` | Outcome counts, coverage, dataset hash/revision, runner/encoder revisions |
+| `configuration.json` | Capture policy, budget, requested model/context, client timeout/retries, dataset hash/revision, runner/encoder revisions, artifact hashes, Gateway revision |
 | `runtime-NNNN.json` | Thread and run IDs, host assembly evidence (effective model, sampling, fingerprints), checkpoint digest, injected context messages |
 
 A case fails if host evidence is missing or cannot be tied to exactly one run.

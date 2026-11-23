@@ -23,8 +23,6 @@ else:  # python scripts/benchmark/search_query/run.py
     from metrics import lexical, semantic
 
 HERE = Path(__file__).resolve().parent
-DATASET = HERE / "task" / "uqv100_evaluation_dataset.csv"
-DATASET_SHA256 = "92b1dcc723f1fc8967d2906748a6d330aabf702bd0eef5c09cf572f9d86e4a7b"
 COLUMNS = ("UQV100Id", "Backstory", "Top 5 SpelledNormQueries")
 CONTEXT = {"subagent_enabled": False}
 
@@ -218,8 +216,9 @@ def run(cases, client, model, encoder, output: Path, provenance: dict, *, max_de
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=Path, default=DATASET)
-    parser.add_argument("--dataset-sha256", default=DATASET_SHA256)
+    parser.add_argument("--dataset", type=Path, required=True, help="Caller-supplied CSV; keep third-party datasets outside the repository")
+    parser.add_argument("--dataset-sha256", required=True, help="Expected SHA-256 of the supplied CSV bytes")
+    parser.add_argument("--dataset-revision", required=True, help="Immutable dataset source revision and derivation identifier (operator supplied)")
     parser.add_argument("--model", help="DeerFlow model name (default: Gateway configuration)")
     parser.add_argument("--max-decisions", type=int, default=8, help="Maximum assistant checkpoints inspected per backstory")
     parser.add_argument("--gateway-revision", required=True, help="Revision/image digest of the running Gateway (operator supplied)")
@@ -233,6 +232,8 @@ def main() -> int:
         parser.error("--max-decisions must be positive")
     if not args.gateway_revision.strip():
         parser.error("--gateway-revision must not be blank")
+    if not args.dataset_revision.strip():
+        parser.error("--dataset-revision must not be blank")
     artifacts = runtime_artifacts(args.runtime_artifact)
     cases = load_cases(args.dataset, args.dataset_sha256)[: args.limit]
     output = args.output_dir or HERE / "runs" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
@@ -248,6 +249,7 @@ def main() -> int:
         provenance = {
             "git_revision": git.stdout.strip() or None,
             "dataset_sha256": args.dataset_sha256.lower(),
+            "dataset_revision": args.dataset_revision,
             "source_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in [Path(__file__), *sorted((HERE / "metrics").glob("*.py"))]},
             "model_selection": args.model or "gateway default",
             "gateway_revision": {"value": args.gateway_revision, "source": "operator"},
