@@ -41,37 +41,46 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `history_search`: keyword search over the current messages and compacted source
   batches reachable from the current checkpoint. English words and Chinese
   character bigrams are supported. Returns up to eight excerpts of at most 600 characters.
-  Repeated archives of one source share one result slot, preserving FTS ranking.
+  Repeated archives of one source share one result slot.
   The optional `role="user"`, `"assistant"`, or `"tool"` filters by message author
   type; omission or `null` preserves search across all roles. These values map to
   internal `human`, `ai`, and `tool` roles; returned role values stay unchanged.
   Both active and archived history are filtered before the eight-result limit.
   Results include `next_cursor` when more distinct sources match in a readable
-  snapshot. Pass it as
-  `cursor` with the same query and role to get the next page. Each page returns
-  at most eight sources, and the last page omits `next_cursor`.
-  The first page reserves space for active matches. Later pages continue with the
-  remaining active and ranked archived matches from that search. Appended messages
-  do not enter the ranking, so the search tool's own replies do not change the
-  list during pagination. An archived hit uses the current active version for
+  snapshot. Pass it as `cursor` with the same query, role, and order to get the next
+  page. Each page returns at most eight sources, and the last page omits
+  `next_cursor`. Later pages continue in the order chosen when the search started.
+  Search ranks the original active messages, so the tool's own replies stay
+  outside the result order. An archived hit uses the current active version for
   the excerpt and truncation flag if the same source ID reappears in active
   history. Changes to the original active prefix or the archive batches can
-  expire the cursor. Each page checks the full ranked source ID sequence, so a
+  expire the cursor. Each page checks the full ordered source ID sequence, so a
   change to matching or order after index maintenance also expires it. Python
   decodes only archived records needed for the returned excerpts. For a `role`
   filter, SQLite also reads matching candidates' payloads before pagination.
   If the archive cannot be read or the page needs a malformed archived record,
-  a fresh search returns up to eight active hits
-  with `unavailable` and omits `next_cursor`. An existing cursor returns
-  `stale_cursor` because the archived result order cannot be continued safely.
+  a fresh search returns up to eight active hits with `unavailable` and omits
+  `next_cursor`. A continuation returns `stale_cursor` because the archived
+  result order cannot be continued safely.
   Start a fresh search for `stale_cursor` or `invalid_cursor`. Each page checks the
   current thread scope and reachable archive batches before returning sources.
   For example, `history_search(query="replicas", role="user")` narrows the search
   to user messages about replica counts; use `history_read` to verify the source.
-  Filtering does not change ranking or guarantee retrieval of the latest message.
   A matching role does not establish truth or grant current authorization.
 - `history_read`: read the exact source ID in 4,000-character pages. Results mark
   truncation and provide `next_offset` while more stored text remains.
+
+### Search order
+
+Use `history_search(query="replicas", role="user", order="latest")` to look for a
+recent correction or decision. This orders active matches from newest to oldest
+in the current message list, followed by matches from reachable batches in
+reverse checkpoint order and from newest to oldest within each batch.
+Recapturing a batch makes it newest when the updated checkpoint is saved.
+With `order="relevance"` (the default), archived matches use the existing full-text
+rank and active matches use message-list order. The first relevance page reserves
+space for active matches. Both orders apply the role filter and deduplicate
+source IDs before returning up to eight results per page.
 
 ### Matching excerpts and character offsets
 
@@ -162,16 +171,18 @@ creation clears the parent archive references and status; inherited note citatio
 may consequently be unavailable and need fresh verification in the branch.
 
 Retention is bounded by the configured batch/record/text limits and a 32,768-page
-SQLite ceiling (128 MiB for the default page size). The oldest physical batches
-expire as new ones are captured, even if an older checkpoint still refers to
-them. Read/search report `partially_expired` or `unavailable`; missing sources must
-be re-verified. `omitted_records` describes the latest capture's record limit,
-and each shortened source carries `truncated: true`.
-Eviction happens before replacement insertion in one write transaction.
-Competing captures serialize retention decisions; if insertion still exceeds
-capacity, rollback preserves the previous batches. Duplicate capture protects
-the current batch even when the configured retention limit is reduced.
-Storage failure preserves
+SQLite ceiling (128 MiB for the default page size). Each capture keeps its own
+batch and gives priority to the most recent references from the input
+checkpoint. Any remaining slots keep other stored batches in insertion order,
+newest first. A recapture moves its reference to the end of the next checkpoint
+without duplicating sources. If that checkpoint is never saved, later captures
+still use the last saved order. Older checkpoints may return
+`partially_expired` or `unavailable`; missing sources must be re-verified.
+`omitted_records` describes the latest capture's record limit, and each shortened
+source carries `truncated: true`.
+Eviction and replacement insertion share one write transaction. Competing
+captures serialize retention decisions, and a failed insertion rolls back
+evictions. Storage failure preserves
 ordinary compaction and marks history unavailable; it does not undo a successful
 summary. Async writes are offloaded and drained before cancellation returns.
 History tools preserve `unavailable` after a capture failure, even when older

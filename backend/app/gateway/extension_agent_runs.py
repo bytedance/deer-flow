@@ -60,6 +60,10 @@ class GatewayAgentRunsHost:
         self.active = False
 
     def bind(self, request: Request):
+        # A background task's synthetic authorization must not be re-minted
+        # as a general-purpose session handle for the agent it starts.
+        if getattr(request.state, "coordination_grant_id", None) is not None:
+            return None
         user = getattr(request.state, "user", None)
         auth = getattr(request.state, "auth", None)
         if user is None or auth is None or not auth.is_authenticated:
@@ -96,6 +100,7 @@ class GatewayAgentRunsHost:
         grant: dict,
         validator: Callable[[], Awaitable[None]] | None = None,
         plugin_namespace: str | None = None,
+        required_permissions: frozenset[str] = frozenset(),
     ):
         """Restore a persisted delegated grant (e.g. workflow recovery) with its ceiling.
 
@@ -105,6 +110,8 @@ class GatewayAgentRunsHost:
         this handle performs. Restoring re-loads the user row and fails closed
         on a changed token_version, needs_setup or a disabled account, exactly
         like ``restore_batch_authority``; it never creates fresh authority.
+        Callers can preflight required permissions against the grant and current
+        policy. Host operations still revalidate permissions at use.
         """
         source, version, permissions = grant.get("source"), grant.get("token_version"), grant.get("permissions")
         if source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED) or type(version) is not int or not isinstance(permissions, list) or any(not isinstance(value, str) for value in permissions):
@@ -112,12 +119,17 @@ class GatewayAgentRunsHost:
         user = get_auth_disabled_user() if source == AUTH_SOURCE_AUTH_DISABLED and is_auth_disabled() else await self.load_user(user_id) if source == AUTH_SOURCE_SESSION and self.load_user is not None else None
         if user is None or str(user.id) != user_id or user.token_version != version or user.needs_setup or getattr(user, "disabled", False):
             raise AgentRunError(403, "Delegated authorization revoked")
+        granted_permissions = frozenset(permissions)
+        if required_permissions:
+            current_permissions = await resolve_route_permissions(user, is_internal=False)
+            if not required_permissions.issubset(granted_permissions.intersection(current_permissions)):
+                raise AgentRunError(403, "Delegated authorization lacks required permissions")
         return _BoundAgentRuns(
             self,
             user_id,
             version,
             source,
-            frozenset(permissions),
+            granted_permissions,
             plugin_namespace=plugin_namespace,
             origin=make_origin("extension", namespace=plugin_namespace),
             delegation_validator=validator,
@@ -305,11 +317,11 @@ class _BoundAgentRuns:
 
             return await asyncio.to_thread(snapshot)
 
-    async def create_thread(self, *, assistant_id="lead_agent", thread_id=None, metadata=None) -> str:
+    async def create_thread(self, *, assistant_id="lead_agent", thread_id=None, metadata=None, project_id=None) -> str:
         from app.gateway.routers.threads import ThreadCreateRequest, create_thread
 
         async with self._request("threads:write") as request:
-            response = await create_thread(ThreadCreateRequest(assistant_id=assistant_id, thread_id=thread_id, metadata=_json_object(metadata) or {}), request)
+            response = await create_thread(ThreadCreateRequest(assistant_id=assistant_id, thread_id=thread_id, project_id=project_id, metadata=_json_object(metadata) or {}), request)
             return response.thread_id
 
     async def _start(self, *, thread_id, input=None, resume=None, context=None, idempotency_key=None, execution_fence=None, artifact_imports=None):
@@ -349,6 +361,112 @@ class _BoundAgentRuns:
 
     async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None, artifact_imports=None) -> AgentRun:
         return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence, artifact_imports=artifact_imports)
+
+    async def start_coordination_worker(self, *, task_id, execution_id, grant_id):
+        from app.gateway.run_models import RunCreateRequest
+        from app.gateway.services import start_run
+        from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
+        from deerflow.persistence.coordination.workers import RUN_KEY_PREFIX
+        from deerflow.persistence.thread_meta.base import THREAD_PROJECT_METADATA_KEY
+
+        async with self._request("runs:create") as request:
+            try:
+                worker, frozen, project_id = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
+            except TaskNotFound as exc:
+                raise AgentRunError(404, "Worker task unavailable") from exc
+            except TaskConflict as exc:
+                raise AgentRunError(409, str(exc)) from exc
+        thread_id = worker["thread_id"]
+        async with self._request("runs:create", thread_id) as request:
+            record = await request.app.state.thread_store.get(thread_id, user_id=self._user_id)
+            if record is None or record.get("assistant_id") != worker["assistant_id"] or (record.get("metadata") or {}).get(THREAD_PROJECT_METADATA_KEY) != project_id:
+                raise AgentRunError(409, "Worker thread binding changed")
+            body = RunCreateRequest(
+                assistant_id=worker["assistant_id"],
+                input=frozen if "messages" in frozen else None,
+                command=frozen.get("command"),
+                checkpoint_id=frozen.get("checkpoint_id"),
+                context={"subagent_enabled": True},
+                on_disconnect="continue",
+            )
+            request.state.coordination_execution_id = execution_id
+            request.state.coordination_grant_id = grant_id
+            record = await start_run(body, thread_id, request, require_existing_thread=True, idempotency_key=RUN_KEY_PREFIX + execution_id)
+            return _view(record)
+
+    async def wait_coordination_worker(self, *, thread_id, run_id, timeout=60):
+        """Observe the committed terminal status, written after the delivery receipt."""
+        from app.gateway.deps import get_run_event_store, get_run_store
+        from deerflow.extensions.run_evidence import StoreRunEvidenceReader
+
+        async with asyncio.timeout(timeout):
+            delay = 0.25
+            while True:
+                async with self._request("runs:read", thread_id) as request:
+                    evidence = StoreRunEvidenceReader(get_run_store(request), get_run_event_store(request), user_id=self._user_id)
+                    row = await evidence.get_run_status(thread_id=thread_id, run_id=run_id)
+                    if row is None:
+                        raise AgentRunError(404, "Worker run unavailable")
+                    if row.status not in ("pending", "running"):
+                        return row
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 4)
+
+    async def cancel_worker_batch(self, *, thread_id, batch_id):
+        from app.gateway.deps import get_subagent_batch_service
+
+        async with self._request("runs:cancel", thread_id) as request:
+            await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=self._user_id, continuation_authority=self)
+
+    async def coordination_recovery_checkpoint(self, *, thread_id, run_id):
+        from app.gateway.deps import get_run_store
+
+        async with self._request("runs:read", thread_id) as request:
+            row = await get_run_store(request).get(run_id, user_id=self._user_id)
+            if row is None or row["thread_id"] != thread_id or row.get("cancel_requested_at"):
+                return None
+        try:
+            return await self.get_state(thread_id=thread_id)
+        except AgentRunError as exc:
+            if exc.status_code != 404:
+                raise
+            # A stopped Run can have no readable checkpoint after restart.
+            return None
+
+    async def coordination_artifacts(self, *, thread_id, run_id):
+        from app.gateway.artifact_archive import MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES
+        from app.gateway.deps import get_run_event_store
+        from app.gateway.extension_artifacts import read_snapshot
+        from app.gateway.routers.artifacts import reserve_artifact_write
+        from deerflow.constants import DELIVERY_PRESENTATION_TOOL_NAMES
+        from deerflow.runtime.runs.manager import ConflictError
+        from deerflow.utils.file_io import await_drained
+
+        async with self._request("runs:read", thread_id) as request:
+            events = await get_run_event_store(request).list_events(thread_id, run_id, event_types=["run.delivery"], limit=2, user_id=self._user_id)
+        if len(events) != 1:
+            raise AgentRunError(409, "Run delivery receipt is unavailable")
+        by_tool = (events[0].get("content") or {}).get("by_tool")
+        if not isinstance(by_tool, dict) or any(not isinstance(paths, list) or any(not isinstance(path, str) for path in paths) for paths in by_tool.values()):
+            raise AgentRunError(409, "Invalid run delivery receipt")
+        paths = dict.fromkeys(path for tool in DELIVERY_PRESENTATION_TOOL_NAMES for path in by_tool.get(tool, []))
+        if not paths:
+            return []
+        if len(paths) > MAX_FILES:
+            raise AgentRunError(422, "Too many task artifacts")
+        artifacts = []
+        remaining = MAX_TOTAL_BYTES
+        async with self._request("threads:read", thread_id) as request:
+            try:
+                async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
+                    for path in paths:
+                        content = await await_drained(read_snapshot(request, self._user_id, thread_id, path, max_bytes=min(MAX_FILE_BYTES, remaining)))
+                        digest = await asyncio.to_thread(hashlib.sha256, content)
+                        artifacts.append((path, digest.hexdigest(), content))
+                        remaining -= len(content)
+            except ConflictError as exc:
+                raise AgentRunError(503, "Worker artifacts are temporarily busy") from exc
+        return artifacts
 
     async def start_batch_followup(self, *, thread_id, batch_id, input, context, config, execution_fence, goal_wakeup=None):
         """Native single follow-up; the existing SQL admission fences cancellation."""

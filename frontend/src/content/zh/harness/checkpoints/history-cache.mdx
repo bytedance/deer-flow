@@ -63,9 +63,15 @@ import { Callout } from "nextra/components";
 | `thread_id` 保持可读 | 运维不必重算摘要就能认出某个线程的键 |
 | 其余成分以 NUL 分隔后哈希 | 含 `:` 的命名空间不可能产生有歧义的键 |
 | 线程清理前缀 | `{key_prefix}:{thread_id}:`，按前缀匹配，绝不做逐键失效 |
-| 默认前缀 | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`，其中 `CACHE_FORMAT_VERSION = 1` |
+| 默认前缀 | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`，其中 `CACHE_FORMAT_VERSION = 2` |
 | `database.checkpoint_cache.key_prefix` | 整体替换派生前缀 |
 | 数据库身份 | 不含凭据：postgres 为 `host:port/database:schema`，sqlite 为文件路径，其余为 `memory`。轮换凭据不会改变命名空间，否则一次凭据轮换就会让缓存变冷、并让旧键一直孤儿到 TTL。两个部署共用同一个 redis 时，默认前缀不同。 |
+
+### 将 Redis 历史缓存从 v1 升级到 v2
+
+使用默认前缀时，升级后的 worker 会在 v2 命名空间中重建历史。删除或裁剪线程时，也会清理同一数据库下该线程的 v1 缓存条目，包括 `ttl_seconds: 0` 时写入的无过期条目。
+
+如果配置了 `database.checkpoint_cache.key_prefix`，请先停止所有使用该前缀的 worker，清理该前缀下的 Redis 检查点历史缓存，再启动升级后的 worker。自定义前缀不会随版本变化，清理前仍可能读到按旧顺序保存的历史。多个部署共用 Redis 时，只清理本部署的检查点历史缓存键。
 
 ## 用合成代替回溯
 
@@ -136,9 +142,9 @@ redis 客户端是惰性导入的；缺少可选依赖时构造 redis 后端会�
 | --- | --- | --- |
 | `mget` 失败 | `checkpoint history cache mget failed; treating as all-miss: %s` | 所有请求的键都按未命中处理，历史被重新合成 |
 | 写入失败 | `checkpoint history cache write failed; skipping: %s` | 跳过该次写入，下次读取直接重算 |
-| 线程清理失败 | `checkpoint history cache thread purge failed; residual entries expire via TTL: %s` | 源删除已经完成；残余副本会随 `ttl_seconds` 过期；这条路径从不抛异常 |
+| 线程清理失败 | `checkpoint history cache thread purge failed; cached entries may remain: %s` | 源数据已删除。残余键只有设置了 TTL 才会过期 |
 
-TTL 是防泄漏网而非正确性机制，因为条目不可变、没有任何读取依赖它。`ttl_seconds: 0` 表示彻底关闭过期，此时孤儿键只依赖 redis 的 `maxmemory` 策略。清理失败是已删除线程的历史残留下来的唯一途径，且只残留到 TTL 到期。
+TTL 是防泄漏网而非正确性机制，因为条目不可变、没有任何读取依赖它。`ttl_seconds: 0` 表示彻底关闭过期，此时孤儿键只依赖 redis 的 `maxmemory` 策略。清理失败是已删除线程的历史残留下来的唯一途径；残余键会在配置的 TTL 到期后过期，若 `ttl_seconds: 0`，则需由运维处理。
 
 ## stats
 

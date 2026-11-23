@@ -23,6 +23,12 @@ and read tools.
   Source availability and policy denial are runtime outcomes, and the slots they
   leave unused are recalculated in the next batch.
 
+## History retention
+
+Select retained batches from the input checkpoint plus the current batch.
+Recaptures reorder references in the returned checkpoint update. Leave stored
+recency untouched because the update may be discarded.
+
 ## History search
 
 - **The role filter belongs to `history_search` only.** `history_read` takes no

@@ -15,6 +15,8 @@ from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from scripts.benchmark.sandbox import bench_prewarm as bench
 
+pytestmark = pytest.mark.benchmark
+
 
 class EventProvider(SandboxProvider):
     def __init__(self):

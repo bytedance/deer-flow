@@ -41,8 +41,8 @@ The middleware chain is built once per agent invocation, based on the current co
 10. `ViewImageMiddleware` — image details injection (if model supports vision)
 11. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
 12. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
-13. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
-14. `LoopDetectionMiddleware` — breaks repetitive tool call loops
+13. `LoopDetectionMiddleware` — breaks repetitive tool call loops
+14. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
 15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
 16. Custom middlewares (if any)
 17. Configured extension middlewares (if any)
@@ -117,7 +117,7 @@ title:
 
 ### TodoMiddleware
 
-When plan mode is active, maintains a structured task list visible to the user. The agent uses the `write_todos` tool to mark tasks as `pending`, `in_progress`, or `completed` as it works through a complex objective.
+When plan mode is active, maintains a structured task list visible to the user. The agent uses the `write_todos` tool to update tasks at meaningful milestones. Statuses are `pending`, `in_progress`, `completed`, `blocked`, and `waiting`; only fully finished and verified work is `completed`.
 
 **Activation**: enabled automatically when `is_plan_mode: true` is set in the request configuration. No `config.yaml` entry required.
 

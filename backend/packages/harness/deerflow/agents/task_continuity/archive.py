@@ -156,6 +156,8 @@ def capture(state: dict, runtime, messages, config) -> dict:
         omitted = max(0, len(sources) - config.max_records_per_batch)
         sources = sources[-config.max_records_per_batch :]
         batch = digest([owner, sources])
+        batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
+        placeholders = ",".join("?" for _ in batches)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with closing(sqlite3.connect(path, timeout=5)) as db, db:
             db.execute("PRAGMA max_page_count=32768")  # 128 MiB at SQLite's default page size.
@@ -167,14 +169,18 @@ def capture(state: dict, runtime, messages, config) -> dict:
             db.execute("BEGIN IMMEDIATE")
             exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
             created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
-            expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, config.max_batches - 1)).fetchall()
+            # Retain the batches referenced by the next checkpoint first. An
+            # earlier capture may have finished writing without publishing its checkpoint.
+            expired = db.execute(
+                f"SELECT id FROM batches WHERE id != ? ORDER BY (id IN ({placeholders})) DESC, created DESC LIMIT -1 OFFSET ?",
+                [batch, *batches, config.max_batches - 1],
+            ).fetchall()
             for (expired_id,) in expired:
                 db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
             if not exists:
                 db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
                 db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
-        batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
         return {"scope": owner, "batches": batches, "omitted_records": omitted, "status": "available"}
     except (OSError, sqlite3.Error, ValueError):
         logger.warning("Task history capture unavailable; preserving ordinary compaction", exc_info=False)
@@ -205,8 +211,10 @@ def _distinct_archived_sources(rows: Iterable[tuple[str, int]]) -> Iterator[tupl
             yield source_id, rowid
 
 
-def _ordered_search_sources(rows: Iterable[tuple[str, int]], active_matches: dict) -> Iterator[tuple[str, int | None]]:
+def _ordered_search_sources(rows: Iterable[tuple[str, int]], active_matches: dict, *, latest_first: bool) -> Iterator[tuple[str, int | None]]:
     archived = _distinct_archived_sources(rows)
+    if latest_first:
+        return chain(((source_id, None) for source_id in active_matches), (row for row in archived if row[0] not in active_matches))
     first_archived = list(islice(archived, _SEARCH_PAGE_SIZE))
     first_archived_ids = {source_id for source_id, _ in first_archived}
     active_only = {source_id: None for source_id in active_matches if source_id not in first_archived_ids}
@@ -250,7 +258,7 @@ def _archived_page_records(db: sqlite3.Connection, batches: list[str], page: lis
     return records_by_id
 
 
-def _search(state: dict, runtime: Runtime, query: str, role: str | None, excerpts: bool, cursor: str | None) -> dict:
+def _search(state: dict, runtime: Runtime, query: str, role: str | None, excerpts: bool, cursor: str | None, *, latest_first: bool) -> dict:
     path, owner = scope(runtime)
     batches = reachable(state, owner)
     history = normalize_task_history(state.get("task_history"))
@@ -277,7 +285,10 @@ def _search(state: dict, runtime: Runtime, query: str, role: str | None, excerpt
         return stale_cursor if cursor is not None else {"results": [], "status": "empty_query"}
     # Search calls append their own messages. Keep the original prefix so
     # following a cursor neither invalidates it nor ranks the previous page.
-    active = {row["id"]: row for row in records(messages[:message_count], 64000)}
+    active_rows = records(messages[:message_count], 64000)
+    if latest_first:
+        active_rows.reverse()
+    active = {row["id"]: row for row in active_rows}
     active_matches = {source_id: row for source_id, row in active.items() if (role is None or row["role"] == role) and any(term in row["text"].casefold() for term in keywords)}
     next_cursor = None
     try:
@@ -292,7 +303,7 @@ def _search(state: dict, runtime: Runtime, query: str, role: str | None, excerpt
                     status = "partially_expired"
             # FTS rank also depends on the currently stored corpus, including
             # batches not reachable from this checkpoint.
-            snapshot = digest([owner, keywords, role, batches, stored_batches, status, message_count, list(active)])
+            snapshot = digest([owner, keywords, role, latest_first, batches, stored_batches, status, message_count, list(active)])
             if fingerprint is not None and fingerprint != digest([snapshot, offset])[:32]:
                 return stale_cursor
             rows = ()
@@ -301,8 +312,14 @@ def _search(state: dict, runtime: Runtime, query: str, role: str | None, excerpt
                 match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                 role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
                 parameters = [match, *batches, *([role] if role is not None else [])]
-                rows = db.execute(f"SELECT id, rowid FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
-            ordered = _ordered_search_sources(rows, active_matches)
+                order_by = "rank"
+                if latest_first:
+                    # Recapture changes checkpoint batch order without rewriting row IDs.
+                    batch_positions = " ".join(f"WHEN ? THEN {position}" for position in range(len(batches)))
+                    order_by = f"CASE batch {batch_positions} END DESC, rowid DESC"
+                    parameters.extend(batches)
+                rows = db.execute(f"SELECT id, rowid FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY {order_by}", parameters)
+            ordered = _ordered_search_sources(rows, active_matches, latest_first=latest_first)
             # A rebuilt index can change unseen hits while leaving the first
             # page intact. Fingerprint every ranked ID in the read transaction.
             rank = hashlib.sha256()
@@ -354,10 +371,11 @@ def lookup(
     source_id: str | None = None,
     role: str | None = None,
     excerpts: bool = False,
+    latest_first: bool = False,
     cursor: str | None = None,
 ) -> dict:
     if query is not None:
-        return _search(state, runtime, query, role, excerpts, cursor)
+        return _search(state, runtime, query, role, excerpts, cursor, latest_first=latest_first)
 
     path, owner = scope(runtime)
     batches = reachable(state, owner)
