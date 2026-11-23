@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Annotated, Any
@@ -205,6 +206,9 @@ def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
         return f"Error invoking ACP agent '{agent}': SDK transport timed out"
     if not isinstance(exc, FileNotFoundError):
         return f"Error invoking ACP agent '{agent}' ({type(exc).__name__}). Check the agent's configuration and authentication."
+
+    if os.path.dirname(cmd):
+        return f"Error invoking ACP agent '{agent}': Could not start the file configured in `acp_agents.{agent}.command`. Check that the file exists and the Gateway account has execute permission."
 
     message = f"Error invoking ACP agent '{agent}': Command '{cmd}' was not found on PATH."
     if cmd == "codex-acp" and shutil.which("codex"):

@@ -1289,8 +1289,13 @@ async def test_invoke_acp_agent_spawns_an_absolute_command_without_an_extension(
 
 
 @pytest.mark.anyio
-async def test_invoke_acp_agent_reports_guidance_for_an_unresolvable_command(monkeypatch, tmp_path):
-    """A missing launcher returns remediation without asking the SDK to spawn."""
+@pytest.mark.parametrize(
+    "installed",
+    [False, pytest.param(True, marks=pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="requires POSIX permission bits and an unprivileged account"))],
+    ids=["missing", "not-executable"],
+)
+async def test_invoke_acp_agent_reports_guidance_for_an_unresolvable_command(monkeypatch, tmp_path, installed):
+    """A launcher lookup failure gives remediation before reaching the process transport."""
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
@@ -1303,10 +1308,20 @@ async def test_invoke_acp_agent_reports_guidance_for_an_unresolvable_command(mon
         pytest.fail("An unresolved launcher reached the process transport")
 
     monkeypatch.setattr("acp.spawn_agent_process", unexpected_spawn)
-    tool = build_invoke_acp_agent_tool({"probe": ACPAgentConfig(command="deerflow-missing-acp-agent", description="Probe", timeout_seconds=30)})
+    command = "deerflow-missing-acp-agent"
+    if installed:
+        launcher = tmp_path / "agent"
+        launcher.touch()
+        launcher.chmod(0o644)
+        command = str(launcher)
+    tool = build_invoke_acp_agent_tool({"probe": ACPAgentConfig(command=command, description="Probe", timeout_seconds=30)})
     result = await asyncio.wait_for(tool.coroutine(agent="probe", prompt="do work"), timeout=20)
 
-    assert "Command 'deerflow-missing-acp-agent' was not found on PATH" in result
+    if installed:
+        assert "execute permission" in result
+        assert "not found" not in result
+    else:
+        assert "Command 'deerflow-missing-acp-agent' was not found on PATH" in result
     assert "acp_agents.probe.command" in result
 
 
