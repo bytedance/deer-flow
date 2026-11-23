@@ -116,7 +116,7 @@ _FENCED_CODE_BLOCK_RE = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 # Match complete backtick runs of equal length so shorter runs stay inside the code.
 _INLINE_CODE_RE = re.compile(r"(?<!`)(?P<delimiter>`+)(?!`)(?P<code>[^\n]+?)(?<!`)(?P=delimiter)(?!`)")
 _HORIZONTAL_RULE_RE = re.compile(r"^-{3,}$", re.MULTILINE)
-_TABLE_SEPARATOR_RE = re.compile(r"^\|[-:| ]+\|$", re.MULTILINE)
+_TABLE_SEPARATOR_RE = re.compile(r"^\|[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|$", re.MULTILINE)
 
 
 def _split_markdown_table_row(row: str) -> list[str]:
@@ -147,6 +147,10 @@ def _convert_markdown_table(text: str) -> str:
         # Detect table: header row followed by separator row
         if i + 1 < len(lines) and line.strip().startswith("|") and _TABLE_SEPARATOR_RE.match(lines[i + 1].strip()):
             headers = _split_markdown_table_row(line)
+            if len(headers) != len(_split_markdown_table_row(lines[i + 1])):
+                result.append(line)
+                i += 1
+                continue
             i += 2  # skip header + separator
             while i < len(lines) and lines[i].strip().startswith("|"):
                 cells = _split_markdown_table_row(lines[i])

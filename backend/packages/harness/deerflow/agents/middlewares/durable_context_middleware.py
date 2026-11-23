@@ -466,6 +466,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         artifacts = []
         if self._inject_tool_artifacts:
             for entry in state.get("tool_artifacts") or []:
+                if not isinstance(entry, dict):
+                    continue
                 # Redact raw labels before HTML escaping; state and real_ref
                 # remain intact for server-side resolution. Handles are generated.
                 projected = dict(entry)

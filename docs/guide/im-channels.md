@@ -271,6 +271,8 @@ backtick delimiters to bold. For spans with non-space content, it removes one
 ASCII space from each end when both ends are padded. Tables display as labeled
 blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or
 trailing cells so values stay under the correct column labels.
+Each delimiter cell requires hyphens with optional alignment colons and accepts
+space or tab padding. Malformed delimiter rows are left as text.
 
 
 DingTalk token caching uses a two-hour fallback when the provider's token lifetime is invalid or no longer than the five-minute refresh margin, avoiding a refresh on every request.
