@@ -12,8 +12,10 @@ from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.workspace_changes import (
+    FileSnapshot,
     WorkspaceChangeLimits,
     WorkspaceRoot,
+    WorkspaceSnapshot,
     capture_workspace_snapshot,
     compare_snapshots,
     get_changed_output_paths,
@@ -620,6 +622,124 @@ def test_compare_snapshots_reports_removed_symlink_without_replacement_as_delete
     result = compare_snapshots(before, after)
     changes = {change.path: change for change in result.files}
     assert changes["/mnt/user-data/workspace/link.txt"].status == "deleted"
+
+
+@pytest.mark.parametrize("size", [0, 17], ids=["windows-zero-size", "posix-equal-target-len"])
+def test_compare_snapshots_detects_retargeted_symlink_with_same_size_and_mtime(size):
+    path = "/mnt/user-data/workspace/link.txt"
+    before = WorkspaceSnapshot(
+        files={
+            path: FileSnapshot(
+                path=path,
+                root="workspace",
+                size=size,
+                mtime_ns=1_000,
+                sha256=None,
+                content_unavailable_reason="symlink",
+                symlink=True,
+                symlink_target="/tmp/target-a.txt",
+            )
+        }
+    )
+    after = WorkspaceSnapshot(
+        files={
+            path: FileSnapshot(
+                path=path,
+                root="workspace",
+                size=size,
+                mtime_ns=1_000,
+                sha256=None,
+                content_unavailable_reason="symlink",
+                symlink=True,
+                symlink_target="/tmp/target-b.txt",
+            )
+        }
+    )
+
+    assert get_changed_paths(before, after) == {path}
+    result = compare_snapshots(before, after)
+    assert result.has_changes() is True
+    assert result.summary.modified == 1
+    assert result.summary.symlink_created == 0
+    change = result.files[0]
+    assert change.status == "modified"
+    assert change.symlink is True
+    assert change.symlink_target_before == "/tmp/target-a.txt"
+    assert change.symlink_target_after == "/tmp/target-b.txt"
+    assert change.diff_unavailable_reason == "symlink"
+
+
+def test_compare_snapshots_detects_regular_file_and_symlink_swaps_with_same_size_and_mtime():
+    workspace_path = "/mnt/user-data/workspace/empty.txt"
+    output_path = "/mnt/user-data/outputs/report.txt"
+    regular_before = FileSnapshot(
+        path=workspace_path,
+        root="workspace",
+        size=0,
+        mtime_ns=1_000,
+        sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        text="",
+    )
+    symlink_after = FileSnapshot(
+        path=workspace_path,
+        root="workspace",
+        size=0,
+        mtime_ns=1_000,
+        sha256=None,
+        content_unavailable_reason="symlink",
+        symlink=True,
+        symlink_target="/etc/hosts",
+    )
+    symlink_before = FileSnapshot(
+        path=output_path,
+        root="outputs",
+        size=0,
+        mtime_ns=1_000,
+        sha256=None,
+        content_unavailable_reason="symlink",
+        symlink=True,
+        symlink_target="/etc/hosts",
+    )
+    regular_after = FileSnapshot(
+        path=output_path,
+        root="outputs",
+        size=0,
+        mtime_ns=1_000,
+        sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        text="",
+    )
+    before = WorkspaceSnapshot(files={workspace_path: regular_before, output_path: symlink_before})
+    after = WorkspaceSnapshot(files={workspace_path: symlink_after, output_path: regular_after})
+
+    assert get_changed_paths(before, after) == {workspace_path, output_path}
+    assert get_changed_output_paths(before, after) == [output_path]
+
+    result = compare_snapshots(before, after)
+    changes = {change.path: change for change in result.files}
+    assert result.summary.symlink_created == 1
+    assert result.summary.modified == 1
+    assert changes[workspace_path].status == "symlink_created"
+    assert changes[workspace_path].symlink is True
+    assert changes[workspace_path].symlink_target_after == "/etc/hosts"
+    assert changes[output_path].status == "modified"
+    assert changes[output_path].symlink is False
+    assert changes[output_path].symlink_target_before == "/etc/hosts"
+    assert changes[output_path].symlink_target_after is None
+
+
+def test_compare_snapshots_symlink_target_equality_and_missing_target_fallback():
+    path = "/mnt/user-data/workspace/link.txt"
+    same_target_before = WorkspaceSnapshot(files={path: FileSnapshot(path=path, root="workspace", size=17, mtime_ns=1_000, sha256=None, content_unavailable_reason="symlink", symlink=True, symlink_target="/tmp/target-a.txt")})
+    same_target_after = WorkspaceSnapshot(files={path: FileSnapshot(path=path, root="workspace", size=17, mtime_ns=2_000, sha256=None, content_unavailable_reason="symlink", symlink=True, symlink_target="/tmp/target-a.txt")})
+    assert get_changed_paths(same_target_before, same_target_after) == set()
+    assert compare_snapshots(same_target_before, same_target_after).has_changes() is False
+
+    unknown_target_before = WorkspaceSnapshot(files={path: FileSnapshot(path=path, root="workspace", size=0, mtime_ns=1_000, sha256=None, content_unavailable_reason="symlink", symlink=True, symlink_target=None)})
+    known_target_after = WorkspaceSnapshot(files={path: FileSnapshot(path=path, root="workspace", size=0, mtime_ns=1_000, sha256=None, content_unavailable_reason="symlink", symlink=True, symlink_target="/tmp/target-a.txt")})
+    assert get_changed_paths(unknown_target_before, known_target_after) == {path}
+
+    unknown_target_same_stat = WorkspaceSnapshot(files={path: FileSnapshot(path=path, root="workspace", size=0, mtime_ns=1_000, sha256=None, content_unavailable_reason="symlink", symlink=True, symlink_target=None)})
+    assert get_changed_paths(unknown_target_before, unknown_target_same_stat) == set()
 
 
 def test_compare_snapshots_truncates_large_text_diffs(tmp_path):
