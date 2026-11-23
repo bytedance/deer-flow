@@ -872,9 +872,8 @@ async def task_tool(
       when the assignment has clear specialist or context-isolation benefit, or is
       one of several independent, non-overlapping tasks that can actually run in
       parallel.
-    - **bash**: Command execution specialist for running bash commands. This is only
-      available when host bash is explicitly allowed or when using an isolated shell
-      sandbox such as `AioSandboxProvider`. Use it only for a bounded shell workflow
+    - **bash**: Command execution specialist that requires an isolated sandbox provider
+      such as `AioSandboxProvider`. Use it only for a bounded shell workflow
       with clear context-isolation or independent-parallel benefit.
       Routine git, build, test, or deploy operations are not sufficient reason to delegate.
 

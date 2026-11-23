@@ -76,7 +76,7 @@ import { Callout } from "nextra/components";
 
 ### `Bash subagent is disabled for LocalSandboxProvider`
 
-本地沙箱默认不允许在宿主机执行命令。只在完全可信的本地环境里设置 `sandbox.allow_host_bash: true`，否则改用容器沙箱。
+切换到隔离沙箱即可启用命令执行。
 
 ### 子 Agent 报 `Error: task is not a valid tool`
 

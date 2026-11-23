@@ -136,7 +136,7 @@ def _select_tool_configs(config: AppConfig, groups: list[str] | None, include_co
         # whether the group is exposed at all.
         if not knowledge_enabled and tool.group == "knowledge":
             continue
-        # Do not expose host bash by default when LocalSandboxProvider is active.
+        # LocalSandboxProvider exposes workspace file tools only.
         if not host_bash_allowed and _is_host_bash_tool(tool):
             continue
         selected.append(tool)
