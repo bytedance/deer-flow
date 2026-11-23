@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, suppress
 from typing import Any
 
 from deerflow_extension_api import (
@@ -69,7 +69,7 @@ from app.gateway.routers import (
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
-from deerflow.sandbox.sandbox_provider import hold_sandbox_shutdown_ownership
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider, hold_sandbox_shutdown_ownership
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 from deerflow.utils.file_io import await_drained
@@ -591,7 +591,13 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
 @asynccontextmanager
 async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfig) -> AsyncGenerator[None, None]:
     """Close MCP transports and initialized sandboxes after runtime shutdown."""
+    signal_handlers = ExitStack()
     try:
+        ownership = getattr(getattr(startup_config, "sandbox", None), "ownership", None)
+        if ownership is not None and ownership.redis_mode == "cluster":
+            # Discover Redis slots before async request handlers can cold-start the provider.
+            provider = await await_drained(asyncio.to_thread(get_sandbox_provider))
+            signal_handlers.enter_context(provider.gateway_signal_handlers())
         async with langgraph_runtime(app, startup_config):
             yield
     finally:
@@ -624,6 +630,8 @@ async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfi
                 await await_drained(asyncio.to_thread(shutdown_sandbox_provider))
             except Exception:
                 logger.exception("Failed to shut down sandbox provider")
+            finally:
+                signal_handlers.close()
 
 
 @asynccontextmanager

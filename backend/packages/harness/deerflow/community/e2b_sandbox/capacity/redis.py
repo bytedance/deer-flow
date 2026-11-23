@@ -10,8 +10,6 @@ from deerflow.config.sandbox_config import SandboxOwnershipConfig
 
 logger = logging.getLogger(__name__)
 
-_SOCKET_TIMEOUT_SECONDS = 5.0
-
 _LEDGER_SCRIPT = """
 local function now_ms()
     local current = redis.call('TIME')
@@ -184,24 +182,21 @@ class RedisE2BCapacityStore:
         redis_url: str,
         hard_limit: int,
         key_prefix: str = "deerflow:sandbox:owner",
+        cluster_nodes: list[str] | None = None,
     ) -> None:
         if hard_limit < 1:
             raise ValueError("hard_limit must be at least 1")
         try:
-            from redis import Redis
-            from redis.exceptions import RedisError
+            from redis.exceptions import RedisClusterException, RedisError
+
+            from deerflow.community.aio_sandbox.ownership.redis import make_ownership_redis_client
         except ImportError:  # pragma: no cover - optional extra
             raise ImportError("Redis E2B capacity requires: cd backend && uv sync --extra redis") from None
 
         self._hard_limit = hard_limit
         self._key = f"{key_prefix.rstrip(':')}:e2b-capacity"
-        self._redis_error = RedisError
-        self._redis = Redis.from_url(
-            redis_url,
-            decode_responses=True,
-            socket_timeout=_SOCKET_TIMEOUT_SECONDS,
-            socket_connect_timeout=_SOCKET_TIMEOUT_SECONDS,
-        )
+        self._redis_error = (RedisError, RedisClusterException)
+        self._redis = make_ownership_redis_client(redis_url, cluster_nodes)
         self._script = self._redis.register_script(_LEDGER_SCRIPT)
 
     @property
@@ -281,6 +276,7 @@ def make_e2b_capacity_store(
     logger.info("E2B deployment capacity: redis (key_prefix=%s, hard_limit=%d)", ownership.key_prefix, hard_limit)
     return RedisE2BCapacityStore(
         redis_url=resolve_ownership_redis_url(ownership),
+        cluster_nodes=ownership.cluster_nodes,
         hard_limit=hard_limit,
         key_prefix=ownership.key_prefix,
     )
