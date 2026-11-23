@@ -607,7 +607,7 @@ reachability.
 - [Path Examples](docs/PATH_EXAMPLES.md)
 - [Context Summarization](docs/summarization.md)
 - [Plan Mode](docs/plan_mode_usage.md)
-- [Setup Guide](docs/SETUP.md)
+- [Deployment Guide](../docs/guide/deployment.md)
 
 ---
 

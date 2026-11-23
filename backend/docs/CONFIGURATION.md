@@ -2393,6 +2393,18 @@ DeerFlow searches for configuration in this order:
 3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or under the current working directory when `DEER_FLOW_PROJECT_ROOT` is unset
 4. Legacy backend/repository-root locations for monorepo compatibility
 
+### Verify the local configuration
+
+After installing the backend dependencies and any extras required by your
+configuration, run this command from the repository root:
+
+```bash
+uv run --no-sync --project backend python -c "from deerflow.config import get_app_config; get_app_config(); print('Configuration loaded')"
+```
+
+`--project backend` selects the installed backend environment while preserving
+the working directory for relative paths. `--no-sync` retains installed extras.
+
 ## Security Notes
 ### Sandbox Isolation and the Docker Socket (DooD)
 
@@ -2610,6 +2622,14 @@ sandbox restrictions and tool-account authorization still run afterward.
 ## Troubleshooting
 
 ### "Config file not found"
+
+To see which configuration file the backend resolves, run this from the
+repository root:
+
+```bash
+uv run --no-sync --project backend python -c "from deerflow.config.app_config import AppConfig; print(AppConfig.resolve_config_path())"
+```
+
 - Ensure `config.yaml` exists in the **project root** directory (`deer-flow/config.yaml`)
 - If the runtime starts outside the project root, set `DEER_FLOW_PROJECT_ROOT`
 - Alternatively, set `DEER_FLOW_CONFIG_PATH` environment variable to custom location

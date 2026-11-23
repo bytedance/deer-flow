@@ -12,7 +12,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 | [SSO.md](SSO.md) | OIDC / SSO single sign-on |
 | [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md) | IM channel user binding (`channel_connections`) |
 | [CONFIGURATION.md](CONFIGURATION.md) | Configuration options |
-| [SETUP.md](SETUP.md) | Quick setup guide |
+| [Deployment guide](../../docs/guide/deployment.md) | Installation and startup |
 
 ## Feature Documentation
 
@@ -27,15 +27,9 @@ This directory contains detailed documentation for the DeerFlow backend.
 | [plan_mode_usage.md](plan_mode_usage.md) | Plan mode with TodoList |
 | [AUTO_TITLE_GENERATION.md](AUTO_TITLE_GENERATION.md) | Automatic title generation |
 
-## Development
-
-| Document | Description |
-|----------|-------------|
-| [TODO.md](TODO.md) | Planned features and known issues |
-
 ## Getting Started
 
-1. **New to DeerFlow?** Start with [SETUP.md](SETUP.md) for quick installation
+1. **New to DeerFlow?** Start with the [deployment guide](../../docs/guide/deployment.md) for installation
 2. **Configuring the system?** See [CONFIGURATION.md](CONFIGURATION.md)
 3. **Understanding the architecture?** Read [ARCHITECTURE.md](ARCHITECTURE.md)
 4. **Building integrations?** Check [API.md](API.md) for API reference
@@ -49,14 +43,11 @@ docs/
 ├── API.md                     # API reference
 ├── AUTH_DESIGN.md             # User authentication and isolation design
 ├── CONFIGURATION.md           # Configuration guide
-├── SETUP.md                   # Setup instructions
 ├── FILE_UPLOAD.md             # File upload feature
 ├── PATH_EXAMPLES.md           # Path usage examples
 ├── summarization.md           # Summarization feature
 ├── plan_mode_usage.md         # Plan mode feature
 ├── STREAMING.md               # Token-level streaming design
 ├── RUN_EVENT_STREAM.md        # Persisted run event stream contract
-├── AUTO_TITLE_GENERATION.md   # Title generation
-├── TITLE_GENERATION_IMPLEMENTATION.md  # Title implementation details
-└── TODO.md                    # Roadmap and issues
+└── AUTO_TITLE_GENERATION.md   # Title generation
 ```

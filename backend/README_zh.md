@@ -482,7 +482,7 @@ make test-live
 - [路径示例](docs/PATH_EXAMPLES.md)
 - [上下文摘要](docs/summarization.md)
 - [计划模式](docs/plan_mode_usage.md)
-- [设置指南](docs/SETUP.md)
+- [部署指南](../docs/guide/deployment.md)
 
 ---
 
