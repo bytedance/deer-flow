@@ -315,15 +315,17 @@ class TestBuildMinimalConfig:
         assert "sandbox" in data
         assert "use" in data["sandbox"]
         assert data["sandbox"]["use"] == "deerflow.sandbox.local:LocalSandboxProvider"
-        assert data["sandbox"]["allow_host_bash"] is False
+        assert "allow_host_bash" not in data["sandbox"]
 
-    def test_bash_tool_disabled_by_default(self):
+    @pytest.mark.parametrize("include_bash_tool", [False, True])
+    def test_local_config_omits_bash_tool(self, include_bash_tool):
         content = build_minimal_config(
             provider_use="langchain_openai:ChatOpenAI",
             model_name="gpt-4o",
             display_name="OpenAI",
             api_key_field="api_key",
             env_var="OPENAI_API_KEY",
+            include_bash_tool=include_bash_tool,
         )
         data = yaml.safe_load(content)
         tool_names = [t["name"] for t in data.get("tools", [])]

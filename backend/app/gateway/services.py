@@ -2466,6 +2466,58 @@ def _stored_mode_options(record: RunRecord | None) -> dict[str, Any] | None:
     return options or None
 
 
+def _stored_turn_metadata(record: RunRecord) -> Mapping[str, Any]:
+    stored_input = (record.kwargs or {}).get("input")
+    messages = stored_input.get("messages") if isinstance(stored_input, Mapping) else None
+    if not isinstance(messages, list):
+        return {}
+    return next((_message_additional_kwargs(msg) for msg in reversed(messages) if _is_scope_source_human_message(msg)), {})
+
+
+async def _resume_mode_options(request: Request, thread_id: str, source: Mapping[str, Any] | None, *, pinned: bool) -> dict[str, Any] | None:
+    """Recover the options that assembled the paused tools, even if the checkpoint head moved."""
+    checkpoint_options = _mode_options(source.get(_TURN_MODE_OPTIONS)) if source is not None else None
+    if source is not None and source.get(CHAT_MODE_KEY) == "chat":
+        checkpoint_options = {**(checkpoint_options or {}), "mode": "chat"}
+    if pinned and source is not None and (_TURN_MODE_OPTIONS in source or source.get(CHAT_MODE_KEY) == "chat"):
+        return checkpoint_options
+    source_run_id = (source or {}).get("run_id")
+    paused = None
+    owner = replay_owner_user_id(request)
+    if owner is not None:
+        with replay_source_read_errors(thread_id):
+            if not pinned:
+                # Match the waiting run that mark_approval_answered will select.
+                records = await get_run_manager(request).list_by_thread(thread_id, user_id=owner, limit=5, raise_on_store_error=True)
+                paused = next((record for record in records if record.status == RunStatus.waiting_for_input), None)
+            elif isinstance(source_run_id, str) and source_run_id:
+                record = await get_run_manager(request).get(source_run_id, user_id=owner, raise_on_store_error=True)
+                if record is not None and record.thread_id == thread_id and record.user_id == owner:
+                    paused = record
+    if paused is None:
+        return checkpoint_options
+    if _TURN_MODE_OPTIONS in (paused.kwargs or {}):
+        # A continuation can pause again without recording a new human message.
+        return _mode_options(paused.kwargs[_TURN_MODE_OPTIONS])
+    turn = _stored_turn_metadata(paused)
+    options = _stored_mode_options(paused) or {}
+    checkpoint_trace = (source or {}).get(DEERFLOW_TRACE_METADATA_KEY)
+    paused_trace = (paused.metadata or {}).get(DEERFLOW_TRACE_METADATA_KEY)
+    if _TURN_MODE_OPTIONS in turn:
+        options = _mode_options(turn[_TURN_MODE_OPTIONS])
+    elif checkpoint_trace and checkpoint_trace == paused_trace:
+        # An execution checkpoint contains the options the worker actually used.
+        options.update(checkpoint_options or {})
+    elif source_run_id == paused.run_id or (not source_run_id and not checkpoint_trace and not paused_trace and options.keys() <= {"mode"} and (not options or selected_mode(checkpoint_options) == selected_mode(options))):
+        # Older rows may have neither a trace nor a source run ID.
+        options = {**(checkpoint_options or {}), **options}
+    if turn.get(CHAT_MODE_KEY) == "chat":
+        options["mode"] = "chat"
+    if mode := selected_mode(paused.metadata):
+        options["mode"] = mode
+    return options
+
+
 async def _recover_source_message_metadata(
     request: Request,
     *,
@@ -2474,6 +2526,7 @@ async def _recover_source_message_metadata(
     target_run_id: str | None = None,
     checkpoint_id: str | None = None,
     checkpoint_ns: str = "",
+    resuming: bool = False,
 ) -> Mapping[str, Any] | None:
     """An ordinary source may have empty metadata. None means its message is missing."""
     checkpoint_kwargs: dict[str, Any] = {}
@@ -2534,8 +2587,17 @@ async def _recover_source_message_metadata(
             (message for message in reversed(messages) if _is_scope_source_human_message(message)),
             None,
         )
+    metadata = _message_additional_kwargs(source) if source is not None else {}
+    if resuming:
+        checkpoint_metadata = getattr(snapshot, "metadata", None) or {}
+        execution = checkpoint_metadata if checkpoint_metadata.get("source") in {"input", "loop"} else {}
+        options = _mode_options(execution)
+        if source is not None or options:
+            metadata = {**metadata, DEERFLOW_TRACE_METADATA_KEY: execution.get(DEERFLOW_TRACE_METADATA_KEY)}
+            if options:
+                metadata.setdefault(_TURN_MODE_OPTIONS, options)
+            return metadata
     if source is not None:
-        metadata = _message_additional_kwargs(source)
         if target_message_id and _TURN_MODE_OPTIONS not in metadata:
             with replay_source_read_errors(thread_id):
                 record = await find_legacy_replay_run(request, thread_id, target_message_id, metadata, target_run_id, answer)
@@ -2789,7 +2851,7 @@ async def start_run(
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     from app.gateway.coordination_workers import direct_worker_run, managed_task
-    from deerflow.persistence.coordination.workers import THREAD_PREFIX
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, THREAD_PREFIX, WORKER_CHECKPOINT_RUN
 
     if thread_id.startswith(THREAD_PREFIX) and not getattr(request.state, "coordination_execution_id", None):
         if task_id := await managed_task(request, thread_id):
@@ -2823,6 +2885,7 @@ async def start_run(
             if idempotency_key is not None
             else None
         )
+        retry_failed_resume = False
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
             stored_idempotency_request = (admitted_run.idempotency_request or _legacy_stored_idempotency_request(admitted_run.kwargs or {})) if admitted_run is not None else None
@@ -2869,6 +2932,8 @@ async def start_run(
         # is what keeps a forged value out of the live run config.
         origin = resolve_request_origin(request, body.metadata)
         run_metadata = _admit_scheduler_metadata(body.metadata, trusted=scheduled_task_runtime is not None)
+        run_metadata.pop(RUN_GRANT_METADATA, None)
+        run_metadata.pop(WORKER_CHECKPOINT_RUN, None)
         run_metadata.pop(DEERFLOW_ORIGIN_KEY, None)
         if origin is not None:
             run_metadata[DEERFLOW_ORIGIN_KEY] = origin
@@ -2881,6 +2946,8 @@ async def start_run(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if isinstance(config.get("metadata"), dict):
             config["metadata"] = _admit_scheduler_metadata(config["metadata"], trusted=scheduled_task_runtime is not None)
+            config["metadata"].pop(RUN_GRANT_METADATA, None)
+            config["metadata"].pop(WORKER_CHECKPOINT_RUN, None)
             config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)
             if origin is not None:
                 config["metadata"][DEERFLOW_ORIGIN_KEY] = origin
@@ -2907,7 +2974,8 @@ async def start_run(
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
         current_human_message = _current_human_message(graph_input)
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
-        replay_requires_scope_recovery = graph_input is None or isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        resuming = isinstance(graph_input, Command)
+        replay_requires_scope_recovery = graph_input is None or resuming or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
         # Clarification and edit-replay messages may intentionally replace the
         # source scope. If either client omits its current selector snapshot,
@@ -2916,16 +2984,17 @@ async def start_run(
         # server recovery regardless of client input.
         is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
         recovery_args: dict[str, Any] = {}
-        if graph_input is None:
+        if graph_input is None or resuming:
             configurable = config.get("configurable") or {}
             recovery_args.update({key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)})
+        if resuming:
+            recovery_args["resuming"] = True
         is_replay = is_scope_recovery or is_human_input_response or (isinstance(target_message_id, str) and bool(target_message_id))
         source_metadata: Mapping[str, Any] | None = {}
         if is_replay and admitted_run is not None and target_message_id:
             # A keyed retry can outlive its source checkpoint. The original
             # admission already persisted the canonical turn and its scope.
-            stored_input = (admitted_run.kwargs or {}).get("input") or {}
-            source_metadata = next((_message_additional_kwargs(msg) for msg in reversed(stored_input.get("messages") or []) if _is_scope_source_human_message(msg)), {})
+            source_metadata = _stored_turn_metadata(admitted_run)
         elif is_replay:
             target_run_id = run_metadata.get("regenerate_from_run_id")
             if isinstance(target_run_id, str) and target_run_id:
@@ -2943,9 +3012,17 @@ async def start_run(
         mode = requested_mode
         source_options = (source_metadata or {}).get(_TURN_MODE_OPTIONS)
         source_chat = (source_metadata or {}).get(CHAT_MODE_KEY) == "chat"
-        if isinstance(target_message_id, str) and target_message_id and (source_options is not None or source_chat or requested_mode == "chat"):
-            # A regenerate or edit replays one human turn. The browser sends
-            # its current composer settings, including derived reasoning flags.
+        if resuming:
+            if admitted_run is None or retry_failed_resume:
+                source_options = await _resume_mode_options(request, thread_id, source_metadata, pinned=bool(recovery_args.get("checkpoint_id")))
+            else:
+                source_options = _stored_mode_options(admitted_run)
+            source_chat = selected_mode(source_options) == "chat"
+            restore_options = source_options is not None
+        else:
+            restore_options = isinstance(target_message_id, str) and bool(target_message_id) and (source_options is not None or source_chat or requested_mode == "chat")
+        if restore_options:
+            # The composer selection and its derived flags apply to the next new turn.
             options = _mode_options(source_options)
             for section in (config.setdefault("context", {}), config["configurable"]):
                 for key in _MODE_OPTIONS:
@@ -2954,19 +3031,10 @@ async def start_run(
             mode = selected_mode(options)
         if source_chat:
             mode = "chat"
-        if admitted_run is not None:
+        if admitted_run is not None and not (resuming and retry_failed_resume):
             mode = selected_mode(admitted_run.metadata)
-        elif source_metadata is None and mode != "chat":
-            # An interrupt may survive after its source message has been pruned.
-            # Use the same paused run that the resume handler will answer.
-            paused = None
-            if command and command.get("resume") is not None:
-                records = await run_mgr.list_by_thread(thread_id, user_id=owner_user_id or run_user_id, limit=5)
-                paused = next((record for record in records if record.status == RunStatus.waiting_for_input), None)
-            if paused is not None:
-                if selected_mode(paused.metadata) == "chat":
-                    mode = "chat"
-            elif await thread_mode(run_ctx.thread_store, thread_id, user_id=str(user.id) if user is not None else run_user_id, internal_owner_id=owner_user_id) == "chat":
+        elif source_metadata is None and source_options is None and mode != "chat":
+            if await thread_mode(run_ctx.thread_store, thread_id, user_id=str(user.id) if user is not None else run_user_id, internal_owner_id=owner_user_id) == "chat":
                 raise HTTPException(409, "Could not recover the source turn for this Chat continuation")
         # The run metadata is echoed and used for retries.
         # Only the admitted mode belongs here, never arbitrary body.metadata.
@@ -2996,6 +3064,8 @@ async def start_run(
         scope_runtime_config = dict(config.get("configurable") or {})
         if isinstance(config.get("context"), dict):
             scope_runtime_config.update(config["context"])
+        if mode == "chat" and scope_runtime_config.get("is_bootstrap"):
+            raise HTTPException(422, "Creating an agent requires workspace access. Switch out of Chat mode to initialize the agent.")
         if current_human_message is not None and is_genuine_user_message(current_human_message):
             # An empty marker on a real user turn preserves the agent defaults
             # across branches and retries even after its run is gone.
@@ -3382,6 +3452,8 @@ async def start_run(
                             # appear while this request prepares its admission. Recheck
                             # under the thread lock so a fresh input cannot replace it.
                             await reject_new_run_when_approval_pending(request, thread_id)
+                        if (grant_id := getattr(request.state, "coordination_grant_id", None)) is not None:
+                            run_metadata[RUN_GRANT_METADATA] = grant_id
                         return await run_mgr.create_or_reject(
                             thread_id,
                             body.assistant_id,
@@ -3393,6 +3465,7 @@ async def start_run(
                             # The live config built above keeps them for the actual run.
                             kwargs={
                                 "input": run_record_input,
+                                **({_TURN_MODE_OPTIONS: _mode_options(scope_runtime_config)} if resuming else {}),
                                 # A replay can narrow a requested normal mode to Chat.
                                 # Remember that choice for an identical keyed retry.
                                 **({"requested_mode": requested_mode} if idempotency_key and requested_mode and requested_mode != mode else {}),

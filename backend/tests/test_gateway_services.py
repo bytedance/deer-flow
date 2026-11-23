@@ -115,6 +115,33 @@ async def test_chat_thread_rejects_run_attachments_before_admission(_stub_app_co
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"context": {"mode": "chat", "is_bootstrap": True}},
+        {"context": {"mode": "chat"}, "config": {"configurable": {"is_bootstrap": True}}},
+        {"config": {"context": {"mode": "chat", "is_bootstrap": True}}},
+    ],
+)
+async def test_chat_bootstrap_is_rejected_before_admission(_stub_app_config, mode_app, monkeypatch, options):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway import services
+
+    app, owner, runs, threads = mode_app
+    await threads.create("new-agent", user_id=owner)
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads/new-agent/runs", json={"input": {"messages": [{"role": "user", "content": "Create an agent"}]}, **options})
+    assert response.status_code == 422, response.text
+    assert not await runs.list_by_thread("new-agent", user_id=owner)
+    worker.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_chat_accepts_replayed_assistant_and_tool_protocol_blocks(_stub_app_config, mode_app, monkeypatch):
     from unittest.mock import AsyncMock
 
@@ -836,17 +863,21 @@ async def test_pruned_regenerate_target_cannot_borrow_a_later_ordinary_turn(_stu
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("human_mode", "checkpoint_mode", "paused_mode", "thread_mode", "expected"),
+    ("human_mode", "checkpoint_mode", "paused_mode", "thread_mode", "requested_mode", "expected"),
     [
-        ("chat", None, None, "flash", "chat"),
-        ("ordinary", None, None, "chat", None),
-        (None, "chat", None, "flash", "chat"),
-        (None, None, "chat", "flash", "chat"),
-        (None, None, "flash", "chat", None),
-        (None, None, None, "chat", "missing-source"),
+        ("chat", None, None, "flash", "flash", "chat"),
+        ("ordinary", None, None, "chat", "chat", None),
+        (None, "chat", None, "flash", "flash", "chat"),
+        (None, "pro", None, "chat", "chat", "pro"),
+        ("ordinary", "pro", None, "chat", "chat", "pro"),
+        (None, "chat", "pro", "chat", "chat", "pro"),
+        (None, None, "chat", "flash", "flash", "chat"),
+        (None, None, "flash", "chat", "chat", "flash"),
+        ("ordinary", None, "flash", "chat", "chat", "flash"),
+        (None, None, None, "chat", None, "missing-source"),
     ],
 )
-async def test_resume_uses_the_interrupted_turn_when_no_checkpoint_id_is_supplied(_stub_app_config, monkeypatch, human_mode, checkpoint_mode, paused_mode, thread_mode, expected):
+async def test_resume_uses_the_interrupted_turn_when_no_checkpoint_id_is_supplied(_stub_app_config, monkeypatch, human_mode, checkpoint_mode, paused_mode, thread_mode, requested_mode, expected):
     from unittest.mock import AsyncMock
 
     from fastapi import HTTPException
@@ -865,7 +896,7 @@ async def test_resume_uses_the_interrupted_turn_when_no_checkpoint_id_is_supplie
         await runs.put("paused-source", thread_id=tid, user_id=str(get_current_user().id), status="waiting_for_input", metadata={"mode": paused_mode})
     worker = AsyncMock()
     monkeypatch.setattr(services, "run_agent", worker)
-    body = RunCreateRequest(command={"resume": "continue"})
+    body = RunCreateRequest(command={"resume": "continue"}, context={"mode": requested_mode})
     if expected == "missing-source":
         with pytest.raises(HTTPException) as conflict:
             await services.start_run(body, tid, request)
@@ -877,6 +908,76 @@ async def test_resume_uses_the_interrupted_turn_when_no_checkpoint_id_is_supplie
         assert resumed.metadata.get("mode") == expected
         assert worker.await_args.kwargs["config"].get("context", {}).get("mode") == expected
     assert (await threads.get(tid))["metadata"]["mode"] == thread_mode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [False, True], ids=["turn-marker", "stored-config"])
+async def test_resume_prefers_the_paused_runs_turn_options_after_the_checkpoint_moves(_stub_app_config, monkeypatch, legacy):
+    from unittest.mock import AsyncMock
+
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway import services
+    from app.gateway.run_models import RunCreateRequest
+    from deerflow.runtime.user_context import get_current_user
+
+    request, runs, threads = _make_start_run_persistence_context()
+    tid = "resume-moved-head"
+    await threads.create(tid, metadata={"mode": "chat"})
+    original = {"mode": "flash", "thinking_enabled": False, "subagent_enabled": False}
+    later = {"mode": "ultra", "thinking_enabled": True, "subagent_enabled": True}
+    message = HumanMessage(content="Write", additional_kwargs={} if legacy else {"deerflow_mode_options": original})
+    kwargs = {"input": {"messages": [message.model_dump(mode="json")]}, "config": {"configurable": original} if legacy else {}}
+    await runs.put("paused", thread_id=tid, user_id=str(get_current_user().id), status="waiting_for_input", metadata={"mode": "flash"}, kwargs=kwargs)
+    await _seed_generic_resume_checkpoint(request.app.state.checkpointer, tid, messages=[HumanMessage(content="Later", additional_kwargs={"deerflow_mode_options": later})])
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    run = await services.start_run(RunCreateRequest(command={"resume": "continue"}, context={"mode": "chat"}), tid, request)
+    await run.task
+    for section in ("context", "configurable"):
+        config = worker.await_args.kwargs["config"][section]
+        assert {key: config[key] for key in original} == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["pruned", "legacy-mode-only", "same-execution", "unrelated-execution", "older-checkpoint"])
+async def test_generic_resume_uses_the_options_of_its_execution_checkpoint(_stub_app_config, monkeypatch, case):
+    from unittest.mock import AsyncMock
+
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway import services
+    from app.gateway.run_models import RunCreateRequest
+    from deerflow.runtime.user_context import get_current_user
+    from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+
+    request, runs, threads = _make_start_run_persistence_context()
+    tid = "resume-from-checkpoint"
+    await threads.create(tid)
+    saver = request.app.state.checkpointer
+    original = {"mode": "flash", "thinking_enabled": False, "subagent_enabled": False}
+    traced = case in {"same-execution", "unrelated-execution"}
+    await _seed_generic_resume_checkpoint(saver, tid, options={**original, **({DEERFLOW_TRACE_METADATA_KEY: "checkpoint-trace"} if traced else {})})
+    paused = await saver.aget_tuple({"configurable": {"thread_id": tid}})
+    checkpoint_id = paused.config["configurable"]["checkpoint_id"] if case == "older-checkpoint" else None
+    if traced:
+        trace = "checkpoint-trace" if case == "same-execution" else "other-trace"
+        await runs.put("traced-pause", thread_id=tid, user_id=str(get_current_user().id), status="waiting_for_input", metadata={"mode": "flash", DEERFLOW_TRACE_METADATA_KEY: trace})
+    elif case == "legacy-mode-only":
+        await runs.put("legacy-pause", thread_id=tid, user_id=str(get_current_user().id), status="waiting_for_input", metadata={"mode": "flash"})
+    if checkpoint_id:
+        later = {"mode": "ultra", "thinking_enabled": True, "subagent_enabled": True}
+        await _seed_generic_resume_checkpoint(saver, tid, messages=[HumanMessage(content="Later", additional_kwargs={"deerflow_mode_options": later})])
+        await runs.put("later-pause", thread_id=tid, user_id=str(get_current_user().id), status="waiting_for_input", metadata={"mode": "ultra"})
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    run = await services.start_run(RunCreateRequest(command={"resume": "continue"}, checkpoint_id=checkpoint_id), tid, request)
+    await run.task
+    assert run.metadata["mode"] == "flash"
+    for section in ("context", "configurable"):
+        config = worker.await_args.kwargs["config"][section]
+        expected = {"mode": "flash"} if case == "unrelated-execution" else original
+        assert {key: config[key] for key in original if key in config} == expected
 
 
 @pytest.mark.asyncio
@@ -4233,7 +4334,7 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
-async def _seed_generic_resume_checkpoint(checkpointer, thread_id, *, messages=None, mode=None):
+async def _seed_generic_resume_checkpoint(checkpointer, thread_id, *, messages=None, mode=None, options=None):
     from langchain_core.messages import HumanMessage
     from langgraph.graph import MessagesState, StateGraph
     from langgraph.types import interrupt
@@ -4249,7 +4350,7 @@ async def _seed_generic_resume_checkpoint(checkpointer, thread_id, *, messages=N
     graph = builder.compile(checkpointer=checkpointer)
     await graph.ainvoke(
         {"messages": [HumanMessage(content="start")] if messages is None else messages},
-        {"configurable": {"thread_id": thread_id}, "metadata": {"mode": mode} if mode else {}},
+        {"configurable": {"thread_id": thread_id, **(options or {})}, "metadata": {"mode": mode} if mode else {}},
     )
 
 

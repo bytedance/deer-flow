@@ -18,8 +18,8 @@ from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConf
 _PERMISSIONS = ("threads:read", "threads:write", "runs:create")
 
 
-def _user(*, user_id="alice", token_version=0, role="user"):
-    return SimpleNamespace(id=user_id, token_version=token_version, system_role=role, needs_setup=False)
+def _user(*, user_id="alice", token_version=0, role="user", disabled=False):
+    return SimpleNamespace(id=user_id, token_version=token_version, system_role=role, needs_setup=False, disabled=disabled)
 
 
 _FUTURE = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0).isoformat()
@@ -155,6 +155,21 @@ async def test_deleted_changed_or_revoked_owner_cannot_use_an_existing_grant(mon
     result = await capability.manage(action="list", request={})
     assert result["status_code"] == 401
     repo.list_manageable_from_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_suspended_owner_loses_existing_schedule_write_authority(monkeypatch):
+    prepare, repo, _, _, _, provider, resolve, _ = _setup(monkeypatch)
+    capability = await prepare()
+    provider.get_user.return_value = _user(disabled=True)
+    resolve.reset_mock()
+
+    result = await capability.manage(action="create", request={})
+
+    assert result["status_code"] == 401
+    repo.create.assert_not_awaited()
+    resolve.assert_not_awaited()
+    assert await prepare() is None
 
 
 @pytest.mark.asyncio

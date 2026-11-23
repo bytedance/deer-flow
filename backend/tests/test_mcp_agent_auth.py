@@ -507,9 +507,9 @@ def test_gateway_admits_owner_and_assembles_the_verified_snapshot(agent_auth_env
             assert len(agent_mcp_transport.calls) == 1
 
             (directory / "SOUL.md").write_text(env.soul, encoding="utf-8")
-            for context in ({"agent_name": env.agent.name, "is_bootstrap": True}, {}):
+            for context, expected_status in (({"agent_name": env.agent.name, "is_bootstrap": True}, 422 if mode == "chat" else 200), ({}, 200)):
                 response = run(context)
-                assert response.status_code == 200, response.text
+                assert response.status_code == expected_status, response.text
                 assert len(agent_mcp_transport.calls) == 1
             register("other-owner@example.com")
             denied = client.post("/api/mcp/personal/config/servers", json={"mcp_servers": {"tickets": {"type": "http", "url": "https://mcp.example", "agent_auth": True}}})

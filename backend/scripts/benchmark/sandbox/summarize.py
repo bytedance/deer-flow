@@ -99,6 +99,7 @@ _COLUMNS = [
     "idle_timeout",
     "health_check_skip_seconds",
     "image",
+    "aio_service_profile",
     "count",
     "ok",
     "errors",
@@ -154,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("inputs", nargs="+", help="JSONL file(s) from sandbox/bench_provider.py")
     p.add_argument(
         "--group",
-        default="provider,scenario,workload,concurrency,users,no_warmpool,replicas,idle_timeout,health_check_skip_seconds,image",
+        default="provider,scenario,workload,concurrency,users,no_warmpool,replicas,idle_timeout,health_check_skip_seconds,image,aio_service_profile",
         help="Comma-separated grouping dimensions (default includes provider configuration and user count)",
     )
     p.add_argument(

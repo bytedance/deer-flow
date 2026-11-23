@@ -38,6 +38,7 @@ from deerflow.config.credentials_key import CredentialsCipher
 from deerflow.persistence.base import Base
 from deerflow.persistence.channel_leases import ChannelLeaseRow, SqlChannelLeaseRepository
 from deerflow.persistence.channel_runtime_configs import ChannelRuntimeConfigRow, SqlChannelRuntimeConfigRepository
+from deerflow.persistence.engine import close_engine
 
 CIPHER = CredentialsCipher.from_keys([Fernet.generate_key()])
 
@@ -123,7 +124,7 @@ def test_credentials_saved_on_one_replica_are_served_by_the_other(tmp_path, runt
         assert disconnected.status_code == 200
         assert _provider(client_a, "slack")["configured"] is False
 
-    anyio.run(connection_repo.close)
+    anyio.run(close_engine)
 
 
 def test_saving_credentials_without_an_encryption_key_is_refused(tmp_path, runtime_sessions):
@@ -136,7 +137,7 @@ def test_saving_credentials_without_an_encryption_key_is_refused(tmp_path, runti
     assert response.status_code == 503
     assert "DEER_FLOW_CREDENTIALS_KEY" in response.json()["detail"]
     assert _runtime_store(runtime_sessions).load_all() == {}
-    anyio.run(connection_repo.close)
+    anyio.run(close_engine)
 
 
 # -- ChannelService under the leader lease --------------------------------
