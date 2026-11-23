@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,32 @@ def test_aio_provider_default_uses_image_defaults(monkeypatch, tmp_path):
     assert captured["image"] is None
     assert captured["environment"] == {}
     assert json.loads(output.read_text(encoding="utf-8"))["aio_service_profile"] == "image-defaults"
+
+
+@pytest.mark.parametrize("env_file", [".env", "benchmark.env"])
+def test_aio_cli_reads_config_path_from_dotenv_on_startup(tmp_path, env_file):
+    (tmp_path / "profile.yaml").write_bytes(b'sandbox:\n  environment:\n    DISABLE_JUPYTER: "$BENCH_JUPYTER"\n')
+    (tmp_path / env_file).write_bytes(b"DEER_FLOW_CONFIG_PATH=profile.yaml\nBENCH_JUPYTER=true\n")
+    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    if env_file != ".env":
+        env["DEER_FLOW_ENV_FILE"] = env_file
+
+    # A fresh interpreter exercises the CLI's first config import. Stop at the Docker boundary.
+    script = """
+import json
+from scripts.benchmark.sandbox import bench_provider as bench
+
+def capture(config):
+    print(json.dumps(config["environment"]))
+    raise SystemExit(0)
+
+bench.PROVIDER_FACTORIES["aio-docker"] = capture
+bench.main(["--provider", "aio-docker"])
+"""
+    run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, env=env, capture_output=True, encoding="utf-8", timeout=30)
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout) == {"DISABLE_JUPYTER": "true"}
 
 
 def test_aio_cli_forwards_selected_service_flags_and_records_profile(monkeypatch, tmp_path):

@@ -235,14 +235,15 @@ def _make_boxlite_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]
 _AIO_SERVICE_FLAGS = ("DISABLE_BROWSER", "DISABLE_CODE_SERVER", "DISABLE_JUPYTER", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL", "DISABLE_VNC")
 
 
-def _aio_service_environment(config_path: str | None) -> dict[str, str]:
-    if not config_path:
-        return {}
-
+def _aio_service_environment() -> dict[str, str]:
     import yaml
 
     from deerflow.config.app_config import AppConfig
 
+    # Importing app_config loads the dotenv file that can select the benchmark YAML.
+    config_path = os.getenv("DEER_FLOW_CONFIG_PATH")
+    if not config_path:
+        return {}
     with AppConfig.resolve_config_path(config_path).open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
     if config is None:
@@ -816,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     if args.provider == "aio-docker":
-        config["environment"] = _aio_service_environment(os.getenv("DEER_FLOW_CONFIG_PATH"))
+        config["environment"] = _aio_service_environment()
 
     factory = PROVIDER_FACTORIES[args.provider]
     provider, config_used = factory(config)

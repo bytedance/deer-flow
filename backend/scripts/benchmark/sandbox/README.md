@@ -52,7 +52,9 @@ the summary's default grouping does so. Percentiles use inclusive interpolation.
 ## Comparing AIO Docker service profiles
 
 For `bench_provider.py --provider aio-docker`, select a disposable DeerFlow YAML
-with `DEER_FLOW_CONFIG_PATH`. Set the service switches under `sandbox.environment`:
+with `DEER_FLOW_CONFIG_PATH`. You can export it in the shell or set it in the
+default `.env` or the file selected by `DEER_FLOW_ENV_FILE`. Set the service
+switches under `sandbox.environment`:
 
 ```yaml
 sandbox:
