@@ -349,3 +349,110 @@ class TestTelegramNewMessageRetryAfter:
         assert _run(channel._send_with_retry(flaky, max_retries=3)) == "sent"
         assert attempts["n"] == 3
         assert sleeps == [1, 2]
+
+
+class TestTelegramFinalEditRetryAfter:
+    @pytest.mark.parametrize(("hint", "expected_wait"), [(timedelta(hours=2), 60.0), (-5, 0.0)], ids=["over-cap", "negative"])
+    def test_plain_final_edit_bounds_retry_after(self, monkeypatch, hint, expected_wait):
+        async def go():
+            channel, bot = _channel_with_bot()
+            sleeps = _patch_retry_sleep(monkeypatch)
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+            await channel._send_running_reply("12345", 42)
+
+            real_edit = bot.edit_message_text
+            calls = {"n": 0}
+
+            async def flaky(**kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise _flood(hint)
+                return await real_edit(**kwargs)
+
+            bot.edit_message_text = flaky
+            await channel.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="final", is_final=True, thread_ts="42"))
+
+            assert sleeps == [expected_wait]
+            assert calls["n"] == 2
+            assert [edit["text"] for edit in bot.edited] == ["final"]
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+
+        _run(go())
+
+    @pytest.mark.parametrize(("hint", "expected_wait"), [(timedelta(hours=2), 60.0), (-5, 0.0)], ids=["over-cap", "negative"])
+    def test_rich_final_edit_bounds_retry_after(self, monkeypatch, hint, expected_wait):
+        async def go():
+            channel, bot = _channel_with_bot()
+            channel.config["rich_messages"] = True
+            sleeps = _patch_retry_sleep(monkeypatch)
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+            await channel._send_running_reply("12345", 42)
+
+            real_rich = bot.do_api_request
+            calls = {"n": 0}
+
+            async def flaky(endpoint, api_kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise _flood(hint)
+                return await real_rich(endpoint, api_kwargs)
+
+            bot.do_api_request = flaky
+            await channel.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True, thread_ts="42"))
+
+            assert sleeps == [expected_wait]
+            assert calls["n"] == 2
+            assert [call[0] for call in bot.rich] == ["editMessageText"]
+            assert bot.edited == []
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        "hint",
+        [float("inf"), float("nan"), "invalid", {}, 10**400, True],
+        ids=["infinite", "nan", "nonnumeric", "wrong-type", "overflow", "boolean"],
+    )
+    def test_plain_final_edit_unusable_retry_after_falls_back_to_new_message(self, monkeypatch, hint):
+        async def go():
+            channel, bot = _channel_with_bot()
+            sleeps = _patch_retry_sleep(monkeypatch)
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+            await channel._send_running_reply("12345", 42)
+
+            async def broken_edit(**kwargs):
+                raise _flood(hint)
+
+            bot.edit_message_text = broken_edit
+            await channel.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="final", is_final=True, thread_ts="42"))
+
+            assert sleeps == []
+            assert [message["text"] for message in bot.sent] == ["Working on it...", "final"]
+            assert channel._last_bot_message["12345"] == 101
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        "hint",
+        [float("inf"), float("nan"), "invalid", {}, 10**400, True],
+        ids=["infinite", "nan", "nonnumeric", "wrong-type", "overflow", "boolean"],
+    )
+    def test_rich_final_edit_unusable_retry_after_falls_back_to_plain_edit(self, monkeypatch, hint):
+        async def go():
+            channel, bot = _channel_with_bot()
+            channel.config["rich_messages"] = True
+            sleeps = _patch_retry_sleep(monkeypatch)
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+            await channel._send_running_reply("12345", 42)
+
+            async def broken_rich(endpoint, api_kwargs):
+                raise _flood(hint)
+
+            bot.do_api_request = broken_rich
+            await channel.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True, thread_ts="42"))
+
+            assert sleeps == []
+            assert [edit["text"] for edit in bot.edited] == ["**answer**"]
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+
+        _run(go())
