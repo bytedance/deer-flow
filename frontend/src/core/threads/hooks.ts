@@ -67,7 +67,6 @@ import {
   type ThreadMetadataPatch,
 } from "./api";
 import { isHistoryError, withHistoryErrorTagging } from "./history-error";
-import { runErrorThreadId, withRunErrorTagging } from "./run-error";
 import {
   dedupeMessagesByIdentity,
   insertByTrustedSeq,
@@ -77,6 +76,7 @@ import {
   messageIdentity,
   trustedMessageSeq,
 } from "./message-order";
+import { runErrorThreadId, withRunErrorTagging } from "./run-error";
 import {
   fetchRunInputState,
   fetchRunInputs,
@@ -88,6 +88,10 @@ import {
   hasRenderedThreadStateUpdate,
   reduceThreadStateUpdates,
 } from "./stream-state";
+import {
+  takeRequestedThreadId,
+  withThreadCreationTagging,
+} from "./thread-creation";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -2479,12 +2483,16 @@ export function useThreadStream({
     // navigation must still bind to this send. Bounded so a long session does
     // not accumulate drafts, and the oldest attempt is the least likely to be
     // accepted after this much navigation.
-    releasedSendsRef.current = [
-      ...releasedSendsRef.current.slice(-MAX_RELEASED_SENDS + 1),
-      pending,
-    ];
+    const released = releasedSendsRef.current;
+    const kept = released.slice(-(MAX_RELEASED_SENDS - 1));
+    for (const evicted of released.slice(0, released.length - kept.length)) {
+      // A record that no longer exists must not keep a binding slot: the next
+      // created thread would be bound to a send nothing can settle.
+      forgetUnboundSend(evicted);
+    }
+    releasedSendsRef.current = [...kept, pending];
     pending.resolve();
-  }, []);
+  }, [forgetUnboundSend]);
 
   /**
    * Drop a released send whose run request failed before its created thread
@@ -2619,7 +2627,10 @@ export function useThreadStream({
   // the SDK reports both without run metadata, but only the refusal means the
   // send never became a turn.
   const streamClient = useMemo(
-    () => withRunErrorTagging(withHistoryErrorTagging(getAPIClient(isMock))),
+    () =>
+      withThreadCreationTagging(
+        withRunErrorTagging(withHistoryErrorTagging(getAPIClient(isMock))),
+      ),
     [isMock],
   );
 
@@ -2636,16 +2647,36 @@ export function useThreadStream({
     // starves UI updates while chunks keep arriving faster than the window.
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
-    // The SDK reports the conversation it created for a new-chat send before any
-    // run frame. Bind it to that send so a released attempt keeps its draft
-    // until its own run is acknowledged, never another chat's.
+    // The SDK reports the conversation it created for a send before any run
+    // frame. Bind it to the send that asked for it, so a released attempt keeps
+    // its draft until its own run is acknowledged, never another chat's.
     onThreadId(createdThreadId) {
-      const [send] = unboundThreadSendsRef.current;
+      const unbound = unboundThreadSendsRef.current;
+      if (unbound.length === 0) {
+        return;
+      }
+      // The submission id recorded at `threads.create` names its own send. A
+      // released attempt whose creation was cancelled never gets such a report,
+      // so it cannot take a later attempt's thread. Without a record (a test
+      // double, or a client that creates threads elsewhere) keep the previous
+      // submission-order binding.
+      const requested = takeRequestedThreadId(createdThreadId);
+      const index =
+        requested === undefined
+          ? 0
+          : unbound.findIndex((send) => send.threadId === requested);
+      if (index < 0) {
+        return;
+      }
+      const [send] = unbound.slice(index, index + 1);
       if (!send) {
         return;
       }
       send.serverThreadId = createdThreadId;
-      unboundThreadSendsRef.current = unboundThreadSendsRef.current.slice(1);
+      unboundThreadSendsRef.current = [
+        ...unbound.slice(0, index),
+        ...unbound.slice(index + 1),
+      ];
     },
     onCreated(meta) {
       const pendingApproval = pendingApprovalSubmissionRef.current;
@@ -3400,6 +3431,13 @@ export function useThreadStream({
       // A new send on this conversation supersedes released attempts for the
       // same conversation whose acceptance never arrived: their one-time state
       // is already stale, while other conversations' attempts stay tracked.
+      for (const superseded of releasedSendsRef.current) {
+        if (superseded.threadId === threadId) {
+          // Drop its binding slot too, or the next created thread binds to a
+          // send that can no longer be retired.
+          forgetUnboundSend(superseded);
+        }
+      }
       releasedSendsRef.current = releasedSendsRef.current.filter(
         (send) => send.threadId !== threadId,
       );
@@ -3674,6 +3712,7 @@ export function useThreadStream({
       visibleHistory,
       rejectPendingSend,
       discardReleasedSend,
+      forgetUnboundSend,
     ],
   );
 

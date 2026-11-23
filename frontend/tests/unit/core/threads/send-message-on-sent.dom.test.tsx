@@ -8,6 +8,7 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
 import { markRunError } from "@/core/threads/run-error";
+import { markThreadCreation } from "@/core/threads/thread-creation";
 import type { UploadResponse } from "@/core/uploads/api";
 import { AttachmentUploadSession } from "@/core/uploads/attachment-upload-session";
 
@@ -761,4 +762,58 @@ test("rejects the mounted send when its own request is refused after a release",
     mocks.callbacks.onCreated?.({ thread_id: "thread-1", run_id: "run-1" });
   });
   expect(onSentA).toHaveBeenCalledTimes(1);
+});
+test("binds a created thread to the send that asked for it, not a released one", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result, rerender } = await renderThreadStream(null);
+  const onSentA = rs.fn();
+  const onSentB = rs.fn();
+
+  // A is submitted in a new chat and released before the SDK reports the
+  // thread it would create; its request is then cancelled silently.
+  let sendA: Promise<unknown> | undefined;
+  act(() => {
+    sendA = result.current.sendMessage(
+      "placeholder-a",
+      { text: "Hello from A", files: [] },
+      undefined,
+      { onSent: onSentA },
+    );
+  });
+  await flushFrames();
+  rerender({ threadId: "thread-other" });
+  await flushFrames();
+  await act(async () => {
+    await sendA;
+  });
+
+  // B is sent in another new chat. The SDK reports the thread it created for B,
+  // and that report names the submission that asked for it, so it must bind B.
+  rerender({ threadId: null });
+  await flushFrames();
+  let sendB: Promise<unknown> | undefined;
+  act(() => {
+    sendB = result.current.sendMessage(
+      "placeholder-b",
+      { text: "Hello from B", files: [] },
+      undefined,
+      { onSent: onSentB },
+    );
+  });
+  await flushFrames();
+  markThreadCreation("server-b", "placeholder-b");
+  await act(async () => {
+    mocks.callbacks.onThreadId?.("server-b");
+  });
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "server-b", run_id: "run-b" });
+  });
+  await act(async () => {
+    await sendB;
+  });
+
+  expect(onSentB).toHaveBeenCalledTimes(1);
+  expect(onSentA).not.toHaveBeenCalled();
 });
