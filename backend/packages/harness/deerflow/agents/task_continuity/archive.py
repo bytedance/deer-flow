@@ -150,6 +150,8 @@ def capture(state: dict, runtime, messages, config) -> dict:
         omitted = max(0, len(sources) - config.max_records_per_batch)
         sources = sources[-config.max_records_per_batch :]
         batch = digest([owner, sources])
+        batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
+        placeholders = ",".join("?" for _ in batches)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with closing(sqlite3.connect(path, timeout=5)) as db, db:
             db.execute("PRAGMA max_page_count=32768")  # 128 MiB at SQLite's default page size.
@@ -161,14 +163,18 @@ def capture(state: dict, runtime, messages, config) -> dict:
             db.execute("BEGIN IMMEDIATE")
             exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
             created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
-            expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, config.max_batches - 1)).fetchall()
+            # Retain the batches referenced by the next checkpoint first. An
+            # earlier capture may have finished writing without publishing its checkpoint.
+            expired = db.execute(
+                f"SELECT id FROM batches WHERE id != ? ORDER BY (id IN ({placeholders})) DESC, created DESC LIMIT -1 OFFSET ?",
+                [batch, *batches, config.max_batches - 1],
+            ).fetchall()
             for (expired_id,) in expired:
                 db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
             if not exists:
                 db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
                 db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
-        batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
         return {"scope": owner, "batches": batches, "omitted_records": omitted, "status": "available"}
     except (OSError, sqlite3.Error, ValueError):
         logger.warning("Task history capture unavailable; preserving ordinary compaction", exc_info=False)

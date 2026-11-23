@@ -86,7 +86,7 @@ export const extensionCatalog = [
   {
     key: "runPostmortem",
     package: "deerflow-extension-run-postmortem",
-    namespace: null,
+    namespace: "community.run-postmortem",
   },
   { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
   { key: "weknora", package: "deerflow-extension-weknora", namespace: null },

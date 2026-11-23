@@ -45,7 +45,7 @@ from deerflow.sandbox.lease import (
     sandbox_command_scope,
     sandbox_lease_owner,
 )
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path, escape_powershell_single_quoted
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.prewarm import claim_sandbox_prewarm
@@ -2050,20 +2050,45 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     return result
 
 
-def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
-    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None, *, shell: str | None = None) -> str:
+    """Anchor relative paths to the thread workspace with a shell-appropriate prefix.
+
+    The syntax has to follow the shell that will actually run the command, not
+    the POSIX one this used to assume unconditionally. ``LocalSandbox._get_shell``
+    falls back to ``powershell.exe`` and then ``cmd.exe`` on Windows, and a
+    ``cd '<path>' && ...`` prefix is unparseable in both: Windows PowerShell
+    before 7 rejects ``&&`` ("not a valid statement separator in this version",
+    surfaced as ``InvalidEndOfLine``), and cmd.exe does not strip single quotes,
+    so it looks for a directory literally named ``'<path>'``. Either way every
+    ``bash`` call fails before the command runs.
+
+    Each form keeps the fail-closed behaviour of ``&&``: the PowerShell variant
+    uses ``-ErrorAction Stop`` because ``Set-Location`` otherwise reports a
+    missing workspace as a non-terminating error and lets the command run from
+    the inherited working directory.
 
     Args:
         command: The bash command to execute.
         thread_data: The thread data containing the workspace path.
+        shell: The shell executable that will run the command. Defaults to the
+            one ``LocalSandbox`` resolves.
 
     Returns:
-        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
+        The command prefixed with a cwd change if workspace_path is available,
         otherwise the original command unchanged.
     """
-    if thread_data and (workspace := thread_data.get("workspace_path")):
-        return f"cd {shlex.quote(workspace)} && {command}"
-    return command
+    if not (thread_data and (workspace := thread_data.get("workspace_path"))):
+        return command
+    resolved_shell = shell or LocalSandbox._get_shell()
+    if LocalSandbox._is_powershell(resolved_shell):
+        # ``-ErrorAction Stop`` keeps the stop-on-failure semantics ``&&`` gives
+        # the POSIX form: ``Set-Location`` reports a missing directory as a
+        # non-terminating error, which would let the ``;``-separated command run
+        # from the gateway's inherited cwd.
+        return f"Set-Location -LiteralPath '{escape_powershell_single_quoted(workspace)}' -ErrorAction Stop; {command}"
+    if LocalSandbox._is_cmd_shell(resolved_shell):
+        return f'cd /d "{workspace}" && {command}'
+    return f"cd {shlex.quote(workspace)} && {command}"
 
 
 def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
@@ -2454,9 +2479,12 @@ def _execute_bash_command(
     runtime: Runtime,
     env: dict[str, str] | None,
     timeout: float | None = None,
+    cwd: str | None = None,
 ) -> str:
     """Route subagent bash calls through their isolated shell-session scope."""
     with command_owner(sandbox, sandbox_lease_owner(runtime.context)):
+        if cwd is not None and isinstance(sandbox, LocalSandbox):
+            return sandbox.execute_command(command, env=env, timeout=timeout, cwd=cwd)
         scope_id = sandbox_command_scope(runtime.context)
         scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
         if scope_id is not None and callable(scoped_execute):
@@ -2864,51 +2892,6 @@ def _user_identity_prefix(runtime: Runtime) -> str:
     return f"unset {USER_ID_ENV}; "
 
 
-def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
-    """Build a per-call env overlay carrying a GitHub App installation token.
-
-    The GitHub channel mints a short-lived installation token in the
-    ``ChannelManager`` (app layer) and threads it through ``run_context``
-    so it lands in ``runtime.context["github_token"]``. We expose it to
-    the agent's bash as both ``GH_TOKEN`` (what the ``gh`` CLI reads) and
-    ``GITHUB_TOKEN`` (the conventional name). Returning ``None`` when no
-    token is present keeps non-GitHub runs identical to before.
-
-    The value at ``runtime.context["github_token"]`` may be either:
-
-    * a ``str`` — the captured token, the simple shape used by tests and
-      by older code paths that don't need refresh; or
-    * a zero-arg sync callable returning ``str`` — a provider that re-mints
-      transparently when the underlying installation token's 1h TTL is
-      nearing expiry. The provider's cache logic lives app-side (see
-      ``app.gateway.github.app_auth.mint_installation_token`` for the
-      cache + leeway semantics); the harness just calls it.
-
-    The callable path is what lets long autonomous runs survive past the
-    60-minute installation-token life: every bash invocation re-asks the
-    provider, which returns the cached token until ~55 min, then mints a
-    fresh one. Without this, a coder agent doing a multi-hour refactor
-    would do most of the work and then 401 on the final ``git push``.
-
-    The token still crosses the harness/app boundary as opaque data — the
-    harness never imports the app-layer minting code, preserving the
-    dependency firewall enforced by ``tests/test_harness_boundary.py``.
-    """
-    context = runtime.context if runtime.context is not None else None
-    value = context.get("github_token") if context else None
-    if callable(value):
-        try:
-            token = value()
-        except Exception:
-            logger.warning("github_token provider raised; skipping env overlay", exc_info=True)
-            return None
-    else:
-        token = value
-    if not isinstance(token, str) or not token:
-        return None
-    return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
-
-
 _LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
 
 
@@ -2962,17 +2945,11 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | To
     redaction_env = None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
-        # Request-scoped secrets resolved for the active skill (#3861), plus a
-        # short-lived GitHub App installation token threaded through by the
-        # GitHub channel. Both are injected as per-call env into the subprocess,
-        # never placed in the command string.
+        # Only the active skill's explicitly resolved secrets belong here.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
         user_prefix = _user_identity_prefix(runtime)
-        github_env = _github_env_from_runtime(runtime)
         lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
-        if github_env:
-            injected_env = {**(injected_env or {}), **github_env}
         if lark_cli_env:
             injected_env = {**(injected_env or {}), **lark_cli_env}
         redaction_env = injected_env
@@ -2988,7 +2965,12 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | To
             thread_data = get_thread_data(runtime)
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
-            command = _apply_cwd_prefix(command, thread_data)
+            workspace = thread_data.get("workspace_path") if thread_data else None
+            cwd = None
+            if workspace and _is_windows() and isinstance(sandbox, LocalSandbox) and sandbox._is_cmd_shell(sandbox._get_shell()):
+                cwd = workspace
+            else:
+                command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
             # PowerShell/cmd.exe where `export` is not valid syntax, so the id
             # is published through the subprocess environment instead —
@@ -3019,6 +3001,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | To
                 runtime=runtime,
                 env=local_env,
                 timeout=command_timeout,
+                cwd=cwd,
             )
             content = _truncate_bash_output(
                 mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),

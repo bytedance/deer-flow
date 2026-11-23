@@ -20,6 +20,17 @@ logger = logging.getLogger(__name__)
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
+def validate_injected_skill_storage(storage: SkillStorage, *, container_root: str, user_id: str | None = None) -> None:
+    """Keep an injected catalog within the configured mount and owner scope."""
+    from deerflow.config.paths import make_safe_user_id
+
+    if storage.get_container_root() != container_root:
+        raise ValueError("Injected skill storage container root must match skills.container_path")
+    storage_owner = getattr(storage, "user_id", None)
+    if storage_owner is not None and user_id is not None and storage_owner != make_safe_user_id(user_id):
+        raise ValueError("Injected skill storage owner must match the run user")
+
+
 def walk_skill_directories(root: Path) -> Iterable[tuple[str, list[str], list[str]]]:
     """Follow directory links, but prune links back to the current ancestors.
 

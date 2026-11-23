@@ -46,7 +46,7 @@ authentication and stays on loopback; it is never a deployed Gateway.
 - **A terminal run alone is not success**, and an interruption is never approved
   automatically. After a restart, only an authenticated action or a native
   mention rebinds a job.
-- **A terminal result and its follow-up receipt commit in one SQLite
+- **A terminal result and its follow-up receipt commit in one storage
   transaction**, and so do team data and the pending-jobs projection.
 - **Hold the scheduling lock for bookkeeping only**, never across a host call.
   Execution and control mutations take the team-scoped lock.
@@ -70,3 +70,18 @@ authentication and stays on loopback; it is never a deployed Gateway.
 - **A file transfer pauses the worker deadline.** Restore the remaining budget
   afterwards, and drain cancellation before you release a host reservation or a
   sandbox lease.
+
+## PostgreSQL ownership
+
+Use a dedicated plugin schema and one service-lock session for all storage
+operations. Serialize each complete transaction on that connection so owner-wide
+team and artifact quotas are atomic across teams. Connection loss invalidates
+the store and stops service admission. Restart and authenticated Reconnect
+recover retained work. Drain offloaded database operations and team workers
+before releasing ownership. Keep connection URLs out of diagnostics.
+Stop callers share one shielded shutdown task, but cancellation of a caller must
+propagate immediately so the Gateway can enforce its per-service stop budget.
+The background task retains ownership until draining completes; observe and
+report failures without exposing storage exception details. Test blocked
+database work, worker cleanup and connection close through the host stop path.
+Run PostgreSQL regressions with `TEST_POSTGRES_URI` against a disposable database.
