@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.community.apify import tools as apify_tools
 from deerflow.community.ddg_search import tools as ddg_search_tools
 from deerflow.community.fastcrw import tools as fastcrw_tools
 from deerflow.community.firecrawl import tools as firecrawl_tools
@@ -43,6 +44,7 @@ COMMUNITY_ROOT = Path(ddg_search_tools.__file__).resolve().parent.parent
 # tests (tests/test_fastcrw_tools.py, tests/test_firecrawl_tools.py) stay
 # meaningful; the module is imported so a coercer cannot come back at runtime.
 SHARED_OWNER_PROVIDERS = {
+    "apify": ("Apify", apify_tools),
     "ddg_search": ("DDG Search", ddg_search_tools),
     "image_search": ("DDG image search", image_search_tools),
     "serper": ("Serper", serper_tools),

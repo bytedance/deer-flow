@@ -88,6 +88,16 @@ def _stub_tencent_wsa(module, url):
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_search", return_value=(data, None))], _sync(module.web_search_tool)
 
 
+def _stub_apify(module, url):
+    data = {"results": [{"title": "t", "url": url, "snippet": "c"}]}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=data))
+    real_client = httpx.AsyncClient
+    return [
+        patch.object(module, "_tool_settings", return_value=("k", {})),
+        patch.object(module.httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs)),
+    ], _async(module.web_search_tool)
+
+
 def _stub_specstream(module, url):
     data = {"sources": [{"title": "t", "url": url, "snippet": "c"}]}
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_specstream_request", return_value=(data, None))], _sync(module.web_search_tool)
@@ -167,6 +177,7 @@ def _stub_webz(module, url):
 
 
 _TEXT_SEARCH_STUBS = {
+    "apify": _stub_apify,
     "tavily": _stub_tavily,
     "exa": _stub_exa,
     "youcom": _stub_youcom,
