@@ -183,7 +183,9 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
-                client_max_body_size 100M;
+                # 101M: 1 MiB over Gateway's 100 MiB file-byte total, so a
+                # max-size multipart request's framing still fits (#8578).
+                client_max_body_size 101M;
                 proxy_request_buffering off;
             }
 
@@ -199,7 +201,7 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
-                client_max_body_size 100M;
+                client_max_body_size 101M;
                 proxy_request_buffering off;
                 proxy_read_timeout 600s;
             }

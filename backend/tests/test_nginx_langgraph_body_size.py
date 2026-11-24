@@ -37,9 +37,11 @@ from support.nginx_conf import parse_body_size_bytes as _parse_body_size_bytes
 from support.nginx_conf import parse_read_timeout_seconds as _parse_read_timeout_seconds
 from support.nginx_conf import read_config as _read
 
+from app.gateway.routers.uploads import DEFAULT_MAX_FILES, DEFAULT_MAX_TOTAL_SIZE
+
 # Text prompts never carry binary file attachments (those go through the
 # dedicated uploads route), so the ceiling here is intentionally well below
-# the uploads route's 100M -- generous for even a very long pasted document,
+# the uploads route's 101M -- generous for even a very long pasted document,
 # while avoiding needlessly letting one chat request force Gateway to buffer
 # and JSON-parse an arbitrarily large body in memory.
 _MIN_EXPECTED_BODY_SIZE_BYTES = 5 * 1024 * 1024
@@ -73,7 +75,7 @@ def test_langgraph_route_raises_body_size_limit_for_text_prompts(path):
         f"{path}: /api/langgraph/ client_max_body_size is {size_bytes} bytes, "
         f"expected between {_MIN_EXPECTED_BODY_SIZE_BYTES} and "
         f"{_MAX_EXPECTED_BODY_SIZE_BYTES} bytes -- comfortably above nginx's 1m "
-        "default (the actual bug) but below the uploads route's 100M, since "
+        "default (the actual bug) but below the uploads route's 101M, since "
         "this route only ever carries JSON chat text, never binary files"
     )
 
@@ -87,8 +89,32 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
     content = _read(path)
     block = _extract_location_block(content, r"~ ^/api/threads/[^/]+/uploads")
 
-    assert "client_max_body_size 100M;" in block
+    assert "client_max_body_size 101M;" in block
     assert "proxy_request_buffering off;" in block
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_uploads_route_admits_a_max_size_multipart_request(path):
+    """Regression for issue #8578: Gateway accepts up to
+    ``DEFAULT_MAX_TOTAL_SIZE`` of file bytes per upload request, but the
+    multipart body carrying those bytes is larger than the files themselves
+    -- each part adds a boundary and headers on top. A ceiling set to
+    exactly the file-byte total (100M = 104,857,600 bytes) therefore 413s a
+    request Gateway would accept: two 50 MiB files measured a Content-Length
+    of 104,857,940. The ceiling must clear the file-byte total plus framing
+    for the maximum part count, like the skills upload route's 101M."""
+    content = _read(path)
+    block = _extract_location_block(content, r"~ ^/api/threads/[^/]+/uploads")
+
+    size_bytes = _parse_body_size_bytes(block)
+
+    # 1 KiB per part is a generous bound on multipart framing (boundary,
+    # Content-Disposition and Content-Type headers); the measured request
+    # above carried ~170 bytes of framing per part.
+    framing_allowance = DEFAULT_MAX_FILES * 1024
+    assert size_bytes >= DEFAULT_MAX_TOTAL_SIZE + framing_allowance, (
+        f"{path}: uploads client_max_body_size is {size_bytes} bytes, but a max-size multipart request carries {DEFAULT_MAX_TOTAL_SIZE} bytes of files plus framing, so nginx would 413 an upload Gateway accepts -- see issue #8578"
+    )
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)
