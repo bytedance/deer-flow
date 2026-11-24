@@ -27,11 +27,12 @@ tasks; absence of evidence stays permissive there rather than failing closed.
 Edit replay resolves its base through the same lineage-first path as regenerate;
 it must pass `head_checkpoint` or it silently degrades to the chronological scan
 that cannot tell sibling branches apart. Branch, regenerate, and edit replay
-share a 30-second deadline for the linked lookup of the replay base. Changing
-`max_recursion_limit` for future runs does not affect that lookup. Expiry of the
-lookup's own deadline returns HTTP 504. Checkpoint store timeouts propagate as
-storage errors. The chronological compatibility lookup retains its fixed
-checkpoint window.
+share a deadline for the linked lookup of the replay base. Changing
+`max_recursion_limit` for future runs does not affect that lookup. The Gateway
+logs lookup deadline expiry and returns HTTP 504. A `TimeoutError` raised by
+the checkpoint store before the deadline propagates to the generic HTTP 500
+handler. The chronological compatibility lookup retains its fixed checkpoint
+window.
 An edit replay that pauses for tool approval stays the current attempt: the edit
 remains in thread state and replaces the source turn in history. Only a failed,
 timed-out or cancelled attempt restores the pre-edit checkpoint; once the pause is

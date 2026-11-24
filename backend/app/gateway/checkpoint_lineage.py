@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from itertools import count
 from typing import Any
 
-REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS = 30
+from fastapi import HTTPException
+
+from app.gateway.utils import sanitize_log_param
+
+logger = logging.getLogger(__name__)
+
+_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS = 30
+_REPLAY_LINEAGE_TIMEOUT_DETAIL = "Timed out resolving the checkpoint before the target user message"
 
 
 def task_interrupts_by_id(snapshot: Any) -> dict[str, list[Any]]:
@@ -44,6 +52,12 @@ class CheckpointLineageIntegrityError(CheckpointLineageError):
 
 class CheckpointLineageTimeoutError(CheckpointLineageError):
     """Raised when the replay lineage lookup exceeds its own deadline."""
+
+
+def replay_lineage_timeout_http_error(thread_id: str, exc: CheckpointLineageTimeoutError) -> HTTPException:
+    """Log a replay lookup deadline expiry and return its fixed client error."""
+    logger.warning("Replay checkpoint lookup timed out for thread %s", sanitize_log_param(thread_id), exc_info=exc)
+    return HTTPException(status_code=504, detail=_REPLAY_LINEAGE_TIMEOUT_DETAIL)
 
 
 def checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
@@ -387,15 +401,15 @@ async def find_replay_checkpoint_before_message(
     head_checkpoint: Any,
     message_id: str,
 ) -> Any:
-    """Resolve the replay base within a deadline shared by branch and regenerate."""
-    deadline = asyncio.timeout(REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS)
+    """Resolve the replay base for branching, regeneration, or edit replay."""
+    deadline = asyncio.timeout(_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS)
     try:
         async with deadline:
             return await find_checkpoint_before_message(accessor, head_checkpoint, message_id, max_depth=None)
     except TimeoutError as exc:
         if not deadline.expired():
             raise  # The checkpoint store raised its own timeout.
-        raise CheckpointLineageTimeoutError("Timed out resolving the checkpoint before the target user message") from exc
+        raise CheckpointLineageTimeoutError(_REPLAY_LINEAGE_TIMEOUT_DETAIL) from exc
 
 
 async def find_checkpoint_before_message(
@@ -412,7 +426,7 @@ async def find_checkpoint_before_message(
     a checkpoint from the wrong branch. Duration-only metadata checkpoints do not
     represent an addressable conversation state and are skipped, and so are
     checkpoints that still have pending tasks (see :func:`has_pending_tasks`).
-    Callers that pass ``max_depth=None`` bound the lookup with a deadline.
+    With ``max_depth=None``, the caller must bound the lookup with a deadline.
     """
 
     if message_id not in {_message_id(message) for message in checkpoint_messages(head_checkpoint)}:

@@ -40,6 +40,7 @@ from app.gateway.checkpoint_lineage import (
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
+    replay_lineage_timeout_http_error,
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
@@ -761,7 +762,7 @@ async def _find_base_checkpoint_before_human(
         try:
             return await find_replay_checkpoint_before_message(accessor, head_checkpoint, human_message_id)
         except CheckpointLineageTimeoutError as exc:
-            raise HTTPException(status_code=504, detail="Timed out resolving the checkpoint before the target user message") from exc
+            raise replay_lineage_timeout_http_error(thread_id, exc) from exc
         except CheckpointParentMissingError:
             # Some legacy or imported heads have no recorded parent link.
             # Only those heads can use the chronological compatibility scan.

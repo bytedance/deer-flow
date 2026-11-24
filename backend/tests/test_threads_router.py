@@ -3178,6 +3178,24 @@ def test_branch_thread_can_prepare_regenerate_without_branch_run_events(source_c
     assert branch_base.checkpoint.get("channel_values", {}).get("messages", []) == []
 
 
+def test_branch_replay_deadline_returns_504_and_logs_exception(monkeypatch, caplog) -> None:
+    from app.gateway import checkpoint_lineage
+
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "source-replay-deadline"
+    monkeypatch.setattr(checkpoint_lineage, "_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id})
+        assert created.status_code == 200, created.text
+        _seed_branchable_thread(app, thread_id)
+        response = client.post(f"/api/threads/{thread_id}/branches", json={"message_id": "ai-1"})
+
+    assert response.status_code == 504, response.text
+    assert response.json()["detail"] == "Timed out resolving the checkpoint before the target user message"
+    assert any(thread_id in record.message and record.exc_info for record in caplog.records)
+
+
 def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> None:
     app, store, checkpointer = _build_thread_app()
     source_thread_id = "source-thread"
