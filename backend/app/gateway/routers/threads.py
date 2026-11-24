@@ -29,9 +29,10 @@ from sqlalchemy.exc import IntegrityError
 from app.gateway.authz import _is_internal_caller, authorize_model_use, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
+    CheckpointLineageTimeoutError,
     CheckpointParentMissingError,
-    find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    find_replay_checkpoint_before_message,
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
@@ -304,12 +305,9 @@ async def _find_branch_replay_base(
     """Resolve a replay base while preserving unlinked legacy histories."""
 
     try:
-        return await find_checkpoint_before_message(
-            accessor,
-            snapshot,
-            target_human_id,
-            max_depth=_BRANCH_HISTORY_RAW_SCAN_LIMIT,
-        )
+        return await find_replay_checkpoint_before_message(accessor, snapshot, target_human_id)
+    except CheckpointLineageTimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Timed out resolving the checkpoint before the target user message") from exc
     except CheckpointParentMissingError:
         thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.debug(

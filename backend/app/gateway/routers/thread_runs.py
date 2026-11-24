@@ -31,11 +31,12 @@ from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveRe
 from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
+    CheckpointLineageTimeoutError,
     CheckpointParentMissingError,
     checkpoint_configurable,
     checkpoint_messages,
-    find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    find_replay_checkpoint_before_message,
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
@@ -140,7 +141,6 @@ REGENERATE_HISTORY_SCAN_LIMIT = 200
 # Doubled to keep ~200 effective checkpoints when duration-only checkpoints
 # (one per successful run in steady state) consume roughly half of history.
 REGENERATE_HISTORY_RAW_SCAN_LIMIT = REGENERATE_HISTORY_SCAN_LIMIT * 2
-REGENERATE_LINEAGE_LOOKUP_TIMEOUT_SECONDS = 30
 THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
 _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
@@ -759,14 +759,8 @@ async def _find_base_checkpoint_before_human(
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     if head_checkpoint is not None:
         try:
-            async with asyncio.timeout(REGENERATE_LINEAGE_LOOKUP_TIMEOUT_SECONDS):
-                return await find_checkpoint_before_message(
-                    accessor,
-                    head_checkpoint,
-                    human_message_id,
-                    max_depth=None,
-                )
-        except TimeoutError as exc:
+            return await find_replay_checkpoint_before_message(accessor, head_checkpoint, human_message_id)
+        except CheckpointLineageTimeoutError as exc:
             raise HTTPException(status_code=504, detail="Timed out resolving the checkpoint before the target user message") from exc
         except CheckpointParentMissingError:
             # Some legacy or imported heads have no recorded parent link.

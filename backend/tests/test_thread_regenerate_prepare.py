@@ -1125,9 +1125,10 @@ def test_prepare_edit_regenerate_rejects_sibling_after_exhausting_linked_history
 
 
 def test_replay_lineage_timeout_does_not_scan_chronological_history(monkeypatch):
+    from app.gateway import checkpoint_lineage
     from app.gateway.routers import thread_runs
 
-    monkeypatch.setattr(thread_runs, "REGENERATE_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(checkpoint_lineage, "REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
     checkpointer = _first_turn_checkpointer()
     checkpointer.history[0].parent_config = checkpointer.history[1].config
     head = FakeAccessor._from_raw(checkpointer.history[0])
@@ -1146,6 +1147,31 @@ def test_replay_lineage_timeout_does_not_scan_chronological_history(monkeypatch)
     assert checkpointer.alist_limits == []
 
 
+def test_replay_lineage_preserves_checkpoint_store_timeout(monkeypatch):
+    from app.gateway.routers import thread_runs
+
+    checkpointer = _first_turn_checkpointer()
+    checkpointer.history[0].parent_config = checkpointer.history[1].config
+    head = FakeAccessor._from_raw(checkpointer.history[0])
+    store_timeout = TimeoutError("checkpoint store timed out")
+    get_tuple = AsyncMock(side_effect=store_timeout)
+    monkeypatch.setattr(checkpointer, "aget_tuple", get_tuple)
+
+    with pytest.raises(TimeoutError) as exc:
+        asyncio.run(
+            thread_runs._find_base_checkpoint_before_human(
+                "thread-1",
+                "human-1__user",
+                _request(checkpointer, FakeEventStore([])),
+                head_checkpoint=head,
+            )
+        )
+
+    assert exc.value is store_timeout
+    get_tuple.assert_awaited_once_with(head.parent_config)
+    assert checkpointer.alist_limits == []
+
+
 def test_prepare_edit_regenerate_payload_prefers_checkpoint_lineage():
     """Edit replay must resolve its base the same lineage-first way regenerate does.
 
@@ -1160,7 +1186,7 @@ def test_prepare_edit_regenerate_payload_prefers_checkpoint_lineage():
 
     walk = AsyncMock(side_effect=CheckpointParentMissingError("no parent link"))
 
-    with patch.object(thread_runs, "find_checkpoint_before_message", walk):
+    with patch.object(thread_runs, "find_replay_checkpoint_before_message", walk):
         response = asyncio.run(
             thread_runs._prepare_edit_regenerate_payload(
                 "thread-1",

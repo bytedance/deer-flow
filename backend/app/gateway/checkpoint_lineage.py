@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from itertools import count
 from typing import Any
 
+REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS = 30
+
 
 def task_interrupts_by_id(snapshot: Any) -> dict[str, list[Any]]:
     """Group non-empty task interrupts of one snapshot by task id."""
@@ -38,6 +40,10 @@ class CheckpointParentMissingError(CheckpointLineageError):
 
 class CheckpointLineageIntegrityError(CheckpointLineageError):
     """Raised when recorded checkpoint lineage is present but unsafe to use."""
+
+
+class CheckpointLineageTimeoutError(CheckpointLineageError):
+    """Raised when the replay lineage lookup exceeds its own deadline."""
 
 
 def checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
@@ -374,6 +380,22 @@ def _checkpoint_exists(checkpoint_tuple: Any) -> bool:
     if getattr(checkpoint_tuple, "created_at", None) is not None:
         return True
     return isinstance(getattr(checkpoint_tuple, "checkpoint", None), dict)
+
+
+async def find_replay_checkpoint_before_message(
+    accessor: Any,
+    head_checkpoint: Any,
+    message_id: str,
+) -> Any:
+    """Resolve the replay base within a deadline shared by branch and regenerate."""
+    deadline = asyncio.timeout(REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS)
+    try:
+        async with deadline:
+            return await find_checkpoint_before_message(accessor, head_checkpoint, message_id, max_depth=None)
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise  # The checkpoint store raised its own timeout.
+        raise CheckpointLineageTimeoutError("Timed out resolving the checkpoint before the target user message") from exc
 
 
 async def find_checkpoint_before_message(
