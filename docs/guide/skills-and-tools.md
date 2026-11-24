@@ -298,23 +298,13 @@ The built-in `image-generation` skill supports Gemini, MiniMax, and
 OpenAI-compatible Images APIs. Select the latter with
 `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. For a containerized sandbox or an explicitly enabled
-local host shell, expose these variables through `sandbox.environment`; sandbox
-commands intentionally do not inherit API keys from the Gateway process.
-The local provider uses the resolved configuration values unchanged, and
-request-scoped secrets override operator values. Local bash output and command
-errors redact credential values while leaving benign settings such as model
-names and base URLs readable.
+`IMAGE_GENERATION_MODEL`. Run the skill's script in an isolated sandbox such as
+Docker/AIO, the Kubernetes provisioner, or E2B, and pass the variables through
+`sandbox.environment`. Sandbox commands do not inherit API keys from the Gateway
+process.
 
-For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
-
-When the local sandbox uses PowerShell, mapped host-path spaces and shell metacharacters are escaped for the caller's quoting context; wildcard expansion is preserved. The public `bash` tool's existing workspace prefix uses `&&` and POSIX path quoting: it requires PowerShell 7 for that separator and does not support workspace paths containing apostrophes. These workspace-prefix limitations are separate from virtual-path mapping.
-
-On Windows, the local sandbox's `cmd.exe` fallback decodes builtin output using
-the console output code page, including UTF-8 after `chcp 65001`, independently
-of Python's UTF-8 mode. If no console page is available, it uses the system OEM
-page, with ANSI as a last resort. Native programs can choose a different output
-encoding; configure those programs to match the console page when needed.
+The local provider applies the skill view through its workspace file tools.
+Script-based skills require an isolated sandbox provider on Windows as well.
 
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under

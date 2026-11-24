@@ -30,7 +30,7 @@ from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
-from app.channels.connection_identity import lookup_thread_id
+from app.channels.connection_identity import fallback_store_channel, lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.goal_status import goal_reply_text, goal_status_text, is_active_goal_state
 from app.channels.message_bus import (
@@ -2914,7 +2914,7 @@ class ChannelManager:
             return
 
         await self.store.set_thread_id(
-            msg.channel_name,
+            fallback_store_channel(msg.channel_name, msg.topic_id, self._connection_repo),
             msg.chat_id,
             thread_id,
             topic_id=msg.topic_id,
@@ -2932,7 +2932,7 @@ class ChannelManager:
                 external_topic_id=msg.topic_id,
                 thread_id=thread_id,
             )
-        return await self.store.claim_thread_id(msg.channel_name, msg.chat_id, thread_id, topic_id=msg.topic_id, user_id=msg.user_id)
+        return await self.store.claim_thread_id(fallback_store_channel(msg.channel_name, msg.topic_id, self._connection_repo), msg.chat_id, thread_id, topic_id=msg.topic_id, user_id=msg.user_id)
 
     def _remember_thread_agent(self, thread_id: str, agent_name: str | None) -> None:
         if len(self._thread_agent_names) > IN_PROCESS_CACHE_MAX_ENTRIES:

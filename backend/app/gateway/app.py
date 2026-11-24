@@ -957,7 +957,14 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 set_subagent_batch_submitter(batch_service)
                 app.state.subagent_batches_available = True
 
-        yield
+        workers = getattr(app.state, "coordination_workers", None)
+        try:
+            if workers is not None:
+                workers.start_recovery()
+            yield
+        finally:
+            if workers is not None:
+                await workers.close()
 
         await _shutdown_startup_trash_sweep(app)
         try:

@@ -24,15 +24,29 @@ Content-Type: application/json
 {}
 ```
 
-Each token runs with its owning user's identity (owner filtering and per-user
-memory keep working), carries a scope set that can only narrow that user's
-permissions, and is admitted only to the thread/run lifecycle routes — every
-other route answers `403` to PAT callers, and a PAT never carries admin
-capability. Tokens can be listed and revoked at any time; revocation is
-immediate. PATs require a database backend (SQLite/PostgreSQL). Full
-reference: [API Reference — Personal Access Tokens](../../backend/docs/API.md#personal-access-tokens).
+Each token uses its owner's identity, and its scopes can narrow the owner's
+permissions. The Gateway admits PATs only to allowlisted routes, including
+thread, run, and project operations. A valid PAT can call
+`GET /api/v1/auth/me` to confirm its identity. PATs require SQLite or
+PostgreSQL. Revocation takes effect on the next request.
+[PAT API reference](../../backend/docs/API.md#personal-access-tokens)
+
+A CI pipeline can deploy agents, schedules, and managed subagents with their
+respective scopes. Set `agents_api.enabled` to `true` in `config.yaml` to use
+the agent management API. The PAT exception for admin operations applies only to
+managed-subagent writes and requires `subagents:write` from an admin token owner.
+[Deployment routes and required scopes](../../backend/docs/API.md#agent-configuration-by-pat)
 
 ## Embedded Python Client
+
+For a named agent, `DeerFlowClient` uses the saved `model` before the global
+default. An explicit constructor or per-call `model_name` takes precedence.
+An empty or removed saved model falls back to the global default, matching the Gateway.
+The agent's `model_settings` sampling overrides apply to the selected model,
+as they do through the Gateway. Call `client.reset_agent()` after editing the
+saved model configuration.
+The [`write_file` budget hint](sandbox.md#sandbox--file-system) reflects the
+effective model's output token limit after agent and thinking-mode overrides.
 
 User messages are framed as untrusted input. Reserved XML-like tags are escaped
 for model context only when present; tag-free URLs and shell commands retain

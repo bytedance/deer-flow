@@ -319,7 +319,15 @@ across cache versions.
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
+Before starting local development, follow the [configuration guide](configuration.md)
+to run `make setup` from the repository root or prepare `config.yaml` manually.
+
+`make dev` requires a valid `config.yaml` in the project root. Set
+`DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH`
+to point at a specific config file. Runtime state defaults to `.deer-flow` under
+the project root and can be moved with `DEER_FLOW_HOME`. Skills default to
+`skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`.
+Run `make doctor` to verify your setup before starting.
 
 Configuration checks and agent-storage migrations use the installed backend environment through `uv run --no-sync --project backend` from the repository root. This preserves relative runtime paths and installed optional dependencies; see the [setup checks](../../backend/docs/SETUP.md#steps) and [agent-storage migration](../../backend/docs/CONFIGURATION.md#agent-storage).
 
@@ -416,7 +424,10 @@ every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
 `--skip-frontend-build` when calling `./scripts/serve.sh --prod` directly). This
 is opt-in: it fails fast when `frontend/.next` has no completed build.
 
-Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
+With the bundled nginx configuration, nginx rewrites public LangGraph-compatible
+requests from `/api/langgraph/*` to `/api/*` before proxying them to the Gateway.
+For example, `POST /api/langgraph/threads` reaches the Gateway as
+`POST /api/threads`.
 
 Cold agent imports during run creation use a dedicated worker pool, keeping
 unrelated Gateway requests responsive while the agent stack loads. A failed

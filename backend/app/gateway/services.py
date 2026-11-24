@@ -117,7 +117,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -650,7 +650,7 @@ def _normalize_input_messages(
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
 #: Older checkpoints can contain loop detection's record of frequency-capped
 #: tools. Reserve its channel for server-owned state.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY})
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY, IMPORTED_HISTORY_CHANNEL})
 
 #: The ``write_todos`` status contract the todo middleware renders.
 _TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
@@ -2587,7 +2587,7 @@ async def start_run(
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     from app.gateway.coordination_workers import direct_worker_run, managed_task
-    from deerflow.persistence.coordination.workers import THREAD_PREFIX
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, THREAD_PREFIX, WORKER_CHECKPOINT_RUN
 
     if thread_id.startswith(THREAD_PREFIX) and not getattr(request.state, "coordination_execution_id", None):
         if task_id := await managed_task(request, thread_id):
@@ -2667,6 +2667,8 @@ async def start_run(
         # is what keeps a forged value out of the live run config.
         origin = resolve_request_origin(request, body.metadata)
         run_metadata = _admit_scheduler_metadata(body.metadata, trusted=scheduled_task_runtime is not None)
+        run_metadata.pop(RUN_GRANT_METADATA, None)
+        run_metadata.pop(WORKER_CHECKPOINT_RUN, None)
         run_metadata.pop(DEERFLOW_ORIGIN_KEY, None)
         if origin is not None:
             run_metadata[DEERFLOW_ORIGIN_KEY] = origin
@@ -2679,6 +2681,8 @@ async def start_run(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if isinstance(config.get("metadata"), dict):
             config["metadata"] = _admit_scheduler_metadata(config["metadata"], trusted=scheduled_task_runtime is not None)
+            config["metadata"].pop(RUN_GRANT_METADATA, None)
+            config["metadata"].pop(WORKER_CHECKPOINT_RUN, None)
             config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)
             if origin is not None:
                 config["metadata"][DEERFLOW_ORIGIN_KEY] = origin
@@ -3105,6 +3109,8 @@ async def start_run(
                             # appear while this request prepares its admission. Recheck
                             # under the thread lock so a fresh input cannot replace it.
                             await reject_new_run_when_approval_pending(request, thread_id)
+                        if (grant_id := getattr(request.state, "coordination_grant_id", None)) is not None:
+                            run_metadata[RUN_GRANT_METADATA] = grant_id
                         return await run_mgr.create_or_reject(
                             thread_id,
                             body.assistant_id,

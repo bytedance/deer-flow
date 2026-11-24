@@ -291,15 +291,19 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         except Exception as exc:
             logger.warning("Error destroying OpenSandbox %s (%s): %s", sandbox.id, context, exc)
 
-    def _invalidate_sandbox(self, sandbox_id: str, reason: str) -> None:
+    def _invalidate_sandbox(self, sandbox: OpenSandboxSandbox, reason: str) -> None:
+        sandbox_id = sandbox.id
         with self._lock:
-            active = self._sandboxes.pop(sandbox_id, None)
-            warm_entry = self._warm_pool.pop(sandbox_id, None)
+            active = self._sandboxes.get(sandbox_id)
+            warm_entry = self._warm_pool.get(sandbox_id)
+            if active is sandbox:
+                self._sandboxes.pop(sandbox_id)
+            elif warm_entry is not None and warm_entry[0] is sandbox:
+                self._warm_pool.pop(sandbox_id)
+            else:
+                return
             for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
-        sandbox = active or (warm_entry[0] if warm_entry is not None else None)
-        if sandbox is None:
-            return
         logger.warning("Invalidating OpenSandbox %s after terminal failure: %s", sandbox_id, reason)
         self._destroy_quietly(sandbox, context="terminal failure")
 
@@ -429,15 +433,16 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 logger.warning("Failed to destroy OpenSandbox %s after bootstrap failure", remote.id, exc_info=True)
             raise
 
-        return OpenSandboxSandbox(
+        sandbox = OpenSandboxSandbox(
             sandbox_id,
             remote,
             run_command_opts_cls=run_command_opts_cls,
             default_env=self._config["environment"],
             sandbox_timeout=None if self._config["sandbox_timeout"] is None else timedelta(seconds=self._config["sandbox_timeout"]),
             default_command_timeout=self._config["command_timeout"],
-            on_terminal_failure=self._invalidate_sandbox,
+            on_terminal_failure=lambda _sandbox_id, reason: self._invalidate_sandbox(sandbox, reason),
         )
+        return sandbox
 
     def _reclaim_warm_pool(self, sandbox_id: str) -> OpenSandboxSandbox | None:
         with self._lock:
@@ -507,7 +512,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._park_failed_skill_upload(sandbox, was_active=True)
                 raise
             except BaseException:
-                self._invalidate_sandbox(sandbox_id, "skill projection setup failed")
+                self._invalidate_sandbox(sandbox, "skill projection setup failed")
                 raise
 
     def _replace_skill_projection(self, sandbox: OpenSandboxSandbox, projection: SkillProjectionPaths | None) -> None:

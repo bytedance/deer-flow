@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 67
+config_version: 68
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1409,9 +1409,7 @@ tools:
     group: file:write
     use: deerflow.sandbox.tools:str_replace_tool
 
-  # Bash execution tool
-  # Active only when using an isolated shell sandbox or when
-  # sandbox.allow_host_bash: true explicitly opts into host bash.
+  # Bash execution tool. Select an isolated sandbox provider to use it.
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
@@ -1773,16 +1771,12 @@ uploads:
 # ============================================================================
 # Sandbox Configuration
 # ============================================================================
-# Choose between local sandbox (direct execution), Docker-based AIO sandbox,
+# Choose between local file tools, Docker-based AIO sandbox,
 # or BoxLite micro-VM sandbox
 # Option 1: Local Sandbox (Default)
-# Executes commands directly on the host machine
+# Serves workspace file operations
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  # Host bash execution is disabled by default because LocalSandboxProvider is
-  # not a secure isolation boundary for shell access. Enable only for fully
-  # trusted, single-user local workflows.
-  allow_host_bash: false
   # For AioSandboxProvider only: overlap likely sandbox work with the first
   # model call. It is disabled by default and ignored by other providers.
   prewarm: false
@@ -2072,6 +2066,37 @@ sandbox:
 #   # replicas: 3                     # active + warm cap per gateway process
 #   # idle_timeout: 600               # warm seconds before the machine is deleted; 0 disables
 #   # environment:                    # merged into every command's environment
+#   #   PYTHONUNBUFFERED: "1"
+
+# Option 8: BytePlus veFaaS Cloud Sandbox
+# Provisions managed All-in-One Sandbox instances via BytePlus Function Service
+# (veFaaS) OpenAPI (Version=2024-06-06) and reuses AioSandbox for the data plane.
+# Requires no extra cloud SDK dependency (uses httpx + SigV4 directly).
+# sandbox:
+#   use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+#   vefaas:
+#     region: ap-southeast-1
+#     endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+#     function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+#     sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL   # unified domain or https://{sandbox_id}.example.com
+#     access_key_env: BYTEPLUS_ACCESS_KEY_ID
+#     secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+#     # session_token_env: BYTEPLUS_SESSION_TOKEN           # optional STS temporary credentials
+#     # sandbox_access_token: $BYTEPLUS_VEFAAS_SANDBOX_ACCESS_TOKEN  # optional APIG data-plane token
+#     # cpu_milli: 1000                                     # 250..16000
+#     # memory_mb: 2048                                     # 512..131072
+#     # timeout_minutes: 60                                 # 3..1440
+#     # ready_timeout: 60                                   # seconds to wait for Running + HTTP readiness
+#     # tos_mount:                                          # optional per-thread scoped TOS mount
+#     #   enabled: false
+#     #   bucket: $BYTEPLUS_TOS_BUCKET
+#     #   prefix: deerflow-user-data
+#   # replicas: 3                     # active + warm soft cap per gateway process
+#   # idle_timeout: 600               # warm seconds before KillSandbox; 0 disables
+#   # bash_command_timeout: 600       # default remote command timeout seconds
+#   # ownership:
+#   #   type: redis                   # required for multi-worker gateways sharing one veFaaS app
+#   # environment:
 #   #   PYTHONUNBUFFERED: "1"
 
 # ============================================================================

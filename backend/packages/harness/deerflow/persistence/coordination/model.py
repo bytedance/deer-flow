@@ -3,7 +3,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, ForeignKeyConstraint, Index, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, DateTime, Double, ForeignKey, ForeignKeyConstraint, Index, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -34,6 +34,7 @@ class CoordinationTaskRow(Base):
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("coord_tasks.id"))
     depends_on: Mapped[list[str]] = mapped_column(JSON)
     objective: Mapped[str] = mapped_column(Text)
+    run_settings: Mapped[dict[str, int | bool] | None] = mapped_column(JSON(none_as_null=True))
     status: Mapped[str] = mapped_column(String(16))
     revision: Mapped[int] = mapped_column(BigInteger)
     execution_epoch: Mapped[int] = mapped_column(BigInteger)
@@ -62,6 +63,17 @@ class CoordinationAssignmentRow(Base):
     epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), unique=True)
     assistant_id: Mapped[str] = mapped_column(String(128))
+
+
+class CoordinationGrantRow(Base):
+    """One current delegation per task. Reauthorization rotates its ID."""
+
+    __tablename__ = "coord_task_grants"
+    task_id: Mapped[str] = mapped_column(ForeignKey("coord_tasks.id"), primary_key=True)
+    id: Mapped[str] = mapped_column(String(64))
+    authority: Mapped[dict] = mapped_column(JSON)
+    channel: Mapped[dict | None] = mapped_column(JSON)
+    expires_at: Mapped[float] = mapped_column(Double)
 
 
 class CoordinationExecutionRow(Base):

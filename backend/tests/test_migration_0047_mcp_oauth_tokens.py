@@ -21,7 +21,11 @@ from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0047_mcp_oauth_tokens"
-HEAD = "0059_merge_batch_recovery"
+HEAD = "0061_merge_batch_recovery"
+RECOVERY_REVISION = "0059_merge_batch_recovery"
+COORDINATION_SETTINGS_REVISION = "0060_coordination_run_settings"
+COORDINATION_GRANTS_REVISION = "0059_coordination_grants"
+BROWSER_OAUTH_REVISION = "0058_mcp_browser_oauth"
 PREVIOUS = "0046_skill_mutations"
 TABLE = "mcp_oauth_tokens"
 COLUMNS = {
@@ -48,10 +52,13 @@ async def test_0047_remains_in_the_single_migration_chain():
     assert bootstrap._get_head_revision() == HEAD
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [HEAD]
-    assert set(script.get_revision(HEAD).down_revision) == {"0058_mcp_browser_oauth", "0056_merge_batch_recovery"}
+    assert set(script.get_revision(HEAD).down_revision) == {COORDINATION_SETTINGS_REVISION, RECOVERY_REVISION}
+    assert set(script.get_revision(RECOVERY_REVISION).down_revision) == {BROWSER_OAUTH_REVISION, "0056_merge_batch_recovery"}
     assert set(script.get_revision("0056_merge_batch_recovery").down_revision) == {"0055_thread_shares", "0053_batch_recovery"}
     assert script.get_revision("0053_batch_recovery").down_revision == "0052_batch_continuation"
-    assert script.get_revision("0058_mcp_browser_oauth").down_revision == "0057_coordination_workers"
+    assert script.get_revision(COORDINATION_SETTINGS_REVISION).down_revision == COORDINATION_GRANTS_REVISION
+    assert script.get_revision(COORDINATION_GRANTS_REVISION).down_revision == BROWSER_OAUTH_REVISION
+    assert script.get_revision(BROWSER_OAUTH_REVISION).down_revision == "0057_coordination_workers"
     assert script.get_revision("0057_coordination_workers").down_revision == "0056_coordination_task_state"
     assert script.get_revision("0056_coordination_task_state").down_revision == "0055_thread_shares"
     assert script.get_revision("0055_thread_shares").down_revision == "0054_project_memory"
@@ -213,7 +220,7 @@ async def test_browser_oauth_migration_preserves_legacy_tokens_and_drops_delegat
         async with engine.begin() as conn:
             table = await conn.run_sync(lambda sync: sa.Table(TABLE, sa.MetaData(), autoload_with=sync))
             await conn.execute(sa.insert(table).values(**_row(refresh_token_enc="legacy ciphertext")))
-        await asyncio.to_thread(command.upgrade, cfg, HEAD)
+        await asyncio.to_thread(command.upgrade, cfg, BROWSER_OAUTH_REVISION)
         assert await _orm_diff(engine) == []
         async with engine.begin() as conn:
             assert (await conn.execute(sa.select(McpOAuthTokenRow.grant_epoch))).scalar_one() is None

@@ -60,6 +60,10 @@ class GatewayAgentRunsHost:
         self.active = False
 
     def bind(self, request: Request):
+        # A background task's synthetic authorization must not be re-minted
+        # as a general-purpose session handle for the agent it starts.
+        if getattr(request.state, "coordination_grant_id", None) is not None:
+            return None
         user = getattr(request.state, "user", None)
         auth = getattr(request.state, "auth", None)
         if user is None or auth is None or not auth.is_authenticated:
@@ -96,6 +100,7 @@ class GatewayAgentRunsHost:
         grant: dict,
         validator: Callable[[], Awaitable[None]] | None = None,
         plugin_namespace: str | None = None,
+        required_permissions: frozenset[str] = frozenset(),
     ):
         """Restore a persisted delegated grant (e.g. workflow recovery) with its ceiling.
 
@@ -105,6 +110,8 @@ class GatewayAgentRunsHost:
         this handle performs. Restoring re-loads the user row and fails closed
         on a changed token_version, needs_setup or a disabled account, exactly
         like ``restore_batch_authority``; it never creates fresh authority.
+        Callers can preflight required permissions against the grant and current
+        policy. Host operations still revalidate permissions at use.
         """
         source, version, permissions = grant.get("source"), grant.get("token_version"), grant.get("permissions")
         if source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED) or type(version) is not int or not isinstance(permissions, list) or any(not isinstance(value, str) for value in permissions):
@@ -112,12 +119,17 @@ class GatewayAgentRunsHost:
         user = get_auth_disabled_user() if source == AUTH_SOURCE_AUTH_DISABLED and is_auth_disabled() else await self.load_user(user_id) if source == AUTH_SOURCE_SESSION and self.load_user is not None else None
         if user is None or str(user.id) != user_id or user.token_version != version or user.needs_setup or getattr(user, "disabled", False):
             raise AgentRunError(403, "Delegated authorization revoked")
+        granted_permissions = frozenset(permissions)
+        if required_permissions:
+            current_permissions = await resolve_route_permissions(user, is_internal=False)
+            if not required_permissions.issubset(granted_permissions.intersection(current_permissions)):
+                raise AgentRunError(403, "Delegated authorization lacks required permissions")
         return _BoundAgentRuns(
             self,
             user_id,
             version,
             source,
-            frozenset(permissions),
+            granted_permissions,
             plugin_namespace=plugin_namespace,
             origin=make_origin("extension", namespace=plugin_namespace),
             delegation_validator=validator,
@@ -350,7 +362,7 @@ class _BoundAgentRuns:
     async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None, artifact_imports=None) -> AgentRun:
         return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence, artifact_imports=artifact_imports)
 
-    async def start_coordination_worker(self, *, task_id, execution_id):
+    async def start_coordination_worker(self, *, task_id, execution_id, grant_id):
         from app.gateway.run_models import RunCreateRequest
         from app.gateway.services import start_run
         from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
@@ -359,7 +371,7 @@ class _BoundAgentRuns:
 
         async with self._request("runs:create") as request:
             try:
-                worker, frozen, project_id = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
+                worker, frozen, project_id, saved_settings = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
             except TaskNotFound as exc:
                 raise AgentRunError(404, "Worker task unavailable") from exc
             except TaskConflict as exc:
@@ -369,30 +381,38 @@ class _BoundAgentRuns:
             record = await request.app.state.thread_store.get(thread_id, user_id=self._user_id)
             if record is None or record.get("assistant_id") != worker["assistant_id"] or (record.get("metadata") or {}).get(THREAD_PROJECT_METADATA_KEY) != project_id:
                 raise AgentRunError(409, "Worker thread binding changed")
+            settings = saved_settings or {}
+            context = {key: settings[key] for key in ("thinking_enabled", "is_plan_mode") if key in settings}
+            context["subagent_enabled"] = True
             body = RunCreateRequest(
                 assistant_id=worker["assistant_id"],
-                input=None if "command" in frozen else frozen,
+                input=frozen if "messages" in frozen else None,
                 command=frozen.get("command"),
-                context={"subagent_enabled": True},
+                checkpoint_id=frozen.get("checkpoint_id"),
+                config={"recursion_limit": settings["recursion_limit"]} if "recursion_limit" in settings else None,
+                context=context,
                 on_disconnect="continue",
             )
             request.state.coordination_execution_id = execution_id
+            request.state.coordination_grant_id = grant_id
             record = await start_run(body, thread_id, request, require_existing_thread=True, idempotency_key=RUN_KEY_PREFIX + execution_id)
             return _view(record)
 
     async def wait_coordination_worker(self, *, thread_id, run_id, timeout=60):
         """Observe the committed terminal status, written after the delivery receipt."""
-        from app.gateway.deps import get_run_store
+        from app.gateway.deps import get_run_event_store, get_run_store
+        from deerflow.extensions.run_evidence import StoreRunEvidenceReader
 
         async with asyncio.timeout(timeout):
             delay = 0.25
             while True:
                 async with self._request("runs:read", thread_id) as request:
-                    row = await get_run_store(request).get(run_id, user_id=self._user_id)
-                    if row is None or row["thread_id"] != thread_id:
+                    evidence = StoreRunEvidenceReader(get_run_store(request), get_run_event_store(request), user_id=self._user_id)
+                    row = await evidence.get_run_status(thread_id=thread_id, run_id=run_id)
+                    if row is None:
                         raise AgentRunError(404, "Worker run unavailable")
-                    if row["status"] not in ("pending", "running"):
-                        return AgentRun(thread_id, run_id, row["status"], row.get("assistant_id"), row.get("stop_reason"))
+                    if row.status not in ("pending", "running"):
+                        return row
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 4)
 
@@ -401,6 +421,21 @@ class _BoundAgentRuns:
 
         async with self._request("runs:cancel", thread_id) as request:
             await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=self._user_id, continuation_authority=self)
+
+    async def coordination_recovery_checkpoint(self, *, thread_id, run_id):
+        from app.gateway.deps import get_run_store
+
+        async with self._request("runs:read", thread_id) as request:
+            row = await get_run_store(request).get(run_id, user_id=self._user_id)
+            if row is None or row["thread_id"] != thread_id or row.get("cancel_requested_at"):
+                return None
+        try:
+            return await self.get_state(thread_id=thread_id)
+        except AgentRunError as exc:
+            if exc.status_code != 404:
+                raise
+            # A stopped Run can have no readable checkpoint after restart.
+            return None
 
     async def coordination_artifacts(self, *, thread_id, run_id):
         from app.gateway.artifact_archive import MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES

@@ -195,7 +195,7 @@ async def acapture(*args) -> dict:
         raise
 
 
-def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False) -> dict:
+def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False, latest_first: bool = False) -> dict:
     path, owner = scope(runtime)
     batches = reachable(state, owner)
     active = records(state.get("messages", []), 64000)
@@ -209,6 +209,8 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     for row in active:
         if (source_id and row["id"] == source_id) or (query is not None and (role is None or row["role"] == role) and any(t in row["text"].casefold() for t in keywords)):
             active_matches.append(row)
+    latest_active = {row["id"]: row for row in reversed(active_matches)} if latest_first else {}
+    archive_limit = max(0, 8 - len(latest_active))
     if batches:
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
@@ -216,20 +218,29 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
                 if present != len(batches) and status != "unavailable":
                     status = "partially_expired"
+                rows = ()
                 if source_id:
                     rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
-                else:
+                elif archive_limit:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
                     parameters = [match, *batches, *([role] if role is not None else [])]
-                    # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
+                    order_by = "rank"
+                    if latest_first:
+                        # Recapture moves the checkpoint reference while keeping its stored row IDs.
+                        batch_positions = " ".join(f"WHEN ? THEN {position}" for position in range(len(batches)))
+                        order_by = f"CASE batch {batch_positions} END DESC, rowid DESC"
+                        parameters.extend(batches)
+                    # Sort the bounded archive before taking distinct sources.
+                    # A SQL row limit can hide distinct sources behind duplicates.
+                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY {order_by}", parameters)
                 for (payload,) in rows:
                     row = json.loads(payload)
-                    # Repeated archives share one result slot; keep FTS order
-                    # and stop reading once eight distinct sources are selected.
+                    if row["id"] in latest_active:
+                        continue
+                    # Repeated archives share one result slot in either order.
                     found.setdefault(row["id"], row)
-                    if len(found) == 8:
+                    if len(found) == archive_limit:
                         break
                 if excerpts and query is not None and found:
                     # A source may be archived at different lengths; select its first stored version, as history_read does.
@@ -245,15 +256,18 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     elif history.get("scope") is not None and history["scope"] != owner:
         status = "scope_unavailable"
     archived_matches = list(found.values())
-    archived_ids = {item["id"] for item in archived_matches}
     active_by_id = {row["id"]: row for row in active}
     archived_matches = [active_by_id.get(row["id"], row) for row in archived_matches]
-    active_only_by_id = {}
-    for row in active_matches:
-        if row["id"] not in archived_ids:
-            active_only_by_id.setdefault(row["id"], row)
-    active_only = list(active_only_by_id.values())
-    results = archived_matches[: max(0, 8 - len(active_only))] + active_only[:8]
+    if latest_first:
+        results = [*latest_active.values(), *archived_matches][:8]
+    else:
+        archived_ids = set(found)
+        active_only_by_id = {}
+        for row in active_matches:
+            if row["id"] not in archived_ids:
+                active_only_by_id.setdefault(row["id"], row)
+        active_only = list(active_only_by_id.values())
+        results = archived_matches[: max(0, 8 - len(active_only))] + active_only[:8]
     if excerpts and query is not None:
         excerpts_result = []
         for row in results:

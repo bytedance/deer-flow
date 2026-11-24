@@ -92,8 +92,11 @@ Content-Type: application/json
 ```
 
 - `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
-  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`. A PAT can only
-  *narrow* its owning user's permissions, never widen them.
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`, `projects:read`,
+  `projects:write`, `projects:delete`, `agents:read`, `agents:write`; plus the
+  PAT-only scopes `schedules:read`, `schedules:write`, `subagents:read`,
+  `subagents:write` (see [Agent configuration](#agent-configuration-by-pat)).
+  A PAT can only *narrow* its owning user's permissions, never widen them.
 - `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
 
 **Response (`201`):**
@@ -149,16 +152,43 @@ Revocation is immediate.
   `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
-  Every other authenticated route — memory, agents, models, MCP/skills
+  Besides those, only the routes under [Agent configuration by
+  PAT](#agent-configuration-by-pat) are admitted, each behind its scope.
+  Every other authenticated route — memory, models, MCP/skills
   config, integrations, channels, uploads — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
   permission-decorated routes, so the allowlist is the outer boundary;
   session-cookie callers are unaffected.
 - PAT credentials never carry admin capability, even when the owning user is
   an admin. This includes extension-contributed admin routes: the extension
-  principal projection suppresses every admin signal for PAT callers.
+  principal projection suppresses every admin signal for PAT callers. The one
+  opt-in exception is the managed-subagent writes below.
 - Revoking or deleting the owning user invalidates their PATs on the next
   request.
+
+### Agent configuration by PAT
+
+A pipeline that deploys agents, their managed subagents and schedules can use a
+PAT instead of a password session. Set `agents_api.enabled` to `true` in
+`config.yaml` to use the agent management API. The deployment routes require
+the scopes and permissions below.
+
+| Routes | Scope | Also required |
+|---|---|---|
+| `GET /api/v1/auth/me` | any | — |
+| `GET /api/agents`, `GET /api/agents/check`, `GET /api/agents/{name}` | `agents:read` | — |
+| `POST /api/agents`, `PUT`/`DELETE /api/agents/{name}` | `agents:write` | — |
+| `GET /api/scheduled-tasks`, `GET /api/scheduled-tasks/{task_id}`, `GET .../{task_id}/runs`, `POST /api/scheduled-tasks/preview-cron` | `schedules:read` | `threads:read` |
+| `POST /api/scheduled-tasks`, `PATCH /api/scheduled-tasks/{task_id}`, `POST .../{task_id}/resume`, `POST .../{task_id}/trigger` | `schedules:write` | `threads:write`, `runs:create` |
+| `DELETE /api/scheduled-tasks/{task_id}`, `POST .../{task_id}/pause` | `schedules:write` | `threads:write` |
+| `GET /api/subagents` | `subagents:read` | — (prompts stay hidden, as for non-admins) |
+| `POST /api/subagents`, `PUT`/`DELETE /api/subagents/{name}` | `subagents:write` | the token's owner is an admin |
+
+A denied scope answers `403` with `Permission denied: <scope>`. The user
+profile (`/api/user-profile`), agent import and export stay session-only.
+`subagents:write` is the only scope that carries admin capability, and only on
+the three managed-subagent write routes: an admin's token holding it still
+gets `403` on every other admin route.
 
 ## LangGraph-compatible API
 
@@ -264,6 +294,15 @@ the thread's current goal and continuation budget. A cleared or achieved goal
 is not restored from history. A valid goal explicitly supplied in run input
 still replaces it. Historical replay clears the old `goal_outcome`, because
 the previous answer's verdict does not certify the replacement answer.
+
+#### Branch and Replay Lookup
+
+`POST /api/threads/{thread_id}/branches`,
+`POST /api/threads/{thread_id}/runs/regenerate/prepare`, and
+`POST /api/threads/{thread_id}/runs/edit-regenerate/prepare` share a deadline
+for finding the replay base on the checkpoint lineage. If that lookup expires,
+the response is HTTP 504 with detail
+`Timed out resolving the checkpoint before the target user message`.
 
 ### Runs
 
