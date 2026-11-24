@@ -2,8 +2,11 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 import httpx
+
+from deerflow.community.provider_credentials import redact_secret
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,15 @@ class BrowserlessClient:
         unknown keys, so the token must never be sent in the JSON body.
         """
         return {"token": self.token} if self.token else None
+
+    def redact(self, value: object) -> str:
+        """Scrub the configured token (raw and URL-encoded forms) from error text."""
+        text = redact_secret(value, self.token)
+        if self.token:
+            for encoded in (quote(self.token, safe=""), quote_plus(self.token)):
+                if encoded != self.token:
+                    text = redact_secret(text, encoded)
+        return text
 
     async def fetch_html(
         self,
@@ -203,7 +215,7 @@ class BrowserlessClient:
                 logger.debug(f"Browserless response: code={code}, target_code={target_code}, target_status={target_status}")
 
                 if code != 200:
-                    return f"Error: Browserless HTTP {code}: {resp.text[:200]}"
+                    return f"Error: Browserless HTTP {code}: {self.redact(resp.text)[:200]}"
 
                 html = resp.text
                 if not html or not html.strip():
@@ -218,11 +230,13 @@ class BrowserlessClient:
         except httpx.TimeoutException:
             return f"Error: Browserless request timed out after {self.timeout_s}s"
         except httpx.RequestError as e:
-            logger.error(f"Browserless request failed: {e}")
-            return f"Error: Browserless request failed: {e!s}"
+            detail = self.redact(e)
+            logger.error("Browserless request failed: %s", detail)
+            return f"Error: Browserless request failed: {detail}"
         except Exception as e:
-            logger.error(f"Browserless fetch failed: {e}")
-            return f"Error: Browserless fetch failed: {e!s}"
+            detail = self.redact(e)
+            logger.error("Browserless fetch failed: %s", detail)
+            return f"Error: Browserless fetch failed: {detail}"
 
     async def capture_screenshot(
         self,
@@ -297,7 +311,7 @@ class BrowserlessClient:
                 )
 
                 if code != 200:
-                    return f"Error: Browserless HTTP {code}: {resp.text[:200]}"
+                    return f"Error: Browserless HTTP {code}: {self.redact(resp.text)[:200]}"
 
                 content = resp.content
                 if not content:
@@ -314,8 +328,10 @@ class BrowserlessClient:
         except httpx.TimeoutException:
             return f"Error: Browserless screenshot request timed out after {self.timeout_s}s"
         except httpx.RequestError as e:
-            logger.error(f"Browserless screenshot request failed: {e}")
-            return f"Error: Browserless screenshot request failed: {e!s}"
+            detail = self.redact(e)
+            logger.error("Browserless screenshot request failed: %s", detail)
+            return f"Error: Browserless screenshot request failed: {detail}"
         except Exception as e:
-            logger.error(f"Browserless screenshot failed: {e}")
-            return f"Error: Browserless screenshot failed: {e!s}"
+            detail = self.redact(e)
+            logger.error("Browserless screenshot failed: %s", detail)
+            return f"Error: Browserless screenshot failed: {detail}"
