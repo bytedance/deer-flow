@@ -287,7 +287,7 @@ print(response.json())
 
 ## 限制
 
-- 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
+- 应用层默认限制为单文件 50 MiB、单次请求合计 100 MiB；内置 nginx 的 `client_max_body_size` 为 101M，为 multipart 边界和各 part 的请求头额外留出 1 MiB，不把完整 HTTP 请求的大小误当成文件内容总量
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
 - 删除只作用于普通文件：上传目录中的符号链接不会被跟随，删除请求按文件不存在（404）处理
 - 删除文档不会一并删除其转换生成的 Markdown；转换文件仍可通过上传 API 单独删除。`list_uploaded_files` 只对有归属记录的转换文件做历史发现排除，不影响上传 API 的完整文件列表（见 issue #5672）

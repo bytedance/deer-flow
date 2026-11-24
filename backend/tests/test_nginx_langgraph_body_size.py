@@ -37,13 +37,20 @@ from support.nginx_conf import parse_body_size_bytes as _parse_body_size_bytes
 from support.nginx_conf import parse_read_timeout_seconds as _parse_read_timeout_seconds
 from support.nginx_conf import read_config as _read
 
+from app.gateway.routers.uploads import DEFAULT_MAX_TOTAL_SIZE
+
 # Text prompts never carry binary file attachments (those go through the
 # dedicated uploads route), so the ceiling here is intentionally well below
-# the uploads route's 100M -- generous for even a very long pasted document,
+# the uploads route's 101M -- generous for even a very long pasted document,
 # while avoiding needlessly letting one chat request force Gateway to buffer
 # and JSON-parse an arbitrarily large body in memory.
 _MIN_EXPECTED_BODY_SIZE_BYTES = 5 * 1024 * 1024
 _MAX_EXPECTED_BODY_SIZE_BYTES = 100 * 1024 * 1024
+_MIN_MULTIPART_FRAMING_HEADROOM_BYTES = 1024 * 1024
+_MULTIPART_UPLOAD_LOCATIONS = (
+    r"~ ^/api/threads/[^/]+/uploads",
+    r"~ ^/api/projects/[^/]+/documents",
+)
 
 # The read timeout /api/langgraph/ already allows for a model-bound request.
 _MIN_BLOCKING_READ_TIMEOUT_SECONDS = 600
@@ -73,7 +80,7 @@ def test_langgraph_route_raises_body_size_limit_for_text_prompts(path):
         f"{path}: /api/langgraph/ client_max_body_size is {size_bytes} bytes, "
         f"expected between {_MIN_EXPECTED_BODY_SIZE_BYTES} and "
         f"{_MAX_EXPECTED_BODY_SIZE_BYTES} bytes -- comfortably above nginx's 1m "
-        "default (the actual bug) but below the uploads route's 100M, since "
+        "default (the actual bug) but below the uploads route's 101M, since "
         "this route only ever carries JSON chat text, never binary files"
     )
 
@@ -87,8 +94,25 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
     content = _read(path)
     block = _extract_location_block(content, r"~ ^/api/threads/[^/]+/uploads")
 
-    assert "client_max_body_size 100M;" in block
+    assert "client_max_body_size" in block
     assert "proxy_request_buffering off;" in block
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+@pytest.mark.parametrize("location", _MULTIPART_UPLOAD_LOCATIONS)
+def test_multipart_upload_locations_leave_framing_headroom(path, location):
+    """Gateway counts file bytes, but nginx limits the complete request body.
+    A request at Gateway's 100 MiB total-content limit also carries multipart
+    boundaries and per-part headers, so an equal nginx limit rejects a request
+    Gateway would accept."""
+    content = _read(path)
+    block = _extract_location_block(content, location)
+
+    size_bytes = _parse_body_size_bytes(block)
+
+    assert size_bytes >= DEFAULT_MAX_TOTAL_SIZE + _MIN_MULTIPART_FRAMING_HEADROOM_BYTES, (
+        f"{path}: {location} allows {size_bytes} bytes, but Gateway accepts {DEFAULT_MAX_TOTAL_SIZE} bytes of file content and multipart framing needs at least {_MIN_MULTIPART_FRAMING_HEADROOM_BYTES} bytes of headroom"
+    )
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)
