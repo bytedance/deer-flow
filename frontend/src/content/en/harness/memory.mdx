@@ -100,6 +100,8 @@ deermem is the default backend and implements the full contract:
 
 OpenViking is a remote memory backend with a crisp responsibility split: **DeerFlow owns capture timing, the recall query, and the transcript cursor; the `langchain-openviking` package owns transport, message conversion, batching, and Session commits.**
 
+Single-user example:
+
 ```yaml
 memory:
   enabled: true
@@ -119,11 +121,34 @@ memory:
       max_injection_chars: 12000
 ```
 
+Multi-user / multi-tenant example:
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  manager_class: openviking
+  mode: middleware
+  backend_config:
+    base_url: http://openviking:1933
+    user_credentials:
+      alice:
+        api_key_env: OPENVIKING_API_KEY_ALICE
+        tenant_id: acme
+      bob:
+        api_key_env: OPENVIKING_API_KEY_BOB
+        tenant_id: globex
+    # Or use credential_provider (+ credential_provider_config) / host_hooks["credential_provider"]
+    client_pool:
+      max_clients: 64
+      idle_ttl_seconds: 900.0
+```
+
 Integration notes:
 
-- **One API key is bound to one DeerFlow owner**; accessing another owner is rejected. Keep the USER key in the server environment (`api_key_env`), never in `config.yaml`.
-- **One DeerFlow thread maps to one stable OpenViking Session**; bounded hash-only cursors live under `{storage_path}/openviking/sessions/`.
-- This version supports one user with one key in middleware mode; multi-user key provisioning is out of scope. See `docs/OPENVIKING.md` for the full boundary and startup guide.
+- **Single-user vs. multi-user isolation in `api_key` mode**: single-user mode binds one OpenViking USER API key (`api_key_env`) to `owner_user_id`. Multi-user mode uses `user_credentials` (`api_key_env` or `api_key`, plus optional `tenant_id`) and/or a dynamic `credential_provider` (`credential_provider` + `credential_provider_config`, or programmatic `host_hooks["credential_provider"]`) with a bounded LRU/TTL `client_pool`. Mutually exclusive with `owner_user_id` / `api_key_env`; unmapped, blank, or revoked users fail closed without falling back to another key or ambient `OPENVIKING_API_KEY`.
+- **One DeerFlow thread maps to one stable OpenViking Session** (unscoped requests keep v1 session hashes while `tenant_id` derives disjoint v2 hashes); bounded hash-only local cursors live under `{storage_path}/openviking/sessions/`.
+- **Middleware mode only**: `auth_mode: trusted` / `account` headers remain unsupported because OpenViking derives account and user server-side from each USER API key. See `docs/OPENVIKING.md` for the full security boundary, key rotation/revocation, and startup guide.
 
 ## Implementing your own memory backend
 
@@ -264,9 +289,12 @@ memory:
 
 Set `manager_class: openviking` to send completed turns to an independent
 OpenViking server and recall its memory through the official
-`langchain-openviking` adapter. This first version supports one DeerFlow user
-with one OpenViking USER API key in middleware mode; DeerMem remains the
-default.
+`langchain-openviking` adapter. It supports `memory.mode: middleware` in both
+single-user mode (`owner_user_id` + `api_key_env`) and fail-closed multi-user
+/ multi-tenant isolation (`user_credentials` or `credential_provider` with
+optional `tenant_id` and `client_pool`); DeerMem remains the default.
+
+Single-user configuration:
 
 ```yaml
 memory:
@@ -287,11 +315,38 @@ memory:
       max_injection_chars: 12000
 ```
 
-Use `owner_user_id: default` when DeerFlow authentication is disabled. Put the
-USER key in the server environment, not directly in `config.yaml`. Trusted-mode
-account headers, root-key memory access, and multi-user key provisioning are not
-part of this version. See `docs/OPENVIKING.md` for the full boundary and startup
-guide.
+Multi-user / multi-tenant configuration (mutually exclusive with
+`owner_user_id` and `api_key_env`):
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  manager_class: openviking
+  mode: middleware
+  backend_config:
+    base_url: http://openviking:1933
+    user_credentials:
+      alice:
+        api_key_env: OPENVIKING_API_KEY_ALICE
+        tenant_id: acme
+      bob:
+        api_key_env: OPENVIKING_API_KEY_BOB
+        tenant_id: globex
+    # Or resolve keys dynamically with credential_provider (+ credential_provider_config)
+    # or programmatic host_hooks["credential_provider"]
+    client_pool:
+      max_clients: 64
+      idle_ttl_seconds: 900.0
+```
+
+Use `owner_user_id: default` when DeerFlow authentication is disabled in
+single-user deployments. Put USER keys in the server environment (or resolve
+them through `credential_provider`), not directly in `config.yaml`.
+Trusted-mode `auth_mode` / `account` headers and root-key memory access remain
+unsupported because OpenViking derives `account` and `user` server-side from
+each USER API key. See `docs/OPENVIKING.md` for the full security boundary,
+session-ID scoping, key rotation/revocation, and startup guide.
 
 ## Global vs per-agent memory
 
