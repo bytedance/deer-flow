@@ -12,18 +12,27 @@ from __future__ import annotations
 import asyncio
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from blockbuster import BlockingError
+from langchain_core.messages import HumanMessage
 from support.vefaas_sandbox import FakeAioSandbox, FakeVeFaaSServer, install_vefaas_provider, make_vefaas_app_config
 
 from deerflow.community.aio_sandbox.ownership import RenewOutcome
 from deerflow.community.vefaas_sandbox import VeFaaSClient, VeFaaSSandboxProvider
 from deerflow.community.vefaas_sandbox import provider as provider_mod
+from deerflow.sandbox import prewarm
 from deerflow.sandbox.identity import derive_sandbox_scope_token
-from deerflow.sandbox.sandbox_provider import hold_sandbox_shutdown_ownership
+from deerflow.sandbox.lease import (
+    ensure_sandbox_lease_owner,
+    register_sandbox_prewarm_cleanup,
+    release_sandbox_execution_lease_async,
+)
+from deerflow.sandbox.sandbox_provider import hold_sandbox_shutdown_ownership, reset_sandbox_provider, set_sandbox_provider
+from deerflow.sandbox.tools import ensure_sandbox_initialized_async
 
 pytestmark = pytest.mark.asyncio
 
@@ -230,4 +239,45 @@ async def test_acquire_async_resume_paused_and_restore_snapshot_stay_off_event_l
         create_reqs = [payload for action, payload, _ in probing_server.requests if action == "CreateSandbox"]
         assert create_reqs and create_reqs[-1]["SnapshotId"] == "snap-bio-1"
     finally:
+        await asyncio.to_thread(provider.shutdown)
+
+
+async def test_prewarm_acquire_and_claim_stay_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Speculative veFaaS prewarm, tool claim, and lease cleanup must stay off the event loop."""
+    probing_server = _FileIOProbingVeFaaSServer(tmp_path)
+    provider, _server, _aio = await asyncio.to_thread(
+        lambda: install_vefaas_provider(
+            monkeypatch,
+            tmp_path,
+            server=probing_server,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 0},
+        )
+    )
+    provider._ownership = await asyncio.to_thread(_BlockingProbeOwnershipStore, tmp_path / "ownership-probe-prewarm")
+    app_cfg = await asyncio.to_thread(
+        lambda: make_vefaas_app_config(
+            tmp_path,
+            sandbox_overrides={"prewarm": True, "prewarm_max_concurrent": 1, "idle_timeout": 0},
+        )
+    )
+    monkeypatch.setattr(prewarm, "get_app_config", lambda: app_cfg)
+    set_sandbox_provider(provider)
+    try:
+        context: dict[str, object] = {"user_id": "u-pw-bio", "thread_id": "t-pw-bio", "app_config": app_cfg}
+        ensure_sandbox_lease_owner(context)
+        register_sandbox_prewarm_cleanup(context)
+        rt = SimpleNamespace(context=context, state={})
+
+        prewarm.start_sandbox_prewarm({"messages": [HumanMessage(content="```sh\npytest tests\n```")]}, rt)
+        handle = context["__deerflow_sandbox_prewarm"]
+        sandbox_id = await handle.task
+        assert isinstance(sandbox_id, str) and sandbox_id
+
+        sandbox = await ensure_sandbox_initialized_async(rt)
+        assert sandbox.id == sandbox_id
+
+        await release_sandbox_execution_lease_async(context)
+        assert not prewarm._permits
+    finally:
+        await asyncio.to_thread(reset_sandbox_provider)
         await asyncio.to_thread(provider.shutdown)
