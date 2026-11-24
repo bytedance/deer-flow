@@ -299,13 +299,13 @@ class LocalSkillStorage(SkillStorage):
     def append_history(self, name: str, record: dict) -> None:
         self.validate_skill_name(name)
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
-        # A record reaches the file in one O_APPEND write together with its LF
-        # terminator, under the history file's own lock. Appenders in other
-        # threads and processes do not always share a mutation lock, and a record
-        # holding two SKILL.md revisions outgrows the text-file buffer: a
-        # separate terminator write let another record land between a record and
-        # its "\n", and read_history then rejected the joined line for good.
-        # Encoding first leaves no file behind on failure.
+        # A record and its LF terminator are appended whole, under the history
+        # file's own lock. Appenders in other threads and processes do not always
+        # share a mutation lock, and a record holding two SKILL.md revisions
+        # outgrows the text-file buffer: a separate terminator write let another
+        # record land between a record and its "\n", and read_history then
+        # rejected the joined line for good. Encoding first leaves no file
+        # behind on failure.
         data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,11 +327,17 @@ class LocalSkillStorage(SkillStorage):
     def read_history(self, name: str) -> list[dict]:
         self.validate_skill_name(name)
         history_path = self.get_skill_history_file(name)
-        if not history_path.exists():
+        try:
+            history_file = history_path.open(encoding="utf-8")
+        except FileNotFoundError:
             return []
+        # Shared with other readers, but not with an append: a record whose
+        # write is still being retried would otherwise read as a torn tail.
+        with history_file, locked_history_file(history_file.fileno(), shared=True):
+            text = history_file.read()
         records: list[dict] = []
         # JSONL boundaries are newlines, not Unicode separators inside JSON strings.
-        for line in history_path.read_text(encoding="utf-8").split("\n"):
+        for line in text.split("\n"):
             if not line.strip():
                 continue
             records.append(json.loads(line))

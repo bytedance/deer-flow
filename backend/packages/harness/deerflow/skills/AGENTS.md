@@ -56,7 +56,8 @@ their credentials and enabled state stay per user.
 - **History is JSONL split on LF only.** Unicode line separators inside a saved
   field are data. Every history writer appends a whole record and its LF under
   `locked_history_file`: callers do not share a mutation lock, and a split or
-  retried write would let another record join the line.
+  retried write would let another record join the line. Readers take its shared
+  mode, or a retried write reads as a torn record.
 - **Export is not a secret audit.** It returns raw saved files. Responses carry
   relative paths and generic errors, and limits are reported, not silently applied
   by truncation.

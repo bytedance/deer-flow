@@ -174,6 +174,52 @@ def test_another_append_waits_for_a_short_write_to_finish(storage, monkeypatch):
     assert [record["author"] for record in storage.read_history("demo-skill")] == ["a", "b"]
 
 
+def test_a_read_waits_for_a_short_write_to_finish(storage, monkeypatch):
+    import threading
+
+    storage.append_history("demo-skill", {"action": "create", "author": "first"})
+    seen = []
+
+    def read():
+        try:
+            seen.append([record["author"] for record in storage.read_history("demo-skill")])
+        except json.JSONDecodeError as error:
+            seen.append(error)
+
+    reader = threading.Thread(target=read)
+
+    def let_the_read_run():
+        # Between the short write and its retry: the tail is half a record.
+        reader.start()
+        reader.join(timeout=0.5)
+
+    _script_history_writes(monkeypatch, storage, _shorten_first_write(10, before_rest=let_the_read_run))
+
+    storage.append_history("demo-skill", {"action": "edit", "author": "a", "new_content": "x" * 1000})
+    reader.join(timeout=5)
+
+    assert not reader.is_alive()
+    assert seen == [["first", "a"]]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="msvcrt.locking has no shared mode, so Windows readers lock exclusively")
+def test_reads_share_the_history_lock(storage):
+    import fcntl
+    import threading
+
+    storage.append_history("demo-skill", {"action": "create", "author": "first"})
+    seen = []
+    with storage.get_skill_history_file("demo-skill").open("rb") as other_reader:
+        fcntl.flock(other_reader, fcntl.LOCK_SH)
+        reader = threading.Thread(target=lambda: seen.append(storage.read_history("demo-skill")))
+        reader.start()
+        reader.join(timeout=5)
+        fcntl.flock(other_reader, fcntl.LOCK_UN)
+
+    assert not reader.is_alive()
+    assert [record["author"] for record in seen[0]] == ["first"]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="the operation mirror requires POSIX directory descriptors")
 def test_the_operation_mirror_and_appends_share_the_history_lock(storage, monkeypatch):
     import threading
