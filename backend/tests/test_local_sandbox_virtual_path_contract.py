@@ -150,6 +150,28 @@ def test_grep_lines_show_virtual_paths_that_write_file_stored_as_host_paths(prov
         assert [(m.path, m.line) for m in matches] == [("/mnt/user-data/workspace/run.py", 'DATA = "/mnt/user-data/workspace/data.csv"')]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="filenames with ':' and a symlink fixture need POSIX")
+def test_grep_lines_keep_filenames_that_the_path_scanner_cuts_at_punctuation(provider):
+    sbx = provider.get(provider.acquire("alpha"))
+    host_workspace = Path(_host_dir(sbx, "/mnt/user-data/workspace"))
+    (host_workspace / "data").mkdir()
+    (host_workspace / "cache:old.txt").write_text("old")
+    (host_workspace / "report(1).txt").write_text("report")
+    # Unrelated links at the prefixes the output scanner stops at.
+    (host_workspace / "cache").symlink_to("data")
+    (host_workspace / "report").symlink_to("data")
+    sbx.write_file("/mnt/user-data/workspace/run.py", 'OLD = "/mnt/user-data/workspace/cache:old.txt"\n')
+    # Pin the scenario: the stored script names the existing file.
+    assert f'"{host_workspace}/cache:old.txt"' in (host_workspace / "run.py").read_text()
+    (host_workspace / "notes.sh").write_text(f"cat {host_workspace}/report(1).txt\n")
+
+    old, _ = sbx.grep("/mnt/user-data/workspace", "OLD =")
+    report, _ = sbx.grep("/mnt/user-data/workspace", "cat ")
+
+    assert [m.line for m in old] == ['OLD = "/mnt/user-data/workspace/cache:old.txt"']
+    assert [m.line for m in report] == ["cat /mnt/user-data/workspace/report(1).txt"]
+
+
 def test_grep_line_is_shortened_after_host_paths_become_virtual(provider):
     sbx = provider.get(provider.acquire("alpha"))
     host_workspace = _host_dir(sbx, "/mnt/user-data/workspace")
