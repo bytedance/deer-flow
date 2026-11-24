@@ -1786,6 +1786,90 @@ def test_terminal_error_evicts_active_sandbox(monkeypatch: pytest.MonkeyPatch) -
     provider.shutdown()
 
 
+@pytest.mark.parametrize("warm", [False, True], ids=["active", "warm"])
+def test_late_terminal_failure_cannot_evict_replacement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, warm: bool) -> None:
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    provider, sdk = _install(monkeypatch)
+    try:
+        sandbox_id = provider.acquire("thread-1", user_id="user-1")
+        old = provider.get(sandbox_id)
+        assert isinstance(old, OpenSandboxSandbox)
+        notify = old._on_terminal_failure
+        assert notify is not None
+        notification_started = threading.Event()
+        resume_notification = threading.Event()
+        notification_delivered = threading.Event()
+
+        def delay_notification(failed_id: str, reason: str) -> None:
+            # The adapter has released its operation lock when it calls us.
+            delayed = threading.current_thread() is worker
+            if delayed:
+                notification_started.set()
+                if not resume_notification.wait(10):
+                    return
+            notify(failed_id, reason)
+            if delayed:
+                notification_delivered.set()
+
+        monkeypatch.setattr(old, "_on_terminal_failure", delay_notification)
+        old_remote = sdk.remotes[0]
+        old_remote.command_error = _TerminalApiError("old command endpoint is gone", status_code=404)
+        results: list[str] = []
+        worker = threading.Thread(target=lambda: results.append(old.execute_command("true")))
+        worker.start()
+        try:
+            assert notification_started.wait(10)
+            old_remote.renew_error = _TerminalApiError("old sandbox expired", status_code=410)
+            assert provider.acquire("thread-1", user_id="user-1") == sandbox_id
+            replacement = provider.get(sandbox_id)
+            assert isinstance(replacement, OpenSandboxSandbox)
+            assert replacement.id == old.id == sandbox_id
+            assert replacement.remote_id != old.remote_id
+            if warm:
+                provider.release(sandbox_id)
+                assert provider.get(sandbox_id) is None
+        finally:
+            resume_notification.set()
+            worker.join(10)
+
+        assert not worker.is_alive()
+        assert notification_delivered.is_set()
+        assert results == ["Error: old command endpoint is gone"]
+        assert [remote.destroy_calls for remote in sdk.remotes] == [1, 0]
+        if not warm:
+            assert provider.get(sandbox_id) is replacement
+            assert replacement.execute_command("true") == "(no output)"
+        assert provider.acquire("thread-1", user_id="user-1") == sandbox_id
+        assert provider.get(sandbox_id) is replacement
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
+
+
+def test_terminal_error_evicts_current_warm_sandbox(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    provider, sdk = _install(monkeypatch)
+    try:
+        sandbox_id = provider.acquire("thread-1", user_id="user-1")
+        box = provider.get(sandbox_id)
+        assert box is not None
+        provider.release(sandbox_id)
+        assert sandbox_id in provider._warm_pool
+        assert sdk.remotes[0].destroy_calls == 0
+
+        sdk.remotes[0].command_error = _TerminalApiError("warm sandbox is gone")
+        assert box.execute_command("true") == "Error: warm sandbox is gone"
+        assert sandbox_id not in provider._warm_pool
+        assert sdk.remotes[0].destroy_calls == 1
+        assert provider.acquire("thread-1", user_id="user-1") == sandbox_id
+        assert provider.get(sandbox_id) is not box
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
+
+
 def test_concurrent_same_scope_acquire_creates_once(monkeypatch: pytest.MonkeyPatch) -> None:
     provider, sdk = _install(monkeypatch)
     original_create = sdk.create
