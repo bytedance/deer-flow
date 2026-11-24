@@ -1066,6 +1066,106 @@ def test_prepare_edit_regenerate_payload_skips_mid_run_replay_base_on_first_turn
     assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
 
 
+def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn():
+    from app.gateway.routers import thread_runs
+
+    event_store, run_manager = _answer_run_fixtures()
+    checkpointer = _first_turn_checkpointer()
+    messages = checkpointer.history[1].checkpoint["channel_values"]["messages"]
+    checkpointer.history[1:1] = [_checkpoint(f"ckpt-middle-{index}", messages, next_tasks=("model",)) for index in range(468)]
+    for checkpoint, parent in zip(checkpointer.history, checkpointer.history[1:]):
+        checkpoint.parent_config = parent.config
+
+    response = asyncio.run(
+        thread_runs._prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1__user",
+            "edited question",
+            _request(checkpointer, event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-empty"
+    assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
+    assert checkpointer.alist_limits == []
+
+
+def test_prepare_edit_regenerate_rejects_sibling_after_exhausting_linked_history():
+    from app.gateway.routers import thread_runs
+
+    event_store, run_manager = _answer_run_fixtures()
+    checkpointer = _first_turn_checkpointer()
+    for checkpoint, parent in zip(checkpointer.history, checkpointer.history[1:]):
+        checkpoint.parent_config = parent.config
+    root = checkpointer.history[-1]
+    root.checkpoint["channel_values"]["messages"] = [HumanMessage(id="human-1__user", content="original question")]
+    # The chronological scan would mistake this older sibling for the replay base.
+    checkpointer.history.append(_checkpoint("unrelated-sibling", []))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            thread_runs._prepare_edit_regenerate_payload(
+                "thread-1",
+                "human-1__user",
+                "edited question",
+                _request(checkpointer, event_store, run_manager=run_manager),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Could not safely resolve the checkpoint before the target user message"
+    assert checkpointer.alist_limits == []
+
+
+def test_replay_lineage_timeout_does_not_scan_chronological_history(monkeypatch):
+    from app.gateway import checkpoint_lineage
+    from app.gateway.routers import thread_runs
+
+    monkeypatch.setattr(checkpoint_lineage, "_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
+    checkpointer = _first_turn_checkpointer()
+    checkpointer.history[0].parent_config = checkpointer.history[1].config
+    head = FakeAccessor._from_raw(checkpointer.history[0])
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            thread_runs._find_base_checkpoint_before_human(
+                "thread-1",
+                "human-1__user",
+                _request(checkpointer, FakeEventStore([])),
+                head_checkpoint=head,
+            )
+        )
+
+    assert exc.value.status_code == 504
+    assert exc.value.detail == "Timed out resolving the checkpoint before the target user message"
+    assert checkpointer.alist_limits == []
+
+
+def test_replay_lineage_preserves_checkpoint_store_timeout(monkeypatch):
+    from app.gateway.routers import thread_runs
+
+    checkpointer = _first_turn_checkpointer()
+    checkpointer.history[0].parent_config = checkpointer.history[1].config
+    head = FakeAccessor._from_raw(checkpointer.history[0])
+    store_timeout = TimeoutError("checkpoint store timed out")
+    get_tuple = AsyncMock(side_effect=store_timeout)
+    monkeypatch.setattr(checkpointer, "aget_tuple", get_tuple)
+
+    with pytest.raises(TimeoutError) as exc:
+        asyncio.run(
+            thread_runs._find_base_checkpoint_before_human(
+                "thread-1",
+                "human-1__user",
+                _request(checkpointer, FakeEventStore([])),
+                head_checkpoint=head,
+            )
+        )
+
+    assert exc.value is store_timeout
+    get_tuple.assert_awaited_once_with(head.parent_config)
+    assert checkpointer.alist_limits == []
+
+
 def test_prepare_edit_regenerate_payload_prefers_checkpoint_lineage():
     """Edit replay must resolve its base the same lineage-first way regenerate does.
 
@@ -1080,7 +1180,7 @@ def test_prepare_edit_regenerate_payload_prefers_checkpoint_lineage():
 
     walk = AsyncMock(side_effect=CheckpointParentMissingError("no parent link"))
 
-    with patch.object(thread_runs, "find_checkpoint_before_message", walk):
+    with patch.object(thread_runs, "find_replay_checkpoint_before_message", walk):
         response = asyncio.run(
             thread_runs._prepare_edit_regenerate_payload(
                 "thread-1",
