@@ -54,3 +54,75 @@ def test_malformed_json_is_still_rejected(storage):
     path.write_bytes(b'{"reason":"valid"}\n{"reason":')
     with pytest.raises(json.JSONDecodeError):
         storage.read_history("demo-skill")
+
+
+def test_concurrent_appends_keep_one_record_per_line(storage):
+    # Records this large hold two SKILL.md revisions; they outgrow the text-file
+    # buffer, which once sent the "\n" terminator in a separate write.
+    import threading
+
+    bodies = {tag: tag * 65536 for tag in "abcd"}
+
+    def append(tag):
+        for index in range(40):
+            storage.append_history("demo-skill", {"action": "edit", "author": tag, "index": index, "new_content": bodies[tag]})
+
+    threads = [threading.Thread(target=append, args=(tag,)) for tag in bodies]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    records = storage.read_history("demo-skill")
+    assert sorted((record["author"], record["index"]) for record in records) == sorted((tag, index) for tag in bodies for index in range(40))
+    assert all(record["new_content"] == bodies[record["author"]] for record in records)
+
+
+def _history_writes(monkeypatch, storage, *, first_write_limit=None):
+    """Record every ``os.write`` to the history file, optionally shortening the first."""
+    import os
+
+    history_path = storage.get_skill_history_file("demo-skill")
+    real_write = os.write
+    writes = []
+
+    def is_history(fd):
+        try:
+            target = os.stat(history_path)
+        except FileNotFoundError:
+            return False
+        opened = os.fstat(fd)
+        return (opened.st_dev, opened.st_ino) == (target.st_dev, target.st_ino)
+
+    def write(fd, data):
+        if not is_history(fd):
+            return real_write(fd, data)
+        data = bytes(data)
+        if first_write_limit is not None and not writes:
+            data = data[:first_write_limit]
+        writes.append(data)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", write)
+    return writes
+
+
+def test_each_record_reaches_the_file_in_one_write(storage, monkeypatch):
+    writes = _history_writes(monkeypatch, storage)
+
+    storage.append_history("demo-skill", {"action": "edit", "new_content": "x" * 65536})
+    storage.append_history("demo-skill", {"action": "edit", "reason": "small"})
+
+    assert len(writes) == 2
+    assert all(data.endswith(b"\n") and data.count(b"\n") == 1 for data in writes)
+    assert [record["action"] for record in storage.read_history("demo-skill")] == ["edit", "edit"]
+
+
+def test_a_short_write_still_stores_the_whole_record(storage, monkeypatch):
+    writes = _history_writes(monkeypatch, storage, first_write_limit=10)
+
+    storage.append_history("demo-skill", {"action": "edit", "new_content": "x" * 1000})
+
+    assert len(writes) == 2 and len(writes[0]) == 10
+    (record,) = storage.read_history("demo-skill")
+    assert record["new_content"] == "x" * 1000

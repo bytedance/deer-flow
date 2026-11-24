@@ -6,6 +6,7 @@ import asyncio
 import errno
 import json
 import logging
+import os
 import shutil
 import tempfile
 from collections.abc import Iterable
@@ -297,14 +298,27 @@ class LocalSkillStorage(SkillStorage):
     def append_history(self, name: str, record: dict) -> None:
         self.validate_skill_name(name)
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
+        # A record reaches the file in one O_APPEND write together with its LF
+        # terminator. Appenders in other threads and processes do not always
+        # share a lock, and a record holding two SKILL.md revisions outgrows the
+        # text-file buffer: a separate terminator write let another record land
+        # between a record and its "\n", and read_history then rejected the
+        # joined line for good. Encoding first leaves no file behind on failure.
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
-        # JSONL records are LF-delimited on every host: a translated record
-        # boundary made read_history and any raw-byte reader describe different
-        # revisions of the same entry.
-        with history_path.open("a", encoding="utf-8", newline="") as f:
-            f.write(json.dumps(payload, ensure_ascii=False))
-            f.write("\n")
+        # JSONL records are LF-delimited on every host (O_BINARY: no Windows
+        # translation): a translated record boundary made read_history and any
+        # raw-byte reader describe different revisions of the same entry.
+        fd = os.open(history_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o666)
+        try:
+            remaining = memoryview(data)
+            # A short write (a full disk, a signal) continues with the rest
+            # rather than dropping the tail of the record.
+            while remaining:
+                remaining = remaining[os.write(fd, remaining) :]
+        finally:
+            os.close(fd)
 
     def read_history(self, name: str) -> list[dict]:
         self.validate_skill_name(name)

@@ -54,7 +54,9 @@ their credentials and enabled state stay per user.
   reject Windows reserved device names on all platforms. Reads and deletes stay
   permissive, so that skills stored by an older release can still be removed.
 - **History is JSONL split on LF only.** Unicode line separators inside a saved
-  field are data.
+  field are data. A record and its LF go out in one `O_APPEND` write: appenders
+  in other threads and processes do not always share a lock, and a separate
+  terminator write lets another record join the line.
 - **Export is not a secret audit.** It returns raw saved files. Responses carry
   relative paths and generic errors, and limits are reported, not silently applied
   by truncation.
