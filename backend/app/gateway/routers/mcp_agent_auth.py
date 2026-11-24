@@ -6,7 +6,11 @@ maintain the owners and approved definition digests here; each change applies
 to the next call and run without a Gateway restart. A grant covers the agent,
 server, destination and OAuth client the binding had when it was approved; if
 ``config.yaml`` later changes one of them, the grant admits nobody (``approval:
-stale``) until an administrator replaces it.
+stale``) until an administrator replaces it. A grant whose binding was removed
+from ``config.yaml`` is listed as ``approval: retired``. Stale and retired
+grants keep their owners reserved for the agent and server they were approved
+for, because a configuration rollback can make them current again; deleting
+the grant releases them.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from app.gateway.persistent_writes import run_drained_write
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.mcp_agent_auth_config import BindingId, McpAgentCredentialBinding, McpAgentGrant, StoredMcpAgentGrant
 from deerflow.config.paths import get_paths
-from deerflow.mcp.agent_auth import grant_subject, runtime_grant_in_force
+from deerflow.mcp.agent_auth import grant_subject
 from deerflow.persistence.mcp_agent_grants import make_mcp_agent_grant_store
 
 router = APIRouter(prefix="/api/mcp/agent-auth", tags=["mcp"])
@@ -42,7 +46,9 @@ class McpAgentBindingResponse(BaseModel):
     # config: owners and digests come from config.yaml. current: the runtime
     # grant is in force. stale: it was approved for another agent, server,
     # destination or OAuth client and admits nobody. none: no runtime grant.
-    approval: Literal["config", "current", "stale", "none"]
+    # retired: a stored grant whose binding is no longer configured; server and
+    # agent are the ones it was approved for.
+    approval: Literal["config", "current", "stale", "none", "retired"]
     owners: list[str]
     definition_digests: list[str]
 
@@ -97,32 +103,66 @@ def _response(config: AppConfig, binding_id: str, binding: McpAgentCredentialBin
     )
 
 
+def _retired_response(binding_id: str, grant: StoredMcpAgentGrant) -> McpAgentBindingResponse:
+    """A stored grant whose binding is no longer configured, described by what it was approved for."""
+    return McpAgentBindingResponse(
+        binding=binding_id,
+        server=grant.approved_for.server,
+        agent=grant.approved_for.agent,
+        enabled=False,
+        grants="runtime",
+        approval="retired",
+        owners=list(grant.owners),
+        definition_digests=list(grant.definition_digests),
+    )
+
+
 def _overlapping_binding(config: AppConfig, binding_id: str, binding: McpAgentCredentialBinding, grant: McpAgentGrant) -> str | None:
-    """Return another enabled binding that already grants one of these owners the same server and agent."""
-    stored = make_mcp_agent_grant_store(config).list()
+    """Return another binding that grants, or may grant again, one of these owners the same server and agent.
+
+    A stored runtime grant reserves its owners for the agent and server it was
+    approved for even while it is stale or its binding is gone from
+    ``config.yaml``: a configuration rollback can make it current again, and
+    two matching grants would then reject the agent at admission. Deleting the
+    grant releases the owners. Disabled bindings reserve nothing.
+    """
+    owners = set(grant.owners)
     for other_id, other in config.mcp_agent_auth.items():
-        if other_id == binding_id or not other.enabled or other.server != binding.server or other.agent != binding.agent:
+        if other_id == binding_id or not other.enabled or other.grants != "config":
             continue
-        other_owners = other.owners if other.grants == "config" else runtime_grant_in_force(config, other_id, other, stored.get(other_id))[0]
-        if set(other_owners) & set(grant.owners):
+        if other.server == binding.server and other.agent == binding.agent and owners & set(other.owners):
+            return other_id
+    for other_id, other_grant in make_mcp_agent_grant_store(config).list().items():
+        configured = config.mcp_agent_auth.get(other_id)
+        if other_id == binding_id or (configured is not None and not configured.enabled):
+            continue
+        subject = other_grant.approved_for
+        if subject.server == binding.server and subject.agent == binding.agent and owners & set(other_grant.owners):
             return other_id
     return None
 
 
 @router.get("", response_model=McpAgentBindingsResponse, summary="List MCP Agent Credential Bindings")
 async def list_bindings(request: Request) -> McpAgentBindingsResponse:
-    """List every configured binding with the owners and digests in force; OAuth settings are never returned."""
+    """List every configured binding with the owners and digests in force, then retired grants; OAuth settings are never returned."""
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     config = await asyncio.to_thread(_config)
     stored = await asyncio.to_thread(lambda: make_mcp_agent_grant_store(config).list())
-    return McpAgentBindingsResponse(bindings=[_response(config, binding_id, binding, stored.get(binding_id)) for binding_id, binding in sorted(config.mcp_agent_auth.items())])
+    bindings = [_response(config, binding_id, binding, stored.get(binding_id)) for binding_id, binding in sorted(config.mcp_agent_auth.items())]
+    bindings += [_retired_response(binding_id, grant) for binding_id, grant in sorted(stored.items()) if binding_id not in config.mcp_agent_auth]
+    return McpAgentBindingsResponse(bindings=bindings)
 
 
 @router.get("/{binding_id}", response_model=McpAgentBindingResponse, summary="Get MCP Agent Credential Binding")
 async def get_binding(binding_id: BindingId, request: Request) -> McpAgentBindingResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     config = await asyncio.to_thread(_config)
-    binding = _binding(config, binding_id)
+    binding = config.mcp_agent_auth.get(binding_id)
+    if binding is None:
+        retired = await asyncio.to_thread(lambda: make_mcp_agent_grant_store(config).get(binding_id))
+        if retired is None:
+            raise HTTPException(status_code=404, detail=f"MCP agent binding '{binding_id}' is not configured")
+        return _retired_response(binding_id, retired)
     grant = await asyncio.to_thread(lambda: make_mcp_agent_grant_store(config).get(binding_id)) if binding.grants == "runtime" else None
     return _response(config, binding_id, binding, grant)
 
@@ -157,13 +197,21 @@ async def put_grant(binding_id: BindingId, grant: McpAgentGrant, request: Reques
 
 @router.delete("/{binding_id}/grants", status_code=204, summary="Delete Runtime MCP Agent Grant")
 async def delete_grant(binding_id: BindingId, request: Request) -> Response:
-    """Delete the grant; the binding then admits nobody."""
+    """Delete the grant; the binding then admits nobody.
+
+    A stored grant left behind after its binding was removed from
+    ``config.yaml`` or moved to ``grants: config`` can be deleted too; that
+    releases the owners it reserves.
+    """
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     config = await asyncio.to_thread(_config)
+    if await run_drained_write("Delete MCP agent grant", lambda: make_mcp_agent_grant_store(config).delete(binding_id)):
+        return Response(status_code=204)
+    binding = config.mcp_agent_auth.get(binding_id)
+    if binding is None:
+        raise HTTPException(status_code=404, detail=f"MCP agent binding '{binding_id}' is not configured and has no stored grant")
     _runtime_binding(config, binding_id)
-    if not await run_drained_write("Delete MCP agent grant", lambda: make_mcp_agent_grant_store(config).delete(binding_id)):
-        raise HTTPException(status_code=404, detail=f"MCP agent binding '{binding_id}' has no runtime grant")
-    return Response(status_code=204)
+    raise HTTPException(status_code=404, detail=f"MCP agent binding '{binding_id}' has no runtime grant")
 
 
 @router.get("/{binding_id}/definition-digest", response_model=McpAgentDefinitionDigestResponse, summary="Compute an Agent Definition Digest")

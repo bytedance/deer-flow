@@ -22,15 +22,23 @@ class FileMcpAgentGrantStore(McpAgentGrantStore):
     def _root() -> Path:
         return get_paths().base_dir / "mcp-agent-grants"
 
-    def _read(self, path: Path) -> tuple[str, StoredMcpAgentGrant]:
-        document = json.loads(path.read_text(encoding="utf-8"))
+    def _read(self, path: Path) -> tuple[str, StoredMcpAgentGrant] | None:
+        """Read one grant file; None when a concurrent delete removed it.
+
+        Parse errors and other I/O failures still raise.
+        """
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        document = json.loads(text)
         return document.pop("binding"), StoredMcpAgentGrant.model_validate(document)
 
     def get(self, binding_id: str) -> StoredMcpAgentGrant | None:
-        path = self._root() / f"{binding_id}.json"
-        if not path.is_file():
+        entry = self._read(self._root() / f"{binding_id}.json")
+        if entry is None:
             return None
-        stored_id, grant = self._read(path)
+        stored_id, grant = entry
         # A case-insensitive filesystem maps "A" and "a" to one file; a grant
         # never applies to a binding it was not written for.
         return grant if stored_id == binding_id else None
@@ -39,7 +47,8 @@ class FileMcpAgentGrantStore(McpAgentGrantStore):
         root = self._root()
         if not root.exists():
             return {}
-        return dict(sorted(self._read(path) for path in root.glob("*.json")))
+        entries = (self._read(path) for path in root.glob("*.json"))
+        return dict(sorted(entry for entry in entries if entry is not None))
 
     def put(self, binding_id: str, grant: StoredMcpAgentGrant) -> None:
         reason = windows_incompatible_segment(binding_id)
@@ -50,7 +59,8 @@ class FileMcpAgentGrantStore(McpAgentGrantStore):
         with _write_lock:
             root.mkdir(parents=True, exist_ok=True)
             path = root / f"{binding_id}.json"
-            if path.is_file() and self._read(path)[0] != binding_id:
+            existing = self._read(path)
+            if existing is not None and existing[0] != binding_id:
                 raise ValueError(f"Binding ID {binding_id!r} collides with a stored grant that differs only in case")
             tmp_path: Path | None = None
             try:
@@ -68,7 +78,11 @@ class FileMcpAgentGrantStore(McpAgentGrantStore):
     def delete(self, binding_id: str) -> bool:
         path = self._root() / f"{binding_id}.json"
         with _write_lock:
-            if not path.is_file() or self._read(path)[0] != binding_id:
+            existing = self._read(path)
+            if existing is None or existing[0] != binding_id:
                 return False
-            path.unlink()
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return False
             return True

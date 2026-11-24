@@ -876,6 +876,28 @@ def test_file_store_never_applies_a_grant_to_another_binding(tmp_path, monkeypat
     assert json.loads((tmp_path / "mcp-agent-grants" / "Tickets.json").read_text())["binding"] == "Tickets"
 
 
+def test_file_store_treats_a_grant_removed_during_a_read_as_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    store = FileMcpAgentGrantStore()
+    store.put("b1", _stored(owners=["alice"]))
+    store.put("b2", _stored(owners=["bob"]))
+    root = tmp_path / "mcp-agent-grants"
+    real_glob = Path.glob
+
+    def glob_then_revoke(self, pattern):
+        paths = list(real_glob(self, pattern))
+        (root / "b1.json").unlink(missing_ok=True)  # a concurrent revoke after discovery
+        return iter(paths)
+
+    monkeypatch.setattr(Path, "glob", glob_then_revoke)
+    assert list(store.list()) == ["b2"]
+    assert store.get("b1") is None and store.delete("b1") is False
+    (root / "b3.json").write_text("{")
+    with pytest.raises(json.JSONDecodeError):
+        store.list()
+
+
 @pytest.mark.asyncio
 async def test_migration_creates_and_drops_the_table(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
@@ -969,16 +991,50 @@ async def test_admin_api_reports_and_replaces_a_stale_grant(api_env):
     stale = await router.get_binding("research-tickets", admin)
     assert (stale.approval, stale.owners) == ("stale", ["alice"])
     assert capture_agent_authority(moved, user_id="alice", agent_config=env.agent) is None
-    # A stale grant admits nobody, so it doesn't block granting its owners elsewhere.
+    # A stale grant admits nobody but keeps its owners reserved: a rollback makes it current again.
     data = moved.model_dump()
     data["mcp_agent_auth"]["research-tickets-2"] = {**data["mcp_agent_auth"]["research-tickets"]}
     with_second = AppConfig.model_validate(data)
     set_app_config(with_second)
+    with pytest.raises(HTTPException) as exc:
+        await router.put_grant("research-tickets-2", _grant(owners=["alice"]), admin)
+    assert exc.value.status_code == 409 and "research-tickets'" in exc.value.detail
+    set_app_config(api_env.config)  # roll the OAuth client back
+    assert (await router.get_binding("research-tickets", admin)).approval == "current"
+    assert capture_agent_authority(api_env.config, user_id="alice", agent_config=env.agent) is not None
+    # Deleting the stale grant releases its owners.
+    set_app_config(with_second)
+    assert (await router.delete_grant("research-tickets", admin)).status_code == 204
     assert (await router.put_grant("research-tickets-2", _grant(owners=["alice"]), admin)).approval == "current"
     with pytest.raises(HTTPException) as exc:
         await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[env.digest]), admin)
     assert exc.value.status_code == 409
     assert (await router.put_grant("research-tickets", _grant(owners=["bob"], digests=[env.digest]), admin)).approval == "current"
+
+
+@pytest.mark.asyncio
+async def test_admin_api_lists_reserves_and_deletes_a_retired_grant(api_env):
+    router, env = api_env.router, api_env.env
+    admin = _request("admin")
+    await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[env.digest]), admin)
+    # GitOps renames the binding: the old grant is retired, not gone.
+    data = api_env.config.model_dump()
+    data["mcp_agent_auth"]["tickets"] = data["mcp_agent_auth"].pop("research-tickets")
+    set_app_config(AppConfig.model_validate(data))
+    listed = (await router.list_bindings(admin)).model_dump()["bindings"]
+    assert [(b["binding"], b["approval"], b["agent"], b["owners"]) for b in listed][-1] == ("research-tickets", "retired", env.agent.name, ["alice"])
+    assert (await router.get_binding("research-tickets", admin)).approval == "retired"
+    with pytest.raises(HTTPException) as exc:
+        await router.put_grant("tickets", _grant(owners=["alice"], digests=[env.digest]), admin)
+    assert exc.value.status_code == 409 and "research-tickets" in exc.value.detail
+    assert (await router.delete_grant("research-tickets", admin)).status_code == 204
+    assert (await router.put_grant("tickets", _grant(owners=["alice"], digests=[env.digest]), admin)).approval == "current"
+    with pytest.raises(HTTPException) as exc:
+        await router.get_binding("research-tickets", admin)
+    assert exc.value.status_code == 404
+    with pytest.raises(HTTPException) as exc:
+        await router.delete_grant("research-tickets", admin)
+    assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio

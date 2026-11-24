@@ -1089,6 +1089,10 @@ DELETE /api/mcp/agent-auth/{binding}/grants
 A grant covers the agent, server, destination and OAuth client the binding had
 when it was written; after `config.yaml` changes one of them, responses show
 `"approval": "stale"` and the grant admits nobody until it is written again.
+A grant whose binding was removed from `config.yaml` is listed with
+`"approval": "retired"` and can still be read and deleted by its binding ID.
+Stale and retired grants keep their owners reserved for the agent and server
+they were approved for until they are replaced or deleted.
 
 #### Reset MCP Tools Cache
 
