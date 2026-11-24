@@ -301,6 +301,65 @@ async def test_coordinator_decision_is_atomic_idempotent_and_fenced(database, ch
 
 
 @pytest.mark.asyncio
+async def test_coordinator_settles_only_the_current_decision(database):
+    from time import time
+
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, RUN_KEY_PREFIX, CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
+
+    engine, dialect, schema = database
+    await bootstrap.bootstrap_schema(engine, backend=dialect, postgres_schema=schema)
+    sessions = async_sessionmaker(engine)
+    workers, runs = CoordinationWorkerRepository(sessions), RunRepository(sessions)
+    async with sessions.begin() as session:
+        session.add(UserRow(id="alice", email="alice@example.com"))
+    root = await workers.create("alice", request_id="plan", objective="Research", coordinator=True)
+    task_id = root["id"]
+    grant = {"id": "grant", "authority": {"token_version": 0, "source": "session", "permissions": ["runs:create"]}, "channel": None, "expires_at": time() + 100}
+
+    async def admit(task_id, run_id, *, start_root=False):
+        assignment, execution, _ = await workers.prepare("alice", task_id, "lead_agent" if start_root else None, initial_grant=grant if start_root else None)
+        await runs.create_thread_operation_atomic(
+            run_id,
+            thread_id=assignment["thread_id"],
+            user_id="alice",
+            owner_worker_id="gateway",
+            lease_expires_at=None,
+            idempotency_key=RUN_KEY_PREFIX + execution["id"],
+            metadata={RUN_GRANT_METADATA: grant["id"]},
+        )
+        return execution["id"]
+
+    async def submit(execution_id, run_id, objective):
+        plan = [{"key": "research", "assistant_id": "lead_agent", "objective": objective, "depends_on": []}]
+        ids = await workers.submit_task_decision("alice", task_id, execution_id, run_id, grant["id"], plan)
+        await runs.update_status(run_id, "success")
+        return ids["research"]
+
+    first = await admit(task_id, "plan-1", start_root=True)
+    old_child = await submit(first, "plan-1", "Original source")
+    old_worker = await admit(old_child, "worker-1")
+    await workers.append_input("alice", task_id, request_id="follow-up", content="Use the replacement source")
+    assert not await workers.settle("alice", task_id, first, "plan-1", "success", [])
+    await runs.update_status("worker-1", "error")
+    assert await workers.settle("alice", old_child, old_worker, "worker-1", "error", [])
+    assert await workers.settle("alice", task_id, first, "plan-1", "success", [])
+    assert (await workers.view("alice", task_id))["execution"]["status"] == "superseded"
+
+    second = await admit(task_id, "plan-2")
+    new_child = await submit(second, "plan-2", "Replacement source")
+    assert not await workers.settle("alice", task_id, second, "plan-2", "success", [])
+    new_worker = await admit(new_child, "worker-2")
+    await runs.update_status("worker-2", "success")
+    assert await workers.settle("alice", new_child, new_worker, "worker-2", "success", [])
+    assert await workers.settle("alice", task_id, second, "plan-2", "success", [])
+    view = await workers.view("alice", task_id)
+    assert view["task"]["status"] == TaskStatus.SUCCEEDED
+    assert {row["id"]: row["status"] for row in view["children"]} == {old_child: TaskStatus.FAILED, new_child: TaskStatus.SUCCEEDED}
+
+
+@pytest.mark.asyncio
 async def test_worker_admission_is_atomic_with_cancellation_and_replay(database):
     from deerflow.persistence.coordination.workers import RUN_KEY_PREFIX, CoordinationWorkerRepository
     from deerflow.persistence.run import RunRepository

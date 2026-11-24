@@ -241,10 +241,18 @@ class CoordinationTaskRepository:
             await self._finish_locked(session, task, outcome, result_ref)
             return _snapshot(task)
 
-    async def _finish_locked(self, session: AsyncSession, task: CoordinationTaskRow, outcome: TaskStatus, result_ref: str) -> None:
-        children = (await session.scalars(select(CoordinationTaskRow.status).filter_by(parent_id=task.id, owner_id=task.owner_id))).all()
+    @staticmethod
+    async def _child_statuses(session: AsyncSession, task: CoordinationTaskRow, *, child_ids: Sequence[str] | None = None) -> Sequence[str]:
+        query = select(CoordinationTaskRow.status).filter_by(parent_id=task.id, owner_id=task.owner_id)
+        if child_ids is not None:
+            query = query.where(CoordinationTaskRow.id.in_(child_ids))
+        return (await session.scalars(query)).all()
+
+    async def _finish_locked(self, session: AsyncSession, task: CoordinationTaskRow, outcome: TaskStatus, result_ref: str, *, child_statuses: Sequence[str] | None = None) -> None:
+        if child_statuses is None:
+            child_statuses = await self._child_statuses(session, task)
         accepted = {TaskStatus.SUCCEEDED} if outcome == TaskStatus.SUCCEEDED else {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}
-        if any(status not in accepted for status in children):
+        if any(status not in accepted for status in child_statuses):
             raise TaskConflict("Child tasks have not settled for this outcome")
         task.status = outcome
         task.result_ref = result_ref

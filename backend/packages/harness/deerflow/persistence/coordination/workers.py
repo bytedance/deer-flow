@@ -405,11 +405,13 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                 return True
             if task.status != TaskStatus.RUNNING or task.execution_epoch != execution.epoch:
                 return True
+            child_statuses = None
             if task.coordinator:
-                children = list(await session.scalars(select(CoordinationTaskRow.status).filter_by(owner_id=owner, parent_id=task_id)))
-                if any(child in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.CANCELLING) for child in children):
+                child_ids = list(execution.decision["task_ids"].values()) if execution.decision is not None else []
+                child_statuses = await self._child_statuses(session, task, child_ids=child_ids)
+                if any(child in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.CANCELLING) for child in child_statuses):
                     return False
-                status = "success" if execution.decision is not None and all(child == TaskStatus.SUCCEEDED for child in children) else "error"
+                status = "success" if execution.decision is not None and all(child == TaskStatus.SUCCEEDED for child in child_statuses) else "error"
             for path, digest, content in artifacts:
                 session.add(Artifact(id=uuid4().hex, execution_id=execution.id, path=path, sha256=digest, size=len(content), content=content))
             if status == "waiting_for_input":
@@ -421,7 +423,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             worker = await session.get(Assignment, (task_id, task.execution_epoch))
             result_ref = f"/api/threads/{worker.thread_id}/runs/{run_id}/messages" if run_id else None
             outcome = TaskStatus.SUCCEEDED if status == "success" else TaskStatus.FAILED
-            await self._finish_locked(session, task, outcome, result_ref or f"/api/coordination/tasks/{task_id}")
+            await self._finish_locked(session, task, outcome, result_ref or f"/api/coordination/tasks/{task_id}", child_statuses=child_statuses)
             execution.status = status
             execution.result_text = result_text
             return True

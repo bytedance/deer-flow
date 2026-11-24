@@ -434,17 +434,16 @@ class _BoundAgentRuns:
             await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=self._user_id, continuation_authority=self)
 
     async def coordination_result_text(self, *, thread_id, run_id):
+        from app.gateway.conversation_access import _visible_text
         from app.gateway.deps import get_run_event_store
-        from deerflow.utils.messages import message_to_text
 
         async with self._request("runs:read", thread_id) as request:
             rows = await get_run_event_store(request).list_messages_by_run(thread_id, run_id, user_id=self._user_id, limit=12)
         for row in reversed(rows):
-            caller = str((row.get("metadata") or {}).get("caller", ""))
-            if row.get("event_type") in ("llm.ai.response", "ai_message") and not caller.startswith("middleware:"):
-                text = message_to_text(row.get("content") or {})
-                if text:
-                    return text[:4000]
+            if row.get("event_type") in ("llm.ai.response", "ai_message"):
+                visible = _visible_text(row, thread_id=thread_id)
+                if visible is not None and visible[0] == "assistant":
+                    return visible[1][:4000]
         return None
 
     async def coordination_recovery_checkpoint(self, *, thread_id, run_id):

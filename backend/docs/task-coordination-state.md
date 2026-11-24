@@ -155,11 +155,12 @@ child IDs and their Worker assignments together. A retry of that decision
 reuses those IDs. A change to an accepted decision returns a conflict.
 
 The Gateway admits a queued child when its prerequisites succeed. It freezes
-available prerequisite reply text into the dependent Worker's input. An
+the visible prerequisite reply text into the dependent Worker's input. An
 unsuccessful prerequisite prevents admission and settles its dependents as
 failed. Children share the root's revocable authorization.
 
 The parent task view lists child IDs, statuses, result references and artifact
-endpoints. The root settles after the children settle. After restart, the
+endpoints, including children from earlier plans. Only the current plan's
+children determine the root outcome. After restart, the
 Gateway continues from the saved decision or retries a planner interrupted
 before it committed. Later input stays in the same Task's inbox.

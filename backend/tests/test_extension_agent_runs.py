@@ -935,7 +935,11 @@ async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(work
 
     async def echo_model(prompt, runtime):
         journal = runtime.context["__run_journal"]
-        result = LLMResult(generations=[[ChatGeneration(message=AIMessage(content=f"answer:{prompt}"))]])
+        answer = f"answer:{prompt}"
+        content = answer
+        if prompt == "wait":
+            content = [{"type": "reasoning", "text": "structured reasoning"}, {"type": "text", "text": f"<think>{'private reasoning ' * 300}</think>{answer}"}]
+        result = LLMResult(generations=[[ChatGeneration(message=AIMessage(content=content))]])
         journal.on_llm_end(result, run_id=uuid4())
 
     state.present_worker_report = echo_model
@@ -989,8 +993,94 @@ async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(work
     finished_report = (await client.get(f"{url}/{report['id']}")).raise_for_status().json()
     messages = (await client.get(finished_report["task"]["result_ref"])).raise_for_status().json()
     assert any("answer:wait" in str(message["content"]) for message in messages["data"])
+    assert all("reasoning" not in str(message["content"]) for message in messages["data"])
     assert model.bind_tools.return_value.ainvoke.await_count == 2
     assert [tool.name for tool in model.bind_tools.call_args.args[0]] == ["submit_task_decision"]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_replans_after_restart_before_submission(worker_gateway, monkeypatch):
+    import asyncio
+
+    from langchain_core.messages import AIMessage
+
+    client, _, state, _, _ = worker_gateway
+    planning, release = asyncio.Event(), asyncio.Event()
+
+    async def plan(_messages):
+        if not planning.is_set():
+            planning.set()
+            await release.wait()
+        return AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "decision", "args": {"tasks": [{"key": "draft", "objective": "Write a draft"}]}}])
+
+    model = Mock()
+    invoke = model.bind_tools.return_value.ainvoke = AsyncMock(side_effect=plan)
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    monkeypatch.setattr("app.gateway.coordination_workers.RECOVERY_INTERVAL", 0.1)
+    url = "/api/coordination/tasks"
+    first = (await client.post(url, json={"request_id": "restart", "coordinator": True, "objective": "Write a draft"})).raise_for_status().json()
+    task_id = first["task"]["id"]
+    try:
+        await asyncio.wait_for(planning.wait(), 8)
+        assert (await client.get(f"{url}/{task_id}")).raise_for_status().json()["children"] == []
+        await _restart_coordination(state)
+        state.coordination_workers.start_recovery()
+        final = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    finally:
+        release.set()
+    assert final["execution"]["run_id"] != first["execution"]["run_id"]
+    assert [(task["objective"], task["status"]) for task in final["children"]] == [("Write a draft", "succeeded")]
+    assert invoke.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+async def test_coordinator_does_not_admit_dependents_of_unsuccessful_prerequisite(worker_gateway, monkeypatch, outcome):
+    import asyncio
+
+    from langchain_core.messages import AIMessage
+
+    client, _, state, _, _ = worker_gateway
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def research(prompt, runtime):
+        assert prompt == "Find sources"
+        started.set()
+        await release.wait()
+        if outcome == "failed":
+            raise RuntimeError("source unavailable")
+
+    state.present_worker_report = research
+    model = Mock()
+    tasks = [
+        {"key": "research", "objective": "Find sources"},
+        {"key": "report", "objective": "Write the report", "depends_on": ["research"]},
+        {"key": "summary", "objective": "Summarize the report", "depends_on": ["report"]},
+    ]
+    model.bind_tools.return_value.ainvoke = AsyncMock(return_value=AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "decision", "args": {"tasks": tasks}}]))
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    monkeypatch.setattr("app.gateway.coordination_workers.RECOVERY_INTERVAL", 0.1)
+    state.coordination_workers.start_recovery()
+    url = "/api/coordination/tasks"
+    root = (await client.post(url, json={"request_id": "plan", "coordinator": True, "objective": "Research and write a report"})).raise_for_status().json()
+    task_id = root["task"]["id"]
+    try:
+        await asyncio.wait_for(started.wait(), 8)
+        view = (await client.get(f"{url}/{task_id}")).raise_for_status().json()
+        prerequisite = next(task for task in view["children"] if task["objective"] == "Find sources")
+        if outcome == "cancelled":
+            (await client.post(f"{url}/{prerequisite['id']}/cancel", json={"expected_revision": prerequisite["revision"]})).raise_for_status()
+    finally:
+        release.set()
+    final = await _wait_for_worker(client, task_id, "task", "status", "failed")
+    assert len(final["children"]) == 3
+    for task in final["children"]:
+        if task["id"] == prerequisite["id"]:
+            assert task["status"] == outcome
+        else:
+            assert task["status"] == "failed"
+            child = (await client.get(f"{url}/{task['id']}")).raise_for_status().json()
+            assert child["execution"] is None
 
 
 @pytest.mark.asyncio
