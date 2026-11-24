@@ -2,8 +2,10 @@
 
 import ipaddress
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from deerflow.community.crawl4ai.crawl4ai_client import Crawl4AiClient
@@ -268,19 +270,28 @@ class TestCrawl4AiTools:
             ({"max_chars": 0}, 5000, 4096),  # invalid values keep the default
             ({"max_chars": True}, 5000, 4096),
             ({"max_chars": "lots"}, 5000, 4096),
+            pytest.param({"max_chars": "²"}, 5000, 4096, id="nondecimal-digit"),
             ({"max_chars": 8000}, 8000, None),  # fits: unchanged, no note
         ],
     )
-    @patch("deerflow.community.crawl4ai.tools._build_client")
     @pytest.mark.usefixtures("public_dns")
-    async def test_web_fetch_tool_truncates_to_max_chars(self, mock_build, cfg, length, kept):
+    async def test_web_fetch_tool_truncates_to_max_chars(self, cfg, length, kept):
         from deerflow.community.crawl4ai import tools
 
-        mock_client = MagicMock()
-        mock_client.fetch_markdown = AsyncMock(return_value="x" * length)
-        mock_build.return_value = mock_client
+        def respond(request):
+            assert request.url.path == "/md"
+            return httpx.Response(200, json={"success": True, "markdown": "x" * length})
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=cfg):
+        transport = httpx.MockTransport(respond)
+        mock_httpx = SimpleNamespace(
+            AsyncClient=lambda **kwargs: httpx.AsyncClient(transport=transport, **kwargs),
+            TimeoutException=httpx.TimeoutException,
+            RequestError=httpx.RequestError,
+        )
+        with (
+            patch("deerflow.community.crawl4ai.crawl4ai_client.httpx", mock_httpx),
+            patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=cfg),
+        ):
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
         if kept is None:

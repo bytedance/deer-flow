@@ -50,10 +50,16 @@ def _coerce_max_chars(value: object) -> int:
     """Coerce the ``max_chars`` output cap; anything but a positive integer keeps the default."""
     if value is None:
         return DEFAULT_MAX_CHARS
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    if isinstance(value, str) and value.strip().isdigit() and int(value) > 0:
-        return int(value)
+
+    max_chars = value
+    if isinstance(value, str) and (digits := value.strip()).isdecimal():
+        try:
+            max_chars = int(digits)
+        except ValueError:
+            max_chars = None  # Python can reject an integer string that exceeds its digit limit.
+    if isinstance(max_chars, int) and not isinstance(max_chars, bool) and max_chars > 0:
+        return max_chars
+
     logger.warning("Crawl4AI web_fetch: invalid max_chars %r in config; using %s", value, DEFAULT_MAX_CHARS)
     return DEFAULT_MAX_CHARS
 
