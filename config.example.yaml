@@ -1756,6 +1756,10 @@ uploads:
   max_files: 10
   max_file_size: 52428800    # 50 MiB
   max_total_size: 104857600  # 100 MiB
+  # nginx cannot read these runtime values. If you raise any of them, raise
+  # client_max_body_size above the new content total plus multipart framing in
+  # docker/nginx/nginx.conf, docker/nginx/nginx.local.conf and the Helm nginx
+  # ConfigMap too.
   # Automatic Office/PDF conversion runs on the backend host before sandbox
   # isolation applies. Keep this disabled unless uploads come from a fully
   # trusted source and you intentionally accept host-side parser risk.
