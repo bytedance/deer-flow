@@ -1149,6 +1149,8 @@ tools:
   #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
   #   #                                    # is isolated from private and cloud-metadata networks.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
+  #   # max_chars: 4096                   # Output cap in characters (default 4096); a cut page ends with a note.
+  #   #                                    # Above tool_output.externalize_min_chars, output goes to a file instead.
 
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
   # Browserless captures JavaScript-heavy pages with a real headless Chrome and
