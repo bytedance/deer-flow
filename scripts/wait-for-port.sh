@@ -57,6 +57,19 @@ is_port_listening() {
         fi
     fi
 
+    # Android/Termux fallback: check the port using a real TCP connection.
+    if [ -n "${ANDROID_ROOT:-}" ] && command -v python3 >/dev/null 2>&1; then
+        if python3 -c 'import socket,sys
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+s.settimeout(0.5)
+try:
+    sys.exit(0 if s.connect_ex(("127.0.0.1",int(sys.argv[1]))) == 0 else 1)
+finally:
+    s.close()' "$PORT" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
     return 1
 }
 
