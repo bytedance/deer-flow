@@ -1,9 +1,12 @@
 """Provider probes return bounded result codes without returning remote bodies."""
 
 import base64
+import struct
+from io import BytesIO
 
 import httpx
 import pytest
+from PIL import Image
 
 from app.gateway import image_generation_probe as probe
 from deerflow.config.image_generation import ImageGenerationProfile
@@ -81,6 +84,26 @@ def test_truncated_image_is_not_recorded_as_success(monkeypatch, provider, opera
     }[provider]
     client_with(lambda _request: httpx.Response(200, json=payload), monkeypatch)
     assert probe.probe_image_profile(provider_profile(provider), operation) == "invalid_response"
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini", "minimax"])
+def test_png_checksum_failure_returns_invalid_response(monkeypatch, provider):
+    png = bytearray(probe._solid_png())
+    idat_offset = 8 + 4 + 4 + 13 + 4
+    idat_length = struct.unpack_from(">I", png, idat_offset)[0]
+    png[idat_offset + 8 + idat_length] ^= 1
+    with Image.open(BytesIO(png)) as image:
+        with pytest.raises(SyntaxError, match="bad header checksum"):
+            image.verify()
+
+    encoded = base64.b64encode(png).decode("ascii")
+    payload = {
+        "openai": {"data": [{"b64_json": encoded}]},
+        "gemini": {"candidates": [{"content": {"parts": [{"inlineData": {"data": encoded}}]}}]},
+        "minimax": {"data": {"image_base64": [encoded]}},
+    }[provider]
+    client_with(lambda _request: httpx.Response(200, json=payload), monkeypatch)
+    assert probe.probe_image_profile(provider_profile(provider), "generation") == "invalid_response"
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini", "minimax"])

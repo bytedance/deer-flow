@@ -50,7 +50,7 @@ def _image_data(value: object) -> bool:
             image.verify()
         with Image.open(BytesIO(data)) as image:
             image.load()
-    except (OSError, ValueError, Image.DecompressionBombError):
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
         return False
     return True
 
@@ -166,5 +166,5 @@ def probe_image_profile(profile: ImageGenerationProfile, operation: str) -> str:
         return "provider_rejected"
     except httpx.HTTPError:
         return "unreachable"
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError, SyntaxError):
         return "invalid_response"
