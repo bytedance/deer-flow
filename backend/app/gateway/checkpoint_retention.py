@@ -53,6 +53,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.gateway.checkpoint_lineage import (
+    channel_versions_match,
     checkpoint_configurable,
     is_duration_only_checkpoint,
 )
@@ -105,7 +106,7 @@ class _Node:
     duration_only: bool
     metadata_source: str | None = None
     carries_run_durations: bool = False
-    versions: frozenset = frozenset()
+    versions: dict[str, Any] = field(default_factory=dict)
 
 
 def _thread_config(thread_id: str) -> dict[str, Any]:
@@ -156,7 +157,8 @@ def _mark_duration_leaves_without_the_marker(nodes: dict[tuple[str, str], _Node]
         parent = nodes.get((node.parent_ns, node.parent_id))
         if parent is None or node.metadata_source != "update" or not node.carries_run_durations:
             continue
-        if node.versions and node.versions == parent.versions:
+        # Without the authoritative writes marker, require a non-empty map as evidence.
+        if node.versions and parent.versions and channel_versions_match(node.versions, parent.versions):
             node.duration_only = True
 
 
@@ -452,7 +454,7 @@ async def enforce_thread_retention(
                 duration_only=is_duration_only_checkpoint(tuple_, stamp_fallback=False),
                 metadata_source=metadata.get("source"),
                 carries_run_durations=isinstance(run_durations, dict) and bool(run_durations),
-                versions=frozenset(channel_versions.values()) if isinstance(channel_versions, dict) else frozenset(),
+                versions=dict(channel_versions) if isinstance(channel_versions, dict) else {},
             )
         if not nodes:
             # Nothing to classify: an empty (or unknown) thread is a no-op, but
@@ -538,7 +540,7 @@ async def enforce_thread_retention(
         survivor_versions: set[Any] = set()
         for key, node in nodes.items():
             if key not in deleted_keys:
-                survivor_versions.update(node.versions)
+                survivor_versions.update(node.versions.values())
 
         # Invalidate before touching source-of-truth rows. If cache deletion
         # fails, fail closed with every checkpoint intact; doing this after the
@@ -603,7 +605,7 @@ async def enforce_trailing_duration_retention(
 
         latest_versions = latest.checkpoint.get("channel_versions")
         parent_versions = parent.checkpoint.get("channel_versions")
-        if not isinstance(latest_versions, dict) or latest_versions != parent_versions:
+        if not channel_versions_match(latest_versions, parent_versions):
             return report
         metadata = latest.metadata or {}
         run_durations = metadata.get("run_durations")
@@ -615,9 +617,9 @@ async def enforce_trailing_duration_retention(
             duration_only=is_duration_only_checkpoint(latest),
             metadata_source=metadata.get("source"),
             carries_run_durations=isinstance(run_durations, dict) and bool(run_durations),
-            versions=frozenset(latest_versions.values()),
+            versions=dict(latest_versions),
         )
-        parent_node = _Node(ns="", cp_id=parent_id, parent_ns=None, parent_id=None, duration_only=False, versions=latest_node.versions)
+        parent_node = _Node(ns="", cp_id=parent_id, parent_ns=None, parent_id=None, duration_only=False, versions=dict(parent_versions))
         _mark_duration_leaves_without_the_marker({("", latest_id): latest_node, ("", parent_id): parent_node})
         if not latest_node.duration_only or await _checkpoint_has_writes(storage, ("", latest_id), thread_id):
             return report

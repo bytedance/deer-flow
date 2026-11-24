@@ -2,7 +2,7 @@ import asyncio
 import re
 import time
 from unittest.mock import AsyncMock
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 import jwt
@@ -910,7 +910,7 @@ async def test_oidc_userinfo_without_sub_cannot_make_a_first_login_an_admin():
     local_provider.create_oauth_user.assert_awaited_once_with(email="user@example.com", oauth_provider="keycloak", oauth_id="s1", system_role="user")
 
 
-def _oidc_router_client(monkeypatch, service: OIDCService):
+def _oidc_router_client(monkeypatch, service: OIDCService, *, enabled: bool = True):
     from types import SimpleNamespace
 
     from fastapi import FastAPI
@@ -921,7 +921,7 @@ def _oidc_router_client(monkeypatch, service: OIDCService):
     from app.gateway.auth.config import AuthConfig
     from app.gateway.routers import auth as auth_router
 
-    oidc_config = SimpleNamespace(enabled=True, providers={"keycloak": _provider_config()}, frontend_base_url="")
+    oidc_config = SimpleNamespace(enabled=enabled, providers={"keycloak": _provider_config()}, frontend_base_url="")
     monkeypatch.setattr(app_config_module, "get_app_config", lambda: SimpleNamespace(auth=SimpleNamespace(oidc=oidc_config)))
     monkeypatch.setattr(auth_router, "_get_oidc_service", lambda: service)
     monkeypatch.setattr(oidc_state, "get_auth_config", lambda: AuthConfig(jwt_secret="test-secret-for-oidc-malformed-bodies-min-32"))
@@ -956,3 +956,46 @@ def test_oidc_callback_redirects_sso_failed_when_token_response_is_an_html_page(
 
     assert response.status_code == 302
     assert response.headers["location"] == "/login?error=sso_failed"
+
+
+_FORGED_LOG_LINE = "\n2026-01-01 00:00:00 INFO app.gateway.auth: forged line\r"
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["oidc-enabled", "oidc-disabled"])
+def test_oidc_callback_provider_error_log_strips_newlines(monkeypatch, caplog, enabled):
+    """The provider-error branch logs before any check, so every value is unauthenticated input."""
+    service = _service_answering({})
+    client = _oidc_router_client(monkeypatch, service, enabled=enabled)
+
+    try:
+        with caplog.at_level("WARNING", logger="app.gateway.routers.auth"):
+            response = client.get(
+                f"/api/v1/auth/callback/{quote('keycloak' + _FORGED_LOG_LINE)}",
+                params={"error": f"access_denied{_FORGED_LOG_LINE}", "error_description": f"denied{_FORGED_LOG_LINE}"},
+            )
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login?error=sso_failed"
+    [record] = [r for r in caplog.records if r.name == "app.gateway.routers.auth"]
+    logged = record.getMessage()
+    assert "\n" not in logged
+    assert "\r" not in logged
+    joined = _FORGED_LOG_LINE.replace("\n", "").replace("\r", "")
+    assert f"keycloak{joined}: access_denied{joined} (description: denied{joined})" in logged
+
+
+def test_oidc_callback_provider_error_log_without_description(monkeypatch, caplog):
+    service = _service_answering({})
+    client = _oidc_router_client(monkeypatch, service)
+
+    try:
+        with caplog.at_level("WARNING", logger="app.gateway.routers.auth"):
+            response = client.get("/api/v1/auth/callback/keycloak", params={"error": "access_denied"})
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 302
+    [record] = [r for r in caplog.records if r.name == "app.gateway.routers.auth"]
+    assert record.getMessage() == "OIDC provider returned error for keycloak: access_denied (description: None)"

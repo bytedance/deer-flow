@@ -17,14 +17,14 @@ Why log-only rather than auto-post:
 
 - Two agents can bind the same event (e.g. coder + reviewer on a mention).
   If both auto-posted their final messages, the user would see two replies
-  for every mention even when only one had useful work to do. Letting the
-  LLM call ``gh`` mid-run means silence is just "the LLM did not call gh."
+  for every mention even when only one had useful work to do. Each agent
+  chooses whether to post using its configured tools.
 - The agent often wants to post *intermediate* updates (an issue comment
   linking the PR, a separate comment on a new sub-issue, …) — the
   auto-post-the-final-message contract didn't model that and forced the
   final message to play double duty.
 - The dispatcher's per-agent ``_is_self_event`` gate already prevents the
-  comments the LLM posts via ``gh`` from looping the webhook back into a
+  comments the agent posts from looping the webhook back into a
   new run for the same agent.
 """
 
@@ -85,9 +85,8 @@ class GitHubChannel(Channel):
     async def send(self, msg: OutboundMessage) -> None:
         """Log the agent's final message — do NOT post it to GitHub.
 
-        GitHub agents post to issues/PRs themselves via ``gh`` mid-run; the
-        final assistant message is logged for ``gateway.log`` visibility but
-        is not delivered to the platform. See the module docstring for why.
+        GitHub agents use configured tools to post to issues and PRs. The
+        final assistant message goes to ``gateway.log``.
 
         Metadata layout (read for logging context only):
             - ``repo`` (str, e.g. ``"owner/name"``) — falls back to ``chat_id``

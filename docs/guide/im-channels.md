@@ -59,6 +59,10 @@ Feishu desktop posts can include a caption and files. Commands use the caption,
 and a command that starts a chat turn, such as `/goal <condition>`, passes the
 files to that turn.
 
+Links and code blocks in a Feishu rich-text post reach the agent as Markdown: a
+link as `[text](url)`, or the bare URL when its text is the URL, and a code block
+as a fenced block tagged with its language.
+
 **Configuration in `config.yaml`:**
 
 Discord's `channels.discord.allowed_guilds` accepts one positive numeric guild
@@ -181,6 +185,7 @@ Notes:
 - In Telegram private chats, text, attachment and streaming replies (including "Working on it...") can still be delivered if their referenced user or bot message was deleted, such as after clearing chat history during a run. Group reply-target requirements remain unchanged to preserve forum routing.
 - In Telegram groups, replying to a delivered bot response or attachment continues its DeerFlow conversation. Reply mappings survive restarts and stay scoped to the user's connection when one is bound. New, unrelated group messages still start separate conversations; private-chat routing is unchanged.
 - New Telegram final-reply sends use the bot API's rate-limit wait up to 60 seconds per retry. Missing, invalid, or shorter hints use the usual backoff. The "Working on it..." acknowledgment is best effort.
+- Slack replies that the Web API rejects with HTTP 429 wait for the `Retry-After` header, up to 15 seconds per retry; a longer hint abandons the reply with a log line instead of holding a shared worker. Missing, invalid, or shorter hints use the usual backoff. File uploads, connection replies, and the Working-on-it acknowledgment (`_send_running_reply`) still try once.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 - Streaming IM channels treat backend `error` events like transport failures and follow the same reply and retry path. The channel logs the error type and message for diagnosis.
 
@@ -266,7 +271,13 @@ Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu
 3. Copy the `Client ID` and `Client Secret`, set `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` in `.env`, and enable the channel in `config.yaml`.
 4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
 
-DingTalk's Markdown fallback displays tables as labeled blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or trailing cells so values stay under the correct column labels.
+DingTalk's Markdown fallback converts same-line code spans with equal-length
+backtick delimiters to bold. For spans with non-space content, it removes one
+ASCII space from each end when both ends are padded. Tables display as labeled
+blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or
+trailing cells so values stay under the correct column labels.
+Each delimiter cell requires hyphens with optional alignment colons and accepts
+space or tab padding. Malformed delimiter rows are left as text.
 
 
 DingTalk token caching uses a two-hour fallback when the provider's token lifetime is invalid or no longer than the five-minute refresh margin, avoiding a refresh on every request.

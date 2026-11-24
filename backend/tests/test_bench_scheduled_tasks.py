@@ -7,6 +7,8 @@ import pytest
 
 from scripts.benchmark.scheduled_tasks.protocol import assert_arm_installed, fixture, goal_history_evidence, grade_artifact, require_loopback, require_spend_reserve, run_cost, task_prompt
 
+pytestmark = pytest.mark.benchmark
+
 
 def test_fixture_reader_cannot_open_arbitrary_paths_or_urls():
     assert fixture("inventory")["source"]["document"].startswith("Synthetic")

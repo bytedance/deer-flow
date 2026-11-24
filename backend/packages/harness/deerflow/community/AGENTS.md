@@ -25,6 +25,9 @@ make test-blocking-io
   still enforces the address policy at connection time. Normalize the Unicode dot
   separators of IDNA before the check, and return the original URL for an
   allowed result.
+- **Pair cited DeepSeek sources with excerpts.** Validate provider offsets
+  against the full answer and apply configured PII redaction before slicing
+  so clipped identifiers and later tool-result rewrites preserve attribution.
 - **A diagnostic names the malformed container and its type.** Queries, URLs,
   credentials and payload values stay out of logs.
 - **Resolve API keys through `provider_credentials.resolve_api_key`.**

@@ -116,6 +116,10 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
         self.write_lock = asyncio.Lock()
         self.global_slots = asyncio.Semaphore(config["global_concurrency"])
         self.lockfile = None
+        # Host capability restoring captured session authority; None on hosts
+        # without delegated restore (unattended recovery then stays manual).
+        self.agent_runs_restore = None
+        self.recovery_scan = None
 
     async def start(self, deps):
         def initialize():
@@ -157,6 +161,7 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                 raise
 
         self.lockfile, self.store, self.runtime_version = await asyncio.to_thread(initialize)
+        self.agent_runs_restore = getattr(deps, "agent_runs_restore", None)
         if self.clustered and deps is not None:
             from sqlalchemy import text as sql_text
 
@@ -169,10 +174,17 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
             if host_identity != await asyncio.to_thread(self.store.database_identity):
                 raise ValueError("Workflow and host must share the same PostgreSQL database and schema")
         self.available = True
+        if not self.clustered:
+            # Single-Gateway stores may hold recoverable records whose owner
+            # minted an unattended-recovery grant before the restart. Clustered
+            # stores coordinate through leases and stay on the manual path.
+            self.recovery_scan = asyncio.create_task(self.recover_granted_workflows())
 
     async def stop(self):
         async with self.launch_lock:
             self.available = False
+            scan = self.recovery_scan
+            self.recovery_scan = None
             for entry in self.entries.values():
                 entry["suspending"] = entry["record"]["status"] != "cancelling"
                 entry["cancel"].set()
@@ -183,6 +195,14 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
             await asyncio.gather(*list(self.admissions), return_exceptions=True)
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
+        if scan is not None:
+            scan.cancel()
+            try:
+                await scan
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Workflow recovery scan failed during shutdown")
         if self.heartbeats:
             heartbeats = list(self.heartbeats.values())
             for heartbeat in heartbeats:
@@ -202,6 +222,16 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
         if not self.available or context.settings.get("enabled") is not True:
             raise ValueError("Workflow service unavailable or disabled")
         return context.principal.user_id
+
+    @staticmethod
+    def _revoke_grant(record):
+        # Withdraw the owner's standing recovery authority with the record, so
+        # the next delegated operation fails closed. A live supervisor defers
+        # this until its cleanup of already-admitted children finishes, since
+        # that cleanup is itself an authorized use of the handle.
+        grant = record.get("grant")
+        if isinstance(grant, dict):
+            grant["revoked"] = True
 
     async def save(self, owner, record):
         # SQLite commits survive cancellation of to_thread. Keep the lock and
@@ -234,8 +264,23 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
         owner = self.owner(context)
         if context.agent_runs is None:
             raise ValueError("Session-bound AgentRuns required; PAT/internal callers unsupported")
-        if set(payload) - {"request_id", "script", "args", "definition"}:
+        if set(payload) - {"request_id", "script", "args", "definition", "unattended_recovery"}:
             raise ValueError("Unexpected launch fields")
+        unattended = payload.get("unattended_recovery", False)
+        if type(unattended) is not bool:
+            raise ValueError("unattended_recovery must be boolean")
+        grant = None
+        if unattended:
+            capture = getattr(context.agent_runs, "capture_authority", None)
+            captured = capture() if callable(capture) else None
+            if context.interaction != "session" or captured is None:
+                raise ValueError("Unattended recovery requires a session-authenticated launch")
+            grant = {
+                "authority": captured,
+                "expires_at": time.time() + self.config["pause_timeout_seconds"],
+                "revoked": False,
+                "version": 1,
+            }
         definition = payload.get("definition")
         if definition is not None:
             if "script" in payload or not isinstance(definition, dict):
@@ -299,6 +344,7 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
             "steps": [],
             "logs": [],
             "result": None,
+            "grant": grant,
         }
         # SQLite threads survive caller cancellation. Retain a service-owned task
         # through commit AND supervisor publication, shielding only the caller's wait.
@@ -401,12 +447,18 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                 entry["suspending"] = False
                 if entry["record"]["status"] not in TERMINAL:
                     entry["record"]["status"] = "cancelling"
+                # Defer revocation to the supervisor's cleanup: the delegated
+                # handle is the authorized path that cancels children this
+                # workflow already admitted, and revoking now would 403 that
+                # cleanup into needs_reconciliation.
+                entry["revoke_grant_on_finish"] = True
                 await self.save(owner, entry["record"])
                 return {"run_id": run_id, "status": "cancelling"}
             if record["status"] == "recoverable":
                 if context.agent_runs is None:
                     raise ValueError("Session-bound AgentRuns required")
                 record["status"] = "cancelling"
+                self._revoke_grant(record)
                 await self.save(owner, record)
                 for row in record["steps"]:
                     if row.get("run_id") and row["status"] != "completed":
@@ -636,7 +688,10 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                 row["status"] = "failed"
             response["error"] = str(exc)[:240] if isinstance(exc, ValueError) else "Agent step failed"
         finally:
-            if replay and "error" in response:
+            if replay and "error" in response and not (entry["cancel"].is_set() and row is not None and row["status"] == "cancelled"):
+                # A replayed step error is fenced as uncertain — unless the
+                # error is the workflow stopping while its re-dispatched child
+                # was already cancelled and observed, which is deterministic.
                 entry["fault"] = "Recovered child outcome requires reconciliation"
                 if row:
                     row["status"] = "needs_reconciliation"
@@ -829,6 +884,10 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
             cleanup = [self.cancel_child(runs, row, **({"record": record} if self.clustered else {})) for row in record["steps"] if row.get("run_id") and row["status"] not in ("completed", "waiting_input", "cancelled")]
             if cleanup:
                 await asyncio.gather(*cleanup)
+            if entry.pop("revoke_grant_on_finish", False):
+                # Cleanup above was the last authorized user of the delegated
+                # handle; withdraw the persisted grant before the final save.
+                self._revoke_grant(record)
             if self.clustered:
                 for row in record["steps"]:
                     if self.slot_releasable(row):

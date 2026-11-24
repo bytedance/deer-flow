@@ -316,7 +316,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         # Register shutdown handler
         atexit.register(self.shutdown)
-        self._register_signal_handlers()
+        self._register_or_defer_signal_handlers()
 
         # Reconcile orphaned containers from previous process lifecycles
         self._reconcile_orphans()
@@ -367,6 +367,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 max_shell_sessions=self._config.get("max_shell_sessions"),
                 max_bash_sessions=self._config.get("max_bash_sessions", 50),
                 required_shell_sessions=self._config.get("required_shell_sessions", 0),
+                environment=self._config.get("environment"),
             )
 
         logger.info("Using local container sandbox backend")

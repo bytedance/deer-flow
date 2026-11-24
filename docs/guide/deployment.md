@@ -306,11 +306,31 @@ rolling upgrade, route keyed runs with ID-less input and their retries to
 upgraded workers until all Gateway workers are upgraded; older workers may
 reject those retries with 409. See the [run API contract](../../backend/docs/API.md#create-run).
 
+### Redis checkpoint history cache upgrade
+
+The v2 cache rebuilds histories under a new default prefix. Deleting or pruning
+a thread also purges its v1 entries for the same database, including entries
+without expiry. If `database.checkpoint_cache.key_prefix` is set, stop all
+workers using that prefix, clear this deployment's Redis checkpoint history
+keys, and then start the upgraded workers. Custom prefixes keep the same name
+across cache versions.
+
 ## Option 2: Local Development
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
+Before starting local development, follow the [configuration guide](configuration.md)
+to run `make setup` from the repository root or prepare `config.yaml` manually.
+
+`make dev` needs a valid configuration file. Set `DEER_FLOW_CONFIG_PATH` to
+point at a specific file. Otherwise, DeerFlow looks for `config.yaml` under
+`DEER_FLOW_PROJECT_ROOT`, which defaults to the checkout root. It then falls back
+to the checkout's `backend/config.yaml` and `config.yaml` in that order.
+
+When started with `make dev`, DeerFlow stores runtime state in `backend/.deer-flow`
+in the checkout by default. Set `DEER_FLOW_HOME` to choose a different location.
+Skills default to `skills/` under the project root and can be moved with
+`DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
 
 Configuration checks and agent-storage migrations use the installed backend environment through `uv run --no-sync --project backend` from the repository root. This preserves relative runtime paths and installed optional dependencies; see the [setup checks](../../backend/docs/SETUP.md#steps) and [agent-storage migration](../../backend/docs/CONFIGURATION.md#agent-storage).
 
@@ -407,19 +427,28 @@ every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
 `--skip-frontend-build` when calling `./scripts/serve.sh --prod` directly). This
 is opt-in: it fails fast when `frontend/.next` has no completed build.
 
-Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
+With the bundled nginx configuration, nginx rewrites public LangGraph-compatible
+requests from `/api/langgraph/*` to `/api/*` before proxying them to the Gateway.
+For example, `POST /api/langgraph/threads` reaches the Gateway as
+`POST /api/threads`.
 
 Cold agent imports during run creation use a dedicated worker pool, keeping
 unrelated Gateway requests responsive while the agent stack loads. A failed
 factory import prevents the run from being admitted.
 
-For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
-then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
-from the same directory. The build includes public demo assets and resolves
-supported demo API reads locally; writes are unavailable. To display the homepage
-GitHub star count, set `GITHUB_OAUTH_TOKEN` in `frontend/.env` before starting Node.
-The token stays on the server; missing credentials or GitHub failures hide the
-count. Restart Node after changing the token; no rebuild is needed.
+For a read-only demo without the Gateway, run these commands from `frontend/`:
+
+```bash
+make build-static
+HOSTNAME=127.0.0.1 PORT=3000 node .next/standalone/server.js
+```
+
+The build includes public demo assets and resolves supported demo API reads
+locally. Writes are unavailable. To display the homepage GitHub star count, set
+`GITHUB_OAUTH_TOKEN` in `frontend/.env` and add `--env-file=.env` before
+`.next/standalone/server.js` in the launch command. The token stays on the server.
+Missing credentials or GitHub failures hide the count. Restart Node after
+changing the token to load the new value.
 
 ## LangGraph Studio (Optional)
 

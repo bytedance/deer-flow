@@ -14,6 +14,7 @@ import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Overwrite
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.postgres import asyncpg_test_url
@@ -216,6 +217,426 @@ async def test_fork_is_owned_by_visitor_and_survives_revocation(share_app):
     # Continue with a real checkpoint write in the new owner's conversation.
     await accessor.aupdate(config, {"messages": [HumanMessage(content="Follow up", id="followup")]}, as_node="branch")
     assert (await accessor.aget(config)).values["messages"][-1].content == "Follow up"
+
+
+async def test_fork_history_is_not_captured_into_recipient_memory(share_app, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from langgraph.runtime import Runtime
+
+    from deerflow.agents.middlewares import memory_middleware
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    share = await make_share(ctx)
+    response = await ctx.client.post(f"/api/shares/{share['token']}/fork", json={"request_id": str(uuid4())}, headers=headers("bob"))
+    assert response.status_code == 200, response.text
+    accessor, config = build_checkpoint_state_mutation_accessor(ctx.request, thread_id=response.json()["thread_id"], as_node="branch")
+    head = await accessor.aget(config)
+    copied = head.values["messages"]
+    assert copied and all(message.additional_kwargs.get(IMPORTED_HISTORY_KEY) == "share" for message in copied)
+    assert head.values[IMPORTED_HISTORY_CHANNEL] == "share"
+    # The recipient's first turn in the copy is the first memory capture for this thread.
+    own = [HumanMessage(content="Bob's own question", id="bob-q"), AIMessage(content="Bob's answer", id="bob-a")]
+    manager = MagicMock()
+    monkeypatch.setattr(memory_middleware, "get_memory_manager", lambda: manager)
+    middleware = memory_middleware.MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
+    middleware.after_agent({"messages": [*copied, *own]}, Runtime(context={"thread_id": "copy", "user_id": str(BOB.id)}))
+    assert [message.id for message in manager.add.call_args.args[1]] == ["bob-q", "bob-a"]
+    copy = await ctx.app.state.thread_store.get(response.json()["thread_id"], user_id=str(BOB.id))
+    assert copy["metadata"][share_fork.SHARE_IMPORT_HISTORY_MARKED_KEY] is True
+
+
+async def _copy_from_an_earlier_build(ctx):
+    """A copy as ``fork_share`` wrote it before copied messages were marked, plus one own turn."""
+    thread_id = str(uuid4())
+    await ctx.app.state.thread_store.create(thread_id, user_id=str(BOB.id), display_name="Old copy")
+    accessor, config = build_checkpoint_state_mutation_accessor(ctx.request, thread_id=thread_id, as_node="branch")
+    copied = [HumanMessage(content="I am Alice, CFO at Contoso", id="copied-h"), AIMessage(content="search:\nAlice's tool output", id="copied-a")]
+    await accessor.aupdate(config, {"messages": Overwrite(copied), "title": "Old copy"}, as_node="branch")
+    await ctx.app.state.thread_store.update_metadata(thread_id, {share_fork.SHARE_IMPORT_COMPLETE_KEY: True}, user_id=str(BOB.id))
+    await accessor.aupdate(config, {"messages": [HumanMessage(content="Bob's own question", id="bob-q"), AIMessage(content="Bob's answer", id="bob-a")]}, as_node="branch")
+    return thread_id, accessor, config
+
+
+async def test_copy_from_an_earlier_build_is_marked_once_the_thread_is_free(share_app):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    threads = ctx.app.state.thread_store
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+
+    def marks(snapshot):
+        return {message.id: message.additional_kwargs.get(IMPORTED_HISTORY_KEY) for message in snapshot.values["messages"]}
+
+    async with ctx.app.state.run_manager.reserve_thread_operation(thread_id, kind=ThreadOperationKind.artifact_write, user_id=str(BOB.id)):
+        await share_fork.ensure_share_import_history_marked(ctx.request, thread_id, threads=threads, metadata_timeout=5)
+    assert set(marks(await accessor.aget(config)).values()) == {None}
+
+    await share_fork.ensure_share_import_history_marked(ctx.request, thread_id, threads=threads, metadata_timeout=5)
+    marked = await accessor.aget(config)
+    # Only the turns the import wrote are someone else's; Bob's turn stays his.
+    assert marks(marked) == {"copied-h": "share", "copied-a": "share", "bob-q": None, "bob-a": None}
+    assert marked.values[IMPORTED_HISTORY_CHANNEL] == "share"
+    assert (await threads.get(thread_id, user_id=None))["metadata"][share_fork.SHARE_IMPORT_HISTORY_MARKED_KEY] is True
+    await share_fork.ensure_share_import_history_marked(ctx.request, thread_id, threads=threads, metadata_timeout=5)
+    assert (await accessor.aget(config)).config == marked.config
+
+
+async def test_copy_from_an_earlier_build_keeps_a_pending_interrupt(share_app, monkeypatch):
+    from deerflow.utils.messages import IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    build = share_fork.build_checkpoint_state_mutation_accessor
+
+    class Paused:
+        """The real accessor, reporting the head as paused before a node."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def aget(self, *args, **kwargs):
+            return (await self.inner.aget(*args, **kwargs))._replace(next=("tools",))
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    def paused_accessor(*args, **kwargs):
+        inner, paused_config = build(*args, **kwargs)
+        return Paused(inner), paused_config
+
+    monkeypatch.setattr(share_fork, "build_checkpoint_state_mutation_accessor", paused_accessor)
+    head = await accessor.aget(config)
+    await share_fork.ensure_share_import_history_marked(ctx.request, thread_id, threads=ctx.app.state.thread_store, metadata_timeout=5)
+    assert (await accessor.aget(config)).config == head.config
+    assert not any(IMPORTED_HISTORY_KEY in message.additional_kwargs for message in head.values["messages"])
+    assert share_fork.SHARE_IMPORT_HISTORY_MARKED_KEY not in (await ctx.app.state.thread_store.get(thread_id, user_id=None))["metadata"]
+
+
+def _wire_gateway_runs(ctx, monkeypatch, tmp_path):
+    """Serve real runs through the Gateway; returns the mocked memory manager."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from _agent_e2e_helpers import FakeToolCallingModel
+
+    from app.gateway.routers import thread_runs
+    from deerflow.agents.lead_agent import agent
+    from deerflow.agents.middlewares import memory_middleware
+    from deerflow.config import app_config
+    from deerflow.persistence.projects import ProjectRepository
+    from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
+
+    if not isinstance(ctx.app.state.run_event_store, DbRunEventStore) or ctx.app.state.checkpoint_channel_mode != "full":
+        pytest.skip("exercises the gateway runtime with durable full checkpoints")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(ctx.paths.base_dir))
+    monkeypatch.setattr("deerflow.config.paths._paths", ctx.paths)
+    config = app_config.AppConfig.model_validate(
+        {
+            "models": [{"name": "share-test", "display_name": "Share test", "use": "langchain_openai:ChatOpenAI", "model": "unused"}],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "skills": {"path": str(tmp_path / "skills")},
+            "tool_search": {"enabled": False},
+            "memory": {"enabled": True, "injection_enabled": False},
+            "title": {"enabled": False},
+        }
+    )
+    monkeypatch.setattr(app_config, "_app_config", config)
+    monkeypatch.setattr(app_config, "_app_config_is_custom", True)
+    ctx.app.state.project_repo = ProjectRepository(ctx.factory)
+    ctx.app.state.stream_bridge = MemoryStreamBridge()
+    ctx.app.include_router(thread_runs.router)
+    monkeypatch.setattr(agent, "create_chat_model", lambda **kwargs: FakeToolCallingModel(responses=[AIMessage(content="Use lst[::-1].")]))
+    manager = MagicMock(aadd=AsyncMock())
+    monkeypatch.setattr(memory_middleware, "get_memory_manager", lambda: manager)
+    return manager
+
+
+async def _run_and_capture(ctx, manager, thread_id):
+    result = await ctx.client.post(f"/api/threads/{thread_id}/runs/wait", json={"input": {"messages": [{"type": "human", "content": "How do I reverse a list?"}]}}, headers=headers("bob"))
+    assert result.status_code == 200, result.text
+    return manager.aadd.call_args.args[1]
+
+
+def _wire_manual_compaction(monkeypatch):
+    """Enable compaction with a fake summary model; returns the mocked flush manager."""
+    from unittest.mock import MagicMock
+
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+    from deerflow.agents.memory import summarization_hook
+    from deerflow.agents.middlewares import summarization_middleware
+    from deerflow.config import app_config
+
+    current = app_config._app_config
+    monkeypatch.setattr(app_config, "_app_config", current.model_copy(update={"summarization": current.summarization.model_copy(update={"enabled": True})}))
+    monkeypatch.setattr(summarization_middleware, "create_chat_model", lambda **kwargs: FakeListChatModel(responses=["SUMMARY"]))
+    flush = MagicMock()
+    monkeypatch.setattr(summarization_hook, "get_memory_manager", lambda: flush)
+    monkeypatch.setattr(summarization_hook, "get_memory_config", lambda: SimpleNamespace(enabled=True))
+    return flush
+
+
+async def _compact(ctx, thread_id):
+    response = await ctx.client.post(f"/api/threads/{thread_id}/compact", json={"force": True, "keep": {"type": "messages", "value": 1}}, headers=headers("bob"))
+    assert response.status_code == 200 and response.json()["compacted"] is True, response.text
+
+
+async def _bind_to_default_agent(accessor, config):
+    """Bob already chatted in the copy on the earlier build, which bound its checkpoints to an agent."""
+    from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+
+    bound = {**config, "metadata": {CHECKPOINT_AGENT_NAME_METADATA_KEY: DEFAULT_AGENT_NAME_METADATA_VALUE}}
+    await accessor.aupdate(bound, {"messages": [HumanMessage(content="Bob again", id="bob-q2"), AIMessage(content="Noted", id="bob-a2")]}, as_node="branch")
+
+
+def _follows_copy(messages):
+    from deerflow.utils.messages import FOLLOWS_IMPORTED_HISTORY_KEY
+
+    return bool(messages) and all(message.additional_kwargs.get(FOLLOWS_IMPORTED_HISTORY_KEY) is True for message in messages)
+
+
+async def test_next_run_in_a_copy_from_an_earlier_build_captures_only_the_owners_turns(share_app, monkeypatch, tmp_path):
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, _, _ = await _copy_from_an_earlier_build(ctx)
+
+    captured = await _run_and_capture(ctx, manager, thread_id)
+    assert [message.content for message in captured if message.type in {"human", "ai"}][:2] == ["Bob's own question", "Bob's answer"]
+    assert not any("Alice" in str(message.content) for message in captured)
+
+
+async def test_copy_keeps_its_provenance_through_compaction_branching_and_continuing(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    share = await make_share(ctx)
+    response = await ctx.client.post(f"/api/shares/{share['token']}/fork", json={"request_id": str(uuid4())}, headers=headers("bob"))
+    assert response.status_code == 200, response.text
+    copy_id = response.json()["thread_id"]
+    # Two own turns: compaction keeps the latest one and flushes the first.
+    await _run_and_capture(ctx, manager, copy_id)
+    await _run_and_capture(ctx, manager, copy_id)
+    flush = _wire_manual_compaction(monkeypatch)
+
+    # Compaction removes every copied message, and their marks with them.
+    await _compact(ctx, copy_id)
+    flushed = flush.add_nowait.call_args.args[1]
+    assert _follows_copy(flushed) and not any(message.additional_kwargs.get(IMPORTED_HISTORY_KEY) for message in flushed)
+    accessor, config = build_checkpoint_state_mutation_accessor(ctx.request, thread_id=copy_id, as_node="branch")
+    head = (await accessor.aget(config)).values["messages"]
+    assert not any(message.additional_kwargs.get(IMPORTED_HISTORY_KEY) for message in head)
+
+    # A second compaction flushes a batch with no marked message left in it.
+    await _run_and_capture(ctx, manager, copy_id)
+    await _compact(ctx, copy_id)
+    assert _follows_copy(flush.add_nowait.call_args.args[1])
+    head = (await accessor.aget(config)).values["messages"]
+
+    # A branch of the compacted copy and a run in it still capture as a copy.
+    branched = await ctx.client.post(f"/api/threads/{copy_id}/branches", json={"message_id": head[-1].id}, headers=headers("bob"))
+    assert branched.status_code == 200, branched.text
+    assert _follows_copy(await _run_and_capture(ctx, manager, branched.json()["thread_id"]))
+    assert _follows_copy(await _run_and_capture(ctx, manager, copy_id))
+
+
+async def test_manual_compaction_of_an_unmigrated_copy_flushes_only_the_owners_turns(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
+
+    ctx = share_app
+    _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    await _bind_to_default_agent(accessor, config)
+    flush = _wire_manual_compaction(monkeypatch)
+
+    # No run since the upgrade, so the copied turns are still unmarked.
+    await _compact(ctx, thread_id)
+
+    flushed = flush.add_nowait.call_args.args[1]
+    # Compaction keeps the latest request, so Bob's earlier turn is what it flushes.
+    assert [message.id for message in flushed] == ["bob-q", "bob-a"] and _follows_copy(flushed)
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == "share"
+
+
+async def test_manual_compaction_skips_the_memory_flush_when_share_provenance_is_unknown(share_app, monkeypatch, tmp_path):
+    ctx = share_app
+    _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    await _bind_to_default_agent(accessor, config)
+    flush = _wire_manual_compaction(monkeypatch)
+
+    async def metadata_unavailable(*args, **kwargs):
+        raise TimeoutError("metadata read timed out")
+
+    monkeypatch.setattr(share_fork, "_read_metadata", metadata_unavailable)
+
+    await _compact(ctx, thread_id)
+
+    flush.add_nowait.assert_not_called()
+
+
+async def test_copy_whose_import_history_is_unreadable_is_kept_out_of_memory_until_resolved(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_UNRESOLVED
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    await _bind_to_default_agent(accessor, config)
+    flush = _wire_manual_compaction(monkeypatch)
+    readable = share_fork._imported_message_ids
+
+    async def import_checkpoint_unavailable(*args, **kwargs):
+        return None
+
+    # The metadata says legacy copy, but which turns were copied cannot be read.
+    monkeypatch.setattr(share_fork, "_imported_message_ids", import_checkpoint_unavailable)
+    await _compact(ctx, thread_id)
+    flush.add_nowait.assert_not_called()
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == IMPORTED_HISTORY_UNRESOLVED
+    result = await ctx.client.post(f"/api/threads/{thread_id}/runs/wait", json={"input": {"messages": [{"type": "human", "content": "And sets?"}]}}, headers=headers("bob"))
+    assert result.status_code == 200, result.text
+    manager.aadd.assert_not_called()
+
+    # Once the import history can be read, the next run resolves it.
+    monkeypatch.setattr(share_fork, "_imported_message_ids", readable)
+    captured = await _run_and_capture(ctx, manager, thread_id)
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == "share"
+    assert _follows_copy(captured) and not any("Alice" in str(message.content) for message in captured)
+    # The turn Bob wrote while the copy was unresolved is not lost.
+    assert "And sets?" in [message.content for message in captured]
+
+
+def _fail_import_history_reads(ctx, monkeypatch):
+    """Make reading a thread's checkpoint history raise, as an unavailable checkpoint store does."""
+    checkpointer = ctx.app.state.checkpointer
+
+    class Failing:
+        def alist(self, *args, **kwargs):
+            raise ConnectionError("checkpoint store unavailable")
+
+        def __getattr__(self, name):
+            return getattr(checkpointer, name)
+
+    monkeypatch.setattr(share_fork, "get_checkpointer", lambda request: Failing())
+
+
+async def test_copy_whose_import_history_read_fails_is_kept_out_of_memory(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_UNRESOLVED
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+
+    _fail_import_history_reads(ctx, monkeypatch)
+    result = await ctx.client.post(f"/api/threads/{thread_id}/runs/wait", json={"input": {"messages": [{"type": "human", "content": "And sets?"}]}}, headers=headers("bob"))
+
+    assert result.status_code == 200, result.text
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == IMPORTED_HISTORY_UNRESOLVED
+    manager.aadd.assert_not_called()
+
+
+async def test_run_in_a_copy_is_refused_while_its_provenance_cannot_be_recorded(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
+
+    ctx = share_app
+    manager = _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    build = share_fork.build_checkpoint_state_mutation_accessor
+
+    class ReadOnly:
+        """The real accessor, failing every state write."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def aupdate(self, *args, **kwargs):
+            raise ConnectionError("checkpoint store unavailable")
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    def read_only_accessor(*args, **kwargs):
+        inner, read_only_config = build(*args, **kwargs)
+        return ReadOnly(inner), read_only_config
+
+    monkeypatch.setattr(share_fork, "build_checkpoint_state_mutation_accessor", read_only_accessor)
+    result = await ctx.client.post(f"/api/threads/{thread_id}/runs/wait", json={"input": {"messages": [{"type": "human", "content": "And sets?"}]}}, headers=headers("bob"))
+
+    assert result.status_code == 503, result.text
+    manager.aadd.assert_not_called()
+    assert IMPORTED_HISTORY_CHANNEL not in (await accessor.aget(config)).values
+
+    # Once provenance can be recorded, the run is admitted again.
+    monkeypatch.setattr(share_fork, "build_checkpoint_state_mutation_accessor", build)
+    captured = await _run_and_capture(ctx, manager, thread_id)
+    assert _follows_copy(captured) and not any("Alice" in str(message.content) for message in captured)
+
+
+@pytest.mark.parametrize("failure", ["missing", "read_error"])
+async def test_branch_of_a_copy_with_unreadable_import_history_is_unresolved(share_app, monkeypatch, tmp_path, failure):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_UNRESOLVED
+
+    ctx = share_app
+    _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, _, _ = await _copy_from_an_earlier_build(ctx)
+
+    async def import_checkpoint_unavailable(*args, **kwargs):
+        return None
+
+    if failure == "missing":
+        monkeypatch.setattr(share_fork, "_imported_message_ids", import_checkpoint_unavailable)
+    else:
+        _fail_import_history_reads(ctx, monkeypatch)
+    branched = await ctx.client.post(f"/api/threads/{thread_id}/branches", json={"message_id": "bob-a"}, headers=headers("bob"))
+
+    assert branched.status_code == 200, branched.text
+    accessor, config = build_checkpoint_state_mutation_accessor(ctx.request, thread_id=branched.json()["thread_id"], as_node="branch")
+    assert (await accessor.aget(config)).values[IMPORTED_HISTORY_CHANNEL] == IMPORTED_HISTORY_UNRESOLVED
+
+
+async def test_branch_of_an_unmigrated_copy_marks_the_copied_turns(share_app, monkeypatch, tmp_path):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    _wire_gateway_runs(ctx, monkeypatch, tmp_path)
+    thread_id, _, _ = await _copy_from_an_earlier_build(ctx)
+
+    branched = await ctx.client.post(f"/api/threads/{thread_id}/branches", json={"message_id": "bob-a"}, headers=headers("bob"))
+
+    assert branched.status_code == 200, branched.text
+    accessor, config = build_checkpoint_state_mutation_accessor(ctx.request, thread_id=branched.json()["thread_id"], as_node="branch")
+    head = await accessor.aget(config)
+    assert {message.id: message.additional_kwargs.get(IMPORTED_HISTORY_KEY) for message in head.values["messages"]} == {"copied-h": "share", "copied-a": "share", "bob-q": None, "bob-a": None}
+    assert head.values[IMPORTED_HISTORY_CHANNEL] == "share"
+
+
+async def test_copy_from_the_marking_build_gains_the_state_channel(share_app):
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY
+
+    ctx = share_app
+    threads = ctx.app.state.thread_store
+    thread_id, accessor, config = await _copy_from_an_earlier_build(ctx)
+    # As #8422 imported it: messages already marked, no state channel yet.
+    await share_fork.ensure_share_import_history_marked(ctx.request, thread_id, threads=threads, metadata_timeout=5)
+    head = await accessor.aget(config)
+    await accessor.aupdate(config, {IMPORTED_HISTORY_CHANNEL: None}, as_node="branch")
+
+    await share_fork.ensure_share_import_history_marked(ctx.request, thread_id, threads=threads, metadata_timeout=5)
+
+    migrated = await accessor.aget(config)
+    assert migrated.values[IMPORTED_HISTORY_CHANNEL] == "share"
+    assert [message.additional_kwargs.get(IMPORTED_HISTORY_KEY) for message in migrated.values["messages"]] == [message.additional_kwargs.get(IMPORTED_HISTORY_KEY) for message in head.values["messages"]]
+
+
+async def test_share_import_metadata_is_server_owned(share_app):
+    ctx = share_app
+    thread_id = str(uuid4())
+    forged = {share_fork.SHARE_IMPORT_COMPLETE_KEY: True, share_fork.SHARE_IMPORT_HISTORY_MARKED_KEY: False, "keep": 1}
+    response = await ctx.client.post("/api/threads", json={"thread_id": thread_id, "metadata": forged}, headers=headers("bob"))
+    assert response.status_code == 200, response.text
+    assert (await ctx.app.state.thread_store.get(thread_id, user_id=None))["metadata"] == {"keep": 1}
 
 
 async def test_fork_rechecks_completion_after_durable_admission(share_app, monkeypatch):
@@ -463,6 +884,24 @@ async def test_imported_nested_files_have_sandbox_write_permissions(share_app):
     assert stat.S_IMODE(output.stat().st_mode) == 0o666
     for directory in (root, root / "reports", output.parent):
         assert stat.S_IMODE(directory.stat().st_mode) == 0o777
+
+
+async def test_artifact_import_off_posix_is_refused_before_any_state(share_app, monkeypatch):
+    ctx = share_app
+    share = await make_share(ctx)
+    snapshot = await ctx.client.get(f"/api/shares/{share['token']}")
+    assert snapshot.json()["artifacts"]
+    url = f"/api/shares/{share['token']}/fork"
+    request_id = str(uuid4())
+    monkeypatch.setattr(share_fork, "_ARTIFACT_IMPORT_SUPPORTED", False)
+    refused = await ctx.client.post(url, json={"request_id": request_id}, headers=headers("bob"))
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == "Importing a share with artifacts requires POSIX"
+    # The refusal precedes any workspace state, so the same request can succeed
+    # once the descriptor-confined writer is available again.
+    monkeypatch.setattr(share_fork, "_ARTIFACT_IMPORT_SUPPORTED", True)
+    retried = await ctx.client.post(url, json={"request_id": request_id}, headers=headers("bob"))
+    assert retried.status_code == 200, retried.text
 
 
 async def test_unsafe_artifact_fails_without_publishing_partial_share(share_app):
