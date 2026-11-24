@@ -2227,3 +2227,76 @@ def test_file_operation_lock_memory_cleanup() -> None:
 
     # 检查特定 key 是否被清理（而不是检查总长度）
     assert lock_key not in _FILE_OPERATION_LOCKS
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/mnt/skills",
+        "/mnt/skills/public/demo/SKILL.md",
+        "//mnt/skills/custom/my-skill/SKILL.md",
+        "/mnt/skills/./legacy/old/SKILL.md",
+        "/mnt/user-data/../skills/public/demo/SKILL.md",
+        r"\mnt\skills\public\demo\SKILL.md",
+        "/mnt/acp-workspace",
+        "/mnt/acp-workspace/result.txt",
+    ],
+)
+def test_non_local_sandbox_blocks_readonly_virtual_writes(monkeypatch, path: str) -> None:
+    calls: list[str] = []
+
+    def fail_init(_rt):
+        calls.append("init")
+        raise AssertionError("ensure_sandbox_initialized should not be called for read-only virtual paths")
+
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "e2b-remote-1"}}, context={"thread_id": "thread-1"}, config={})
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", fail_init)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda rt: calls.append("dirs"))
+
+    write_result = write_file_tool.func(runtime=runtime, description="write", path=path, content="tamper")
+    replace_result = str_replace_tool.func(runtime=runtime, description="replace", path=path, old_str="a", new_str="b")
+
+    assert write_result == f"Error: Permission denied writing to file: {path}"
+    assert replace_result == f"Error: Permission denied accessing file: {path}"
+    assert calls == []
+
+
+def test_non_local_sandbox_blocks_custom_skills_container_path(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("deerflow.sandbox.tools._get_skills_container_path", lambda: "/custom/skills")
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda rt: calls.append("init"))
+
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "e2b-remote-custom"}}, context={"thread_id": "thread-1"}, config={})
+    target = "/custom/skills/public/demo/SKILL.md"
+
+    assert write_file_tool.func(runtime=runtime, description="write", path=target, content="tamper") == f"Error: Permission denied writing to file: {target}"
+    assert str_replace_tool.func(runtime=runtime, description="replace", path=target, old_str="a", new_str="b") == f"Error: Permission denied accessing file: {target}"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/mnt/user-data/workspace/note.txt",
+        "/mnt/skills-backup/note.txt",
+    ],
+)
+def test_non_local_sandbox_allows_writable_paths(monkeypatch, path: str) -> None:
+    written: list[tuple[str, str]] = []
+
+    class FakeRemoteSandbox:
+        id = "e2b-remote-2"
+
+        def read_file(self, target: str) -> str:
+            return "hello world"
+
+        def write_file(self, target: str, content: str, append: bool = False) -> None:
+            written.append((target, content))
+
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "e2b-remote-2"}}, context={"thread_id": "thread-1"}, config={})
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda rt: FakeRemoteSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda rt: None)
+
+    assert write_file_tool.func(runtime=runtime, description="write", path=path, content="hello world") == "OK"
+    assert str_replace_tool.func(runtime=runtime, description="replace", path=path, old_str="world", new_str="deer") == "OK"
+    assert written == [(path, "hello world"), (path, "hello deer")]

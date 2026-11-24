@@ -824,3 +824,30 @@ def test_apply_prompt_template_deferred_path_mentions_describe_skill(monkeypatch
     assert "describe_skill(name)" in prompt
     # Must NOT contain the legacy wording
     assert "Always load the relevant skill" not in prompt
+
+
+def test_skills_prompt_states_readonly_runtime_rule(monkeypatch):
+    config = _make_minimal_app_config()
+    config.skills = SimpleNamespace(container_path="/custom/skills")
+    skill = SimpleNamespace(
+        name="demo-skill",
+        description="Demo",
+        category="public",
+        enabled=True,
+        get_container_file_path=lambda base: f"{base}/public/demo-skill/SKILL.md",
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: [skill]))
+    monkeypatch.setattr(prompt_module, "get_enabled_skills_for_config", lambda *args, **kwargs: [skill])
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+
+    legacy_prompt = prompt_module.apply_prompt_template(app_config=config)
+    deferred_prompt = prompt_module.apply_prompt_template(app_config=config, skill_names=frozenset({"demo-skill"}))
+
+    for rendered in (legacy_prompt, deferred_prompt):
+        assert "/custom/skills" in rendered
+        assert "read-only runtime assets" in rendered
+        assert "write_file" in rendered
+        assert "str_replace" in rendered
+        assert "bash" in rendered
+        assert "skill_manage" in rendered

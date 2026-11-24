@@ -21,6 +21,7 @@ from deerflow.config.subagents_config import (
     effective_total_subagents_per_run,
 )
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.describe import format_skills_readonly_guidance
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
@@ -910,6 +911,7 @@ You have access to skills that provide optimized workflows for specific tasks. E
 **Allowed tools:** A skill's `allowed-tools` frontmatter is compatibility metadata carried for other agent frameworks. It never restricts or grants tools here; your tools are controlled by DeerFlow's Agent configuration and authorization.
 
 **Skills are located at:** {container_base_path}
+{format_skills_readonly_guidance(container_base_path)}
 {skill_evolution_section}
 {skills_list}
 {disabled_section}

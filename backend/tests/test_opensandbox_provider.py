@@ -609,6 +609,24 @@ def opensandbox_skill_view(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     finally:
         reset_sandbox_provider()
         provider.shutdown()
+        _make_tree_writable(remote_roots)
+
+
+def _make_tree_writable(root: Path) -> None:
+    if not root.exists():
+        return
+    for dirpath, _dirnames, filenames in os.walk(root):
+        try:
+            os.chmod(dirpath, os.stat(dirpath).st_mode | 0o200)
+        except OSError:
+            pass
+        for fname in filenames:
+            target = Path(dirpath) / fname
+            if not target.is_symlink():
+                try:
+                    os.chmod(target, target.stat().st_mode | 0o200)
+                except OSError:
+                    pass
 
 
 def _remote_skills(remote):
@@ -652,6 +670,29 @@ def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
         env.provider.release(alice_id)
     assert len(env.sdk.remotes) == 2
     assert _remote_skills(bob) == {"alpha", "beta", "bob-only"}
+
+
+def test_opensandbox_skill_projection_locks_readonly_and_unlocks_before_replace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    paths = Paths(base_dir=tmp_path / "host")
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    provider, sdk = _install(monkeypatch)
+    projection = get_thread_skill_projection_paths(get_or_new_user_skill_storage("alice", app_config=_stub_config()), "thread-ro")
+    for category_dir in (projection.public, projection.custom, projection.legacy, projection.integrations):
+        category_dir.mkdir(parents=True, exist_ok=True)
+    (projection.public / "demo").mkdir()
+    (projection.public / "demo" / "SKILL.md").write_text("---\nname: demo\n---\n", encoding="utf-8")
+    try:
+        sandbox_id = provider.acquire("thread-ro", user_id="alice")
+        provider.sync_agent_skills(sandbox_id, thread_id="thread-ro", user_id="alice", projection=projection)
+        commands = [cmd for cmd, _ in sdk.remotes[0].commands.calls]
+        stage_cmds = [cmd for cmd in commands if "mkdir -m 700 --" in cmd]
+        swap_cmds = [cmd for cmd in commands if "mv --" in cmd and "rmdir --" in cmd]
+        assert stage_cmds and "chmod -R u+w --" in stage_cmds[-1]
+        assert swap_cmds
+        assert "chmod -R u+w --" in swap_cmds[-1]
+        assert "chmod -R a-w --" in swap_cmds[-1]
+    finally:
+        provider.shutdown()
 
 
 @pytest.mark.parametrize("restricted", [False, True])
@@ -765,6 +806,7 @@ def test_opensandbox_skill_sync_refuses_symlinked_remote_root(opensandbox_skill_
     sandbox_id = env.provider.acquire("thread", user_id="alice")
     remote = env.sdk.remotes[0]
     env.provider.release(sandbox_id)
+    _make_tree_writable(remote.skill_root)
     shutil.rmtree(remote.skill_root)
     destination = tmp_path / "unmanaged"
     destination.mkdir()

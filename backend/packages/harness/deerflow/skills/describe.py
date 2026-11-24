@@ -210,6 +210,16 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
 # ── Prompt rendering ─────────────────────────────────────────────────────────
 
 
+def format_skills_readonly_guidance(container_base_path: str) -> str:
+    """Return runtime read-only instructions for mounted skills."""
+    return (
+        f"**Read-Only Runtime Skills:** Files under `{container_base_path}` are read-only runtime assets. "
+        "Never modify them using `write_file`, `str_replace`, or `bash`, and never tell the user a skill "
+        f"was updated by editing files under `{container_base_path}`. To create, update, or delete skills, "
+        "use `skill_manage` when enabled, or instruct the user to manage skills externally."
+    )
+
+
 def get_skill_index_prompt_section(
     *,
     skill_names: frozenset[str] = frozenset(),
@@ -249,4 +259,5 @@ You have access to skills that provide optimized workflows for specific tasks.
 </skill_index>
 
 Skills are located at: {container_base_path}
+{format_skills_readonly_guidance(container_base_path)}
 </skill_system>"""

@@ -698,6 +698,34 @@ class TestVeFaaSSandboxProviderLifecycle:
         finally:
             provider.shutdown()
 
+    def test_sync_agent_skills_locks_readonly_and_keeps_user_data_writable(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, _server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("t-skills-ro", user_id="u-skills")
+            aio = aio_instances[0]
+            aio.commands.clear()
+
+            proj_root = tmp_path / "proj"
+            for cat in ("public", "custom", "legacy", "integrations"):
+                (proj_root / cat).mkdir(parents=True)
+            (proj_root / "public" / "demo-skill").mkdir()
+            (proj_root / "public" / "demo-skill" / "SKILL.md").write_text("---\nname: demo\n---\n", encoding="utf-8")
+            projection = SimpleNamespace(
+                public=proj_root / "public",
+                custom=proj_root / "custom",
+                legacy=proj_root / "legacy",
+                integrations=proj_root / "integrations",
+            )
+            provider.sync_agent_skills(sandbox_id, thread_id="t-skills-ro", user_id="u-skills", projection=projection)
+
+            skill_cmds = [cmd for cmd in aio.commands if ".vefaas-stage-" in cmd and "UPLOAD_OK" in cmd]
+            assert skill_cmds
+            assert "chmod -R u+w --" in skill_cmds[-1]
+            assert "chmod -R a-w --" in skill_cmds[-1]
+            assert not any("chmod -R a-w" in cmd for cmd in aio.commands if "/mnt/user-data" in cmd)
+        finally:
+            provider.shutdown()
+
     def test_lost_ownership_lease_forgets_locally_without_killing_peer_sandbox(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         provider, server, aio_instances = _install_provider(monkeypatch, tmp_path)
         try:

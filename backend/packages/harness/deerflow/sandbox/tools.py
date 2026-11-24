@@ -1022,6 +1022,23 @@ def _reject_path_traversal(path: str) -> None:
             raise PermissionError("Access denied: path traversal detected")
 
 
+def _normalize_virtual_posix_path(path: str) -> str:
+    """Normalize a virtual POSIX path and collapse leading double slashes."""
+    normalized = posixpath.normpath(path.replace("\\", "/"))
+    if normalized.startswith("//"):
+        normalized = "/" + normalized.lstrip("/")
+    return normalized
+
+
+def _reject_readonly_virtual_write_path(path: str) -> None:
+    """Block writes to read-only virtual roots across all sandbox providers."""
+    normalized = _normalize_virtual_posix_path(path)
+    if _is_skills_path(normalized):
+        raise PermissionError(f"Write access to skills path is not allowed: {path}")
+    if _is_acp_workspace_path(normalized):
+        raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
+
+
 def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
     """Validate that a virtual path is allowed for local-sandbox access.
 
@@ -3505,6 +3522,7 @@ def write_file_tool(
                 )
     try:
         requested_path = path
+        _reject_readonly_virtual_write_path(path)
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         if is_local_sandbox(runtime):
@@ -3594,9 +3612,10 @@ def str_replace_tool(
         replace_all: Whether to replace all occurrences of the substring. If False, only the first occurrence will be replaced. Default is False.
     """
     try:
+        requested_path = path
+        _reject_readonly_virtual_write_path(path)
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
