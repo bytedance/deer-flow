@@ -23,6 +23,10 @@ and checkpoints. Models configured with `supports_vision: true` continue to
 receive images. Direct SDK factories without a model capability profile retain
 their existing image handling.
 
+When the compatibility middleware rewrites history, the OpenAI Responses API
+request replays the projected messages. After a switch to a text-only model,
+this lets the provider see the placeholders and surrounding tool text.
+
 ## Stdio Working Directory
 
 Set `cwd` when a stdio server needs to resolve its entrypoint or data files

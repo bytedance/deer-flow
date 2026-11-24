@@ -552,6 +552,64 @@ class TestAsyncParity:
         assert prepared is request
 
 
+@pytest.mark.parametrize("supports_vision", [False, True], ids=["text-only", "vision"])
+def test_responses_api_replays_projected_image_history(supports_vision):
+    import json
+
+    import httpx
+    from langchain.agents import create_agent
+    from langchain_openai import ChatOpenAI
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    payloads = []
+
+    def respond(request):
+        assert request.url.path == "/v1/responses"
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_followup",
+                "object": "response",
+                "model": "gpt-4.1",
+                "created_at": 0,
+                "status": "completed",
+                "output": [{"type": "message", "id": "msg_followup", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Done", "annotations": []}]}],
+            },
+        )
+
+    image = {"type": "image", "base64": "iVBORw0KGgo=", "mime_type": "image/png"}
+    result = _tool_message([{"type": "text", "text": "Screenshot captured"}, image])
+    call = AIMessage(content="", tool_calls=[{"name": "some_tool", "args": {}, "id": result.tool_call_id}], response_metadata={"id": "resp_call"})
+    previous = AIMessage(content="The page was captured", response_metadata={"id": "resp_vision"})
+    followup = HumanMessage(content="Describe the screenshot")
+    config = {"configurable": {"thread_id": "responses-image-history"}}
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatOpenAI(model="gpt-4.1", api_key="test-key", http_client=client, use_responses_api=True, use_previous_response_id=True)
+        graph = create_agent(model, middleware=[ModelContentCompatibilityMiddleware(supports_vision=supports_vision)], checkpointer=InMemorySaver())
+        graph.update_state(config, {"messages": [HumanMessage(content="Capture the page"), call, result, previous]}, as_node="model")
+        graph.invoke({"messages": [followup]}, config=config)
+        stored = graph.get_state(config).values["messages"]
+
+    assert stored[1].response_metadata == {"id": "resp_call"}
+    assert stored[2].content == [{"type": "text", "text": "Screenshot captured"}, image]
+    assert stored[3].response_metadata == {"id": "resp_vision"}
+
+    (payload,) = payloads
+    if supports_vision:
+        assert payload["previous_response_id"] == "resp_vision"
+        assert payload["input"] == [{"type": "message", "role": "user", "content": followup.content}]
+    else:
+        assert "previous_response_id" not in payload
+        (output,) = [item for item in payload["input"] if item.get("type") == "function_call_output"]
+        assert output["call_id"] == result.tool_call_id
+        assert output["output"] == [
+            {"type": "input_text", "text": "Screenshot captured"},
+            {"type": "input_text", "text": "[Image omitted: the selected model does not support image inputs]"},
+        ]
+
+
 @pytest.mark.parametrize("block", [{"type": "image", "base64": "synthetic-image-payload", "mime_type": "image/png"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,synthetic-image-payload"}}])
 async def test_text_only_image_projection_is_transient_and_idempotent(block):
     from deerflow_extension_api import collect_release_policies

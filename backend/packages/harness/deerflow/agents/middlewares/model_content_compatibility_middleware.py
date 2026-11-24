@@ -88,6 +88,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AnyMessage
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.agents.middlewares.tool_call_args import without_response_chain_id
 from deerflow.tools.resource_placeholder import model_visible_location, resource_placeholder_text
 
 logger = logging.getLogger(__name__)
@@ -244,4 +245,6 @@ class ModelContentCompatibilityMiddleware(AgentMiddleware[AgentState]):
         patched = _sanitize_messages(request.messages, request.model, self._supports_vision)
         if patched is None:
             return request
-        return request.override(messages=patched)
+        # An OpenAI response ID references the provider's original history.
+        # Drop every chain ID so the adapter sends the projected history.
+        return request.override(messages=[without_response_chain_id(message) for message in patched])
