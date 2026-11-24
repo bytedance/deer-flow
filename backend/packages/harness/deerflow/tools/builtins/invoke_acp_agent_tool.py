@@ -331,9 +331,16 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
             )
             session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
-            if agent_config.model:
-                session_kwargs["model"] = agent_config.model
             session = await conn.new_session(**session_kwargs)
+            if agent_config.model:
+                model_option = next(
+                    (option for option in (getattr(session, "config_options", None) or []) if option.category == "model" and option.type == "select"),
+                    None,
+                )
+                if model_option is not None:
+                    await conn.set_config_option(config_id=model_option.id, session_id=session.session_id, value=agent_config.model)
+                else:
+                    await conn.set_session_model(model_id=agent_config.model, session_id=session.session_id)
             await conn.prompt(
                 session_id=session.session_id,
                 prompt=[text_block(prompt)],
