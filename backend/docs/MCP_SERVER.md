@@ -17,11 +17,12 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 ## Image results and model capabilities
 
 For a model configured with `supports_vision: false`, image blocks returned by
-MCP tools are replaced with text placeholders in the model request. Other text
-from the result remains available, and the original images stay in tool messages
-and checkpoints. Models configured with `supports_vision: true` continue to
-receive images. Direct SDK factories without a model capability profile retain
-their existing image handling.
+MCP tools become text placeholders in the model request. This covers standard
+`image` blocks, legacy `image_url` blocks, and native OpenAI Responses
+`input_image` blocks. Other result text remains available, and the original
+images stay in tool messages and checkpoints. Models configured with
+`supports_vision: true` continue to receive images. Direct SDK factories without
+a model capability profile retain their existing image handling.
 
 When the compatibility middleware rewrites history, the OpenAI Responses API
 request replays the projected messages. After a switch to a text-only model,

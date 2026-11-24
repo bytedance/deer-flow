@@ -553,7 +553,14 @@ class TestAsyncParity:
 
 
 @pytest.mark.parametrize("supports_vision", [False, True], ids=["text-only", "vision"])
-def test_responses_api_replays_projected_image_history(supports_vision):
+@pytest.mark.parametrize(
+    "image",
+    [
+        pytest.param({"type": "image", "base64": "iVBORw0KGgo=", "mime_type": "image/png"}, id="standard"),
+        pytest.param({"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}, id="native-responses"),
+    ],
+)
+def test_responses_api_replays_projected_image_history(supports_vision, image):
     import json
 
     import httpx
@@ -578,7 +585,6 @@ def test_responses_api_replays_projected_image_history(supports_vision):
             },
         )
 
-    image = {"type": "image", "base64": "iVBORw0KGgo=", "mime_type": "image/png"}
     result = _tool_message([{"type": "text", "text": "Screenshot captured"}, image])
     call = AIMessage(content="", tool_calls=[{"name": "some_tool", "args": {}, "id": result.tool_call_id}], response_metadata={"id": "resp_call"})
     previous = AIMessage(content="The page was captured", response_metadata={"id": "resp_vision"})
@@ -610,7 +616,14 @@ def test_responses_api_replays_projected_image_history(supports_vision):
         ]
 
 
-@pytest.mark.parametrize("block", [{"type": "image", "base64": "synthetic-image-payload", "mime_type": "image/png"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,synthetic-image-payload"}}])
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param({"type": "image", "base64": "synthetic-image-payload", "mime_type": "image/png"}, id="standard"),
+        pytest.param({"type": "image_url", "image_url": {"url": "data:image/png;base64,synthetic-image-payload"}}, id="legacy"),
+        pytest.param({"type": "input_image", "image_url": "data:image/png;base64,synthetic-image-payload"}, id="native-responses"),
+    ],
+)
 async def test_text_only_image_projection_is_transient_and_idempotent(block):
     from deerflow_extension_api import collect_release_policies
 

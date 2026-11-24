@@ -28,9 +28,9 @@ rewriting the *request view* at the model boundary:
   placeholder — local images are meant to reach the model through the
   ``view_image`` tool, not as unresolvable URLs.
 
-Configured text-only models also receive text placeholders for standard and
-legacy image blocks, including inline MCP images. Original messages retain their
-image payloads so a later vision-capable turn can still consume them.
+Configured text-only models also receive text placeholders for standard, legacy,
+and native OpenAI Responses image blocks. Original messages retain their image
+payloads so a later vision-capable turn can still consume them.
 
 Resource-link placeholder text comes from ``resource_placeholder_text`` in
 ``deerflow.tools.resource_placeholder`` — the same formatter the conversion
@@ -146,7 +146,7 @@ def _sanitize_block(block: Any, model: Any, supports_vision: bool) -> Any:
     if not isinstance(block, dict):
         return block
     block_type = block.get("type")
-    if block_type in ("image", "image_url") and not supports_vision:
+    if block_type in ("image", "image_url", "input_image") and not supports_vision:
         return {"type": "text", "text": "[Image omitted: the selected model does not support image inputs]"}
     if block_type == "file":
         # URL-sourced file blocks are rejected by Chat Completions whenever a
