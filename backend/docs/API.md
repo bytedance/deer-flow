@@ -295,6 +295,15 @@ is not restored from history. A valid goal explicitly supplied in run input
 still replaces it. Historical replay clears the old `goal_outcome`, because
 the previous answer's verdict does not certify the replacement answer.
 
+#### Branch and Replay Lookup
+
+`POST /api/threads/{thread_id}/branches`,
+`POST /api/threads/{thread_id}/runs/regenerate/prepare`, and
+`POST /api/threads/{thread_id}/runs/edit-regenerate/prepare` share a deadline
+for finding the replay base on the checkpoint lineage. If that lookup expires,
+the response is HTTP 504 with detail
+`Timed out resolving the checkpoint before the target user message`.
+
 ### Runs
 
 #### Create Run
