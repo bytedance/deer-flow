@@ -59,6 +59,8 @@ one removes it from subsequent runs. Promotion saves the instruction and removes
 the fact atomically; save any pending instruction edits first. User edits fence
 already-queued extraction so old results cannot undo them. Archived projects
 retain their facts for reading and do not collect new ones.
+A correction can remove its original fact only when its replacement is valid
+and survives storage.
 
 ## Document shelf
 
