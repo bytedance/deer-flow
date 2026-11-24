@@ -40,14 +40,28 @@ data:
             "~*^\[::1\]:(?<loopback_port>\d+)$"      "localhost:$loopback_port";
         }
 
+        # API clients do not reliably follow cross-host redirects, and some drop
+        # Authorization when they do. OAuth browser handoffs still redirect so
+        # their state cookies are available on the canonical host (#6156).
+        # Keep the OAuth exceptions ahead of the broader API regex.
+        map $uri $loopback_redirect_scope {
+            default                             "1";
+            "~^/api/v1/auth/(?:oauth|callback)/" "1";
+            "~^/api/mcp/user-oauth/callback"     "1";
+            "~^/api/"                            "";
+            "~^/health"                          "";
+            "~^/openapi\.json"                  "";
+        }
+
         # Safe methods only: redirecting an API POST would strand clients that
         # do not re-send bodies across the redirect. A GET carrying an Upgrade
         # header (a WebSocket handshake) must proxy straight through instead:
         # WebSocket clients never follow the 301.
-        map $request_method:$http_upgrade:$loopback_canonical_host $loopback_origin {
-            default      "";
-            "~*^GET::."  $loopback_canonical_host;
-            "~*^HEAD::." $loopback_canonical_host;
+        # Only paths included in the redirect scope use the canonical host.
+        map $request_method:$http_upgrade:$loopback_redirect_scope:$loopback_canonical_host $loopback_origin {
+            default        "";
+            "~*^GET::1:."  $loopback_canonical_host;
+            "~*^HEAD::1:." $loopback_canonical_host;
         }
 
         # K8s Services resolve at config-parse time (no resolver directive needed).
@@ -70,6 +84,11 @@ data:
             listen 2026 default_server;
             listen [::]:2026 default_server;
             server_name _;
+
+            # Canonicalize the loopback origin (#6156); see the maps above.
+            if ($loopback_origin != "") {
+                return 301 $scheme://$loopback_origin$request_uri;
+            }
 
             proxy_buffering off;
             proxy_cache off;
@@ -309,11 +328,6 @@ data:
 
             # Everything else -> frontend (with WebSocket upgrade for HMR/sockets).
             location / {
-                # Canonicalize the browser origin (#6156) after API and health routing.
-                if ($loopback_origin != "") {
-                    return 301 $scheme://$loopback_origin$request_uri;
-                }
-
                 proxy_pass http://frontend_upstream;
                 proxy_http_version 1.1;
                 proxy_set_header Host $http_host;
