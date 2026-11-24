@@ -99,7 +99,7 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
 
     Returns the rewritten list, one ``{original, synthetic, name, executable}`` claim
     entry per relabelled call, and whether anything changed. Invalid calls never
-    execute, so they are flagged unexecutable and excluded from result pairing.
+    execute, so they are flagged unexecutable and only pair with a result no executable call can claim.
     """
     relabeled: list = []
     assigned: list[dict] = []
