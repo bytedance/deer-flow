@@ -101,7 +101,7 @@ def test_render_project_block_escapes_name_attribute():
     assert block.startswith('<project id="p-1" name="a&quot;b&amp;c&lt;d&gt;">')
 
 
-@pytest.mark.parametrize("sep", ["\n", "\r", "\r\n", "\v", "\f", "\x85", "\u2028", "\u2029"])
+@pytest.mark.parametrize("sep", ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"])
 def test_render_project_block_keeps_name_attribute_on_one_line(sep):
     # The name is member-settable untrusted text; a line break inside the open
     # tag would push attacker-chosen lines into the rendered framework block.

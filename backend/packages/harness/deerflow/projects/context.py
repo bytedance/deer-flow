@@ -140,8 +140,9 @@ def render_project_block(snapshot: Mapping[str, Any] | None, *, include_memory: 
     instructions omit the instructions body but keep the project identity —
     the block always carries the pinned ``id``/``name`` (§7.2). Instructions
     are untrusted user text and pass through ``neutralize_untrusted_tags`` so a
-    literal ``</project>`` cannot close the block early; attribute values are
-    folded to one line and escaped for quotes, ampersands and angle brackets.
+    literal ``</project>`` cannot close the block early; the name attribute is
+    folded to one line and attribute values are escaped for quotes, ampersands
+    and angle brackets.
     """
     if not isinstance(snapshot, Mapping):
         return None
