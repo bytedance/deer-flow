@@ -117,7 +117,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -650,7 +650,7 @@ def _normalize_input_messages(
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
 #: Older checkpoints can contain loop detection's record of frequency-capped
 #: tools. Reserve its channel for server-owned state.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY})
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY, IMPORTED_HISTORY_CHANNEL})
 
 #: The ``write_todos`` status contract the todo middleware renders.
 _TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
