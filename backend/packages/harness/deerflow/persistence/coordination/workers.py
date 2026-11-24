@@ -202,7 +202,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             if execution is None or execution.task_id != task_id or execution.epoch != task.execution_epoch or task.status != TaskStatus.RUNNING:
                 raise TaskConflict("Task no longer accepts this execution")
             worker = await session.get(Assignment, (task_id, execution.epoch))
-            return worker.to_dict(), execution.frozen_input, task.project_id
+            return worker.to_dict(), execution.frozen_input, task.project_id, task.run_settings
 
     async def submit_task_decision(self, owner, task_id, execution_id, run_id, grant_id, tasks):
         if not 1 <= len(tasks) <= 8:

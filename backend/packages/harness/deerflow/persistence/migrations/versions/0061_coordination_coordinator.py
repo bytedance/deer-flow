@@ -4,8 +4,8 @@ import sqlalchemy as sa
 
 from deerflow.persistence.migrations._helpers import safe_add_column, safe_drop_column
 
-revision = "0060_coordination_coordinator"
-down_revision = "0059_coordination_grants"
+revision = "0061_coordination_coordinator"
+down_revision = "0060_coordination_run_settings"
 branch_labels = None
 depends_on = None
 

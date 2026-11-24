@@ -481,6 +481,8 @@ class ThreadState(AgentState):
     task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
     background_tasks: NotRequired[list[BackgroundTaskState]]
+    # Server-owned: see ``deerflow.utils.messages.IMPORTED_HISTORY_CHANNEL``.
+    imported_history: NotRequired[str | None]
 
 
 def _normalize_messages(value: Any) -> list[AnyMessage]:

@@ -91,6 +91,7 @@ class CoordinationTaskRepository:
         parent_id: str | None = None,
         depends_on: Sequence[str] = (),
         coordinator: bool = False,
+        run_settings: dict[str, int | bool] | None = None,
     ) -> dict:
         """Create a task once. Dependencies refer to previously created siblings."""
         _request_id(request_id)
@@ -99,13 +100,21 @@ class CoordinationTaskRepository:
         if coordinator and parent_id is not None:
             raise TaskConflict("Only a root task can use a Coordinator")
         dependencies = sorted(set(depends_on))
+        saved_run_settings = dict(run_settings) if run_settings else None
         async with self._write() as session:
             parent = await self._lock_tree(session, owner_id, parent_id) if parent_id is not None else None
             if parent is not None:
                 if project_id is not None and project_id != parent.project_id:
                     raise TaskConflict("A child task must use its parent's project")
                 project_id = parent.project_id
-            create_fields = dict(objective=objective, project_id=project_id, parent_id=parent_id, depends_on=dependencies, coordinator=True if coordinator else None)
+            create_fields = dict(
+                objective=objective,
+                project_id=project_id,
+                parent_id=parent_id,
+                depends_on=dependencies,
+                coordinator=True if coordinator else None,
+                run_settings=saved_run_settings,
+            )
             existing = await session.scalar(select(CoordinationTaskRow).filter_by(owner_id=owner_id, request_id=request_id))
             if existing is None:
                 if parent is not None and parent.status not in _OPEN:

@@ -31,6 +31,7 @@ from typing import Any, Literal
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -476,7 +477,12 @@ class DeerFlowClient:
         )
         max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), self._app_config)
 
-        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=tool_groups)
+        # attach_tracing=False because ``stream()`` injects tracing
+        # callbacks at the graph invocation root so a single embedded run
+        # produces one trace with correct session_id / user_id propagation.
+        # Attaching them again on the model would emit duplicate spans.
+        chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False, model_overrides=agent_model_overrides)
+        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=tool_groups, chat_model=chat_model)
 
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
@@ -548,11 +554,7 @@ class DeerFlowClient:
         verify_declared_tool_view(bound_middlewares, authorized_names=declared_authorized)
 
         kwargs: dict[str, Any] = {
-            # attach_tracing=False because ``stream()`` injects tracing
-            # callbacks at the graph invocation root so a single embedded run
-            # produces one trace with correct session_id / user_id propagation.
-            # Attaching them again on the model would emit duplicate spans.
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False, model_overrides=agent_model_overrides),
+            "model": chat_model,
             "tools": final_tools,
             "middleware": bound_middlewares,
             "system_prompt": apply_prompt_template(
@@ -586,11 +588,11 @@ class DeerFlowClient:
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool, mcp_plugins: list[str] | None = None, groups: list[str] | None = None):
+    def _get_tools(*, model_name: str | None, subagent_enabled: bool, chat_model: BaseChatModel, mcp_plugins: list[str] | None = None, groups: list[str] | None = None):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=groups)
+        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=groups, chat_model=chat_model)
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:

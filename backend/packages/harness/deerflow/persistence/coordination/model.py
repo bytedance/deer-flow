@@ -35,6 +35,7 @@ class CoordinationTaskRow(Base):
     depends_on: Mapped[list[str]] = mapped_column(JSON)
     objective: Mapped[str] = mapped_column(Text)
     coordinator: Mapped[bool | None] = mapped_column(Boolean)
+    run_settings: Mapped[dict[str, int | bool] | None] = mapped_column(JSON(none_as_null=True))
     status: Mapped[str] = mapped_column(String(16))
     revision: Mapped[int] = mapped_column(BigInteger)
     execution_epoch: Mapped[int] = mapped_column(BigInteger)

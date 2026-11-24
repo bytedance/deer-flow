@@ -177,20 +177,20 @@ async def test_cancel_and_followup_in_separate_transactions(repo):
 async def test_coordination_migration_matches_model_and_downgrades(database):
     engine, _, schema = database
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
-    previous = "0058_mcp_browser_oauth"
-    revision = "0060_coordination_coordinator"
+    previous = "0059_coordination_grants"
+    run_settings_revision = "0060_coordination_run_settings"
+    revision = "0061_coordination_coordinator"
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
     await asyncio.to_thread(command.upgrade, config, previous)
-    repo = CoordinationTaskRepository(async_sessionmaker(engine))
-    task_id = uuid4().hex
     async with engine.begin() as conn:
         await conn.execute(
             text(
                 "INSERT INTO coord_tasks (id, owner_id, request_id, root_id, depends_on, objective, status, revision, execution_epoch, latest_input_seq, created_at, updated_at) "
-                "VALUES (:id, 'alice', 'root', :id, '[]', 'Test the upgraded schema', 'queued', 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-            ),
-            {"id": task_id},
+                "VALUES ('legacy', 'alice', 'root', 'legacy', '[]', 'Test the upgraded schema', 'queued', 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
         )
+    repo = CoordinationTaskRepository(async_sessionmaker(engine))
+    await asyncio.to_thread(command.upgrade, config, run_settings_revision)
     await asyncio.to_thread(command.upgrade, config, revision)
     async with engine.connect() as conn:
 
@@ -202,15 +202,36 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
             return compare_metadata(context, Base.metadata)
 
         assert await conn.run_sync(diff) == []
-    assert (await repo.get("alice", task_id))["status"] == TaskStatus.QUEUED
-    await repo.append_input("alice", task_id, request_id="update", content="Record an input")
+    task = await repo.get("alice", "legacy")
+    assert task["status"] == TaskStatus.QUEUED
+    assert task["run_settings"] is None
+    assert task["coordinator"] is None
+    assert await repo.create("alice", request_id="root", objective=task["objective"], run_settings={}) == task
+    await repo.append_input("alice", task["id"], request_id="update", content="Record an input")
+    settings = {"recursion_limit": 400, "thinking_enabled": False}
+    configured = await repo.create("alice", request_id="configured", objective="Review", coordinator=True, run_settings=settings)
+    assert configured["coordinator"] is True
+    assert (await repo.get("alice", configured["id"]))["run_settings"] == settings
+
+    await asyncio.to_thread(command.downgrade, config, run_settings_revision)
+    async with engine.connect() as conn:
+        columns = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("coord_tasks")})
+        assert "coordinator" not in columns
+        assert "run_settings" in columns
+        assert await conn.scalar(text("SELECT run_settings IS NOT NULL FROM coord_tasks WHERE id = :id"), {"id": configured["id"]})
+
     await asyncio.to_thread(command.downgrade, config, previous)
+    async with engine.connect() as conn:
+        columns = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("coord_tasks")})
+        assert "run_settings" not in columns
+        assert await conn.scalar(text("SELECT latest_input_seq FROM coord_tasks WHERE id = 'legacy'")) == 1
+    await asyncio.to_thread(command.downgrade, config, "0058_mcp_browser_oauth")
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
     assert "mcp_oauth_attempts" in tables
     assert "coord_task_grants" not in tables
     async with engine.connect() as conn:
-        assert await conn.scalar(text("SELECT latest_input_seq FROM coord_tasks WHERE id = :id"), {"id": task_id}) == 1
+        assert await conn.scalar(text("SELECT latest_input_seq FROM coord_tasks WHERE id = 'legacy'")) == 1
     await asyncio.to_thread(command.downgrade, config, "0055_thread_shares")
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
