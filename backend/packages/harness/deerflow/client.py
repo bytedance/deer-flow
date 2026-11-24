@@ -325,6 +325,8 @@ class DeerFlowClient:
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
         }
+        if "reasoning_effort" in overrides:
+            configurable["reasoning_effort"] = overrides["reasoning_effort"]
         return RunnableConfig(
             configurable=configurable,
             recursion_limit=overrides.get("recursion_limit", 100),
@@ -361,6 +363,7 @@ class DeerFlowClient:
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
         mcp_plugins = getattr(agent_config, "mcp_plugins", None)
         tool_groups = getattr(agent_config, "tool_groups", None)
+        reasoning_effort = cfg.get("reasoning_effort", getattr(agent_config, "reasoning_effort", None))
         # Delegation reads this run's metadata, including when the graph is cached.
         config.setdefault("metadata", {})["mcp_plugins"] = mcp_plugins
         config["metadata"]["tool_groups"] = tool_groups
@@ -383,6 +386,7 @@ class DeerFlowClient:
         key = (
             cfg.get("model_name"),
             cfg.get("thinking_enabled"),
+            reasoning_effort,
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
             cfg.get("max_concurrent_subagents"),
@@ -481,7 +485,7 @@ class DeerFlowClient:
         # callbacks at the graph invocation root so a single embedded run
         # produces one trace with correct session_id / user_id propagation.
         # Attaching them again on the model would emit duplicate spans.
-        chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False, model_overrides=agent_model_overrides)
+        chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, attach_tracing=False, model_overrides=agent_model_overrides)
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=tool_groups, chat_model=chat_model)
 
         # Add framework-provided tools before authorization so Layer 1 sees

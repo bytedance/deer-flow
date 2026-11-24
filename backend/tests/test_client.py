@@ -1581,6 +1581,58 @@ class TestClientMcpSelection:
 
 
 class TestEnsureAgent:
+    @pytest.mark.parametrize("saved_effort", [None, "high"])
+    def test_reasoning_effort_reaches_provider(self, client, tmp_path, monkeypatch, saved_effort):
+        import httpx
+
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths._paths", paths)
+        if saved_effort is not None:
+            agent_dir = paths.user_agent_dir("test-user", "researcher")
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "config.yaml").write_text(f"name: researcher\nreasoning_effort: {saved_effort}\n", encoding="utf-8")
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            chunk = {"id": "chatcmpl-effort", "choices": [{"index": 0, "delta": {"content": "Done"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+            config = AppConfig(
+                models=[
+                    {
+                        "name": "offline",
+                        "use": "langchain_openai:ChatOpenAI",
+                        "model": "offline",
+                        "api_key": "synthetic-test-key",
+                        "http_client": transport,
+                        "use_responses_api": False,
+                        "reasoning": {"thinking": "optional", "effort": {"values": ["low", "medium", "high"], "default": "medium"}},
+                    }
+                ],
+                tools=[],
+                sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            )
+            config.tool_search.enabled = False
+            monkeypatch.setattr("deerflow.config.app_config._app_config", config)
+            monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
+            client._app_config = config
+            client._agent_name = "researcher" if saved_effort is not None else None
+            with (
+                patch("deerflow.client.build_middlewares", return_value=[]),
+                patch("deerflow.client.apply_prompt_template", return_value="Answer briefly."),
+                patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+                patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()),
+                patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            ):
+                for overrides in ({}, {"reasoning_effort": "low"}, {}, {"reasoning_effort": None}, {}):
+                    assert client.chat("Hello", thread_id="effort-probe", user_id="test-user", **overrides) == "Done"
+            assert [request.get("reasoning_effort") for request in requests] == [saved_effort or "medium", "low", saved_effort or "medium", "medium", saved_effort or "medium"]
+
     @pytest.mark.parametrize(
         ("selection", "saved_model", "when_thinking_disabled"),
         [
@@ -2172,6 +2224,7 @@ class TestEnsureAgent:
         client._agent_config_key = (
             None,
             True,
+            None,
             False,
             False,
             None,
