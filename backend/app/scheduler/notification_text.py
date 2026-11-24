@@ -39,21 +39,63 @@ _CONDITION_LIMIT = 200
 _TITLE_LIMIT = 200
 
 _EGRESS_REDACTION = "[redacted]"
-# Best-effort scrub before run content leaves for a third-party IM platform.
-# Patterns mirror the high-confidence secret detectors in skillscan.
-_EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+# Whole blocks go before the line rules: a header rule would otherwise consume
+# the opening delimiter, leaving the block pattern without a start marker and
+# the key body behind it in plain text.
+_EGRESS_BLOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
         re.DOTALL,
     ),
+)
+# Best-effort scrub before run content leaves for a third-party IM platform.
+# Patterns mirror the high-confidence secret detectors in skillscan.
+_EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
-    re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)"),
+    re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential|signature)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)"),
 )
+# The patterns above only reach a value that follows a secret-like key. Two
+# credential carriers have no such key: a URL's user info
+# (``postgres://user:pass@host``) and an ``Authorization``/``Cookie`` header
+# value (``Authorization: Bearer ...``). Both are common in agent replies about
+# deployments and API calls, and both would otherwise reach the IM platform
+# verbatim. Only the credential itself is replaced, so the scheme and the rest
+# of the line keep reading normally.
+_URL_USERINFO_RE = re.compile(r"([a-zA-Z][\w+.-]*://)([^/?#\s@]+)@")
+# The value may be quoted with the scheme outside the quotes, so both
+# ``Authorization: Bearer x`` and ``Authorization: "Bearer x"`` are covered.
+_AUTH_HEADER_RE = re.compile(r"(?i)(\bauthorization\b\s*[:=]\s*)(?:[\"']?(?:(bearer|basic|token|digest)\s+)?[\"']?)([^\s\"';]+)[\"']?")
+# ``Digest`` carries the credential as a list of ``name=value`` fields
+# (``username="…", nonce="…", response="…"``). Only the first field follows the
+# scheme, so the token rule would leave the rest visible; the whole header value
+# goes instead, the same way the cookie rule handles its pair list.
+_DIGEST_HEADER_RE = re.compile(r"(?i)(\bauthorization\b\s*[:=]\s*)(?:[\"']?digest\s+)([^\n]+)")
+# A cookie header carries one ``name=value`` pair per ``;``-separated segment,
+# and only the first pair follows the header name, so the whole value goes.
+_COOKIE_HEADER_RE = re.compile(r"(?i)(\bcookie\b\s*[:=]\s*)([^\n]+)")
+
+
+def _redact_url_userinfo(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_EGRESS_REDACTION}@"
+
+
+def _redact_auth_header(match: re.Match[str]) -> str:
+    scheme = match.group(2)
+    prefix = f"{match.group(1)}{scheme} " if scheme else match.group(1)
+    return f"{prefix}{_EGRESS_REDACTION}"
+
+
+def _redact_digest_header(match: re.Match[str]) -> str:
+    return f"{match.group(1)}Digest {_EGRESS_REDACTION}"
+
+
+def _redact_cookie_header(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_EGRESS_REDACTION}"
 
 
 def redact_egress_text(text: str) -> str:
@@ -61,6 +103,12 @@ def redact_egress_text(text: str) -> str:
     if not text:
         return text
     redacted = text
+    for pattern in _EGRESS_BLOCK_PATTERNS:
+        redacted = pattern.sub(_EGRESS_REDACTION, redacted)
+    redacted = _URL_USERINFO_RE.sub(_redact_url_userinfo, redacted)
+    redacted = _DIGEST_HEADER_RE.sub(_redact_digest_header, redacted)
+    redacted = _AUTH_HEADER_RE.sub(_redact_auth_header, redacted)
+    redacted = _COOKIE_HEADER_RE.sub(_redact_cookie_header, redacted)
     for pattern in _EGRESS_SECRET_PATTERNS:
         if pattern.groups:
             redacted = pattern.sub(lambda match: f"{match.group(1)}={_EGRESS_REDACTION}", redacted)

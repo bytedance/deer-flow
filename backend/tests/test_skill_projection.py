@@ -398,6 +398,71 @@ def test_unrestricted_run_reuses_existing_thread_mount_with_full_enabled_view(pr
     assert {category: getattr(projected, category).stat().st_ino for category in ("public", "custom", "legacy", "integrations")} == category_inodes
 
 
+@pytest.mark.parametrize("available_skills", [{"request-only"}, None], ids=["allowlist", "unrestricted"])
+@pytest.mark.parametrize("user_scoped", [True, False], ids=["user-scoped", "local"])
+def test_lead_projects_injected_skills_into_the_sandbox(projection_env, monkeypatch, available_skills, user_scoped) -> None:
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    env = projection_env
+    _write_skill(env.skills_root / "public", "default-only")
+    app_config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=False))
+    app_config.skills.path = str(env.skills_root)
+    request_root = env.root / "request-skills"
+    skill = _write_skill(request_root / "public", "request-only")
+    (skill.parent / "info.txt").write_text("request support file", encoding="utf-8")
+    _write_skill(request_root / "public", "another-skill")
+    _write_skill(request_root / "public", "disabled-skill")
+    env.extensions.skills["disabled-skill"] = SkillStateConfig(enabled=False)
+    kwargs = {"host_path": str(request_root), "app_config": app_config}
+    storage = UserScopedSkillStorage("alice", **kwargs) if user_scoped else LocalSkillStorage(**kwargs)
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    monkeypatch.setattr("deerflow.sandbox.security.get_app_config", lambda: app_config)
+    provider = LocalSandboxProvider()
+    monkeypatch.setattr("deerflow.sandbox.middleware.get_sandbox_provider", lambda: provider)
+    middlewares = build_middlewares(
+        {"configurable": {}},
+        app_config=app_config,
+        model_name=None,
+        user_id="alice",
+        available_skills=available_skills,
+        skill_storage=storage,
+    )
+    sandbox_middleware = next(m for m in middlewares if isinstance(m, SandboxMiddleware))
+    thread_id = "thread-injected"
+    projection = sandbox_middleware._prepare_agent_skill_projection(thread_id, user_id="alice")
+    assert projection is not None
+
+    sandbox = provider.get(provider.acquire(thread_id, user_id="alice"))
+    assert sandbox is not None
+    assert sandbox.read_file("/mnt/skills/public/request-only/SKILL.md") == skill.read_text(encoding="utf-8")
+    assert sandbox.read_file("/mnt/skills/public/request-only/info.txt") == "request support file"
+    assert (projection.public / "another-skill").exists() == (available_skills is None)
+    assert not (projection.public / "default-only").exists()
+    assert not (projection.public / "disabled-skill").exists()
+
+    restored = SandboxMiddleware()._prepare_agent_skill_projection(thread_id, user_id="alice")
+    assert restored == projection
+    assert not (projection.public / "request-only").exists()
+    assert (projection.public / "default-only" / "SKILL.md").is_file()
+
+
+def test_lead_rejects_projection_from_another_users_storage(projection_env, monkeypatch) -> None:
+    env = projection_env
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: env.config)
+    monkeypatch.setattr("deerflow.sandbox.middleware.get_sandbox_provider", lambda: SimpleNamespace(supports_agent_skill_isolation=True))
+    middleware = SandboxMiddleware(skill_storage=env.storage)
+
+    with pytest.raises(ValueError, match="storage owner"):
+        middleware._prepare_agent_skill_projection("thread-wrong-owner", user_id="bob")
+
+    assert not env.paths.thread_skills_view_dir("thread-wrong-owner", user_id="alice").exists()
+
+
 def test_subagent_non_owner_preserves_restricted_lead_projection(
     projection_env,
     monkeypatch,

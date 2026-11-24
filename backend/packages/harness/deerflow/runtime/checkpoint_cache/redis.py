@@ -58,12 +58,14 @@ class RedisCheckpointHistoryCache:
         serde: Any,
         ttl_seconds: int,
         max_connections: int | None = None,
+        legacy_key_prefix: str | None = None,
     ) -> None:
         self._client = _create_client(redis_url, max_connections=max_connections)
         self._serde = serde
         # ttl_seconds=0 is an explicit opt-out of expiry (no SETEX) — not the
         # default, and leaked/orphaned keys then rely on redis maxmemory only.
         self._ttl = ttl_seconds if ttl_seconds > 0 else None
+        self._legacy_key_prefix = legacy_key_prefix
         self._hits = 0
         self._misses = 0
         self._write_serialization_failures = 0
@@ -133,9 +135,12 @@ class RedisCheckpointHistoryCache:
             _warn("checkpoint history cache write failed; skipping: %s", exc)
 
     async def adelete_thread(self, key_prefix: str, thread_id: str) -> None:
-        """SCAN+UNLINK every entry of one thread. Failure degrades to
-        TTL-bounded residual retention; the source-of-truth delete already
-        happened, so this never raises."""
+        """Purge the thread from the active and previous default namespaces."""
+        await self._purge_prefix(key_prefix, thread_id)
+        if self._legacy_key_prefix is not None and self._legacy_key_prefix != key_prefix:
+            await self._purge_prefix(self._legacy_key_prefix, thread_id)
+
+    async def _purge_prefix(self, key_prefix: str, thread_id: str) -> None:
         stem = thread_key_stem(key_prefix, thread_id)
         # The configured namespace is a literal key prefix, not a Redis glob.
         pattern = "".join("\\" + char if char in "\\*?[]" else char for char in stem) + "*"
@@ -152,7 +157,7 @@ class RedisCheckpointHistoryCache:
                 if cursor == 0:
                     break
         except _redis_error() as exc:
-            _warn("checkpoint history cache thread purge failed; residual entries expire via TTL: %s", exc)
+            _warn("checkpoint history cache thread purge failed; cached entries may remain: %s", exc)
 
     def stats(self) -> CheckpointCacheStats:
         return CheckpointCacheStats(

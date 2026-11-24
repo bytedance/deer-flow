@@ -53,6 +53,17 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `history_read`: read the exact source ID in 4,000-character pages. Results mark
   truncation and provide `next_offset` while more stored text remains.
 
+### Search order
+
+Use `history_search(query="replicas", role="user", order="latest")` to look for a
+recent correction or decision. This orders active matches from newest to oldest
+in the current message list, then fills the remaining slots from reachable
+batches in reverse checkpoint order and from newest to oldest within each batch.
+Recapturing a batch makes it newest when the updated checkpoint is saved.
+With `order="relevance"` (the default), archived matches use the existing full-text
+rank and active matches use message-list order. Both orders apply the role
+filter and deduplicate source IDs before returning up to eight results.
+
 ### Matching excerpts and character offsets
 
 Each search result includes `excerpt`, `excerpt_start`, `excerpt_end`, and
@@ -142,16 +153,18 @@ creation clears the parent archive references and status; inherited note citatio
 may consequently be unavailable and need fresh verification in the branch.
 
 Retention is bounded by the configured batch/record/text limits and a 32,768-page
-SQLite ceiling (128 MiB for the default page size). The oldest physical batches
-expire as new ones are captured, even if an older checkpoint still refers to
-them. Read/search report `partially_expired` or `unavailable`; missing sources must
-be re-verified. `omitted_records` describes the latest capture's record limit,
-and each shortened source carries `truncated: true`.
-Eviction happens before replacement insertion in one write transaction.
-Competing captures serialize retention decisions; if insertion still exceeds
-capacity, rollback preserves the previous batches. Duplicate capture protects
-the current batch even when the configured retention limit is reduced.
-Storage failure preserves
+SQLite ceiling (128 MiB for the default page size). Each capture keeps its own
+batch and gives priority to the most recent references from the input
+checkpoint. Any remaining slots keep other stored batches in insertion order,
+newest first. A recapture moves its reference to the end of the next checkpoint
+without duplicating sources. If that checkpoint is never saved, later captures
+still use the last saved order. Older checkpoints may return
+`partially_expired` or `unavailable`; missing sources must be re-verified.
+`omitted_records` describes the latest capture's record limit, and each shortened
+source carries `truncated: true`.
+Eviction and replacement insertion share one write transaction. Competing
+captures serialize retention decisions, and a failed insertion rolls back
+evictions. Storage failure preserves
 ordinary compaction and marks history unavailable; it does not undo a successful
 summary. Async writes are offloaded and drained before cancellation returns.
 History tools preserve `unavailable` after a capture failure, even when older

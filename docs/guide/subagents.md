@@ -61,6 +61,32 @@ The Gateway closes admission and drains child execution, stream cleanup and
 checkpoint writes before closing the child saver. The parent saver remains open
 through that drain.
 
+### Inspect one thread's child history
+
+To see how much history has accumulated for ordinary `task` delegations, run
+the following command from the repository root. Supply the path to the
+Gateway's SQLite checkpoint database and the thread ID.
+
+```bash
+uv run --no-sync --project backend python backend/scripts/subagent_history_inventory.py \
+  --db /path/to/deerflow.db --thread-id YOUR_THREAD_ID
+```
+
+The command opens the database in read-only mode. For a database in WAL mode,
+SQLite may create `-wal` and `-shm` sidecar files in the database directory.
+If the directory is read-only, both sidecar files must already exist and be
+readable. See the [SQLite WAL documentation](https://sqlite.org/wal.html#read_only_databases).
+
+The JSON report lists each child namespace in the thread with the available
+execution and parent run IDs.
+A namespace with only writes or conflicting execution metadata still appears
+with its counts and a null execution ID. Both counts measure logical rows at
+the same instant, even if another delegation commits during the read.
+
+`unknown / retained` means the database has no conclusive record that the
+execution's checkpoint writer has finished. A completed or timed-out task can
+therefore still have this status. The inventory leaves the history in place.
+
 ### Checkpoint resource ownership
 
 All native subagents share one persistent event loop. The Gateway installs the
@@ -212,6 +238,14 @@ duration suffix printed for runs lasting at least a minute, such as `(0:01:05)`.
 provider reuses a tool-call id in a later response. Each run stays a separate
 entry in execution order, so a later failing run is decisive and an earlier
 run's output is never credited to another command.
+
+When the sandbox supplies a numeric process exit code, `tests_passed` evidence
+uses it before interpreting output such as `Exit Code: 7`. A passing process
+that prints this text therefore retains its successful execution status. Older
+checkpoints and providers that return plain strings keep the existing trailing
+exit-marker fallback. A zero exit code still requires a passing test summary;
+failed summaries are rejected, and missing or zero-test summaries remain
+`UNVERIFIED`.
 
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
