@@ -17,9 +17,10 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 ## Structured-only stdio tool results
 
 When a stdio MCP tool returns `structuredContent` with an empty `content` list,
-DeerFlow exposes the JSON result as model-visible text as well as retaining it
-in the tool artifact. Existing content blocks are preserved without adding a
-duplicate JSON rendering. Error results keep their error handling.
+DeerFlow exposes the JSON result as model-visible text. File references in its
+string values follow the same `/mnt/user-data/...` translation as text results.
+The tool artifact retains the original JSON. Existing content blocks take
+precedence over the fallback, and errors follow the usual error handling.
 
 ## Stdio Working Directory
 

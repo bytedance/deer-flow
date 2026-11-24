@@ -2,6 +2,7 @@
 
 import json
 from contextlib import asynccontextmanager
+from copy import deepcopy
 
 import pytest
 import pytest_asyncio
@@ -37,11 +38,23 @@ async def session_pool():
         ("streamable_http", "image/png", "png"),
         ("stdio", None, "result"),
         ("stdio", None, "empty"),
+        ("stdio", None, "generated-file"),
     ],
 )
 async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, monkeypatch, tmp_path, session_pool):
     url = f"https://example.com/report.{suffix}"
     calls = []
+    paths = Paths(tmp_path)
+    thread_id = "report-thread"
+    user_id = "report-owner"
+    generated_file = paths.sandbox_work_dir(thread_id, user_id=user_id) / "report folder" / "report.pdf"
+    structured = {"count": 3, "city": "杭州"} if suffix == "result" else {}
+    expected = structured
+    if suffix == "generated-file":
+        virtual_path = "/mnt/user-data/workspace/report folder/report.pdf"
+        structured = {"files": [{"path": str(generated_file), "relative": "report folder/report.pdf", "name": "report.pdf"}], "url": "https://example.com/report.pdf"}
+        expected = {**structured, "files": [{"path": virtual_path, "relative": virtual_path, "name": virtual_path}]}
+    original_artifact = {"structured_content": deepcopy(structured)}
 
     class Session:
         async def initialize(self):
@@ -61,7 +74,10 @@ async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, mo
         async def call_tool(self, name, arguments, **kwargs):
             calls.append((name, arguments))
             if mime is None:
-                return CallToolResult(content=[], structuredContent={"count": 3, "city": "杭州"} if suffix == "result" else {})
+                if suffix == "generated-file":
+                    generated_file.parent.mkdir(parents=True)
+                    generated_file.write_bytes(b"report")
+                return CallToolResult(content=[], structuredContent=structured)
             return CallToolResult(
                 content=[
                     ResourceLink(
@@ -81,7 +97,7 @@ async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, mo
     # Discovery, pooling/call protection, tool execution, and capture are real.
     monkeypatch.setattr("langchain_mcp_adapters.tools.create_session", fake_session)
     monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", fake_session)
-    monkeypatch.setattr("deerflow.mcp.tools.get_paths", lambda: Paths(tmp_path))
+    monkeypatch.setattr("deerflow.mcp.tools.get_paths", lambda: paths)
     connection = {"transport": "stdio", "command": "offline-mcp-fixture"} if transport == "stdio" else {"transport": "streamable_http", "url": "https://example.com/mcp"}
     discovered = await load_mcp_tools(
         None,
@@ -111,15 +127,14 @@ async def test_resource_link_captured_by_agent_graph(transport, mime, suffix, mo
     )
     state = await graph.ainvoke(
         {"messages": [("user", "Export a report")]},
-        context={"thread_id": "report-thread", "thread_incarnation": "fixture-incarnation"},
+        context={"thread_id": thread_id, "user_id": user_id, "thread_incarnation": "fixture-incarnation"},
     )
     (message,) = [m for m in state["messages"] if isinstance(m, ToolMessage)]
     assert calls == [("export", {})]
     assert message.status == "success"
     if mime is None:
-        expected = {"count": 3, "city": "杭州"} if suffix == "result" else {}
         assert json.loads(message.content[0]["text"]) == expected
-        assert message.artifact == {"structured_content": expected}
+        assert message.artifact == original_artifact
         return
     if mime.startswith("image/"):
         assert message.content[0]["type"] == "image"
