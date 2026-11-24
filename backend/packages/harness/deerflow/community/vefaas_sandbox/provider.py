@@ -172,6 +172,10 @@ class _VeFaaSShutdownIncompleteError(RuntimeError):
     """Raised when shutdown leaves unconfirmed teardowns or running workers."""
 
 
+class _PeerTeardownError(RuntimeError):
+    """Raised when a peer holds a destructive teardown lease for a sandbox."""
+
+
 @dataclass
 class _TrackedVeFaaSSandbox:
     """In-memory handle pairing a DeerFlow logical ID with its remote veFaaS instance."""
@@ -967,9 +971,13 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             self._acquire_inflight[sandbox_id] = self._acquire_inflight.get(sandbox_id, 0) + 1
 
         try:
-            reclaimed = self._reclaim_warm_pool(sandbox_id, key=key)
+            reclaimed = self._reclaim_warm_pool(sandbox_id, key=key, thread_id=thread_id, user_id=user_id)
             if reclaimed is not None:
                 return reclaimed
+
+            with self._lock:
+                if not self._accepting or self._shutdown_called or sandbox_id in self._local_teardown:
+                    raise RuntimeError("VeFaaSSandboxProvider shut down during acquire")
 
             # Fence any quarantined remote generations before creating or adopting a replacement.
             self._drain_quarantine_for_scope(sandbox_id)
@@ -1011,54 +1019,180 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 else:
                     self._acquire_inflight[sandbox_id] = remaining
 
-    def _handoff_paused_warm_entry(self, sandbox_id: str, tracked: _TrackedVeFaaSSandbox, *, function_id: str, raise_on_error: bool) -> bool:
-        """Check whether a warm sandbox is paused/transitioning; if so, hand off to discovery."""
-        try:
-            record = self._get_client().describe_sandbox(function_id, tracked.remote_sandbox_id)
-        except Exception as exc:
-            if raise_on_error:
-                raise
-            logger.warning("Failed to inspect warm veFaaS sandbox %s (remote=%s): %s", sandbox_id, tracked.remote_sandbox_id, self._redact(exc))
-            return False
-        if record is None or not (record.is_paused or record.status.strip().lower() in _DISCOVER_TRANSITION_STATUSES):
-            return False
+    @staticmethod
+    def _needs_warm_resume(record: VeFaaSSandboxRecord) -> bool:
+        return record.is_paused or record.is_transitioning
+
+    def _discard_absent_warm_entry(self, sandbox_id: str, tracked: _TrackedVeFaaSSandbox) -> None:
+        """Drop a warm entry whose remote instance is authoritatively absent or terminal."""
         with self._lock:
             removed = self._warm_pool.pop(sandbox_id, None) if self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked else None
         if removed is not None:
             removed[0].sandbox.close()
-        logger.info("Warm veFaaS sandbox %s (remote=%s) is %s; delegating to resume discovery", sandbox_id, tracked.remote_sandbox_id, record.status)
-        return True
+            self._release_ownership_best_effort(sandbox_id, context="absent warm sandbox")
 
-    def _reclaim_warm_pool(self, sandbox_id: str, *, key: tuple[str, str]) -> str | None:
+    def _destroy_warm_on_reclaim(self, sandbox_id: str, tracked: _TrackedVeFaaSSandbox, *, reason: str) -> None:
+        """Atomically move an unhealthy or unadoptable warm entry to pending destroys and tear it down."""
+        with self._lock:
+            removed = self._warm_pool.pop(sandbox_id, None) if self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked else None
+            if removed is not None:
+                self._pending_destroys[removed[0].remote_sandbox_id] = removed[0]
+        if removed is not None:
+            self._destroy_tracked(removed[0], reason=reason, require_pending=True)
+
+    def _reclaim_paused_warm_entry(
+        self,
+        sandbox_id: str,
+        tracked: _TrackedVeFaaSSandbox,
+        *,
+        record: VeFaaSSandboxRecord,
+        key: tuple[str, str],
+        function_id: str,
+        thread_id: str,
+        user_id: str | None,
+    ) -> str | None:
+        """Resume and adopt a paused/transitioning warm entry while keeping it tracked.
+
+        Keeps ``tracked`` in ``_warm_pool`` across all transient control-plane and
+        readiness errors so a failed acquire never drops the cleanup record for an
+        owned remote instance. Only removes ``tracked`` from ``_warm_pool`` once the
+        remote instance is adopted, confirmed absent/terminal, confirmed under peer
+        teardown, or moved atomically into ``_pending_destroys``.
+        """
+        remote_id = tracked.remote_sandbox_id
+        logger.info(
+            "Warm veFaaS sandbox %s (remote=%s) is %s; resuming tracked instance in place",
+            sandbox_id,
+            remote_id,
+            record.status,
+        )
+        candidate: VeFaaSSandboxRecord | None = record
+        if not candidate.is_paused and not candidate.is_running:
+            candidate = self._wait_for_transition_settled(
+                function_id,
+                remote_id,
+                deadline=time.monotonic() + self._config["ready_timeout"],
+            )
+            if candidate is None:
+                self._discard_absent_warm_entry(sandbox_id, tracked)
+                return None
+
+        try:
+            outcome, adopted = self._resume_and_adopt_paused_sandbox_outcome(
+                sandbox_id,
+                remote_id,
+                function_id=function_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
+        except _PeerTeardownError:
+            with self._lock:
+                removed = self._warm_pool.pop(sandbox_id, None) if self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked else None
+            if removed is not None:
+                removed[0].sandbox.close()
+            raise
+        except Exception:
+            # If initialization rollback already quarantined this generation under _pending_rollbacks,
+            # drop the stale warm entry so a retry drains quarantine instead of reclaiming it.
+            with self._lock:
+                quarantined = remote_id in self._pending_rollbacks or remote_id in self._quarantined_remote_ids.get(sandbox_id, set())
+                removed = self._warm_pool.pop(sandbox_id, None) if quarantined and self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked else None
+            if removed is not None:
+                removed[0].sandbox.close()
+            raise
+
+        if outcome == "absent":
+            self._discard_absent_warm_entry(sandbox_id, tracked)
+            return None
+        if outcome != "adopted" or adopted is None:
+            self._destroy_warm_on_reclaim(sandbox_id, tracked, reason="warm_resume_unadoptable")
+            return None
+
+        with self._lock:
+            removed = self._warm_pool.pop(sandbox_id, None) if self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked else None
+            if not self._accepting or self._shutdown_called or sandbox_id in self._local_teardown:
+                self._pending_destroys.setdefault(adopted.remote_sandbox_id, adopted)
+                rollback = True
+            else:
+                self._sandboxes[sandbox_id] = adopted
+                self._thread_sandboxes[key] = sandbox_id
+                self._bump_acquire_epoch_locked(sandbox_id)
+                rollback = False
+        if removed is not None:
+            removed[0].sandbox.close()
+        if rollback:
+            self._destroy_tracked(adopted, reason="reclaimed_during_shutdown", require_pending=True)
+            adopted.sandbox.close()
+            raise RuntimeError("VeFaaSSandboxProvider shut down during acquire")
+        logger.info("Reclaimed paused warm veFaaS sandbox %s (remote=%s)", sandbox_id, remote_id)
+        return sandbox_id
+
+    def _reclaim_warm_pool(
+        self,
+        sandbox_id: str,
+        *,
+        key: tuple[str, str],
+        thread_id: str,
+        user_id: str | None,
+    ) -> str | None:
         with self._lock:
             if sandbox_id in self._local_teardown:
                 raise RuntimeError(f"veFaaS sandbox {sandbox_id} is currently being torn down")
             warm_entry = self._warm_pool.get(sandbox_id)
+            quarantined_tracked: _TrackedVeFaaSSandbox | None = None
+            if warm_entry is not None:
+                remote_id = warm_entry[0].remote_sandbox_id
+                if remote_id in self._pending_rollbacks or remote_id in self._quarantined_remote_ids.get(sandbox_id, set()):
+                    self._warm_pool.pop(sandbox_id, None)
+                    quarantined_tracked = warm_entry[0]
+                    warm_entry = None
+        if quarantined_tracked is not None:
+            quarantined_tracked.sandbox.close()
         if warm_entry is None:
             return None
         tracked = warm_entry[0]
         function_id, _ = self._require_provisioning_settings()
-        if self._config["auto_pause"] and self._handoff_paused_warm_entry(sandbox_id, tracked, function_id=function_id, raise_on_error=True):
-            return None
+        if self._config["auto_pause"]:
+            record = self._get_client().describe_sandbox(function_id, tracked.remote_sandbox_id)
+            if record is None or record.is_terminal_failure:
+                self._discard_absent_warm_entry(sandbox_id, tracked)
+                return None
+            if self._needs_warm_resume(record):
+                return self._reclaim_paused_warm_entry(
+                    sandbox_id,
+                    tracked,
+                    record=record,
+                    key=key,
+                    function_id=function_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
         url, headers = self._resolve_data_plane(tracked.remote_sandbox_id)
         healthy = wait_for_sandbox_ready(url, timeout=5, headers=headers)
         if not healthy:
-            if self._handoff_paused_warm_entry(sandbox_id, tracked, function_id=function_id, raise_on_error=bool(self._config["auto_pause"])):
+            record = self._get_client().describe_sandbox(function_id, tracked.remote_sandbox_id)
+            if record is None or record.is_terminal_failure:
+                self._discard_absent_warm_entry(sandbox_id, tracked)
                 return None
-            with self._lock:
-                removed = self._warm_pool.pop(sandbox_id, None)
-                if removed is not None:
-                    self._pending_destroys[removed[0].remote_sandbox_id] = removed[0]
-            if removed is not None:
-                self._destroy_tracked(removed[0], reason="warm_health_check_failed", require_pending=True)
+            if self._needs_warm_resume(record):
+                return self._reclaim_paused_warm_entry(
+                    sandbox_id,
+                    tracked,
+                    record=record,
+                    key=key,
+                    function_id=function_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+            self._destroy_warm_on_reclaim(sandbox_id, tracked, reason="warm_health_check_failed")
             return None
 
         if not self._ownership.take(sandbox_id):
             with self._lock:
-                removed = self._warm_pool.pop(sandbox_id, None)
+                removed = self._warm_pool.pop(sandbox_id, None) if self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked else None
             if removed is not None:
                 removed[0].sandbox.close()
-            raise RuntimeError(f"veFaaS sandbox {sandbox_id} is currently being destroyed by a peer")
+            raise _PeerTeardownError(f"veFaaS sandbox {sandbox_id} is currently being destroyed by a peer")
 
         try:
             self._get_client().set_sandbox_timeout(
@@ -1070,8 +1204,10 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             logger.warning("Failed to extend veFaaS timeout for %s on reclaim: %s", tracked.remote_sandbox_id, exc)
 
         with self._lock:
-            removed = self._warm_pool.pop(sandbox_id, None)
+            removed = self._warm_pool.pop(sandbox_id, None) if self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked else None
             if removed is None:
+                if not self._accepting or self._shutdown_called or sandbox_id in self._local_teardown:
+                    raise RuntimeError("VeFaaSSandboxProvider shut down during acquire")
                 return None
             if not self._accepting or self._shutdown_called or sandbox_id in self._local_teardown:
                 self._pending_destroys[removed[0].remote_sandbox_id] = removed[0]
@@ -1189,7 +1325,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                             raise
                         if not taken:
                             sandbox.close()
-                            raise RuntimeError(f"veFaaS sandbox {sandbox_id} is being destroyed by a peer")
+                            raise _PeerTeardownError(f"veFaaS sandbox {sandbox_id} is being destroyed by a peer")
                     adopted = True
                     break
 
@@ -1286,6 +1422,25 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         user_id: str | None,
     ) -> _TrackedVeFaaSSandbox | None:
         """Resume a paused veFaaS sandbox under exclusive ownership and adopt it."""
+        _, tracked = self._resume_and_adopt_paused_sandbox_outcome(
+            sandbox_id,
+            remote_id,
+            function_id=function_id,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+        return tracked
+
+    def _resume_and_adopt_paused_sandbox_outcome(
+        self,
+        sandbox_id: str,
+        remote_id: str,
+        *,
+        function_id: str,
+        thread_id: str,
+        user_id: str | None,
+    ) -> tuple[Literal["adopted", "absent", "unadoptable"], _TrackedVeFaaSSandbox | None]:
+        """Resume a paused veFaaS sandbox and classify absence vs. refusal to adopt."""
         client = self._get_client()
         resume_deadline = time.monotonic() + self._config["ready_timeout"]
 
@@ -1294,7 +1449,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             with self._remote_init_lock(remote_id):
                 current = client.describe_sandbox(function_id, remote_id)
                 if current is None or current.is_terminal_failure:
-                    return None
+                    return "absent", None
                 if current.is_running:
                     already_running = True
                 elif current.is_paused:
@@ -1304,7 +1459,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                         try:
                             refreshed = client.describe_sandbox(function_id, remote_id)
                             if refreshed is None or refreshed.is_terminal_failure:
-                                return None
+                                return "absent", None
                             resumed_by_us = False
                             if refreshed.is_paused:
                                 try:
@@ -1315,7 +1470,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                                     )
                                     resumed_by_us = True
                                 except VeFaaSSandboxNotFoundError:
-                                    return None
+                                    return "absent", None
                             self._wait_for_remote_running(function_id, remote_id, deadline=resume_deadline)
                             url, headers = self._resolve_data_plane(remote_id)
                             remaining = max(1, int(math.ceil(resume_deadline - time.monotonic())))
@@ -1334,7 +1489,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                             )
                             if tracked is not None:
                                 logger.info("Resumed paused veFaaS sandbox %s (remote=%s)", sandbox_id, remote_id)
-                            return tracked
+                                return "adopted", tracked
+                            return "unadoptable", None
                         finally:
                             if lease_held:
                                 self._release_ownership_best_effort(sandbox_id, context="failed resume")
@@ -1344,7 +1500,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 remaining = max(1, int(math.ceil(resume_deadline - time.monotonic())))
                 if not wait_for_sandbox_ready(url, timeout=remaining, headers=headers):
                     raise TimeoutError(f"veFaaS sandbox {remote_id} did not become HTTP-ready within {self._config['ready_timeout']}s")
-                return self._adopt_running_sandbox(
+                adopted = self._adopt_running_sandbox(
                     sandbox_id,
                     remote_id,
                     function_id=function_id,
@@ -1353,6 +1509,9 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     ownership_claimed=False,
                     refresh_timeout=True,
                 )
+                if adopted is not None:
+                    return "adopted", adopted
+                return "unadoptable", None
 
             remaining = resume_deadline - time.monotonic()
             if remaining <= 0:

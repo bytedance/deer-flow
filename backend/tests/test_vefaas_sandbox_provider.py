@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import json
 import os
 import signal
 import subprocess
@@ -2509,3 +2510,374 @@ class TestVeFaaSImagePrecache:
         finally:
             allow_ready.set()
             provider.shutdown()
+
+    @pytest.mark.parametrize("auto_pause", [True, False])
+    def test_paused_warm_reacquire_with_list_sandboxes_503_retains_tracking_and_resumes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        auto_pause: bool,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        orig_handler = server.handler
+        list_outage = {"active": False}
+
+        def list_503_handler(req: httpx.Request) -> httpx.Response:
+            if list_outage["active"] and req.url.params.get("Action") == "ListSandboxes":
+                return httpx.Response(
+                    503,
+                    json={"ResponseMetadata": {"RequestId": "req-list-503", "Error": {"Code": "ServiceUnavailable", "Message": "transient 503"}}},
+                )
+            return orig_handler(req)
+
+        server.handler = list_503_handler  # type: ignore[method-assign]
+        persisted_files: dict[str, bytes] = {}
+
+        class _PersistingAio(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_files
+
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={"vefaas": {"auto_pause": auto_pause}},
+        )
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAio)
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid = provider.acquire("t-list-503", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            persisted_files["state"] = b"kept"
+            provider.release(sid)
+            assert sid in provider._warm_pool
+
+            server.sandboxes[remote_id]["Status"] = "Paused"
+            list_calls_before = sum(1 for action, _, _ in server.requests if action == "ListSandboxes")
+            list_outage["active"] = True
+
+            # Known paused warm sandbox resumes directly without depending on ListSandboxes.
+            assert provider.acquire("t-list-503", user_id="u1") == sid
+            assert provider._sandboxes[sid].remote_sandbox_id == remote_id
+            assert server.sandboxes[remote_id]["Status"] == "Running"
+            assert persisted_files["state"] == b"kept"
+            assert sum(1 for action, _, _ in server.requests if action == "CreateSandbox") == 1
+            assert sum(1 for action, _, _ in server.requests if action == "ResumeSandbox") == 1
+            assert sum(1 for action, _, _ in server.requests if action == "ListSandboxes") == list_calls_before
+        finally:
+            list_outage["active"] = False
+            provider.shutdown()
+
+        assert remote_id not in server.sandboxes
+        assert sum(1 for action, _, _ in server.requests if action == "KillSandbox") == 1
+
+    @pytest.mark.parametrize("failing_action", ["DescribeSandbox", "ResumeSandbox"])
+    @pytest.mark.parametrize("auto_pause", [True, False])
+    def test_paused_warm_reacquire_transient_503_keeps_cleanup_record_for_shutdown_and_retry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        failing_action: str,
+        auto_pause: bool,
+    ) -> None:
+        # Subcase A: failed acquire leaves warm entry tracked so shutdown kills it after recovery.
+        server = _FakeVeFaaSServer()
+        persisted_a: dict[str, bytes] = {}
+
+        class _PersistingAioA(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_a
+
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "shutdown-path",
+            server=server,
+            sandbox_overrides={"vefaas": {"auto_pause": auto_pause}},
+        )
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAioA)
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid = provider.acquire("t-503-shutdown", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            provider.release(sid)
+            server.sandboxes[remote_id]["Status"] = "Paused"
+
+            if failing_action == "DescribeSandbox":
+                server.describe_error = (503, "ServiceUnavailable", "transient describe 503")
+            else:
+                server.resume_error = (503, "ServiceUnavailable", "transient resume 503")
+
+            with pytest.raises(VeFaaSApiError):
+                provider.acquire("t-503-shutdown", user_id="u1")
+
+            # Warm tracking record must remain intact after failed acquire.
+            assert sid in provider._warm_pool
+            assert provider._warm_pool[sid][0].remote_sandbox_id == remote_id
+            assert remote_id in server.sandboxes
+
+            # Once the service recovers, shutdown MUST send KillSandbox and delete the paused instance.
+            server.describe_error = None
+            server.resume_error = None
+            provider.shutdown()
+            assert remote_id not in server.sandboxes
+            assert sum(1 for action, _, _ in server.requests if action == "KillSandbox") == 1
+        finally:
+            server.describe_error = None
+            server.resume_error = None
+            provider.shutdown()
+
+        # Subcase B: retry acquire after recovery resumes the SAME paused sandbox without duplicates.
+        server_b = _FakeVeFaaSServer()
+        persisted_b: dict[str, bytes] = {}
+
+        class _PersistingAioB(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_b
+
+        provider_b, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "retry-path",
+            server=server_b,
+            sandbox_overrides={"vefaas": {"auto_pause": auto_pause}},
+        )
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAioB)
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server_b.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid_b = provider_b.acquire("t-503-retry", user_id="u1")
+            remote_b = provider_b._sandboxes[sid_b].remote_sandbox_id
+            persisted_b["live"] = b"retry-preserved"
+            provider_b.release(sid_b)
+            server_b.sandboxes[remote_b]["Status"] = "Paused"
+
+            if failing_action == "DescribeSandbox":
+                server_b.describe_error = (503, "ServiceUnavailable", "transient describe 503")
+            else:
+                server_b.resume_error = (503, "ServiceUnavailable", "transient resume 503")
+
+            with pytest.raises(VeFaaSApiError):
+                provider_b.acquire("t-503-retry", user_id="u1")
+            assert sid_b in provider_b._warm_pool
+
+            server_b.describe_error = None
+            server_b.resume_error = None
+            assert provider_b.acquire("t-503-retry", user_id="u1") == sid_b
+            assert provider_b._sandboxes[sid_b].remote_sandbox_id == remote_b
+            assert server_b.sandboxes[remote_b]["Status"] == "Running"
+            assert persisted_b["live"] == b"retry-preserved"
+            assert sum(1 for action, _, _ in server_b.requests if action == "CreateSandbox") == 1
+            assert not any(action == "KillSandbox" for action, _, _ in server_b.requests)
+        finally:
+            server_b.describe_error = None
+            server_b.resume_error = None
+            provider_b.shutdown()
+
+    def test_paused_warm_reacquire_handles_absent_unadoptable_and_peer_handoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: Paused warm sandbox disappears (SandboxNotFound on ResumeSandbox) -> pops warm & creates replacement.
+        server_a = _FakeVeFaaSServer()
+        orig_handler_a = server_a.handler
+
+        def expire_on_resume(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "ResumeSandbox":
+                payload = json.loads(req.content.decode("utf-8"))
+                server_a.sandboxes.pop(payload["SandboxId"], None)
+            return orig_handler_a(req)
+
+        server_a.handler = expire_on_resume  # type: ignore[method-assign]
+        provider_a, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "absent",
+            server=server_a,
+            sandbox_overrides={"vefaas": {"auto_pause": True}},
+        )
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server_a.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid_a = provider_a.acquire("t-warm-absent", user_id="u1")
+            old_remote = provider_a._sandboxes[sid_a].remote_sandbox_id
+            provider_a.release(sid_a)
+            server_a.sandboxes[old_remote]["Status"] = "Paused"
+
+            assert provider_a.acquire("t-warm-absent", user_id="u1") == sid_a
+            new_remote = provider_a._sandboxes[sid_a].remote_sandbox_id
+            assert new_remote != old_remote
+            assert old_remote not in server_a.sandboxes
+            assert new_remote in server_a.sandboxes
+            assert sum(1 for action, _, _ in server_a.requests if action == "CreateSandbox") == 2
+        finally:
+            provider_a.shutdown()
+
+        # Case B: Resumed warm sandbox has mismatched/invalid init marker -> destroyed via _pending_destroys, never leaked.
+        server_b = _FakeVeFaaSServer()
+        persisted_b: dict[str, bytes] = {}
+
+        class _CorruptibleAio(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_b
+
+        provider_b, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "invalid-marker",
+            server=server_b,
+            sandbox_overrides={"vefaas": {"auto_pause": True}},
+        )
+        monkeypatch.setattr(provider_mod, "AioSandbox", _CorruptibleAio)
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server_b.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid_b = provider_b.acquire("t-warm-invalid", user_id="u1")
+            corrupted_remote = provider_b._sandboxes[sid_b].remote_sandbox_id
+            provider_b.release(sid_b)
+            server_b.sandboxes[corrupted_remote]["Status"] = "Paused"
+            # Corrupt init marker on the paused instance; fresh replacement receives its own marker.
+            persisted_b[provider_mod._INIT_MARKER_PATH] = b"wrong-sandbox-id\n"
+
+            class _FreshMarkerAio(_FakeAioSandbox):
+                def __init__(self, **kwargs: Any) -> None:
+                    super().__init__(**kwargs)
+                    remote_hdr = self.request_headers.get(provider_mod.INSTANCE_ROUTING_HEADER)
+                    if remote_hdr == corrupted_remote:
+                        self.uploaded_files = persisted_b
+
+            monkeypatch.setattr(provider_mod, "AioSandbox", _FreshMarkerAio)
+            assert provider_b.acquire("t-warm-invalid", user_id="u1") == sid_b
+            replacement_remote = provider_b._sandboxes[sid_b].remote_sandbox_id
+            assert replacement_remote != corrupted_remote
+            assert corrupted_remote not in server_b.sandboxes
+            assert replacement_remote in server_b.sandboxes
+            kill_targets = [payload["SandboxId"] for action, payload, _ in server_b.requests if action == "KillSandbox"]
+            assert corrupted_remote in kill_targets
+        finally:
+            provider_b.shutdown()
+
+        # Case C: After transient ResumeSandbox 503, a peer takes ownership -> original provider's shutdown must NOT kill it.
+        server_c = _FakeVeFaaSServer()
+        store_owner = MemoryOwnershipStore(owner_id="worker-a", ttl_seconds=60.0)
+        store_peer = MemoryOwnershipStore(owner_id="worker-b", ttl_seconds=60.0)
+        store_peer._leases = store_owner._leases
+        store_peer._lock = store_owner._lock
+        # Simulate a shared store (e.g. Redis) where worker-a closing its connection does not clear worker-b's leases.
+        monkeypatch.setattr(store_owner, "close", lambda: None)
+
+        provider_c, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "peer-takeover",
+            server=server_c,
+            sandbox_overrides={"vefaas": {"auto_pause": True}},
+        )
+        provider_c._ownership = store_owner
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server_c.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid_c = provider_c.acquire("t-peer-handoff", user_id="u1")
+            remote_c = provider_c._sandboxes[sid_c].remote_sandbox_id
+            provider_c.release(sid_c)
+            server_c.sandboxes[remote_c]["Status"] = "Paused"
+            server_c.resume_error = (503, "ServiceUnavailable", "transient resume 503")
+
+            with pytest.raises(VeFaaSApiError):
+                provider_c.acquire("t-peer-handoff", user_id="u1")
+            assert sid_c in provider_c._warm_pool
+
+            # Service recovers and peer claims ownership of the sandbox.
+            server_c.resume_error = None
+            assert store_peer.claim(sid_c) is True
+
+            provider_c.shutdown()
+            assert remote_c in server_c.sandboxes
+            assert not any(action == "KillSandbox" for action, _, _ in server_c.requests)
+            assert store_owner.owner(sid_c) == "worker-b"
+        finally:
+            server_c.resume_error = None
+            provider_c.shutdown()
+
+        # Case D: Concurrent shutdown while resuming a paused warm sandbox rolls back cleanly.
+        server_d = _FakeVeFaaSServer()
+        orig_handler_d = server_d.handler
+        resume_entered = threading.Event()
+        allow_resume = threading.Event()
+
+        def gated_resume_handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "ResumeSandbox":
+                resume_entered.set()
+                assert allow_resume.wait(timeout=5)
+            return orig_handler_d(req)
+
+        server_d.handler = gated_resume_handler  # type: ignore[method-assign]
+        persisted_d: dict[str, bytes] = {}
+
+        class _PersistingAioD(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_d
+
+        provider_d, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "shutdown-race",
+            server=server_d,
+            sandbox_overrides={"vefaas": {"auto_pause": True}},
+        )
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAioD)
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server_d.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid_d = provider_d.acquire("t-warm-shutdown-race", user_id="u1")
+            remote_d = provider_d._sandboxes[sid_d].remote_sandbox_id
+            provider_d.release(sid_d)
+            server_d.sandboxes[remote_d]["Status"] = "Paused"
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                reacquire_future = pool.submit(provider_d.acquire, "t-warm-shutdown-race", user_id="u1")
+                try:
+                    assert resume_entered.wait(timeout=5)
+                    # Concurrent shutdown sees the in-flight acquire, kills the tracked warm sandbox,
+                    # and reports incomplete until the acquire thread exits.
+                    with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError, match="acquire"):
+                        provider_d.shutdown()
+                finally:
+                    allow_resume.set()
+                with pytest.raises(RuntimeError, match="shut down"):
+                    reacquire_future.result(timeout=5)
+
+            # Retrying shutdown once the acquire thread exits succeeds with zero leaked remote sandbox.
+            provider_d.shutdown()
+            assert remote_d not in server_d.sandboxes
+            assert not provider_d._sandboxes
+            assert not provider_d._warm_pool
+            assert not provider_d._pending_destroys
+            assert sum(1 for action, _, _ in server_d.requests if action == "CreateSandbox") == 1
+            assert any(action == "KillSandbox" for action, _, _ in server_d.requests)
+        finally:
+            allow_resume.set()
+            provider_d.shutdown()
