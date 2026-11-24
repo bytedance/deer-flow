@@ -1,6 +1,7 @@
 """Skill history records use physical JSONL boundaries, not Unicode text lines."""
 
 import json
+import os
 
 import pytest
 
@@ -85,8 +86,6 @@ def _script_history_writes(monkeypatch, storage, script=None):
     count; it may shorten ``data`` or let another writer run around it. Returns
     the list of bytes that reached the file, one entry per write.
     """
-    import os
-
     history_path = storage.get_skill_history_file("demo-skill")
     real_write = os.write
     writes = []
@@ -175,6 +174,7 @@ def test_another_append_waits_for_a_short_write_to_finish(storage, monkeypatch):
     assert [record["author"] for record in storage.read_history("demo-skill")] == ["a", "b"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the operation mirror requires POSIX directory descriptors")
 def test_the_operation_mirror_and_appends_share_the_history_lock(storage, monkeypatch):
     import threading
 
