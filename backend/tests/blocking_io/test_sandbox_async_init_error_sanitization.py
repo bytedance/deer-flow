@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import threading
 from pathlib import Path
@@ -185,15 +186,32 @@ async def test_async_init_error_sanitization_drains_on_cancellation(monkeypatch:
     )
 
     task = asyncio.create_task(sandbox_tools._ls_tool_async(runtime, "/mnt/user-data/workspace"))
-    while not started.is_set():
-        await asyncio.sleep(0.01)
+    try:
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while not started.is_set():
+            if task.done():
+                if task.cancelled():
+                    pytest.fail("tool task was cancelled before reaching sanitizer")
+                exc = task.exception()
+                if exc is not None:
+                    pytest.fail(f"tool task raised before reaching sanitizer: {type(exc).__name__}: {exc}")
+                pytest.fail(f"tool task returned before reaching sanitizer: {task.result()!r}")
+            if asyncio.get_running_loop().time() >= deadline:
+                pytest.fail("timed out waiting for off-loop sanitizer to start")
+            await asyncio.sleep(0.01)
 
-    task.cancel()
-    await asyncio.sleep(0.05)
-    assert not task.done(), "task must wait for the off-loop sanitization worker to drain"
-    assert not finished.is_set()
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "task must wait for the off-loop sanitization worker to drain"
+        assert not finished.is_set()
 
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert finished.is_set()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
