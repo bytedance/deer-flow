@@ -4,6 +4,7 @@ import stat
 import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -850,6 +851,76 @@ def _patch_demo_custom_skill_config(monkeypatch, tmp_path: Path) -> SimpleNamesp
 
 def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path, *, user_factory=None) -> FastAPI:
     return _make_test_app(_patch_demo_custom_skill_config(monkeypatch, tmp_path), user_factory=user_factory)
+
+
+def test_custom_skill_put_completes_when_a_concurrent_get_holds_the_file(monkeypatch, tmp_path):
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+    skill_file = _user_custom_dir(tmp_path) / "demo-skill" / "SKILL.md"
+    url = "/api/skills/custom/demo-skill"
+    edited = _skill_content("demo-skill", "Edited during GET")
+    read_open = threading.Event()
+    replace_attempted = threading.Event()
+    original_open = Path.open
+    original_replace = Path.replace
+
+    def hold_first_content_read(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path == skill_file and kwargs.get("encoding") == "utf-8-sig" and not read_open.is_set():
+            read_open.set()
+            if not replace_attempted.wait(timeout=10):
+                handle.close()
+                raise TimeoutError("PUT never reached file replacement")
+        return handle
+
+    def replace_while_reading(source, target):
+        try:
+            return original_replace(source, target)
+        finally:
+            if target == skill_file:
+                replace_attempted.set()
+
+    monkeypatch.setattr(Path, "open", hold_first_content_read)
+    monkeypatch.setattr(Path, "replace", replace_while_reading)
+    monkeypatch.setattr(skills_router, "scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        pending_get = pool.submit(client.get, url)
+        try:
+            assert read_open.wait(timeout=10)
+            update = client.put(url, json={"content": edited})
+            assert update.status_code == 200, update.text
+            assert update.json()["content"] == edited
+        finally:
+            replace_attempted.set()
+        original = pending_get.result(timeout=10)
+        assert original.status_code == 200
+        assert original.json()["content"] == _skill_content("demo-skill")
+        assert client.get(url).json()["content"] == edited
+
+
+@pytest.mark.asyncio
+async def test_custom_skill_response_readback_uses_mutation_lock_after_write(monkeypatch, tmp_path):
+    config = _patch_demo_custom_skill_config(monkeypatch, tmp_path)
+    lock_calls = []
+
+    class _RecordingLock:
+        def __enter__(self):
+            lock_calls.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            lock_calls.append("exit")
+            return False
+
+    monkeypatch.setattr(skills_router, "_custom_skill_mutation", lambda storage: _RecordingLock())
+
+    plain_response = await skills_router._read_custom_skill_response("demo-skill", config)
+    assert plain_response.content == _skill_content("demo-skill")
+    assert lock_calls == []
+
+    after_write_response = await skills_router._read_custom_skill_response("demo-skill", config, after_write=True)
+    assert after_write_response.content == plain_response.content
+    assert lock_calls == ["enter", "exit"]
 
 
 @pytest.mark.parametrize(
@@ -2029,7 +2100,7 @@ def test_custom_skill_update_history_survives_concurrent_put(monkeypatch, tmp_pa
     initial_content = _skill_content("demo-skill")
     edited_content = _skill_content("demo-skill", "Edited skill")
     concurrent_content = _skill_content("demo-skill", "Concurrent edit")
-    (custom_dir / "SKILL.md").write_text(initial_content, encoding="utf-8")
+    (custom_dir / "SKILL.md").write_text(initial_content, encoding="utf-8", newline="\n")
 
     config = SimpleNamespace(
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
@@ -2051,7 +2122,7 @@ def test_custom_skill_update_history_survives_concurrent_put(monkeypatch, tmp_pa
     app = _make_test_app(config)
     server, server_thread, base_url = _run_live_server(app)
     try:
-        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+        with httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_a, httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_b:
             a_result: dict = {}
 
             def _request_a():
@@ -2099,7 +2170,7 @@ def test_custom_skill_rollback_history_survives_concurrent_put(monkeypatch, tmp_
     original_content = _skill_content("demo-skill")
     current_content = _skill_content("demo-skill", "Current skill")
     concurrent_content = _skill_content("demo-skill", "Concurrent edit")
-    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8")
+    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8", newline="\n")
 
     config = SimpleNamespace(
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
@@ -2130,7 +2201,7 @@ def test_custom_skill_rollback_history_survives_concurrent_put(monkeypatch, tmp_
     app = _make_test_app(config)
     server, server_thread, base_url = _run_live_server(app)
     try:
-        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+        with httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_a, httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_b:
             a_result: dict = {}
 
             def _request_a():
@@ -2247,8 +2318,8 @@ def test_custom_skill_update_does_not_serialize_an_unrelated_user(monkeypatch, t
     bob_initial = _skill_content("demo-skill", "Bob's own skill")
     alice_edited = _skill_content("demo-skill", "Edited by Alice")
     bob_edited = _skill_content("demo-skill", "Edited by Bob")
-    (alice_custom / "SKILL.md").write_text(alice_initial, encoding="utf-8")
-    (bob_custom / "SKILL.md").write_text(bob_initial, encoding="utf-8")
+    (alice_custom / "SKILL.md").write_text(alice_initial, encoding="utf-8", newline="\n")
+    (bob_custom / "SKILL.md").write_text(bob_initial, encoding="utf-8", newline="\n")
 
     from deerflow.config.paths import Paths
 
@@ -2272,7 +2343,7 @@ def test_custom_skill_update_does_not_serialize_an_unrelated_user(monkeypatch, t
     server, server_thread, base_url = _run_live_server(app)
     bob_progressed = False
     try:
-        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+        with httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_a, httpx.Client(base_url=base_url, timeout=30, trust_env=False) as client_b:
             a_result: dict = {}
             b_result: dict = {}
 

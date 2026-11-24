@@ -121,7 +121,7 @@ def _no_network(monkeypatch):
 
     def deny(sock, address):
         # Windows asyncio uses a loopback socket pair to wake its event loop.
-        if isinstance(address, tuple) and address[0] in ("127.0.0.1", "::1"):
+        if isinstance(address, tuple) and address and isinstance(address[0], str) and address[0].lower() in {"127.0.0.1", "::1", "localhost"}:
             return connect(sock, address)
         raise AssertionError("this regression must not use the network")
 

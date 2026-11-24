@@ -1583,7 +1583,7 @@ def test_upload_files_keeps_os_error_text_out_of_500(tmp_path, caplog):
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Failed to upload report.txt."
-    assert str(staged_path) in caplog.text
+    assert str(disk_full) in caplog.text
 
 
 def test_upload_files_closes_conversion_descriptor_when_ingestion_is_cancelled(tmp_path):
@@ -1834,7 +1834,7 @@ def test_delete_uploaded_file_keeps_os_error_text_out_of_500(tmp_path, caplog):
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Failed to delete report.pdf."
-    assert str(file_path) in caplog.text
+    assert str(denied) in caplog.text
 
 
 def test_auto_convert_documents_enabled_defaults_to_false_on_config_errors():

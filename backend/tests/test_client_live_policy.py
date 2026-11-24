@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -99,6 +100,8 @@ def _collect_live_tests(
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -113,8 +116,11 @@ def _assert_collection_skipped(result: subprocess.CompletedProcess[str], reason:
 
 @functools.cache
 def _dry_run_make_target(target: str, *extra: str) -> str:
+    make = shutil.which("make") or shutil.which("mingw32-make")
+    if make is None:
+        pytest.skip("make is unavailable")
     result = subprocess.run(
-        ["make", "-n", target, *extra],
+        [make, "-n", target, *extra],
         cwd=BACKEND_ROOT,
         capture_output=True,
         text=True,

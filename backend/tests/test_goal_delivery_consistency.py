@@ -54,11 +54,6 @@ async def _run_goal_delivery(
     tool body. Its deterministic node emits the tool callbacks normally supplied
     by the agent; only the evaluator model response is fixed, without provider/network access.
     """
-    if shared_handoff and os.name != "posix":
-        # The handoff tool answers "requires POSIX" on a native Windows host, so
-        # the shared-artifact case cannot exercise delivery there. The sibling
-        # test_shared_artifact_handoff.py skips non-POSIX for the same reason.
-        pytest.skip("shared artifact handoff requires POSIX")
     checkpointer = InMemorySaver()
     failed_terminal_writes = []
 
@@ -278,6 +273,7 @@ async def test_successful_delivery_clears_satisfied_goal(tmp_path, monkeypatch, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Shared artifact handoff requires POSIX directory descriptors")
 async def test_shared_artifact_delivery_clears_satisfied_goal(tmp_path, monkeypatch):
     result = await _run_goal_delivery(tmp_path, monkeypatch, present_on_turn=1, shared_handoff=True)
 
@@ -288,6 +284,16 @@ async def test_shared_artifact_delivery_clears_satisfied_goal(tmp_path, monkeypa
     assert result.delivery[0]["by_tool"] == {"present_shared_artifact": [OUTPUT_PATH]}
     assert result.delivery[0]["matched_paths"] == [OUTPUT_PATH]
     assert result.delivery[0]["satisfied"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "posix", reason="Checks the unsupported host path")
+async def test_unsupported_shared_artifact_handoff_records_no_delivery(tmp_path, monkeypatch):
+    result = await _run_goal_delivery(tmp_path, monkeypatch, present_on_turn=1, shared_handoff=True)
+
+    assert result.delivery == [{"presented": 0, "paths": [], "by_tool": {}}]
+    outputs = Paths(base_dir=tmp_path).sandbox_outputs_dir(result.record.thread_id, user_id=get_effective_user_id())
+    assert not (outputs / "report.md").exists()
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ import logging
 import tempfile
 import threading
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
@@ -753,7 +753,7 @@ async def get_custom_skill(skill_name: str, request: Request, config: AppConfig 
     return await _read_custom_skill_response(skill_name, config)
 
 
-async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> CustomSkillContentResponse:
+async def _read_custom_skill_response(skill_name: str, config: AppConfig, *, after_write: bool = False) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
 
@@ -762,11 +762,14 @@ async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> Cus
             # read_custom_skill opens SKILL.md — blocking filesystem IO that
             # scales with the number of installed skills (#5747).
             storage = _get_user_skill_storage(config)
-            skills = storage.load_skills(enabled_only=False)
-            skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
-            if skill is None:
-                return None, None
-            return skill, storage.read_custom_skill(skill_name)
+            # A later mutation can replace SKILL.md while this response reads
+            # it. Windows disallows that replacement while a reader is open.
+            with _custom_skill_mutation(storage) if after_write else nullcontext():
+                skills = storage.load_skills(enabled_only=False)
+                skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
+                if skill is None:
+                    return None, None
+                return skill, storage.read_custom_skill(skill_name)
 
         skill, content = await asyncio.to_thread(_load_response_parts)
         if skill is None:
@@ -834,7 +837,7 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
             await _publish_skills_cache_reset(user_id)
 
         await await_drained(_drain_skill_mutation("edit", _persist_edit))
-        return await _read_custom_skill_response(skill_name, config)
+        return await _read_custom_skill_response(skill_name, config, after_write=True)
     except HTTPException:
         raise
     except FileNotFoundError as e:
@@ -1011,7 +1014,7 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
             await _publish_skills_cache_reset(user_id)
 
         await await_drained(_drain_skill_mutation("rollback", _persist_rollback))
-        return await _read_custom_skill_response(skill_name, config)
+        return await _read_custom_skill_response(skill_name, config, after_write=True)
     except HTTPException:
         raise
     except IndexError:

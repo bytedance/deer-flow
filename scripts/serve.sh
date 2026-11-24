@@ -364,13 +364,31 @@ fi
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
 # so pin DeerFlow-owned state to the expected backend runtime directory and
 # create it before uvicorn builds its reload exclude filter.
+# Git Bash receives environment paths from Python as Windows drive-letter
+# values. Normalize them before using them in shell path operations.
+_normalize_shell_path() {
+    local value="$1"
+    if [[ "$value" =~ ^[[:alpha:]]:[/\\] ]] && command -v cygpath >/dev/null 2>&1; then
+        cygpath -u "$value"
+    else
+        printf '%s\n' "$value"
+    fi
+}
+
 if [ -z "$DEER_FLOW_PROJECT_ROOT" ]; then
     export DEER_FLOW_PROJECT_ROOT="$REPO_ROOT"
+elif [[ "$DEER_FLOW_PROJECT_ROOT" =~ ^[[:alpha:]]:[/\\] ]]; then
+    export DEER_FLOW_PROJECT_ROOT="$(_normalize_shell_path "$DEER_FLOW_PROJECT_ROOT")"
 fi
 
 BACKEND_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"
 if [ -z "$DEER_FLOW_HOME" ]; then
     export DEER_FLOW_HOME="$BACKEND_RUNTIME_HOME"
+elif [[ "$DEER_FLOW_HOME" =~ ^[[:alpha:]]:[/\\] ]]; then
+    export DEER_FLOW_HOME="$(_normalize_shell_path "$DEER_FLOW_HOME")"
+fi
+if [[ "${DEER_FLOW_CONFIG_PATH-}" =~ ^[[:alpha:]]:[/\\] ]]; then
+    export DEER_FLOW_CONFIG_PATH="$(_normalize_shell_path "$DEER_FLOW_CONFIG_PATH")"
 fi
 
 # `backend/sandbox` is excluded from uvicorn's reload watcher below. uvicorn only
