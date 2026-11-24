@@ -149,13 +149,6 @@ class _Repo:
         self.items.pop(task_id, None)
         return "deleted"
 
-    async def delete(self, task_id: str, *, user_id: str):
-        item = await self.get(task_id, user_id=user_id)
-        if item is None:
-            return False
-        self.items.pop(task_id, None)
-        return True
-
     async def list_by_task(self, task_id: str):
         return []
 

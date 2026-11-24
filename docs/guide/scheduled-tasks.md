@@ -121,6 +121,9 @@ live card with the schedule, the stop condition and buttons, and the agent
 replies in one or two sentences; IM and other non-web turns describe the
 schedule, the next run and the stop condition in plain text.
 
+Conversation scheduling actions require an active owner account. The Gateway
+returns `authority_expired` when the account is no longer active.
+
 - **Which tasks a conversation manages.** The tasks created in it, and, in a run
   conversation (the chat a scheduled run posted into), the task that run belongs
   to: “pause this” or “move it to 10:00” work there too. This applies only to

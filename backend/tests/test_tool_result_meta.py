@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -17,6 +18,125 @@ from deerflow.agents.middlewares.tool_result_meta import (
     normalize_tool_result,
     stamp_exception_meta,
 )
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("progress_enabled", [False, True])
+@pytest.mark.parametrize(
+    "stdout,exit_code",
+    [
+        ("Error: this is sample text\nREAL_EXIT=0\n", 0),
+        ('{"error":"sample data"}\n', 0),
+        ("Error: example-api-secret\n", 0),
+        ("Exit Code: 7", 0),
+        ("OK: sample\n", 0),
+        ("OK: sample\n", 7),
+        ("Error: " + "x" * 500 + "\nExit Code: 7", 0),
+        ("OK: " + "x" * 500, 7),
+        ("", 124),
+    ],
+)
+@pytest.mark.asyncio
+async def test_bash_structured_exit_code_reaches_graph_and_receipt(tmp_path, monkeypatch, mode, progress_enabled, stdout, exit_code):
+    from langchain.agents import create_agent
+    from langchain_core.callbacks import BaseCallbackHandler
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.config import app_config, paths
+    from deerflow.extensions.registry import EMPTY_EXTENSIONS
+    from deerflow.sandbox import sandbox_provider
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+    from deerflow.sandbox.sandbox import CommandOutput, Sandbox
+    from deerflow.sandbox.tools import bash_tool
+
+    class Model(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    class Requests(BaseCallbackHandler):
+        def __init__(self):
+            self.messages = []
+
+        def on_chat_model_start(self, serialized, messages, **kwargs):
+            self.messages.append(messages[0])
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "config.json"))
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    monkeypatch.setattr(paths, "_paths", None)
+    config = app_config.AppConfig.model_validate(
+        {
+            "models": [],
+            "sandbox": {
+                "use": "deerflow.community.aio_sandbox:AioSandboxProvider",
+                "bash_output_max_chars": 0 if exit_code == 124 else 80,
+                "bash_command_timeout": 0.1 if exit_code == 124 else 5,
+            },
+            "memory": {"enabled": False},
+            "summarization": {"enabled": False},
+            "title": {"enabled": False},
+            "tool_progress": {"enabled": progress_enabled},
+        }
+    )
+    monkeypatch.setattr(app_config, "_app_config", config)
+    monkeypatch.setattr(app_config, "_app_config_is_custom", True)
+    output = "Command timed out" if exit_code == 124 else stdout
+    if exit_code:
+        output = f"{output}\nExit Code: {exit_code}"
+    # This double models a provider with a structured exit code. AIO emits text.
+    execute_command = Mock(return_value=CommandOutput(output, exit_code))
+    sandbox = Mock(spec=Sandbox, id="fixture:status", execute_command=execute_command, supports_command_cancellation=False)
+    provider = Mock(spec=sandbox_provider.SandboxProvider)
+    provider.uses_thread_data_mounts = False
+    provider.acquire.return_value = sandbox.id
+    provider.acquire_async = AsyncMock(return_value=sandbox.id)
+    provider.get.return_value = sandbox
+    provider.get_scoped.return_value = sandbox
+    monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)
+    monkeypatch.setattr("deerflow.sandbox.tools.read_active_secrets", lambda _: {"EXAMPLE_API_KEY": "example-api-secret"})
+    model = Model(
+        messages=iter(
+            [
+                AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": "pwd"}, "id": "bash-probe"}]),
+                AIMessage(content="Done."),
+            ]
+        )
+    )
+    graph = create_agent(model, tools=[bash_tool], middleware=build_middlewares({}, model_name=None, memory_enabled=False, app_config=config, extensions=EMPTY_EXTENSIONS), state_schema=ThreadState)
+    try:
+        state = {"messages": [HumanMessage(content="Run the supplied command once.")]}
+        context = {"thread_id": "bash-status-probe", "user_id": "test-user", "app_config": config}
+        captured = Requests()
+        invoke_config = {"callbacks": [captured]}
+        result = graph.invoke(state, context=context, config=invoke_config) if mode == "sync" else await graph.ainvoke(state, context=context, config=invoke_config)
+        execute_command.assert_called_once()
+        message = next(m for m in result["messages"] if isinstance(m, ToolMessage) and m.name == "bash")
+        if exit_code == 124:
+            assert "timed out" in message.content.lower()
+            assert message.content.endswith("Exit Code: 124")
+        elif len(stdout) > 80:
+            assert len(message.content) <= 80
+            assert "truncated" in message.content
+            if exit_code:
+                assert message.content.endswith(f"Exit Code: {exit_code}")
+        else:
+            expected_output = stdout.replace("example-api-secret", "[redacted]")
+            assert message.content == expected_output + (f"\nExit Code: {exit_code}" if exit_code else "")
+        expected = "error" if exit_code else "success"
+        assert message.status == expected
+        assert message.additional_kwargs[TOOL_META_KEY]["status"] == expected
+        assert message.additional_kwargs[TOOL_META_KEY]["source"] == "tool_return"
+        assert message.additional_kwargs[TOOL_META_KEY]["exit_code"] == exit_code
+        assert message.additional_kwargs["deerflow_tool_receipt"]["status"] == expected
+        projected = next(m for m in captured.messages[-1] if isinstance(m, ToolMessage) and m.name == "bash")
+        assert json.loads(projected.content) == {TOOL_META_KEY: {"status": expected, "source": "tool_return"}, "content": message.content}
+    finally:
+        get_sandbox_lease_manager(provider).close()
 
 
 def _make_msg(content: str, *, status: str = "success", kwargs: dict[str, object] | None = None) -> ToolMessage:

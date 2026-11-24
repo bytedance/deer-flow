@@ -2,7 +2,7 @@
 
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -161,12 +161,17 @@ async def runtime(host, monkeypatch, tmp_path):
         prompt = state["messages"][-1].content
         if prompt == "wait":
             entered.set()
-            await asyncio.Event().wait()
+            await getattr(request.app.state, "release_worker", asyncio.Event()).wait()
+        if present := getattr(request.app.state, "present_worker_report", None):
+            await present(prompt, runtime)
         if prompt == "approve":
             prompt = interrupt({"question": "Continue?"})
         return {"messages": [AIMessage(content=f"answer:{prompt}")]}
 
     def factory(*, config):
+        if (settings := getattr(state, "observed_worker_settings", None)) is not None and "run_id" in config["context"]:
+            context = config["context"]
+            settings.append((config["recursion_limit"], context.get("thinking_enabled"), context.get("is_plan_mode")))
         builder = StateGraph(MessagesState)
         builder.add_node("answer", answer)
         builder.set_entry_point("answer")
@@ -776,3 +781,464 @@ async def test_restored_delegated_handle_is_plugin_scoped_with_extension_origin(
     assert runs._origin == {"kind": "extension", "namespace": "workflows"}
     with pytest.raises(AgentRunError, match="already bound"):
         runs.for_plugin("other")
+
+
+@pytest_asyncio.fixture
+async def worker_gateway(runtime, tmp_path):
+    import asyncio
+
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.gateway.coordination_workers import CoordinationWorkers
+    from app.gateway.routers import coordination, thread_runs
+    from deerflow.persistence.bootstrap import bootstrap_schema
+    from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
+    from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    runs, state, request, entered, _ = runtime
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'workers.db'}")
+    await bootstrap_schema(engine, backend="sqlite")
+    factory = async_sessionmaker(engine)
+    async with factory.begin() as session:
+        session.add(UserRow(id=str(request.state.user.id), email=request.state.user.email))
+    state.run_store = RunRepository(factory)
+    await state.run_manager.shutdown()
+    state.run_manager = RunManager(store=state.run_store)
+    state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(factory), state.agent_runs_host, ChannelConnectionRepository(factory))
+    state.release_worker = asyncio.Event()
+    state.observed_worker_settings = []
+    request.app.include_router(coordination.router)
+    request.app.include_router(thread_runs.router)
+
+    async def authenticated(scope, receive, send):
+        token = set_current_user(request.state.user)
+        try:
+            await request.app({**scope, "state": dict(request.scope["state"])}, receive, send)
+        finally:
+            reset_current_user(token)
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=authenticated), base_url="http://gateway") as client:
+            yield client, runs, state, entered, str(request.state.user.id)
+    finally:
+        await state.coordination_workers.close()
+        await state.run_manager.shutdown()
+        await engine.dispose()
+
+
+async def _wait_for_worker(client, task_id, section, field, value):
+    import asyncio
+
+    async with asyncio.timeout(12):
+        while True:
+            response = await client.get(f"/api/coordination/tasks/{task_id}")
+            response.raise_for_status()
+            view = response.json()
+            if view[section][field] == value:
+                return view
+            await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("followup_report", [None, b"revised report"], ids=["text-followup", "same-name-file"])
+async def test_managed_worker_routes_followups_and_retains_the_producing_runs_file(worker_gateway, followup_report):
+    import asyncio
+    from uuid import uuid4
+
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langgraph.types import Command
+
+    from deerflow.config.paths import get_paths
+    from deerflow.persistence.coordination.sql import TaskNotFound
+
+    client, runs, state, entered, owner = worker_gateway
+
+    async def present_report(prompt, runtime):
+        assert runtime.context["subagent_enabled"] is True
+        report = b"original report" if prompt == "wait" else followup_report
+        if report is not None:
+            outputs = get_paths().sandbox_outputs_dir(runtime.context["thread_id"], user_id=owner)
+            await asyncio.to_thread(outputs.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread((outputs / "report.txt").write_bytes, report)
+            journal = runtime.context["__run_journal"]
+            journal._remember_current_run_tool_calls(AIMessage(content="", tool_calls=[{"id": "present", "name": "present_files", "args": {}}]), caller="lead_agent")
+            journal.on_tool_end(Command(update={"artifacts": ["/mnt/user-data/outputs/report.txt"], "messages": [ToolMessage("Presented", tool_call_id="present")]}), run_id=uuid4())
+
+    state.present_worker_report = present_report
+    url = "/api/coordination/tasks"
+    body = {"request_id": "dispatch", "objective": "wait"}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    task_id, thread, run = first["task"]["id"], first["assignment"]["thread_id"], first["execution"]["run_id"]
+    assert first["task"]["project_id"] is None and (await client.post(url, json=body)).json()["execution"]["run_id"] == run
+    await asyncio.wait_for(entered.wait(), 10)
+    thread_url = f"/api/threads/{thread}"
+    inbox_url = f"{url}/{task_id}/inputs"
+    (await client.post(inbox_url, json={"request_id": "task-input", "content": "task follow-up"})).raise_for_status()
+    followup = {"request_id": "fix", "mode": "queue", "text": "new requirement"}
+    receipt = (await client.post(f"{thread_url}/runs/{run}/inputs", json=followup)).raise_for_status().json()
+    assert receipt["status"] == "pending"
+    assert (await client.post(f"{thread_url}/runs/{run}/inputs", json=followup)).json() == receipt
+    direct = asyncio.create_task(client.post(f"{thread_url}/runs", json={"input": {"messages": [{"type": "human", "content": [{"type": "text", "text": "final instruction"}]}]}}))
+    try:
+        await _wait_for_worker(client, task_id, "task", "latest_input_seq", 3)
+        pending = (await client.get(inbox_url)).raise_for_status().json()
+        assert [(item["sequence"], item["source"], item["content"], item["status"]) for item in pending] == [
+            (1, "task_api", "task follow-up", "pending"),
+            (2, "run_input", "new requirement", "pending"),
+            (3, "worker_chat", "final instruction", "pending"),
+        ]
+        assert (await client.get(inbox_url, params={"after": 1, "limit": 1})).raise_for_status().json() == pending[1:2]
+        assert (await client.get(f"{url}/missing-task/inputs")).status_code == 404
+    finally:
+        state.release_worker.set()
+        (await direct).raise_for_status()
+    result = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    final_run = result["execution"]["run_id"]
+    assert final_run != run and result["task"]["result_ref"] == f"{thread_url}/runs/{final_run}/messages"
+    assert (await direct).raise_for_status().json()["run_id"] == final_run
+    assert (await runs.get_state(thread_id=thread))["values"]["messages"][-1]["content"] == "answer:final instruction"
+    assert (await client.get(f"{thread_url}/inputs")).json()["items"][0]["run_id"] == final_run
+    admitted = (await client.get(inbox_url)).raise_for_status().json()
+    assert [(item["run_id"], item["status"]) for item in admitted] == [(final_run, "admitted")] * 3
+    artifact_list = f"{url}/{task_id}/artifacts"
+    artifacts = (await client.get(artifact_list)).raise_for_status().json()
+    expected_versions = [(run, 1, b"original report")]
+    if followup_report:
+        expected_versions.append((final_run, 2, followup_report))
+    assert [(item["run_id"], item["turn"]) for item in artifacts] == [(producer, turn) for producer, turn, _ in expected_versions]
+    assert {item["source_path"] for item in artifacts} == {"/mnt/user-data/outputs/report.txt"}
+    assert len({item["url"] for item in artifacts}) == len(expected_versions)
+    assert result["execution"]["artifacts"] == (artifacts[1:] if followup_report else [])
+    assert (await client.get(artifact_list, params={"limit": 1, "offset": 1})).raise_for_status().json() == artifacts[1:]
+    assert (await client.get(f"{url}/missing-task/artifacts")).status_code == 404
+    await asyncio.to_thread((get_paths().sandbox_outputs_dir(thread, user_id=owner) / "report.txt").unlink)
+    for artifact, (_, _, content) in zip(artifacts, expected_versions, strict=True):
+        assert (await client.get(artifact["url"])).raise_for_status().content == content
+    with pytest.raises(TaskNotFound):
+        await state.coordination_workers.repo.read_artifact("another-user", task_id, artifacts[0]["id"])
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_reuses_saved_run_settings_for_followups(worker_gateway):
+    import asyncio
+
+    client, _, state, entered, _ = worker_gateway
+    url = "/api/coordination/tasks"
+    settings = {"recursion_limit": 400, "thinking_enabled": True, "is_plan_mode": False}
+    body = {"request_id": "dispatch", "objective": "wait", "run": settings}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    task_id = first["task"]["id"]
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        assert first["task"]["run_settings"] == settings
+        assert (await client.post(url, json=body)).raise_for_status().json() == first
+        assert (await client.post(url, json={**body, "run": {**settings, "is_plan_mode": True}})).status_code == 409
+        (await client.post(f"{url}/{task_id}/inputs", json={"request_id": "follow-up", "content": "Review the results"})).raise_for_status()
+    finally:
+        state.release_worker.set()
+
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert finished["execution"]["turn"] == 2
+    assert state.observed_worker_settings == [(400, True, False)] * 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", [{"recursion_limit": 0}, {"recursion_limit": True}, {"thinking_enabled": "false"}, {"user_id": "another-user"}, {"subagent_enabled": False}])
+async def test_managed_worker_rejects_invalid_run_settings(worker_gateway, settings):
+    client, _, _, _, _ = worker_gateway
+    response = await client.post("/api/coordination/tasks", json={"request_id": "invalid", "objective": "Review", "run": settings})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"][:2] == ["body", "run"]
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_create_retry_returns_task_after_grant_expires(worker_gateway, monkeypatch):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    url = "/api/coordination/tasks"
+    body = {"request_id": "create-replay", "objective": "wait"}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    assert first["task"]["run_settings"] is None
+    assert (await client.post(url, json={**body, "run": {}})).raise_for_status().json() == first
+    task_id = first["task"]["id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    try:
+        grant = await state.coordination_workers.repo.grant(owner, task_id)
+        monkeypatch.setattr("deerflow.persistence.coordination.workers.time", lambda: grant["expires_at"] + 1)
+        detail = (await client.get(f"{url}/{task_id}")).raise_for_status().json()
+        replay = (await client.post(url, json=body)).raise_for_status().json()
+        assert replay == detail
+        assert replay["authorization_required"] is True
+        assert replay["execution"]["run_id"] == first["execution"]["run_id"]
+        assert (await client.post(url, json={**body, "objective": "changed"})).status_code == 409
+        assert (await client.post(url, json={**body, "assistant_id": "different"})).status_code == 409
+    finally:
+        state.release_worker.set()
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_replays_accepted_inputs_after_grant_expires(worker_gateway, monkeypatch):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    tasks = "/api/coordination/tasks"
+    first = (await client.post(tasks, json={"request_id": "receipt-replay", "objective": "wait"})).raise_for_status().json()
+    task_id, thread_id, run_id = first["task"]["id"], first["assignment"]["thread_id"], first["execution"]["run_id"]
+    inputs = [
+        (f"{tasks}/{task_id}/inputs", "content", {"request_id": "follow-up", "content": "Task follow-up"}),
+        (f"/api/threads/{thread_id}/runs/{run_id}/inputs", "text", {"request_id": "follow-up", "mode": "queue", "text": "Run follow-up"}),
+    ]
+    await asyncio.wait_for(entered.wait(), 10)
+    try:
+        receipts = [(await client.post(path, json=payload)).raise_for_status().json() for path, _, payload in inputs]
+    finally:
+        state.release_worker.set()
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    workers = state.coordination_workers
+    grant = await workers.repo.grant(owner, task_id)
+    monkeypatch.setattr("deerflow.persistence.coordination.workers.time", lambda: grant["expires_at"] + 1)
+    wake = Mock(side_effect=AssertionError("receipt replay must not wake a Worker"))
+    monkeypatch.setattr(workers, "watch", wake)
+
+    for (path, text_field, payload), receipt in zip(inputs, receipts, strict=True):
+        assert (await client.post(path, json=payload)).raise_for_status().json() == receipt
+        assert (await client.post(path, json={**payload, text_field: "changed"})).status_code == 409
+        assert (await client.post(path, json={**payload, "request_id": "new"})).status_code == 403
+    wake.assert_not_called()
+    assert (await client.get(f"{tasks}/{task_id}")).raise_for_status().json() == finished
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_replays_legacy_task_input_without_grant(worker_gateway):
+    from hashlib import sha256
+
+    client, _, state, _, owner = worker_gateway
+    repo = state.coordination_workers.repo
+    task = await repo.create(owner, request_id="old-task", objective="Review")
+    payload = {"request_id": "old-input", "content": "Check the report"}
+    receipt = await repo.append_input(owner, task["id"], request_id="input:" + sha256(b"old-input").hexdigest(), content=payload["content"])
+    url = f"/api/coordination/tasks/{task['id']}/inputs"
+    assert (await client.post(url, json=payload)).raise_for_status().json() == receipt
+    assert (await client.post(url, json={**payload, "request_id": "new"})).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_requires_explicit_resume_and_fences_cancellation(worker_gateway):
+    import asyncio
+
+    client, runs, state, entered, _ = worker_gateway
+    url = "/api/coordination/tasks"
+    settings = {"recursion_limit": 240, "thinking_enabled": False, "is_plan_mode": True}
+    paused = (await client.post(url, json={"request_id": "pause", "objective": "approve", "run": settings})).raise_for_status().json()
+    task_id = paused["task"]["id"]
+    await _wait_for_worker(client, task_id, "execution", "status", "waiting_for_input")
+    target = f"/api/threads/{paused['assignment']['thread_id']}/runs"
+    reply = {"json": {"command": {"resume": "confirmed"}, "config": {"recursion_limit": 25}, "context": {"is_plan_mode": False}}, "headers": {"Idempotency-Key": "reply"}}
+    answered = (await client.post(target, **reply)).raise_for_status().json()
+    result = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert result["task"]["result_ref"].endswith(f"/{answered['run_id']}/messages")
+    assert (await client.post(target, **reply)).raise_for_status().json()["run_id"] == answered["run_id"]
+    assert state.observed_worker_settings == [(240, False, True)] * 2
+
+    other = (await client.post(url, json={"request_id": "cancel", "objective": "wait"})).raise_for_status().json()
+    await asyncio.wait_for(entered.wait(), 10)
+    task_id, thread = other["task"]["id"], other["assignment"]["thread_id"]
+    cancelled = (await client.post(f"{url}/{task_id}/cancel", json={"expected_revision": other["task"]["revision"]})).raise_for_status().json()
+    assert cancelled["status"] == "cancelled"
+    assert (await runs.get(thread_id=thread, run_id=other["execution"]["run_id"])).status == "interrupted"
+    assert (await client.post(f"/api/threads/{thread}/runs", json={"input": {"messages": [{"role": "user", "content": "too late"}]}})).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_cancel_returns_cancelling_and_finishes_in_background(worker_gateway, monkeypatch):
+    import asyncio
+
+    from app.gateway import coordination_workers
+
+    client, runs, _, entered, _ = worker_gateway
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    request_stop = type(runs).cancel
+
+    async def paused_stop(self, *, thread_id, run_id):
+        calls.append(run_id)
+        started.set()
+        await release.wait()
+        if len(calls) == 1:
+            raise AgentRunError(503, "Run is temporarily unavailable")
+        await request_stop(self, thread_id=thread_id, run_id=run_id)
+
+    monkeypatch.setattr(type(runs), "cancel", paused_stop)
+    monkeypatch.setattr(coordination_workers, "CANCEL_RESPONSE_TIMEOUT", 0.05, raising=False)
+    url = "/api/coordination/tasks"
+    first = (await client.post(url, json={"objective": "wait", "request_id": "background-cancel"})).raise_for_status().json()
+    task_id, run_id = first["task"]["id"], first["execution"]["run_id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    cancel_url, body = f"{url}/{task_id}/cancel", {"expected_revision": first["task"]["revision"]}
+    pending = asyncio.create_task(client.post(cancel_url, json=body))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        done, _ = await asyncio.wait({pending}, timeout=3)
+        assert pending in done, "Cancellation response waited for the blocked run"
+        response = pending.result()
+        assert response.status_code == 202 and response.json()["status"] == "cancelling"
+        assert (await client.post(cancel_url, json=body)).json()["status"] == "cancelling"
+        assert calls == [run_id]
+        assert (await client.post(f"{url}/{task_id}/inputs", json={"request_id": "late", "content": "too late"})).status_code == 409
+    finally:
+        release.set()
+        await pending
+    final = await _wait_for_worker(client, task_id, "task", "status", "cancelled")
+    assert calls == [run_id, run_id]
+    assert final["execution"]["status"] == "cancelled"
+    assert (await runs.get(thread_id=first["assignment"]["thread_id"], run_id=run_id)).status == "interrupted"
+
+
+async def _restart_coordination(state):
+    from app.gateway.coordination_workers import CoordinationWorkers
+    from deerflow.runtime import RunManager
+
+    previous = state.coordination_workers
+    await previous.close()
+    await state.run_manager.shutdown()
+    state.agent_runs_host.close()
+    host = GatewayAgentRunsHost(state.agent_runs_host.app, load_user=state.agent_runs_host.load_user)
+    state.agent_runs_host = host
+    state.run_manager = RunManager(store=state.run_store)
+    state.coordination_workers = CoordinationWorkers(previous.repo, host, previous._connections)
+    await state.coordination_workers.recover_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_outcome", ["completed", "shutdown", "cancel-takeover", "orphan-no-checkpoint"])
+async def test_managed_worker_restart_reconciles_the_persisted_task(worker_gateway, tmp_path, previous_outcome):
+    import asyncio
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    from deerflow.config.app_config import get_app_config
+    from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON
+    from deerflow.runtime.runs.manager import STARTUP_ORPHAN_RECOVERY_ERROR
+
+    client, runs, state, entered, _ = worker_gateway
+    limit = get_app_config().max_recursion_limit
+    settings = {"recursion_limit": limit + 100, "thinking_enabled": False, "is_plan_mode": True}
+    path = str(tmp_path / "checkpoints.sqlite")
+    async with AsyncSqliteSaver.from_conn_string(path) as saver:
+        if previous_outcome != "orphan-no-checkpoint":
+            state.checkpointer = saver
+        first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart", "run": settings})).raise_for_status().json()
+        task_id, run_id, thread = first["task"]["id"], first["execution"]["run_id"], first["assignment"]["thread_id"]
+        await asyncio.wait_for(entered.wait(), 10)
+        await state.coordination_workers.close()
+        if previous_outcome == "completed":
+            state.release_worker.set()
+            assert (await runs.wait_coordination_worker(thread_id=thread, run_id=run_id)).status == "success"
+        await state.run_manager.shutdown()
+        if previous_outcome == "cancel-takeover":
+            await state.run_store.update_status(run_id, "error", error="Run reclaimed by worker during cancellation", stop_reason=ORPHAN_RECOVERY_STOP_REASON)
+        elif previous_outcome == "orphan-no-checkpoint":
+            await state.run_store.update_status(run_id, "error", error=STARTUP_ORPHAN_RECOVERY_ERROR, stop_reason=ORPHAN_RECOVERY_STOP_REASON)
+    async with AsyncSqliteSaver.from_conn_string(path) as saver:
+        state.checkpointer = saver
+        await _restart_coordination(state)
+        state.release_worker.set()
+        finished = await _wait_for_worker(client, task_id, "task", "status", "failed" if previous_outcome in ("cancel-takeover", "orphan-no-checkpoint") else "succeeded")
+    assert finished["assignment"]["thread_id"] == thread
+    assert finished["execution"]["turn"] == (2 if previous_outcome == "shutdown" else 1)
+    assert state.observed_worker_settings == [(limit, False, True)] * finished["execution"]["turn"]
+    assert finished["task"]["run_settings"] == settings
+    assert (finished["execution"]["run_id"] != run_id) is (previous_outcome == "shutdown")
+    if previous_outcome == "orphan-no-checkpoint":
+        assert finished["execution"]["status"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denial", ["runs:create", "threads:write", "revoked"])
+async def test_managed_worker_admission_waits_for_restored_authorization(worker_gateway, monkeypatch, denial):
+    client, runs, state, _, owner = worker_gateway
+    service = state.coordination_workers
+    task = await service.repo.create(owner, request_id="pending-admission", objective="continue")
+    task_id = task["id"]
+    grant = service._new_grant(runs.capture_authority())
+    turn = await service.repo.prepare(owner, task_id, "lead_agent", initial_grant=grant)
+    authorized, grant_id = await service.authority(owner, task_id)
+    permissions = grant["authority"]["permissions"]
+    policy = AsyncMock(return_value=[permission for permission in permissions if permission != denial])
+    monkeypatch.setattr("app.gateway.extension_agent_runs.resolve_route_permissions", policy)
+    if denial == "revoked":
+        await service.repo.set_grant(owner, task_id, None)
+
+    driver = service.watch(authorized, owner, task_id, grant_id)
+    with pytest.raises(AgentRunError) as exc:
+        await driver
+    assert exc.value.status_code == 403
+    url = f"/api/coordination/tasks/{task_id}"
+    view = (await client.get(url)).raise_for_status().json()
+    assert view["execution"]["id"] == turn[1]["id"]
+    assert view["execution"]["run_id"] is None
+    assert view["task"]["status"] == "running"
+    assert view["execution"]["status"] == "admitting"
+    assert view["authorization_required"] is True
+    retry = await client.post("/api/coordination/tasks", json={"request_id": "pending-admission", "objective": "continue"})
+    assert retry.status_code == 403
+    await service.recover_once()
+    assert (owner, task_id) not in service._drivers
+
+    policy.return_value = permissions
+    if denial == "revoked":
+        assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
+    else:
+        assert (await service.repo.grant(owner, task_id))["id"] == grant_id
+    await service.recover_once()
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert finished["authorization_required"] is False
+    assert finished["execution"]["id"] == turn[1]["id"]
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_restart_finishes_a_previously_fenced_cancellation(worker_gateway):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart-cancel"})).raise_for_status().json()
+    task_id = first["task"]["id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    await state.coordination_workers.repo.request_cancel(owner, task_id, expected_revision=first["task"]["revision"])
+    await _restart_coordination(state)
+    finished = await _wait_for_worker(client, task_id, "task", "status", "cancelled")
+    assert finished["execution"]["run_id"] == first["execution"]["run_id"]
+    assert finished["execution"]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_bound_channel_grant_is_invalid_after_reconnect_and_owner_can_reauthorize(worker_gateway):
+    import asyncio
+
+    from app.channels.message_bus import InboundMessage
+
+    client, _, state, entered, owner = worker_gateway
+    service = state.coordination_workers
+    binding = {"owner_user_id": owner, "provider": "telegram", "external_account_id": "sender"}
+    connection = await service._connections.upsert_connection(**binding)
+    message = InboundMessage(channel_name="telegram", chat_id="chat", user_id="sender", text="wait", connection_id=connection["id"], owner_user_id=owner)
+    first = await service.dispatch_bound_channel(message, request_id="event", objective="wait")
+    task_id = first["task"]["id"]
+    assert (await service.dispatch_bound_channel(message, request_id="event", objective="wait"))["execution"]["run_id"] == first["execution"]["run_id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    await service._connections.disconnect_connection(connection_id=connection["id"], owner_user_id=owner)
+    with pytest.raises(AgentRunError, match="no longer bound"):
+        await service.dispatch_bound_channel(message, request_id="another-event", objective="wait")
+    await service._connections.upsert_connection(**binding)
+    url = f"/api/coordination/tasks/{task_id}"
+    assert (await client.get(url)).json()["authorization_required"] is True
+    assert (await client.post(f"{url}/inputs", json={"request_id": "new", "content": "retry"})).status_code == 403
+    assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
+    assert (await client.delete(f"{url}/authorization")).status_code == 204
+    assert (await client.get(url)).json()["authorization_required"] is True

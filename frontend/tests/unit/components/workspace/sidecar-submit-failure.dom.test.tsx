@@ -18,7 +18,7 @@ import {
 import { SidecarPanel } from "@/components/workspace/sidecar/sidecar-panel";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import type { User } from "@/core/auth/types";
-import { DEFAULT_LOCALE } from "@/core/i18n";
+import { DEFAULT_LOCALE, type Locale } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
 
 // PromptInput clears the composer only when onSubmit resolves, so these tests
@@ -104,9 +104,12 @@ function Setup({ threadId }: { threadId: string | null }) {
   return null;
 }
 
-function renderPanel(threadId: string | null): ReactNode {
+function renderPanel(
+  threadId: string | null,
+  locale: Locale = DEFAULT_LOCALE,
+): ReactNode {
   return (
-    <I18nProvider initialLocale={DEFAULT_LOCALE}>
+    <I18nProvider initialLocale={locale}>
       <QueryClientProvider
         client={
           new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -159,6 +162,17 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  document.cookie = "locale=; max-age=0; path=/";
+});
+
+it("gives the sidecar send button its Chinese accessible name", async () => {
+  document.cookie = "locale=zh-CN; path=/";
+  render(renderPanel("sidecar-1", "zh-CN"));
+
+  const button = await screen.findByRole<HTMLButtonElement>("button", {
+    name: "发送",
+  });
+  expect(button.type).toBe("submit");
 });
 
 describe("SidecarPanel keeps the draft when a send fails", () => {

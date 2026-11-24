@@ -1257,7 +1257,9 @@ class TestDbRunEventStoreWriteLock:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_delete_by_thread_evicts_orphaned_write_lock(self, tmp_path):
+    async def test_idle_thread_keeps_no_write_lock(self, tmp_path):
+        import gc
+
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
         from deerflow.runtime.events.store.db import DbRunEventStore
 
@@ -1265,19 +1267,29 @@ class TestDbRunEventStoreWriteLock:
         await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
         s = DbRunEventStore(get_session_factory())
 
-        # A write materializes the per-thread lock in the registry.
+        # Once every writer drains, a thread keeps no lock, so the registry
+        # does not grow with every thread the singleton store ever wrote.
         await s.put_batch([{"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace"}])
-        assert "t1" in s._write_locks
-
-        # Deleting the thread must evict the now-orphaned lock so the registry
-        # does not grow unbounded across the singleton store's lifetime.
-        await s.delete_by_thread("t1", user_id=None)
+        await s.put_batch([{"thread_id": "t2", "run_id": "r1", "event_type": "trace", "category": "trace"}])
+        gc.collect()
         assert "t1" not in s._write_locks
+        assert "t2" not in s._write_locks
 
-        # A subsequent write recreates a fresh lock and seq restarts from 1.
+        # While a caller still references a generation, every caller resolves it.
+        held = s._get_write_lock("t1")
+        await s.put_batch([{"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace"}])
+        assert s._get_write_lock("t1") is held
+
+        # Deleting the thread leaves no entry once its users drain, and a later
+        # write starts a fresh lock with seq restarting from 1.
+        del held
+        await s.delete_by_thread("t1", user_id=None)
+        gc.collect()
+        assert "t1" not in s._write_locks
         result = await s.put_batch([{"thread_id": "t1", "run_id": "r2", "event_type": "trace", "category": "trace"}])
-        assert "t1" in s._write_locks
         assert result[0]["seq"] == 1
+        gc.collect()
+        assert "t1" not in s._write_locks
 
         await close_engine()
 

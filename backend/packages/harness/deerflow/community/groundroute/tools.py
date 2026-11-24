@@ -25,7 +25,7 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.community.provider_credentials import resolve_api_key
-from deerflow.community.url_safety import safe_public_result_url
+from deerflow.community.url_safety import safe_public_result_url, validate_hosted_fetch_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -183,6 +183,9 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    target_error = validate_hosted_fetch_url(url)
+    if target_error:
+        return target_error
     api_key, _ = await asyncio.to_thread(_resolve_tool_settings, "web_fetch")
     if not api_key:
         return _missing_key_error("web_fetch", url=url)
