@@ -8,9 +8,10 @@ walks `parent_config` rather than globally ordered checkpoint history so replay
 anchors stay on the selected lineage after regenerations create sibling branches.
 New conversation branches persist the pre-user replay anchor before their visible
 head through the state mutation graph, which preserves materialized state in both
-full and delta checkpoint modes. Only an explicitly absent legacy parent link may
-use chronological compatibility lookup; cycles, dangling links, and depth-limit
-exhaustion fail closed. Existing single-checkpoint branches are never repaired by
+full and delta checkpoint modes. Chronological compatibility lookup is available
+only when the checkpoint head has no recorded parent link. An explicit lineage
+that ends before a replay base, contains a cycle or invalid link, or exceeds its
+depth limit fails closed. Existing single-checkpoint branches are never repaired by
 copying a raw checkpoint because delta state is not self-contained in one tuple.
 Both lookups additionally require the replay base to be a **settled** checkpoint
 (`has_pending_tasks` — no scheduled `next` tasks). A checkpoint with pending tasks

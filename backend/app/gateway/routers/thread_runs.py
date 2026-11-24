@@ -769,8 +769,8 @@ async def _find_base_checkpoint_before_human(
         except TimeoutError as exc:
             raise HTTPException(status_code=504, detail="Timed out resolving the checkpoint before the target user message") from exc
         except CheckpointParentMissingError:
-            # Old checkpoints and imported histories may not have parent links.
-            # Preserve the bounded chronological fallback for those records.
+            # Some legacy or imported heads have no recorded parent link.
+            # Only those heads can use the chronological compatibility scan.
             logger.debug(
                 "Could not resolve parent lineage for regenerate thread %s; falling back to history scan",
                 sanitize_log_param(thread_id),

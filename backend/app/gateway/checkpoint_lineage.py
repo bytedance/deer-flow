@@ -33,7 +33,7 @@ class CheckpointLineageError(RuntimeError):
 
 
 class CheckpointParentMissingError(CheckpointLineageError):
-    """Raised when a legacy checkpoint does not record its parent link."""
+    """Raised when a legacy checkpoint head does not record a parent link."""
 
 
 class CheckpointLineageIntegrityError(CheckpointLineageError):
@@ -344,6 +344,8 @@ def _message_id(message: Any) -> str | None:
 
 def _config_identity(config: dict[str, Any]) -> tuple[str, str, str] | None:
     configurable = config.get("configurable", {})
+    if not isinstance(configurable, dict):
+        return None
     thread_id = configurable.get("thread_id")
     checkpoint_ns = configurable.get("checkpoint_ns", "")
     checkpoint_id = configurable.get("checkpoint_id")
@@ -421,18 +423,19 @@ async def find_checkpoint_before_message(
             # In-memory reads can finish inline. Yield so the deadline can fire.
             await asyncio.sleep(0)
         parent_config = getattr(current, "parent_config", None)
-        if not isinstance(parent_config, dict):
-            raise CheckpointParentMissingError("Checkpoint lineage ended before the target message")
+        if parent_config is None:
+            if depth == 0:
+                raise CheckpointParentMissingError("Checkpoint head has no recorded parent link")
+            raise CheckpointLineageIntegrityError("Checkpoint lineage ended before the target message")
 
-        parent = await read(parent_config)
-        parent_identity = _checkpoint_identity(parent)
-        requested_parent_identity = _config_identity(parent_config)
-        if parent_identity is None or not _checkpoint_exists(parent) or (requested_parent_identity is not None and parent_identity != requested_parent_identity):
+        if not isinstance(parent_config, dict) or (parent_identity := _config_identity(parent_config)) is None:
             raise CheckpointLineageIntegrityError("Checkpoint parent link is not addressable")
-        if parent_identity is not None:
-            if parent_identity in visited:
-                raise CheckpointLineageIntegrityError("Checkpoint lineage contains a cycle")
-            visited.add(parent_identity)
+        parent = await read(parent_config)
+        if _checkpoint_identity(parent) != parent_identity or not _checkpoint_exists(parent):
+            raise CheckpointLineageIntegrityError("Checkpoint parent link is not addressable")
+        if parent_identity in visited:
+            raise CheckpointLineageIntegrityError("Checkpoint lineage contains a cycle")
+        visited.add(parent_identity)
 
         grandparent = None
         versions = None

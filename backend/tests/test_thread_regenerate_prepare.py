@@ -1066,6 +1066,15 @@ def test_prepare_edit_regenerate_payload_skips_mid_run_replay_base_on_first_turn
     assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
 
 
+def _long_first_turn_checkpointer() -> FakeCheckpointer:
+    checkpointer = _first_turn_checkpointer()
+    messages = checkpointer.history[1].checkpoint["channel_values"]["messages"]
+    checkpointer.history[1:1] = [_checkpoint(f"ckpt-middle-{index}", messages, next_tasks=("model",)) for index in range(468)]
+    for checkpoint, parent in zip(checkpointer.history, checkpointer.history[1:]):
+        checkpoint.parent_config = parent.config
+    return checkpointer
+
+
 @pytest.mark.parametrize("max_recursion_limit", [1000, 50])
 def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn(monkeypatch, max_recursion_limit):
     """A completed turn stays replayable after the operator lowers the run limit."""
@@ -1074,11 +1083,7 @@ def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn(monkeypatch,
 
     monkeypatch.setattr(services, "get_app_config", lambda: SimpleNamespace(max_recursion_limit=max_recursion_limit))
     event_store, run_manager = _answer_run_fixtures()
-    checkpointer = _first_turn_checkpointer()
-    messages = checkpointer.history[1].checkpoint["channel_values"]["messages"]
-    checkpointer.history[1:1] = [_checkpoint(f"ckpt-middle-{index}", messages, next_tasks=("model",)) for index in range(468)]
-    for checkpoint, parent in zip(checkpointer.history, checkpointer.history[1:]):
-        checkpoint.parent_config = parent.config
+    checkpointer = _long_first_turn_checkpointer()
 
     response = asyncio.run(
         thread_runs._prepare_edit_regenerate_payload(
@@ -1091,6 +1096,31 @@ def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn(monkeypatch,
 
     assert response.checkpoint["checkpoint_id"] == "ckpt-empty"
     assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
+    assert checkpointer.alist_limits == []
+
+
+def test_prepare_edit_regenerate_rejects_sibling_after_exhausting_linked_history():
+    from app.gateway.routers import thread_runs
+
+    event_store, run_manager = _answer_run_fixtures()
+    checkpointer = _long_first_turn_checkpointer()
+    root = checkpointer.history[-1]
+    root.checkpoint["channel_values"]["messages"] = [HumanMessage(id="human-1__user", content="original question")]
+    # The sibling is the oldest entry in the chronological scan window.
+    checkpointer.history.insert(thread_runs.REGENERATE_HISTORY_RAW_SCAN_LIMIT - 1, _checkpoint("unrelated-sibling", []))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            thread_runs._prepare_edit_regenerate_payload(
+                "thread-1",
+                "human-1__user",
+                "edited question",
+                _request(checkpointer, event_store, run_manager=run_manager),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Could not safely resolve the checkpoint before the target user message"
     assert checkpointer.alist_limits == []
 
 
