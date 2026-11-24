@@ -10,6 +10,7 @@ import anyio
 import pytest
 
 from deerflow.skills.security_static_scanner import StaticScannerError
+from deerflow.skills.types import SKILL_MD_FILE
 
 skill_manage_module = importlib.import_module("deerflow.tools.skill_manage_tool")
 
@@ -623,10 +624,23 @@ def test_skill_manage_lock_waiters_leave_workers_for_other_skills(monkeypatch):
                 waiters_parked.set()
 
         storage = _park_skill_mutations(monkeypatch, on_arrival)
+        # Park the holder after its delete: it keeps the skill lock but no
+        # longer holds the owner's mutation lock, as during a slow scan. A
+        # holder parked inside the delete would hold up the owner's other
+        # skills by design, like a route mutation does.
+        storage.entered.set()
+        holder_parked = threading.Event()
+
+        async def _parked_refresh(_user_id: str) -> None:
+            if not holder_parked.is_set():
+                holder_parked.set()
+                assert await asyncio.to_thread(storage.release.wait, 5), "test never released the parked holder"
+
+        monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", _parked_refresh)
         holder = asyncio.create_task(_delete("alice", "busy-skill"))
         tasks = [holder]
         try:
-            assert await asyncio.to_thread(storage.entered.wait, 5)
+            assert await asyncio.to_thread(holder_parked.wait, 5)
             tasks += [asyncio.create_task(_delete("alice", "busy-skill")) for _ in range(2)]
             await asyncio.wait_for(waiters_parked.wait(), 5)
             # The holder parks one worker; the waiters must leave the other free
@@ -808,3 +822,158 @@ def test_skill_manage_edits_stay_permissive_for_device_named_skills(monkeypatch,
         anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "edit", "nul", _skill_content("nul"))
     with pytest.raises(FileNotFoundError, match="not found"):
         anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "delete", "nul")
+
+
+# --- the owner's custom-skill mutation lock, shared with the Gateway routes ---
+
+
+def _run_tool(runtime, *args):
+    return anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, *args)
+
+
+def _owner_storage():
+    from deerflow.skills.storage import get_or_new_user_skill_storage
+
+    return get_or_new_user_skill_storage("default")
+
+
+def _change_during_model_scan(monkeypatch, change):
+    """Run ``change`` once from the model scan: after the tool read the skill, before it writes.
+
+    ``change`` stands for a mutation that a route or a peer Gateway process
+    completed while the tool was scanning.
+    """
+    changed = []
+
+    async def _scan(*args, **kwargs):
+        if not changed:
+            changed.append(True)
+            await asyncio.to_thread(change)
+        return await _async_result("allow", "ok")
+
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", _scan)
+
+
+def test_skill_manage_waits_for_the_owner_mutation_lock(monkeypatch, tmp_path):
+    """A route holding the owner's lock finishes its read → write → history first."""
+    from deerflow.skills import mutation_lock
+
+    user_custom = _patch_skill_manage_env(monkeypatch, tmp_path)
+    runtime = _make_runtime(user_id="default")
+    initial, human, agent = (_skill_content("demo-skill", label) for label in ("Initial", "Human", "Agent"))
+    _run_tool(runtime, "create", "demo-skill", initial)
+    storage = _owner_storage()
+    reached, done = threading.Event(), threading.Event()
+    original_lock = mutation_lock.custom_skill_mutation_lock
+
+    def _observed_lock(lock_storage):
+        reached.set()
+        return original_lock(lock_storage)
+
+    def _edit():
+        try:
+            _run_tool(runtime, "edit", "demo-skill", agent)
+        finally:
+            done.set()
+
+    tool_call = threading.Thread(target=_edit, daemon=True)
+    with mutation_lock.custom_skill_mutation(storage):
+        monkeypatch.setattr(mutation_lock, "custom_skill_mutation_lock", _observed_lock)
+        tool_call.start()
+        assert reached.wait(5), "the tool never reached the owner's mutation lock"
+        assert not done.wait(1), "the tool edited the skill inside a route's critical section"
+        prev_content = storage.read_custom_skill("demo-skill")
+        storage.write_custom_skill("demo-skill", SKILL_MD_FILE, human)
+        storage.append_history("demo-skill", {"action": "human_edit", "author": "human", "prev_content": prev_content, "new_content": human})
+    tool_call.join(5)
+
+    assert done.is_set()
+    assert (user_custom / "demo-skill" / SKILL_MD_FILE).read_text(encoding="utf-8") == agent
+    records = _history_records(user_custom / "demo-skill")
+    assert [(r["action"], r["prev_content"], r["new_content"]) for r in records] == [
+        ("create", None, initial),
+        ("human_edit", initial, human),
+        ("edit", human, agent),
+    ]
+
+
+def test_skill_manage_patch_refuses_a_skill_that_changed_during_its_scans(monkeypatch, tmp_path):
+    """The patch was derived from, and scanned as, a change to the content it read."""
+    user_custom = _patch_skill_manage_env(monkeypatch, tmp_path)
+    runtime = _make_runtime(user_id="default")
+    initial, human = _skill_content("demo-skill"), _skill_content("demo-skill", "Human revision")
+    _run_tool(runtime, "create", "demo-skill", initial)
+
+    def _human_edit():
+        storage = _owner_storage()
+        storage.write_custom_skill("demo-skill", SKILL_MD_FILE, human)
+        storage.append_history("demo-skill", {"action": "human_edit", "author": "human", "prev_content": initial, "new_content": human})
+
+    _change_during_model_scan(monkeypatch, _human_edit)
+
+    with pytest.raises(ValueError, match="changed while this patch was being checked"):
+        _run_tool(runtime, "patch", "demo-skill", None, None, "Demo skill", "Patched skill", 1)
+
+    assert (user_custom / "demo-skill" / SKILL_MD_FILE).read_text(encoding="utf-8") == human
+    assert [r["action"] for r in _history_records(user_custom / "demo-skill")] == ["create", "human_edit"]
+
+
+def test_skill_manage_write_file_records_the_content_it_overwrites(monkeypatch, tmp_path):
+    user_custom = _patch_skill_manage_env(monkeypatch, tmp_path)
+    runtime = _make_runtime(user_id="default")
+    _run_tool(runtime, "create", "demo-skill", _skill_content("demo-skill"))
+    _run_tool(runtime, "write_file", "demo-skill", "v1", "references/guide.md")
+    _change_during_model_scan(monkeypatch, lambda: _owner_storage().write_custom_skill("demo-skill", "references/guide.md", "v2"))
+
+    _run_tool(runtime, "write_file", "demo-skill", "v3", "references/guide.md")
+
+    assert (user_custom / "demo-skill" / "references" / "guide.md").read_text(encoding="utf-8") == "v3"
+    record = _history_records(user_custom / "demo-skill")[-1]
+    assert (record["action"], record["prev_content"], record["new_content"]) == ("write_file", "v2", "v3")
+
+
+def test_skill_manage_write_file_does_not_recreate_a_skill_deleted_during_its_scans(monkeypatch, tmp_path):
+    user_custom = _patch_skill_manage_env(monkeypatch, tmp_path)
+    runtime = _make_runtime(user_id="default")
+    _run_tool(runtime, "create", "demo-skill", _skill_content("demo-skill"))
+    _change_during_model_scan(monkeypatch, lambda: _owner_storage().delete_custom_skill("demo-skill"))
+
+    with pytest.raises(FileNotFoundError, match="not found"):
+        _run_tool(runtime, "write_file", "demo-skill", "print('hi')\n", "references/guide.md")
+
+    assert not (user_custom / "demo-skill").exists()
+
+
+def test_skill_manage_create_does_not_overwrite_a_skill_created_during_its_scans(monkeypatch, tmp_path):
+    user_custom = _patch_skill_manage_env(monkeypatch, tmp_path)
+    runtime = _make_runtime(user_id="default")
+    theirs = _skill_content("demo-skill", "Created elsewhere")
+    _change_during_model_scan(monkeypatch, lambda: _owner_storage().write_custom_skill("demo-skill", SKILL_MD_FILE, theirs))
+
+    with pytest.raises(ValueError, match="already exists"):
+        _run_tool(runtime, "create", "demo-skill", _skill_content("demo-skill"))
+
+    assert (user_custom / "demo-skill" / SKILL_MD_FILE).read_text(encoding="utf-8") == theirs
+    assert not list(user_custom.rglob("*.jsonl"))
+
+
+def test_skill_manage_scans_without_holding_the_owner_mutation_lock(monkeypatch, tmp_path):
+    """A slow scan must not queue the owner's route edits of other skills."""
+    from deerflow.skills.mutation_lock import custom_skill_mutation_lock
+
+    _patch_skill_manage_env(monkeypatch, tmp_path)
+    runtime = _make_runtime(user_id="default")
+    _run_tool(runtime, "create", "demo-skill", _skill_content("demo-skill"))
+    acquired = []
+
+    def _route_lock_is_free():
+        lock = custom_skill_mutation_lock(_owner_storage())
+        acquired.append(lock.acquire(timeout=2))
+        if acquired[-1]:
+            lock.release()
+
+    _change_during_model_scan(monkeypatch, _route_lock_is_free)
+
+    _run_tool(runtime, "edit", "demo-skill", _skill_content("demo-skill", "Edited"))
+
+    assert acquired == [True]
