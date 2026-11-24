@@ -1488,6 +1488,21 @@ class LocalSandbox(Sandbox):
             raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         return [self._reverse_resolve_path(match) for match in matches], truncated
 
+    def _grep_line_with_virtual_paths(self, line: str) -> str:
+        """Show the mount roots in a matched line as virtual paths, spelled as stored.
+
+        write_file stores host paths in code files. Matched lines show virtual
+        paths for every file, as bash output does: the record of agent-written
+        files that read_file consults does not survive a restart. The output
+        scanner stops at punctuation such as ``:`` that can belong to one
+        filename (``cache:old.txt``), so the tail is kept verbatim instead of
+        canonicalized: following an unrelated symlink at the cut-off prefix
+        (``cache -> data``) would name a different file (``data:old.txt``).
+        """
+        for mapping in self._mappings_by_local_specificity:
+            line = replace_output_path_matches(line, self._resolved_local_paths[mapping], mapping.container_path, separator_agnostic=True)
+        return line
+
     def grep(
         self,
         path: str,
@@ -1513,6 +1528,7 @@ class LocalSandbox(Sandbox):
                         max_results=max_results - len(results) + 1,
                         relative_prefix=child,
                         user_data=user_data,
+                        display_line=self._grep_line_with_virtual_paths,
                     )
                     results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
                     if len(results) > max_results:
@@ -1527,6 +1543,7 @@ class LocalSandbox(Sandbox):
                 case_sensitive=case_sensitive,
                 max_results=max_results,
                 user_data=user_data,
+                display_line=self._grep_line_with_virtual_paths,
             )
         except OSError as e:
             if e.filename is None:
