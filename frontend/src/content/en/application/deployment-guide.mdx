@@ -227,17 +227,13 @@ openssl rand -base64 32
 
 ## Deployment verification
 
-After starting, verify the deployment:
+From the host, check Gateway readiness through the nginx address you use for the workspace. The example uses the default `localhost:2026`. If you changed the Compose port, use the host port reported by `docker port deer-flow-nginx 2026/tcp`.
 
 ```bash
-# Check Gateway health
-curl http://localhost:8001/health
-
-# List configured models (through nginx)
-curl http://localhost:2026/api/models
+curl -i http://localhost:2026/health/ready
 ```
 
-A working deployment returns a `200` response from each endpoint. The `/api/models` call returns the list of models from your `config.yaml`.
+A ready Gateway returns HTTP 200 and `"status": "ready"`. HTTP 503 with `"status": "degraded"` means a required dependency check failed. This endpoint is public. Listing models at `/api/models` requires credentials when authentication is enabled.
 
 <Cards num={2}>
   <Cards.Card title="Configuration" href="/docs/application/configuration" />
