@@ -26,8 +26,10 @@ _DDL = """CREATE TABLE IF NOT EXISTS report_sections (
 
 
 def _norm_heading(text: str) -> str:
-    """Whitespace- and marker-insensitive form for heading comparison."""
-    return re.sub(r"[\s#]+", "", text)
+    """Whitespace-insensitive form without optional boundary ATX markers."""
+    text = re.sub(r"^\s*#{1,6}\s+", "", text)
+    text = re.sub(r"\s+#+\s*$", "", text)
+    return re.sub(r"\s+", "", text)
 
 
 def strip_duplicate_title_heading(content: str, title: str) -> str:
@@ -39,7 +41,7 @@ def strip_duplicate_title_heading(content: str, title: str) -> str:
     """
     stripped = content.lstrip()
     first_line, _, rest = stripped.partition("\n")
-    match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", first_line)
+    match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+)?\s*$", first_line)
     if match and _norm_heading(match.group(1)) == _norm_heading(title):
         return rest.lstrip("\n")
     return stripped
