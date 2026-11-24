@@ -1,5 +1,7 @@
 # APA 7th Edition Citation Template
 
+This is an optional formatting example. Adapt sections and length to the request and available evidence. Paper names below illustrate citation syntax only; include them only if they belong to the actual selected corpus. Describe only searches, screening, reading and delegation that actually occurred.
+
 Use this template when the user requests APA format, or when they do not specify a format. APA 7th is the default for social sciences and most CS journals outside of IEEE venues.
 
 ## Citation Format Rules
@@ -41,7 +43,7 @@ Formatting rules:
 
 ## Report Structure
 
-Follow this structure verbatim when writing the SLR report body. Fill in content from your Phase 3 extraction and Phase 4 synthesis.
+Adapt this structure to the requested review. Fill it with evidence from the actual extraction and synthesis.
 
 ```markdown
 # Systematic Literature Review: <Topic>
@@ -53,21 +55,21 @@ Follow this structure verbatim when writing the SLR report body. Fill in content
 
 ## Executive Summary
 
-<3-5 sentences summarizing the state of the literature on this topic. What do the surveyed papers collectively tell us? What is the shape of the field? Avoid listing papers — synthesize.>
+<Summarize supported findings and uncertainty at a length appropriate to the review.>
 
 ## Methodology
 
-This review surveyed <N> arXiv papers retrieved on <YYYY-MM-DD> using the query `<query>`<, filtered to category <cat>><, published between <start_date> and <end_date>>. Papers were sorted by <relevance | submission date> and the top <N> were included. Metadata extraction (research question, methodology, key findings, limitations) was performed by language-model agents, with cross-paper synthesis performed by the lead agent.
+<Describe actual databases, query variants, dates, pagination or result caps, screening, deduplication and included count. Distinguish metadata/abstract inspection from full-text reading. Mention agents only if used. Do not describe the top N results as exhaustive coverage.>
 
-**Limitations of this review**: arXiv preprints are not peer-reviewed; some included papers may not reflect their final published form. Coverage is limited to arXiv — papers published directly in venues without arXiv preprints are not represented.
+**Limitations of this review**: <State actual coverage, publication status, unavailable full text and selection limitations. An arXiv-only search cannot establish coverage of the wider literature; verify publication status per paper.>
 
 ## Themes
 
-<3-6 thematic sections. Each theme is a recurring research direction, problem framing, or methodological approach across the surveyed papers.>
+<Use as many themes as the evidence supports. Each theme reflects a recurring question, problem or method in the selected corpus.>
 
 ### Theme 1: <Theme name>
 
-<2-4 paragraphs describing this theme. Cite papers inline as you discuss them, e.g. "Vaswani et al. (2017) introduced X, while subsequent work (Devlin et al., 2018; Liu et al., 2019) extended it to Y." Do not just list papers — describe the intellectual thread that connects them.>
+<Explain the theme using citations from the selected corpus. State connections only when supported, and distinguish synthesis from direct findings.>
 
 ### Theme 2: <Theme name>
 
@@ -77,7 +79,7 @@ This review surveyed <N> arXiv papers retrieved on <YYYY-MM-DD> using the query 
 
 **Convergences**: <findings that multiple papers agree on — e.g. "Most surveyed papers agree that X is necessary, citing evidence from Y and Z.">
 
-**Disagreements**: <where papers reach different conclusions — e.g. "Vaswani et al. (2017) argue that X, while Dai et al. (2019) find the opposite under condition Y.">
+**Disagreements**: <Describe differences supported by the selected papers, with citations and relevant conditions; do not infer disagreement from different topics or missing evidence.>
 
 ## Gaps and Open Questions
 

@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ class InfoQuestClient:
         self.search_time_range = search_time_range
         self.image_search_time_range = image_search_time_range
         self.image_size = image_size
-        self.api_key_set = bool(os.getenv("INFOQUEST_API_KEY"))
+        self.api_key_set = resolve_api_key(os.getenv("INFOQUEST_API_KEY")) is not None
         if logger.isEnabledFor(logging.DEBUG):
             config_details = (
                 f"\n📋 Configuration Details:\n"
@@ -147,8 +148,9 @@ class InfoQuestClient:
         }
 
         # Add API key if available
-        if os.getenv("INFOQUEST_API_KEY"):
-            headers["Authorization"] = f"Bearer {os.getenv('INFOQUEST_API_KEY')}"
+        api_key = resolve_api_key(os.getenv("INFOQUEST_API_KEY"))
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
             logger.debug("API key added to request headers")
         else:
             logger.warning("InfoQuest API key is not set. Provide your own key for authentication.")

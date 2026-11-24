@@ -6,7 +6,8 @@ from urllib.parse import urlparse
 from exa_py import Exa
 from langchain.tools import tool
 
-from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url
+from deerflow.community.provider_credentials import resolve_api_key
+from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url, validate_hosted_fetch_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -81,8 +82,20 @@ def _get_exa_client(tool_name: str = "web_search") -> Exa:
     return _build_exa_client(extra, _resolve_base_url(extra))
 
 
+def _uses_hosted_exa(base_url: str | None) -> bool:
+    if base_url is None:
+        return True
+    endpoint = urlparse(base_url)
+    return endpoint.scheme == "https" and (endpoint.hostname or "").removesuffix(".") == "api.exa.ai" and endpoint.port in (None, 443)
+
+
 def _build_exa_client(extra: dict, base_url: str | None) -> Exa:
-    kwargs = {"api_key": extra.get("api_key")}
+    api_key = resolve_api_key(extra.get("api_key")) or resolve_api_key(os.getenv("EXA_API_KEY"))
+    # The SDK re-reads EXA_API_KEY unstripped when api_key is None and sends "" as
+    # is, so a missing or blank key fails here, before any request.
+    if api_key is None:
+        raise ValueError("Exa API key must be set in the tool config or EXA_API_KEY")
+    kwargs = {"api_key": api_key}
     if base_url:
         kwargs["base_url"] = base_url
     return Exa(**kwargs)
@@ -146,6 +159,10 @@ def web_fetch_tool(url: str) -> str:
         config = get_app_config().get_tool_config("web_fetch")
         extra = config.model_extra if config is not None else {}
         base_url = _resolve_base_url(extra)
+        if _uses_hosted_exa(base_url):
+            target_error = validate_hosted_fetch_url(url)
+            if target_error:
+                return target_error
         if base_url:
             # A custom backend fetches the URL in its own network, like other delegated fetch services.
             backend_error = validate_delegated_backend_url(

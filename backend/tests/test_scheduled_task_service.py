@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -139,6 +140,36 @@ class DummyRunRepo:
         self.reconcile_count += 1
         self.reconciled = kwargs
         return 0
+
+
+class GenerationRunRepo(DummyRunRepo):
+    """Return a claim generation so service tests can pin the fence plumbing."""
+
+    async def claim_queued_run(self, run_record_id, **kwargs):
+        claimed = await super().claim_queued_run(run_record_id, **kwargs)
+        if claimed is not None:
+            claimed["attempt_count"] = 7
+        return claimed
+
+
+class LostClaimRunRepo(GenerationRunRepo):
+    """Simulate a newer claim generation winning during requeue."""
+
+    async def requeue_claimed_run(self, run_record_id, **kwargs):
+        self.updated.append((run_record_id, {"status": "queued", **kwargs}))
+        return False
+
+
+class LegacyRunRepo(DummyRunRepo):
+    """A custom repository whose writes predate the optional generation fence."""
+
+    async def requeue_claimed_run(self, run_record_id, *, lease_owner, error=None):
+        self.updated.append((run_record_id, {"status": "queued", "lease_owner": lease_owner, "error": error}))
+        return True
+
+    async def fail_launching_run(self, run_record_id, *, task_id, lease_owner, error, now):
+        self.updated.append((run_record_id, {"status": "failed", "task_id": task_id, "lease_owner": lease_owner, "error": error, "now": now}))
+        return True
 
 
 @pytest.mark.asyncio
@@ -435,6 +466,123 @@ async def test_busy_thread_http_conflict_is_kept_in_queue():
 
 
 @pytest.mark.asyncio
+async def test_overlap_requeue_is_fenced_by_the_claim_generation():
+    async def fake_launch(**_kwargs):
+        raise ConflictError("Thread thread-1 already has an active run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-generation-requeue",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = GenerationRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "queued"
+    assert run_repo.updated[-1][1]["status"] == "queued"
+    assert run_repo.updated[-1][1]["expected_attempt_count"] == 7
+
+
+@pytest.mark.asyncio
+async def test_overlap_requeue_logs_when_a_newer_claim_owns_the_row(caplog):
+    async def fake_launch(**_kwargs):
+        raise ConflictError("Thread thread-1 already has an active run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-generation-lost-requeue",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = LostClaimRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="manual")
+
+    assert result["outcome"] == "queued"
+    assert "lost its launch claim before requeue bookkeeping" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pre_launch_failure_is_fenced_by_the_claim_generation():
+    async def fake_launch(**_kwargs):
+        raise RuntimeError("runtime refused to start the run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-generation-failure",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = GenerationRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "failed"
+    assert run_repo.updated[-1][1]["status"] == "failed"
+    assert run_repo.updated[-1][1]["expected_attempt_count"] == 7
+
+
+@pytest.mark.asyncio
 async def test_dispatch_task_records_failure_for_legacy_invalid_thread_id():
     """Rows persisted before the thread-id contract was centralized may store
     IDs that fail the canonical pattern (dots, >64 chars). Dispatch must record
@@ -538,6 +686,147 @@ async def test_run_once_continues_batch_after_invalid_thread_id():
 
     assert len(launched) == 1
     assert launched[0]["thread_id"] == "thread-ok"
+
+
+@pytest.mark.asyncio
+async def test_run_once_continues_after_queued_run_drain_error(monkeypatch, caplog):
+    """A poison queued row must not block the rest of the drain or due claims."""
+    now = datetime.now(UTC)
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": f"run-{len(launched)}", "thread_id": kwargs["thread_id"]}
+
+    poison_task = {
+        "id": "task-poison-drain",
+        "user_id": "user-1",
+        "thread_id": "thread-poison-drain",
+        "context_mode": "reuse_thread",
+        "assistant_id": "lead_agent",
+        "prompt": "Summarize thread",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "0 9 * * *"},
+        "timezone": "UTC",
+        "status": "enabled",
+    }
+    healthy_task = {
+        "id": "task-healthy-drain",
+        "user_id": "user-1",
+        "thread_id": "thread-healthy-drain",
+        "context_mode": "reuse_thread",
+        "assistant_id": "lead_agent",
+        "prompt": "Summarize thread",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "0 9 * * *"},
+        "timezone": "UTC",
+        "status": "enabled",
+    }
+    due_task = {
+        **healthy_task,
+        "id": "task-due-after-drain",
+        "thread_id": "thread-due-after-drain",
+    }
+
+    class DrainRunRepo(DummyRunRepo):
+        async def list_queued_runs(self, *, limit, **_kwargs):
+            return [
+                {"id": "run-poison-drain", "task_id": poison_task["id"], "thread_id": poison_task["thread_id"], "trigger": "manual", "scheduled_for": now},
+                {"id": "run-healthy-drain", "task_id": healthy_task["id"], "thread_id": healthy_task["thread_id"], "trigger": "manual", "scheduled_for": now},
+            ][:limit]
+
+    class DrainTaskRepo(DummyTaskRepo):
+        async def release_queued_admission_lease(self, task_id):
+            if task_id == poison_task["id"]:
+                raise RuntimeError("queue admission lease release failed")
+            return False
+
+    task_repo = DrainTaskRepo([poison_task, healthy_task])
+    run_repo = DrainRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    async def claim_due_tasks(**_kwargs):
+        return [due_task]
+
+    monkeypatch.setattr(task_repo, "claim_due_tasks", claim_due_tasks)
+
+    await service.run_once(now=now)
+
+    assert [item["thread_id"] for item in launched] == ["thread-healthy-drain", "thread-due-after-drain"]
+    assert "Failed to drain scheduled occurrence run-poison-drain" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_run_once_continues_after_queue_expiry_error(monkeypatch, caplog):
+    """A timeout-sweep failure must not skip draining or due-task admission."""
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-ok", "thread_id": kwargs["thread_id"]}
+
+    healthy_task = {
+        "id": "task-healthy-expiry",
+        "user_id": "user-1",
+        "thread_id": "thread-healthy-expiry",
+        "context_mode": "reuse_thread",
+        "assistant_id": "lead_agent",
+        "prompt": "Summarize thread",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "0 9 * * *"},
+        "timezone": "UTC",
+        "status": "enabled",
+    }
+    queued_task = {
+        **healthy_task,
+        "id": "task-healthy-drain",
+        "thread_id": "thread-healthy-drain",
+    }
+
+    class DrainRunRepo(DummyRunRepo):
+        async def list_queued_runs(self, *, limit, **_kwargs):
+            return [
+                {
+                    "id": "run-healthy-drain",
+                    "task_id": queued_task["id"],
+                    "thread_id": queued_task["thread_id"],
+                    "trigger": "manual",
+                    "scheduled_for": datetime.now(UTC),
+                }
+            ][:limit]
+
+    task_repo = DummyTaskRepo([queued_task, healthy_task])
+    run_repo = DrainRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    async def broken_expiry(**_kwargs):
+        raise RuntimeError("queue expiry pass failed")
+
+    monkeypatch.setattr(run_repo, "expire_queued_runs", broken_expiry)
+
+    async def claim_due_tasks(**_kwargs):
+        return [healthy_task]
+
+    monkeypatch.setattr(task_repo, "claim_due_tasks", claim_due_tasks)
+
+    await service.run_once(now=datetime.now(UTC))
+
+    assert [item["thread_id"] for item in launched] == ["thread-healthy-drain", "thread-healthy-expiry"]
+    assert "Failed to expire queued scheduled runs" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1859,6 +2148,40 @@ async def test_launch_passes_user_language_origin_and_run_thread_title(trigger):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("launch_error", "expected_outcome"),
+    [
+        (ConflictError("Thread busy"), "queued"),
+        (RuntimeError("launch failed"), "failed"),
+    ],
+)
+async def test_legacy_repo_does_not_receive_a_generation_kwarg(launch_error, expected_outcome):
+    async def fake_launch(**_kwargs):
+        raise launch_error
+
+    task_repo = DummyTaskRepo([_provenance_task()])
+    run_repo = LegacyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(
+        task_repo.rows[0],
+        now=datetime(2026, 10, 7, 1, 0, tzinfo=UTC),
+        trigger="manual",
+    )
+
+    assert result["outcome"] == expected_outcome
+    assert run_repo.updated
+    assert "expected_attempt_count" not in run_repo.updated[0][1]
+
+
+@pytest.mark.asyncio
 async def test_manual_launch_origin_is_stable_across_retries():
     task_repo = DummyTaskRepo([_provenance_task()])
     run_repo = DummyRunRepo()
@@ -1914,9 +2237,9 @@ async def test_manual_trial_retry_reuses_the_admitted_origin():
     attempted: list[dict] = []
     original_attempt = service._attempt_queued_run
 
-    async def capture_attempt(task, queued, *, now):
+    async def capture_attempt(task, queued, *, now, **kwargs):
         attempted.append(dict(queued))
-        return await original_attempt(task, queued, now=now)
+        return await original_attempt(task, queued, now=now, **kwargs)
 
     service._attempt_queued_run = capture_attempt
     admitted = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)

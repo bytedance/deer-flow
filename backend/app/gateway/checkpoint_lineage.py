@@ -2,8 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Sequence
+from itertools import count
 from typing import Any
+
+from fastapi import HTTPException
+
+from app.gateway.utils import sanitize_log_param
+
+logger = logging.getLogger(__name__)
+
+_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS = 30
+_REPLAY_LINEAGE_TIMEOUT_DETAIL = "Timed out resolving the checkpoint before the target user message"
+
+
+def task_interrupts_by_id(snapshot: Any) -> dict[str, list[Any]]:
+    """Group non-empty task interrupts of one snapshot by task id."""
+    grouped: dict[str, list[Any]] = {}
+    for task in getattr(snapshot, "tasks", None) or ():
+        interrupts = list(getattr(task, "interrupts", ()) or ())
+        if interrupts:
+            grouped[task.id] = interrupts
+    return grouped
+
+
+def is_hitl_approval_payload(value: Any) -> bool:
+    """Whether an interrupt payload is a HITL tool-approval request."""
+    return isinstance(value, dict) and value.get("kind") == "hitl_approval"
+
+
+def hitl_approval_payloads(grouped: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    """Flatten approval payloads from task_interrupts_by_id output."""
+    return [interrupt.value for interrupts in grouped.values() for interrupt in interrupts if is_hitl_approval_payload(interrupt.value)]
 
 
 class CheckpointLineageError(RuntimeError):
@@ -11,11 +43,21 @@ class CheckpointLineageError(RuntimeError):
 
 
 class CheckpointParentMissingError(CheckpointLineageError):
-    """Raised when a legacy checkpoint does not record its parent link."""
+    """Raised when a legacy checkpoint head does not record a parent link."""
 
 
 class CheckpointLineageIntegrityError(CheckpointLineageError):
     """Raised when recorded checkpoint lineage is present but unsafe to use."""
+
+
+class CheckpointLineageTimeoutError(CheckpointLineageError):
+    """Raised when the replay lineage lookup exceeds its own deadline."""
+
+
+def replay_lineage_timeout_http_error(thread_id: str, exc: CheckpointLineageTimeoutError) -> HTTPException:
+    """Log a replay lookup deadline expiry and return its fixed client error."""
+    logger.warning("Replay checkpoint lookup timed out for thread %s", sanitize_log_param(thread_id), exc_info=exc)
+    return HTTPException(status_code=504, detail=_REPLAY_LINEAGE_TIMEOUT_DETAIL)
 
 
 def checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
@@ -54,6 +96,21 @@ def _has_postgres_stamps(metadata: dict[str, Any]) -> bool:
     if metadata.get("source") != "update":
         return False
     return "run_durations" in metadata or "run_message_ids" in metadata
+
+
+def channel_versions_match(
+    versions: dict[str, Any] | None,
+    parent_versions: dict[str, Any] | None,
+) -> bool:
+    """Whether two checkpoint version maps match channel-for-channel.
+
+    LangGraph versions are scoped to their channels, not globally unique.
+    Comparing only the values can mistake a state-changing checkpoint for a
+    metadata-only copy when two channels exchange their versions.
+    """
+
+    # Empty maps are equal too; markerless inference applies its own non-empty guard.
+    return isinstance(versions, dict) and isinstance(parent_versions, dict) and versions == parent_versions
 
 
 def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = None, stamp_fallback: bool = True, versions: dict[str, Any] | None = None, parent_versions: dict[str, Any] | None = None) -> bool:
@@ -248,7 +305,7 @@ def _copies_parent_verbatim(checkpoint_tuple: Any, parent: Any, *, versions: dic
     parent_versions = parent_versions if isinstance(parent_versions, dict) else _snapshot_versions(parent)
     if not isinstance(versions, dict) or not isinstance(parent_versions, dict) or not versions:
         return False
-    return frozenset(versions.values()) == frozenset(parent_versions.values())
+    return channel_versions_match(versions, parent_versions)
 
 
 def history_parent_index(checkpoints: Sequence[Any]) -> dict[tuple[str, str], Any]:
@@ -307,6 +364,8 @@ def _message_id(message: Any) -> str | None:
 
 def _config_identity(config: dict[str, Any]) -> tuple[str, str, str] | None:
     configurable = config.get("configurable", {})
+    if not isinstance(configurable, dict):
+        return None
     thread_id = configurable.get("thread_id")
     checkpoint_ns = configurable.get("checkpoint_ns", "")
     checkpoint_id = configurable.get("checkpoint_id")
@@ -337,12 +396,28 @@ def _checkpoint_exists(checkpoint_tuple: Any) -> bool:
     return isinstance(getattr(checkpoint_tuple, "checkpoint", None), dict)
 
 
+async def find_replay_checkpoint_before_message(
+    accessor: Any,
+    head_checkpoint: Any,
+    message_id: str,
+) -> Any:
+    """Resolve the replay base for branching, regeneration, or edit replay."""
+    deadline = asyncio.timeout(_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS)
+    try:
+        async with deadline:
+            return await find_checkpoint_before_message(accessor, head_checkpoint, message_id, max_depth=None)
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise  # The checkpoint store raised its own timeout.
+        raise CheckpointLineageTimeoutError(_REPLAY_LINEAGE_TIMEOUT_DETAIL) from exc
+
+
 async def find_checkpoint_before_message(
     accessor: Any,
     head_checkpoint: Any,
     message_id: str,
     *,
-    max_depth: int,
+    max_depth: int | None,
 ) -> Any:
     """Walk one parent lineage and return the first checkpoint before ``message_id``.
 
@@ -351,6 +426,7 @@ async def find_checkpoint_before_message(
     a checkpoint from the wrong branch. Duration-only metadata checkpoints do not
     represent an addressable conversation state and are skipped, and so are
     checkpoints that still have pending tasks (see :func:`has_pending_tasks`).
+    With ``max_depth=None``, the caller must bound the lookup with a deadline.
     """
 
     if message_id not in {_message_id(message) for message in checkpoint_messages(head_checkpoint)}:
@@ -362,13 +438,9 @@ async def find_checkpoint_before_message(
     if current_identity is not None:
         visited.add(current_identity)
 
-    # Each distinct ancestor is read once: a Postgres stamp candidate also
-    # needs its grandparent for the shape check, and a candidate the shape
-    # check refuses re-reads that grandparent as the next iteration's parent,
-    # so reads are memoized by config identity instead of carried by hand.
-    # Normal branch/regenerate histories cross the target boundary within
-    # 1–3 reads. Keep max_depth as a conservative safety cap for valid
-    # histories with many intermediate or duration-only checkpoints.
+    # A Postgres stamp candidate may read its grandparent for the shape
+    # check. That snapshot is the next iteration's parent, so keep the last
+    # read only. A long walk does not need to retain every materialized state.
     read_cache: dict[tuple[str, str, str], Any] = {}
 
     async def read(config: dict[str, Any]) -> Any:
@@ -377,23 +449,29 @@ async def find_checkpoint_before_message(
             return read_cache[identity]
         checkpoint_tuple = await accessor.aget(config)
         if identity is not None:
+            read_cache.clear()
             read_cache[identity] = checkpoint_tuple
         return checkpoint_tuple
 
-    for _ in range(max_depth):
+    depths = count() if max_depth is None else range(max_depth)
+    for depth in depths:
+        if max_depth is None and depth % 64 == 0:
+            # In-memory reads can finish inline. Yield so the deadline can fire.
+            await asyncio.sleep(0)
         parent_config = getattr(current, "parent_config", None)
-        if not isinstance(parent_config, dict):
-            raise CheckpointParentMissingError("Checkpoint lineage ended before the target message")
+        if parent_config is None:
+            if depth == 0:
+                raise CheckpointParentMissingError("Checkpoint head has no recorded parent link")
+            raise CheckpointLineageIntegrityError("Checkpoint lineage ended before the target message")
 
-        parent = await read(parent_config)
-        parent_identity = _checkpoint_identity(parent)
-        requested_parent_identity = _config_identity(parent_config)
-        if parent_identity is None or not _checkpoint_exists(parent) or (requested_parent_identity is not None and parent_identity != requested_parent_identity):
+        if not isinstance(parent_config, dict) or (parent_identity := _config_identity(parent_config)) is None:
             raise CheckpointLineageIntegrityError("Checkpoint parent link is not addressable")
-        if parent_identity is not None:
-            if parent_identity in visited:
-                raise CheckpointLineageIntegrityError("Checkpoint lineage contains a cycle")
-            visited.add(parent_identity)
+        parent = await read(parent_config)
+        if _checkpoint_identity(parent) != parent_identity or not _checkpoint_exists(parent):
+            raise CheckpointLineageIntegrityError("Checkpoint parent link is not addressable")
+        if parent_identity in visited:
+            raise CheckpointLineageIntegrityError("Checkpoint lineage contains a cycle")
+        visited.add(parent_identity)
 
         grandparent = None
         versions = None

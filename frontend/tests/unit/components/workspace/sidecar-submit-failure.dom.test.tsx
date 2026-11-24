@@ -18,7 +18,7 @@ import {
 import { SidecarPanel } from "@/components/workspace/sidecar/sidecar-panel";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import type { User } from "@/core/auth/types";
-import { DEFAULT_LOCALE } from "@/core/i18n";
+import { DEFAULT_LOCALE, type Locale } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
 
 // PromptInput clears the composer only when onSubmit resolves, so these tests
@@ -28,6 +28,12 @@ const mocks = rs.hoisted(() => ({
   createSidecarThread: rs.fn(),
   sendMessage: rs.fn(),
   toastError: rs.fn(),
+  streamOptions: undefined as unknown,
+  threadMetadata: {
+    data: undefined as unknown,
+    isLoading: false,
+    isFetching: false,
+  },
 }));
 
 rs.mock("next/navigation", () => ({
@@ -58,14 +64,18 @@ rs.mock("@/core/sidecar/api", () => ({
 
 rs.mock("@/core/threads/hooks", () => ({
   useDeleteThread: () => ({ mutateAsync: rs.fn(), isPending: false }),
-  useThreadStream: () => ({
-    thread: { isLoading: false, messages: [], values: {} },
-    sendMessage: mocks.sendMessage,
-    isUploading: false,
-    isHistoryLoading: false,
-    hasMoreHistory: false,
-    loadMoreHistory: rs.fn(),
-  }),
+  useThreadMetadata: () => mocks.threadMetadata,
+  useThreadStream: (options: unknown) => {
+    mocks.streamOptions = options;
+    return {
+      thread: { isLoading: false, messages: [], values: {} },
+      sendMessage: mocks.sendMessage,
+      isUploading: false,
+      isHistoryLoading: false,
+      hasMoreHistory: false,
+      loadMoreHistory: rs.fn(),
+    };
+  },
 }));
 
 const USER = {
@@ -94,9 +104,12 @@ function Setup({ threadId }: { threadId: string | null }) {
   return null;
 }
 
-function renderPanel(threadId: string | null): ReactNode {
+function renderPanel(
+  threadId: string | null,
+  locale: Locale = DEFAULT_LOCALE,
+): ReactNode {
   return (
-    <I18nProvider initialLocale={DEFAULT_LOCALE}>
+    <I18nProvider initialLocale={locale}>
       <QueryClientProvider
         client={
           new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -141,13 +154,58 @@ beforeEach(() => {
   mocks.createSidecarThread.mockReset();
   mocks.sendMessage.mockReset();
   mocks.toastError.mockReset();
+  mocks.streamOptions = undefined;
+  mocks.threadMetadata.data = undefined;
+  mocks.threadMetadata.isLoading = false;
+  mocks.threadMetadata.isFetching = false;
 });
 
 afterEach(() => {
   cleanup();
+  document.cookie = "locale=; max-age=0; path=/";
+});
+
+it("gives the sidecar send button its Chinese accessible name", async () => {
+  document.cookie = "locale=zh-CN; path=/";
+  render(renderPanel("sidecar-1", "zh-CN"));
+
+  const button = await screen.findByRole<HTMLButtonElement>("button", {
+    name: "发送",
+  });
+  expect(button.type).toBe("submit");
 });
 
 describe("SidecarPanel keeps the draft when a send fails", () => {
+  it("forwards restored interrupts and initial metadata loading to the stream", async () => {
+    const interrupts = { task: [{ value: { kind: "hitl_approval" } }] };
+    mocks.threadMetadata.data = { interrupts };
+    mocks.threadMetadata.isLoading = true;
+    mocks.threadMetadata.isFetching = true;
+
+    render(renderPanel("sidecar-1"));
+
+    await waitFor(() =>
+      expect(mocks.streamOptions).toMatchObject({
+        threadId: "sidecar-1",
+        restInterrupts: interrupts,
+        restInterruptsLoading: true,
+      }),
+    );
+  });
+
+  it("does not treat a background metadata refetch as initial loading", async () => {
+    mocks.threadMetadata.isFetching = true;
+
+    render(renderPanel("sidecar-1"));
+
+    await waitFor(() =>
+      expect(mocks.streamOptions).toMatchObject({
+        threadId: "sidecar-1",
+        restInterruptsLoading: false,
+      }),
+    );
+  });
+
   it("keeps the draft when creating the side chat fails", async () => {
     mocks.createSidecarThread.mockRejectedValue(new Error("create failed"));
     render(renderPanel(null));

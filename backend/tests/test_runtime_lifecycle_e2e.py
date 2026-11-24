@@ -569,7 +569,7 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
 
 
 _CONFIG_SECTION_ERROR = "invalid_run_config_section"
-_UNRESOLVED_AGENT_DETAIL = "knowledge_scope assistant configuration could not be resolved"
+_NON_STRING_AGENT_DETAIL = "Invalid agent_name: expected a string, got int."
 
 
 @pytest.mark.parametrize(
@@ -592,9 +592,10 @@ _UNRESOLVED_AGENT_DETAIL = "knowledge_scope assistant configuration could not be
             "Invalid assistant_id '   ': must contain only letters, digits, and hyphens after normalization.",
             id="assistant-id-blank",
         ),
-        pytest.param({"config": {"configurable": {"agent_name": 1}}}, 422, _UNRESOLVED_AGENT_DETAIL, id="configurable-agent-name"),
-        pytest.param({"config": {"context": {"agent_name": 1}}}, 422, _UNRESOLVED_AGENT_DETAIL, id="config-context-agent-name"),
-        pytest.param({"context": {"agent_name": 1}}, 422, _UNRESOLVED_AGENT_DETAIL, id="context-agent-name"),
+        pytest.param({"config": {"configurable": {"agent_name": 1}}}, 422, _NON_STRING_AGENT_DETAIL, id="configurable-agent-name"),
+        pytest.param({"config": {"context": {"agent_name": 1}}}, 422, _NON_STRING_AGENT_DETAIL, id="config-context-agent-name"),
+        pytest.param({"context": {"agent_name": 1}}, 422, _NON_STRING_AGENT_DETAIL, id="context-agent-name"),
+        pytest.param({"context": {"agent_name": "ghost-agent"}}, 422, "Agent 'ghost-agent' not found", id="context-agent-missing"),
         pytest.param(
             {"input": {"messages": [{"role": "user", "content": "hi"}, {"role": "ai", "content": "", "tool_calls": "x"}]}},
             400,

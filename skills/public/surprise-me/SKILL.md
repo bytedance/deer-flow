@@ -11,7 +11,7 @@ Deliver an unexpected, delightful experience by dynamically discovering availabl
 
 ### Step 1: Discover Available Skills
 
-Read all the skills listed in the <available_skills>.
+Inspect the names and descriptions in <available_skills>. Read only the bodies of skills selected for the deliverable.
 
 ### Step 2: Plan the Surprise
 
@@ -32,7 +32,7 @@ Select **1 to 3** skills and design a creative mashup. The goal is a single cohe
 
 ### Step 3: Fallback — No Other Skills Available
 
-If no other skills are discovered (only surprise-me exists), use one of these fallbacks:
+If no other skills are discovered (only surprise-me exists), choose an approach suited to the user and available tools. These are optional examples:
 
 1. **News-based surprise**: Search today's news for a fascinating story, then create a beautifully designed HTML artifact presenting it in a visually striking way
 2. **Interactive HTML experience**: Build a creative single-page web experience — generative art, a mini-game, a visual poem, an animated infographic, or an interactive story

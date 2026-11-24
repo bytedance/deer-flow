@@ -53,7 +53,7 @@ def _remote_sandbox(name: str, monkeypatch: pytest.MonkeyPatch, remote_files: di
         from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
 
         sandbox = OpenSandboxSandbox("line-contract", SimpleNamespace(), run_command_opts_cls=SimpleNamespace)
-        monkeypatch.setattr(sandbox, "_file_op", lambda operation: operation(SimpleNamespace(read_file=lambda path, **_kwargs: read_text(path))))
+        monkeypatch.setattr(sandbox, "_file_op", lambda operation, **_kwargs: operation(SimpleNamespace(read_file=lambda path, **_kwargs: read_text(path))))
         return sandbox
     raise AssertionError(f"Unregistered provider: {name}")
 

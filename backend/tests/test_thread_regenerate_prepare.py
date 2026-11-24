@@ -1066,6 +1066,106 @@ def test_prepare_edit_regenerate_payload_skips_mid_run_replay_base_on_first_turn
     assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
 
 
+def test_prepare_edit_regenerate_payload_resolves_a_long_first_turn():
+    from app.gateway.routers import thread_runs
+
+    event_store, run_manager = _answer_run_fixtures()
+    checkpointer = _first_turn_checkpointer()
+    messages = checkpointer.history[1].checkpoint["channel_values"]["messages"]
+    checkpointer.history[1:1] = [_checkpoint(f"ckpt-middle-{index}", messages, next_tasks=("model",)) for index in range(468)]
+    for checkpoint, parent in zip(checkpointer.history, checkpointer.history[1:]):
+        checkpoint.parent_config = parent.config
+
+    response = asyncio.run(
+        thread_runs._prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1__user",
+            "edited question",
+            _request(checkpointer, event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-empty"
+    assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
+    assert checkpointer.alist_limits == []
+
+
+def test_prepare_edit_regenerate_rejects_sibling_after_exhausting_linked_history():
+    from app.gateway.routers import thread_runs
+
+    event_store, run_manager = _answer_run_fixtures()
+    checkpointer = _first_turn_checkpointer()
+    for checkpoint, parent in zip(checkpointer.history, checkpointer.history[1:]):
+        checkpoint.parent_config = parent.config
+    root = checkpointer.history[-1]
+    root.checkpoint["channel_values"]["messages"] = [HumanMessage(id="human-1__user", content="original question")]
+    # The chronological scan would mistake this older sibling for the replay base.
+    checkpointer.history.append(_checkpoint("unrelated-sibling", []))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            thread_runs._prepare_edit_regenerate_payload(
+                "thread-1",
+                "human-1__user",
+                "edited question",
+                _request(checkpointer, event_store, run_manager=run_manager),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Could not safely resolve the checkpoint before the target user message"
+    assert checkpointer.alist_limits == []
+
+
+def test_replay_lineage_timeout_does_not_scan_chronological_history(monkeypatch):
+    from app.gateway import checkpoint_lineage
+    from app.gateway.routers import thread_runs
+
+    monkeypatch.setattr(checkpoint_lineage, "_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
+    checkpointer = _first_turn_checkpointer()
+    checkpointer.history[0].parent_config = checkpointer.history[1].config
+    head = FakeAccessor._from_raw(checkpointer.history[0])
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            thread_runs._find_base_checkpoint_before_human(
+                "thread-1",
+                "human-1__user",
+                _request(checkpointer, FakeEventStore([])),
+                head_checkpoint=head,
+            )
+        )
+
+    assert exc.value.status_code == 504
+    assert exc.value.detail == "Timed out resolving the checkpoint before the target user message"
+    assert checkpointer.alist_limits == []
+
+
+def test_replay_lineage_preserves_checkpoint_store_timeout(monkeypatch):
+    from app.gateway.routers import thread_runs
+
+    checkpointer = _first_turn_checkpointer()
+    checkpointer.history[0].parent_config = checkpointer.history[1].config
+    head = FakeAccessor._from_raw(checkpointer.history[0])
+    store_timeout = TimeoutError("checkpoint store timed out")
+    get_tuple = AsyncMock(side_effect=store_timeout)
+    monkeypatch.setattr(checkpointer, "aget_tuple", get_tuple)
+
+    with pytest.raises(TimeoutError) as exc:
+        asyncio.run(
+            thread_runs._find_base_checkpoint_before_human(
+                "thread-1",
+                "human-1__user",
+                _request(checkpointer, FakeEventStore([])),
+                head_checkpoint=head,
+            )
+        )
+
+    assert exc.value is store_timeout
+    get_tuple.assert_awaited_once_with(head.parent_config)
+    assert checkpointer.alist_limits == []
+
+
 def test_prepare_edit_regenerate_payload_prefers_checkpoint_lineage():
     """Edit replay must resolve its base the same lineage-first way regenerate does.
 
@@ -1080,7 +1180,7 @@ def test_prepare_edit_regenerate_payload_prefers_checkpoint_lineage():
 
     walk = AsyncMock(side_effect=CheckpointParentMissingError("no parent link"))
 
-    with patch.object(thread_runs, "find_checkpoint_before_message", walk):
+    with patch.object(thread_runs, "find_replay_checkpoint_before_message", walk):
         response = asyncio.run(
             thread_runs._prepare_edit_regenerate_payload(
                 "thread-1",
@@ -1715,6 +1815,62 @@ def test_prepare_regenerate_payload_reports_recent_checkpoint_scan_limit():
     assert exc.value.status_code == 409
     assert exc.value.detail == "Could not locate target user message in recent checkpoint history (limit=200)"
     assert checkpointer.alist_limits == [400]
+
+
+# Message ids come from checkpoint state, and run input keeps a client's id
+# verbatim, so a thread owner controls them. A newline in one must not start a
+# second line in the Gateway log.
+_FORGED_LOG_LINE = "\n2026-01-01 00:00:00 INFO app.gateway.auth: forged line\r"
+
+
+def test_prepare_regenerate_run_event_scan_warning_strips_newlines_from_message_id(caplog):
+    from app.gateway.routers.thread_runs import REGENERATE_HISTORY_SCAN_LIMIT, _prepare_regenerate_payload
+
+    ai_id = f"ai-1{_FORGED_LOG_LINE}"
+    human = HumanMessage(id="human-1", content="question")
+    ai = AIMessage(id=ai_id, content="answer")
+    checkpointer = FakeCheckpointer([_checkpoint("ckpt-ai", [human, ai])])
+    unrelated_events = [{"run_id": "run-other", "event_type": "llm.ai.response", "category": "message", "content": {"id": "ai-other", "type": "ai", "content": "other"}}] * REGENERATE_HISTORY_SCAN_LIMIT
+
+    with caplog.at_level("WARNING", logger="app.gateway.routers.thread_runs"), pytest.raises(HTTPException) as exc:
+        asyncio.run(_prepare_regenerate_payload("thread-1", ai_id, _request(checkpointer, FakeEventStore(unrelated_events))))
+
+    assert exc.value.status_code == 409
+    [record] = [r for r in caplog.records if r.getMessage().startswith("Could not find source run for regenerate message")]
+    logged = record.getMessage()
+    assert "\n" not in logged and "\r" not in logged
+    assert "ai-12026-01-01 00:00:00 INFO app.gateway.auth: forged line in recent run events" in logged
+
+
+def test_prepare_regenerate_checkpoint_scan_warning_strips_newlines_from_human_message_id(caplog):
+    from app.gateway.routers.thread_runs import _prepare_regenerate_payload
+
+    human_id = f"human-1{_FORGED_LOG_LINE}"
+    human = HumanMessage(id=human_id, content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    latest = _checkpoint("ckpt-latest", [human, ai])
+    history_without_human = [_checkpoint(f"ckpt-{index}", []) for index in range(201)]
+    checkpointer = FakeCheckpointer(history_without_human, latest=latest)
+    event_store = FakeEventStore(
+        [
+            {
+                "run_id": "run-old",
+                "event_type": "llm.ai.response",
+                "category": "message",
+                "content": {"id": "ai-1", "type": "ai", "content": "answer"},
+                "metadata": {"caller": "lead_agent"},
+            }
+        ]
+    )
+
+    with caplog.at_level("WARNING", logger="app.gateway.routers.thread_runs"), pytest.raises(HTTPException) as exc:
+        asyncio.run(_prepare_regenerate_payload("thread-1", "ai-1", _request(checkpointer, event_store)))
+
+    assert exc.value.status_code == 409
+    [record] = [r for r in caplog.records if r.getMessage().startswith("Could not locate target user message")]
+    logged = record.getMessage()
+    assert "\n" not in logged and "\r" not in logged
+    assert "human-12026-01-01 00:00:00 INFO app.gateway.auth: forged line in recent checkpoint history" in logged
 
 
 def test_find_base_checkpoint_ignores_duration_only_checkpoints() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -20,9 +21,18 @@ class Space(BaseModel):
     base_url: AnyHttpUrl
     tenant_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
     api_key_env: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
-    user_ids: tuple[str, ...] = Field(min_length=1)
+    access_mode: Literal["users", "authenticated"] = "users"
+    user_ids: tuple[str, ...] | None = Field(default=None, min_length=1)
     agent_names: tuple[str, ...] | None = Field(default=None, min_length=1)
     knowledge_base_ids: tuple[str, ...] | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def explicit_access(self) -> Space:
+        if self.access_mode == "users" and self.user_ids is None:
+            raise ValueError("users access requires explicit user_ids")
+        if self.access_mode == "authenticated" and self.user_ids is not None:
+            raise ValueError("authenticated access must omit user_ids")
+        return self
 
     @field_validator("base_url")
     @classmethod
@@ -58,5 +68,5 @@ class Settings(BaseModel):
     def unique_connections(self) -> Settings:
         keys = [(str(space.base_url).rstrip("/"), space.tenant_id) for space in self.spaces]
         if len(set(keys)) != len(keys):
-            raise ValueError("Configure each endpoint/tenant once, with its explicit user bindings")
+            raise ValueError("Configure each endpoint/tenant once, with its explicit access mode")
         return self

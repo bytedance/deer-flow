@@ -174,6 +174,29 @@ strict validation.
 
 ## Packaged resources (`assets-v1`)
 
+### Artifact previews
+
+Browser modules can declare `artifactPreviews: [{ id, extensions, mount }]` to
+render otherwise unsupported binary files in the artifact panel and separate reader.
+`extensions` contains 1–32 exact lowercase extensions without dots (for example
+`["xlsx", "docx", "pptx"]`); there may be at most 16 uniquely named renderers per
+module. Built-in text and browser media readers take precedence. The first enabled
+matching contribution for the current viewer is selected.
+
+`mount(root, { filename, locale, signal, readFile, onError })` runs synchronously and
+returns `{ dispose() }`. The host places the root inside a shadow tree and remounts
+on viewer, file, conversation, locale or contribution changes. `readFile()` uses the
+current conversation's authenticated artifact route and enforces a 25 MiB streamed
+limit. Observe the abort signal during asynchronous work; call `onError()` for a
+localized download fallback, and release all resources in `dispose()`. Shadow DOM
+isolates styling, not plugin privileges. Third-party parsers must ship in the trusted
+package and apply their own expansion/render limits.
+
+Optional `getReadingState()` and `saveReadingState(state)` callbacks become available
+after `readFile()` and retain bounded JSON in memory for unchanged content in the
+current viewer session. They are scoped to viewer, thread, file, renderer and content
+hash. Do not store document contents or credentials in reading preferences.
+
 Register a package-owned directory alongside the Python implementation:
 
 ```python
@@ -435,15 +458,20 @@ visiting an unavailable page directly does not mount a plugin.
 Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
 native credentialed module scripts, preserving relative imports and resource URLs.
 Both honor the backend base and prefixes; transport and cache semantics are documented in
-`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
+`docs/full-stack-plugins.md`. Host UI labels belong in the typed locale dictionaries;
+package purpose and usage come from `deerflow-extension.json` (see the
+[authoring contract](../examples/README.md#describe-the-extension)). Installed copy
+takes precedence over the generated bundled snapshot; omit empty prerequisites.
 Conversation action factories, shapes and availability callbacks are guarded per plugin;
 only validated value snapshots reach the toolbar/sidebar render paths.
 `PluginNavigation` and the dynamic workspace extension route consume page declarations;
 Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
 merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
-metadata, never module-loader inputs or proof of installation. Backend-only examples may
-have no plugin descriptor; keep their runtime status unasserted. Details link to package
-installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+metadata, never module-loader inputs or proof of installation. Documented backend
+extensions with successful registrations have runtime-only descriptors without browser
+modules. Other catalog-only entries retain an unknown runtime status. Details show usage
+steps and optional documentation links; launch links require actual enabled page
+registrations through `pluginPages`. Keep the catalog aligned with `examples/deerflow-extension-*`.
 Agent teams uses `community.agent-teams`; merge its installed descriptor into the
 localized catalog entry without asserting runtime status for a catalog-only row.
 Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.

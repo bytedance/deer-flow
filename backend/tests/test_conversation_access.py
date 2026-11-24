@@ -9,10 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from langchain_core.messages import HumanMessage
 from langgraph.store.memory import InMemoryStore
 from pydantic import ValidationError
+from starlette.datastructures import URL
 
 from app.gateway.authz import AuthContext
 from app.gateway.run_models import RunCreateRequest
@@ -33,7 +34,8 @@ def _setup(*, user_id="alice", permissions=("runs:read",), enabled=True, tool_ou
         }
     )
     user = SimpleNamespace(id=user_id, system_role="admin")
-    request = SimpleNamespace(state=SimpleNamespace(auth=AuthContext(user, list(permissions))), url="https://deerflow.example/api/threads/current/runs")
+    request = Request({"type": "http", "method": "POST", "scheme": "https", "server": ("deerflow.example", 443), "path": "/api/threads/current/runs", "headers": [(b"host", b"deerflow.example")]})
+    request.state.auth = AuthContext(user, list(permissions))
     events = MemoryRunEventStore()
     threads = MemoryThreadMetaStore(InMemoryStore())
     manager = AsyncMock()
@@ -215,7 +217,7 @@ def test_missing_transcript_is_reported_without_checkpoint_reconstruction():
 
 
 def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
-    from test_gateway_services import _make_start_run_persistence_context
+    from test_gateway_services import _make_start_run_persistence_context, _seed_generic_resume_checkpoint
 
     from app.gateway import services
     from deerflow.config.app_config import reset_app_config, set_app_config
@@ -227,7 +229,7 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
         request.state.user = user
         request.state.auth = AuthContext(user, ["runs:create", "runs:read"])
         request.state.auth_source = "session"
-        request.url = "https://deerflow.example/api/threads/current/runs"
+        request.url = URL("https://deerflow.example/api/threads/current/runs")
         await threads.create("source", user_id="alice")
         captured = []
 
@@ -245,6 +247,7 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
         second = await services.start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": 'Quoted text: "read source"'}]}), "later", request)
         await second.task
         assert captured[1]["ctx"].conversation_reader is None
+        await _seed_generic_resume_checkpoint(request.app.state.checkpointer, "resume")
         resumed = await services.start_run(RunCreateRequest(command={"resume": "source"}), "resume", request)
         await resumed.task
         assert captured[2]["ctx"].conversation_reader is None

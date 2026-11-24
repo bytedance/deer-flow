@@ -5,10 +5,13 @@ from __future__ import annotations
 import ipaddress
 import socket
 from collections.abc import Callable
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
+
+from pydantic import AnyHttpUrl, TypeAdapter, ValidationError
 
 _BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
 _IDNA_DOT_TRANSLATION = str.maketrans("\u3002\uff0e\uff61", "...")
+_HTTP_URL = TypeAdapter(AnyHttpUrl)
 
 
 def safe_public_result_url(value: object) -> str:
@@ -27,18 +30,43 @@ def safe_public_result_url(value: object) -> str:
         return ""
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or not host:
         return ""
+    return url if _is_public_url_host(host) else ""
+
+
+def validate_hosted_fetch_url(url: str) -> str | None:
+    """Check a hosted reader's input locally. The provider resolves the host."""
+    if isinstance(url, str) and ("[" in url or "]" in url):
+        # Strict parsing needs brackets in query parameters like tag[] escaped.
+        # Only this check uses the escaped form. Readers receive the original URL.
+        before_fragment, hash_mark, fragment = url.partition("#")
+        base, question_mark, query = before_fragment.partition("?")
+        escaped_query = query.replace("[", "%5B").replace("]", "%5D")
+        url = f"{base}{question_mark}{escaped_query}{hash_mark}{fragment}"
+    try:
+        parsed = _HTTP_URL.validate_python(url, strict=True)
+    except ValidationError:
+        return "Error: Expected an absolute HTTP(S) URL"
+    if parsed.username is not None or parsed.password is not None:
+        return "Error: Hosted readers require a URL without embedded credentials"
+    # The HTTP parser canonicalizes international names and brackets IPv6 hosts.
+    if not parsed.host or not _is_public_url_host(parsed.host.strip("[]")):
+        return "Error: Hosted readers require a public URL"
+    return None
+
+
+def _is_public_url_host(host: str) -> bool:
     # IDNA clients treat these Unicode label separators as ASCII dots. Screen
     # the normalized host so an IP literal cannot masquerade as a DNS name.
     host = host.translate(_IDNA_DOT_TRANSLATION).lower().rstrip(".")
     if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost"):
-        return ""
+        return False
 
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = _decode_result_ipv4(host)
         if address is None:
-            return url
+            return True
     if isinstance(address, ipaddress.IPv6Address):
         embedded = address.ipv4_mapped or address.sixtofour
         if embedded is None and address in ipaddress.ip_network("64:ff9b::/96"):
@@ -46,8 +74,8 @@ def safe_public_result_url(value: object) -> str:
         if embedded is None and 1 < int(address) < 1 << 32:
             embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
         if embedded is not None and is_blocked_address(embedded):
-            return ""
-    return "" if is_blocked_address(address) else url
+            return False
+    return not is_blocked_address(address)
 
 
 def _decode_result_ipv4(host: str) -> ipaddress.IPv4Address | None:
@@ -142,6 +170,33 @@ def resolve_public_addresses(
     return candidates
 
 
+def _parse_url(value: str) -> ParseResult | None:
+    """Parse a URL, returning ``None`` for malformed input.
+
+    ``urlparse`` raises ``ValueError`` for some malformed authorities (for
+    example an unmatched IPv6 bracket). The validators' contract is to return an
+    ``"Error: ..."`` string, so callers must never see that exception.
+
+    A raw bracket in the userinfo slot is malformed per RFC 3986. Modern CPython
+    rejects some of those forms inside ``urlparse`` already, but which ones
+    differs across versions, so rejecting all of them here keeps the result
+    version-independent; this also blocks the ``[literal]@[IPv6]`` shape that
+    ``urlparse`` accepts without complaint. Mirrors the SkillScan host parser
+    (#8017). Non-string input is malformed too, matching
+    :func:`safe_public_result_url`.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return None
+    userinfo, _, _ = parsed.netloc.rpartition("@")
+    if "[" in userinfo or "]" in userinfo:
+        return None
+    return parsed
+
+
 def validate_public_http_url(
     url: str,
     *,
@@ -167,7 +222,9 @@ def validate_public_http_url(
     crawl4ai, fastcrw, firecrawl) resolve on their own side and cannot be pinned
     from here.
     """
-    parsed = urlparse(url)
+    parsed = _parse_url(url)
+    if parsed is None:
+        return "Error: URL could not be parsed"
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return "Error: Only http:// and https:// URLs are supported"
 
@@ -216,7 +273,9 @@ def validate_delegated_backend_url(
     :func:`resolve_public_addresses`; from a coroutine, call it via
     ``asyncio.to_thread``.
     """
-    parsed = urlparse(base_url)
+    parsed = _parse_url(base_url)
+    if parsed is None:
+        return "Error: Backend URL could not be parsed"
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return "Error: Only http:// and https:// backend URLs are supported"
 

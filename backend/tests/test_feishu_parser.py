@@ -7,6 +7,7 @@ import time
 from collections import deque
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,6 +20,7 @@ from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
+    InboundMessageType,
     MessageBus,
     OutboundMessage,
 )
@@ -856,6 +858,29 @@ async def _on_message_from_sdk_loop(channel: FeishuChannel, event) -> float:
     return await asyncio.to_thread(sdk_thread)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [True, False], ids=["connected", "unbound"])
+@pytest.mark.parametrize("with_store", [True, False], ids=["channel-store", "connection-repo-only"])
+async def test_topic_routing_passes_the_resolved_sender_to_the_bus(tmp_path, bound, with_store):
+    store = JsonChannelStore(path=tmp_path / "routing.json")
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store if with_store else None})
+    connection = {"id": "conn-1", "owner_user_id": "owner-1", "workspace_id": "chat_1"} if bound else None
+    lookup = AsyncMock(return_value=connection)
+    channel._connection_repo = SimpleNamespace(find_connection_by_external_identity=lookup, get_thread_id=AsyncMock(return_value="thread-a"))
+    await store.set_thread_id("feishu-unbound", "chat_1", "thread-a", topic_id="root", user_id="user_1")
+
+    try:
+        await _on_message_from_sdk_loop(channel, _make_text_event("hello", message_id="reply", root_id="root"))
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+        bus.inbound_task_done()
+        lookup.assert_awaited_once_with(provider="feishu", external_account_id="user_1", workspace_id="chat_1")
+        assert inbound.topic_id == "root"
+        assert (inbound.connection_id, inbound.owner_user_id, inbound.workspace_id) == (("conn-1", "owner-1", "chat_1") if bound else (None, None, None))
+    finally:
+        await channel._close_and_drain_threadsafe_futures()
+
+
 class _GatedStore:
     """A channel store whose database only answers once ``gate`` is set (slow or hung DB)."""
 
@@ -1220,6 +1245,307 @@ def test_feishu_store_bridge_refuses_to_block_the_gateway_loop_itself(caplog):
     _run(go())
 
 
+def _make_post_event(content: dict, *, message_id: str = "msg_post"):
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = message_id
+    event.event.message.root_id = None
+    event.event.message.parent_id = None
+    event.event.message.thread_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps(content)
+    return event
+
+
+def test_feishu_post_with_text_and_top_level_files_extracts_attachments():
+    """Feishu desktop attaches files to a post message in a top-level ``files`` array."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "帮我核对这两张发票和采购订单，看看有没有差异。", "style": []}]],
+            "content_v2": [[{"tag": "text", "text": "帮我核对这两张发票和采购订单，看看有没有差异。", "style": []}]],
+            "files": [
+                {"file_key": "file_inv_a", "file_name": "INV-A-20260815.csv", "is_folder": False},
+                {"file_key": "file_inv_b", "file_name": "INV-B-20260903.csv", "is_folder": False},
+                {"file_key": "file_po", "file_name": "PO-2026-08.csv", "is_folder": False},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["text"] == "帮我核对这两张发票和采购订单，看看有没有差异。\n\n[file]\n\n[file]\n\n[file]"
+        assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_inv_a"}, {"file_key": "file_inv_b"}, {"file_key": "file_po"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["bind-code", None])
+async def test_feishu_post_connect_reads_only_the_caption(monkeypatch, code):
+    repo = SimpleNamespace(find_connection_by_external_identity=AsyncMock(return_value=None))
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "connection_repo": repo})
+    bind = AsyncMock()
+    monkeypatch.setattr(channel, "_bind_connection_from_connect_code", bind)
+    caption = f"@_user_1 /connect {code}" if code else "@_user_1 /connect"
+    event = _make_post_event({"content": [[{"tag": "text", "text": caption}]], "files": [{"file_key": "file_a"}]})
+
+    try:
+        await _on_message_from_sdk_loop(channel, event)
+        if code:
+            await _eventually(lambda: bind.await_count == 1)
+            assert bind.await_args.kwargs["code"] == code
+            assert channel.bus.inbound_queue.empty()
+        else:
+            inbound = await asyncio.wait_for(channel.bus.get_inbound(), timeout=2)
+            channel.bus.inbound_task_done()
+            assert inbound.files == [{"file_key": "file_a"}]
+            bind.assert_not_awaited()
+    finally:
+        await channel._close_and_drain_threadsafe_futures()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("argument", "operation"), [("clear", "delete"), ("compare [file]", "put")])
+async def test_feishu_post_goal_parses_caption_before_loading_files(tmp_path, monkeypatch, argument, operation):
+    from app.channels.manager import ChannelManager
+
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    schedule = MagicMock()
+    monkeypatch.setattr(channel, "_schedule_prepare_inbound", schedule)
+    event = _make_post_event(
+        {
+            "content": [[{"tag": "at", "text": "@_user_1"}, {"tag": "text", "text": f"/goal {argument}"}]],
+            "files": [{"file_key": "file_a"}, {"file_key": "file_b"}],
+        }
+    )
+    channel._on_message(event)
+    schedule.assert_called_once()
+    inbound = schedule.call_args.args[1]
+    assert inbound.msg_type == InboundMessageType.COMMAND
+
+    manager = ChannelManager(bus, JsonChannelStore(tmp_path / "bindings.json"))
+    goal_request = AsyncMock()
+    monkeypatch.setattr(manager, "_goal_request", goal_request)
+    monkeypatch.setattr(manager, "_lookup_thread_id", AsyncMock(return_value="thread_1"))
+    download = AsyncMock(side_effect=["/mnt/user-data/uploads/A.csv", "/mnt/user-data/uploads/B.csv"])
+    monkeypatch.setattr(channel, "_receive_single_file", download)
+
+    async def handle_chat(msg, **kwargs):
+        assert msg.text == argument
+        result = await channel.receive_file(msg, "thread_1")
+        assert result.text == f"{argument}\n\n/mnt/user-data/uploads/A.csv\n\n/mnt/user-data/uploads/B.csv"
+
+    chat = AsyncMock(side_effect=handle_chat)
+    monkeypatch.setattr(manager, "_handle_chat", chat)
+    await manager._handle_command(inbound)
+
+    goal_request.assert_awaited_once()
+    assert goal_request.await_args.args[:2] == (operation, "thread_1")
+    if operation == "put":
+        assert goal_request.await_args.kwargs["json"] == {"objective": argument}
+        chat.assert_awaited_once()
+        assert download.await_count == 2
+    else:
+        chat.assert_not_awaited()
+        download.assert_not_awaited()
+
+
+def test_feishu_files_only_post_is_not_treated_as_empty():
+    """A files-only post has an empty rich-text body; the attachments still make it non-empty."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[]],
+            "content_v2": [[]],
+            "files": [
+                {"file_key": "file_a", "file_name": "A.csv", "is_folder": False},
+                {"file_key": "file_b", "file_name": "B.csv", "is_folder": False},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["text"] == "[file]\n\n[file]"
+        assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_a"}, {"file_key": "file_b"}]
+
+
+def test_feishu_post_skips_folders_and_duplicate_attachments():
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "见附件"}, {"tag": "file", "file_key": "file_a"}]],
+            "files": [
+                {"file_key": "file_a", "file_name": "A.csv", "is_folder": False},
+                {"file_key": "folder_x", "file_name": "资料", "is_folder": True},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["text"] == "见附件 [file]"
+        assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_a"}]
+
+
+def test_feishu_post_merges_inline_and_top_level_files_in_order():
+    """Inline rich-text files come first; top-level files append without re-adding duplicates."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "见附件"}, {"tag": "file", "file_key": "file_inline"}]],
+            "files": [
+                {"file_key": "file_inline", "file_name": "inline.csv", "is_folder": False},
+                {"file_key": "file_top1", "file_name": "top1.csv", "is_folder": False},
+                {"file_key": "file_top2", "file_name": "top2.csv", "is_folder": False},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["text"] == "见附件 [file]\n\n[file]\n\n[file]"
+        assert mock_make_inbound.call_args[1]["files"] == [
+            {"file_key": "file_inline"},
+            {"file_key": "file_top1"},
+            {"file_key": "file_top2"},
+        ]
+
+
+def test_feishu_post_user_written_file_placeholder_is_not_replaced():
+    """A literal ``[file]`` typed by the user must not consume an attachment's path."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "请按 [file] 格式整理", "style": []}]],
+            "files": [
+                {"file_key": "file_a", "file_name": "A.csv", "is_folder": False},
+                {"file_key": "file_b", "file_name": "B.csv", "is_folder": False},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+    kwargs = mock_make_inbound.call_args[1]
+    assert kwargs["text"] == "请按 [file] 格式整理\n\n[file]\n\n[file]"
+    assert kwargs["metadata"][feishu_module._POST_FILES_COUNT_METADATA_KEY] == 2
+
+    async def go():
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat_1",
+            user_id="user_1",
+            text=kwargs["text"],
+            thread_ts="msg_post",
+            files=kwargs["files"],
+            metadata=kwargs["metadata"],
+        )
+        channel._receive_single_file = AsyncMock(side_effect=["/mnt/user-data/uploads/A.csv", "/mnt/user-data/uploads/B.csv"])
+        result = await channel.receive_file(msg, "thread_1")
+        assert result.text == "请按 [file] 格式整理\n\n/mnt/user-data/uploads/A.csv\n\n/mnt/user-data/uploads/B.csv"
+
+    _run(go())
+
+
+def test_feishu_post_mixed_inline_and_top_level_keeps_appended_slot_last():
+    """Pin the mixed inline + top-level behavior: only the appended slot is protected.
+
+    Inline rich-text attachments still match placeholders left to right, exactly as
+    on ``main``, so a user-typed ``[file]`` ahead of an inline attachment is consumed
+    first. This test documents that pre-existing limitation; the fix here only
+    guarantees the appended top-level slot (the last one) is never displaced.
+    """
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [
+                [{"tag": "text", "text": "见 [file] 整理", "style": []}],
+                [{"tag": "file", "file_key": "file_inline"}],
+            ],
+            "files": [{"file_key": "file_top", "file_name": "top.csv", "is_folder": False}],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+    kwargs = mock_make_inbound.call_args[1]
+    assert kwargs["text"] == "见 [file] 整理\n\n[file]\n\n[file]"
+    assert kwargs["files"] == [{"file_key": "file_inline"}, {"file_key": "file_top"}]
+    assert kwargs["metadata"][feishu_module._POST_FILES_COUNT_METADATA_KEY] == 1
+
+    async def go():
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat_1",
+            user_id="user_1",
+            text=kwargs["text"],
+            thread_ts="msg_post",
+            files=kwargs["files"],
+            metadata=kwargs["metadata"],
+        )
+        channel._receive_single_file = AsyncMock(side_effect=["/mnt/user-data/uploads/inline.csv", "/mnt/user-data/uploads/top.csv"])
+        result = await channel.receive_file(msg, "thread_1")
+        # Pre-existing inline behavior: the user-typed literal is consumed first and
+        # the inline slot keeps its ``[file]``; the appended top-level slot is last.
+        assert result.text == "见 /mnt/user-data/uploads/inline.csv 整理\n\n[file]\n\n/mnt/user-data/uploads/top.csv"
+        # The count is consumed, so it does not ride along on outbound metadata.
+        assert feishu_module._POST_FILES_COUNT_METADATA_KEY not in msg.metadata
+
+    _run(go())
+
+
+def test_feishu_post_ignores_non_list_files_field():
+    """A malformed top-level ``files`` value must not take the whole message down."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "先看文字", "style": []}]],
+            "files": 3,
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        kwargs = mock_make_inbound.call_args[1]
+        assert kwargs["text"] == "先看文字"
+        assert kwargs["files"] == []
+        assert feishu_module._POST_FILES_COUNT_METADATA_KEY not in kwargs["metadata"]
+
+
 def _make_text_event(
     text: str,
     *,
@@ -1379,7 +1705,8 @@ def test_feishu_explicit_file_reply_does_not_enter_batch(monkeypatch):
     _run(go())
 
 
-def test_feishu_expired_file_batch_does_not_get_overwritten(monkeypatch):
+@pytest.mark.parametrize(("elapsed", "connection_id"), [(1.0, None), (0.1, "new-connection")], ids=["expired", "rebound"])
+def test_feishu_file_batch_flushes_before_a_new_window_or_connection(monkeypatch, elapsed, connection_id):
     monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.5)
     now = 0.0
     monkeypatch.setattr("app.channels.feishu.time.time", lambda: now)
@@ -1403,11 +1730,13 @@ def test_feishu_expired_file_batch_does_not_get_overwritten(monkeypatch):
         user_id="user_1",
         text="[file]",
         thread_ts="msg_file_2",
+        connection_id=connection_id,
+        owner_user_id="owner" if connection_id else None,
         files=[{"file_key": "file_b"}],
     )
 
     channel._queue_file_inbound_batch("msg_file_1", first)
-    now = 1.0
+    now = elapsed
     channel._queue_file_inbound_batch("msg_file_2", second)
 
     channel._schedule_prepare_inbound.assert_called_once_with(

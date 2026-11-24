@@ -8,6 +8,7 @@ import ipaddress
 import logging
 import math
 import os
+import posixpath
 import shlex
 import stat
 import tempfile
@@ -15,6 +16,8 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from datetime import timedelta
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -26,6 +29,8 @@ from deerflow.sandbox.acquire_serialization import AcquireSerializer, AcquireSer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.skills.projection import SkillProjectionPaths, _projection_lock
+from deerflow.skills.types import SkillCategory
 
 from ..warm_pool_lifecycle import WarmPoolLifecycleMixin
 from .sandbox import _MAX_DOWNLOAD_SIZE, OpenSandboxSandbox, execution_stdout, format_execution
@@ -45,6 +50,50 @@ DEFAULT_COMMAND_TIMEOUT = 10 * 60
 _BOOTSTRAP_TIMEOUT = 30.0
 _BOOTSTRAP_COMMAND = "mkdir -p /mnt/user-data/workspace /mnt/user-data/uploads /mnt/user-data/outputs"
 _WINDOWS_RESERVED_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "123456789¹²³"})
+_SKILL_CATEGORIES = (SkillCategory.PUBLIC, SkillCategory.CUSTOM, SkillCategory.LEGACY, SkillCategory.INTEGRATION)
+_PROTECTED_SKILLS_ROOTS = tuple(PurePosixPath(path) for path in ("/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32", "/proc", "/run", "/sbin", "/sys", "/usr", "/var", "/mnt/user-data", "/mnt/acp-workspace"))
+
+
+class _SkillUploadError(RuntimeError):
+    """The upload failed before the published skill view was changed."""
+
+
+def _skills_root(path: str) -> PurePosixPath:
+    root = PurePosixPath(path)
+    if (
+        len(root.parts) < 2
+        or not root.is_absolute()
+        or path.startswith("//")
+        or root.as_posix() != path
+        or ".." in root.parts
+        or "\\" in path
+        or "\0" in path
+        or path in {"/home", "/root"}
+        or any(root.is_relative_to(protected) or protected.is_relative_to(root) for protected in _PROTECTED_SKILLS_ROOTS)
+    ):
+        raise ValueError("skills.container_path must be a dedicated absolute OpenSandbox skills directory")
+    return root
+
+
+def _portable_skill_name(name: str) -> bool:
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return not ("\\" in name or ":" in name or name.endswith((" ", ".")) or name.partition(".")[0].rstrip(" ").upper() in _WINDOWS_RESERVED_NAMES)
+
+
+def _skill_link_target(path: Path, package: Path) -> Path | None:
+    raw_target = Path(os.readlink(path))
+    if raw_target.is_absolute() or any(part != ".." and not _portable_skill_name(part) for part in raw_target.parts):
+        return None
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_relative_to(package) or not all(_portable_skill_name(part) for part in resolved.relative_to(package).parts):
+        return None
+    return resolved
 
 
 def _uses_insecure_remote_http(domain: Any, protocol: str) -> bool:
@@ -72,7 +121,7 @@ def _import_sdk() -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[R
         from opensandbox.models.execd import RunCommandOpts
         from opensandbox.sync import SandboxSync
     except ImportError as exc:  # pragma: no cover - depends on optional install state
-        raise ImportError("OpenSandboxProvider requires the optional 'opensandbox' dependency. Install it with: pip install 'deerflow-harness[opensandbox]' or pip install 'opensandbox>=0.1.15,<0.2.0'.") from exc
+        raise ImportError("OpenSandboxProvider requires the optional 'opensandbox' dependency. Install it with: pip install 'deerflow-harness[opensandbox]' or pip install 'opensandbox>=1.1.0,<2.0.0'.") from exc
     return SandboxSync, ConnectionConfigSync, RunCommandOpts
 
 
@@ -81,11 +130,15 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
 
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
+    supports_agent_skill_isolation = True
     _idle_checker_thread_name = "opensandbox-idle-reaper"
     _MAX_SYNC_FILES = 2000
     _MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024
     _MAX_SYNC_LISTING_BYTES = 512 * 1024
     _SYNC_DEADLINE_SECONDS = 120.0
+    _MAX_SKILL_FILES = 2000
+    _MAX_SKILL_FILE_BYTES = 100 * 1024 * 1024
+    _MAX_SKILL_TOTAL_BYTES = 512 * 1024 * 1024
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -112,10 +165,41 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         return resolved
 
     def _load_config(self) -> dict[str, Any]:
-        sandbox_config = get_app_config().sandbox
+        app_config = get_app_config()
+        sandbox_config = app_config.sandbox
 
-        def option(name: str, default: Any = None) -> Any:
-            return getattr(sandbox_config, name, default)
+        def option(name: str) -> Any:
+            return getattr(sandbox_config, name, None)
+
+        def bool_option(name: str) -> bool:
+            value = option(name)
+            if value is None:
+                return False
+            if not isinstance(value, bool):
+                raise ValueError(f"sandbox.{name} must be true or false")
+            return value
+
+        def resource_quantity(value: Any) -> str | None:
+            if isinstance(value, str):
+                return value.strip() or None
+            if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+                return str(value)
+            return None
+
+        def resource_option(name: str) -> dict[str, str] | None:
+            value = option(name)
+            if value is None:
+                return None
+            invalid = ValueError(f"sandbox.{name} must map resource names to positive quantities, e.g. {{cpu: '2', memory: 4Gi}}")
+            if not isinstance(value, Mapping):
+                raise invalid
+            resources: dict[str, str] = {}
+            for key, raw in value.items():
+                quantity = resource_quantity(raw)
+                if not isinstance(key, str) or not key.strip() or quantity is None:
+                    raise invalid
+                resources[key.strip()] = quantity
+            return resources or None
 
         api_key = option("api_key")
         domain = option("domain")
@@ -143,7 +227,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "domain": domain,
             "protocol": protocol,
             "request_timeout": self._positive_float("request_timeout", option("request_timeout"), DEFAULT_REQUEST_TIMEOUT),
-            "use_server_proxy": bool(option("use_server_proxy", False)),
+            "use_server_proxy": bool_option("use_server_proxy"),
+            "secure_access": bool_option("secure_access"),
             "image": option("image") or DEFAULT_IMAGE,
             "ready_timeout": self._positive_float("ready_timeout", option("ready_timeout"), DEFAULT_READY_TIMEOUT),
             "sandbox_timeout": None if sandbox_timeout == 0 else sandbox_timeout,
@@ -151,6 +236,9 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
+            "resource": resource_option("resource"),
+            "resource_requests": resource_option("resource_requests"),
+            "skills_root": _skills_root(app_config.skills.container_path),
         }
 
     def _get_sdk(self) -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[RunCommandOpts]]:
@@ -203,15 +291,19 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         except Exception as exc:
             logger.warning("Error destroying OpenSandbox %s (%s): %s", sandbox.id, context, exc)
 
-    def _invalidate_sandbox(self, sandbox_id: str, reason: str) -> None:
+    def _invalidate_sandbox(self, sandbox: OpenSandboxSandbox, reason: str) -> None:
+        sandbox_id = sandbox.id
         with self._lock:
-            active = self._sandboxes.pop(sandbox_id, None)
-            warm_entry = self._warm_pool.pop(sandbox_id, None)
+            active = self._sandboxes.get(sandbox_id)
+            warm_entry = self._warm_pool.get(sandbox_id)
+            if active is sandbox:
+                self._sandboxes.pop(sandbox_id)
+            elif warm_entry is not None and warm_entry[0] is sandbox:
+                self._warm_pool.pop(sandbox_id)
+            else:
+                return
             for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
-        sandbox = active or (warm_entry[0] if warm_entry is not None else None)
-        if sandbox is None:
-            return
         logger.warning("Invalidating OpenSandbox %s after terminal failure: %s", sandbox_id, reason)
         self._destroy_quietly(sandbox, context="terminal failure")
 
@@ -222,6 +314,11 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         if thread_id is None:
             sandbox_id = str(uuid.uuid4())[:8]
             sandbox = self._create_sandbox(sandbox_id, thread_id=None, user_id=user_id)
+            try:
+                self._prepare_new_skill_view(sandbox, thread_id=None, user_id=user_id)
+            except BaseException:
+                self._destroy_quietly(sandbox, context="skill projection setup failed")
+                raise
             with self._lock:
                 if self._shutdown_called:
                     destroy_after_unlock = True
@@ -269,15 +366,18 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 if not invalidated or not active.is_closed or shutting_down:
                     raise
                 logger.info("Rebuilding terminal OpenSandbox %s during acquire", existing)
-        reclaimed = self._reclaim_warm_pool(sandbox_id)
-        if reclaimed is not None:
-            with self._lock:
-                if self._shutdown_called:
-                    raise RuntimeError("OpenSandboxProvider shut down during acquire")
-                if reclaimed in self._sandboxes:
-                    self._thread_sandboxes[key] = reclaimed
-                    return reclaimed
-        sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
+        sandbox = self._reclaim_warm_pool(sandbox_id)
+        reclaimed = sandbox is not None
+        if sandbox is None:
+            sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
+        try:
+            self._prepare_new_skill_view(sandbox, thread_id=thread_id, user_id=user_id)
+        except BaseException as exc:
+            if reclaimed and isinstance(exc, _SkillUploadError):
+                self._park_failed_skill_upload(sandbox, was_active=False)
+            else:
+                self._destroy_quietly(sandbox, context="skill projection setup failed")
+            raise
         with self._lock:
             if self._shutdown_called:
                 destroy_after_unlock = True
@@ -309,7 +409,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             ready_timeout=timedelta(seconds=self._config["ready_timeout"]),
             env=self._config["environment"] or None,
             metadata=metadata,
+            resource=self._config["resource"],
+            resource_requests=self._config["resource_requests"],
             connection_config=connection_config,
+            secure_access=self._config["secure_access"],
         )
         try:
             bootstrap = remote.commands.run(
@@ -330,17 +433,18 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 logger.warning("Failed to destroy OpenSandbox %s after bootstrap failure", remote.id, exc_info=True)
             raise
 
-        return OpenSandboxSandbox(
+        sandbox = OpenSandboxSandbox(
             sandbox_id,
             remote,
             run_command_opts_cls=run_command_opts_cls,
             default_env=self._config["environment"],
             sandbox_timeout=None if self._config["sandbox_timeout"] is None else timedelta(seconds=self._config["sandbox_timeout"]),
             default_command_timeout=self._config["command_timeout"],
-            on_terminal_failure=self._invalidate_sandbox,
+            on_terminal_failure=lambda _sandbox_id, reason: self._invalidate_sandbox(sandbox, reason),
         )
+        return sandbox
 
-    def _reclaim_warm_pool(self, sandbox_id: str) -> str | None:
+    def _reclaim_warm_pool(self, sandbox_id: str) -> OpenSandboxSandbox | None:
         with self._lock:
             warm_entry = self._warm_pool.get(sandbox_id)
         if warm_entry is None:
@@ -356,13 +460,192 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             removed = self._warm_pool.pop(sandbox_id, None)
             if removed is None:
                 return None
-            self._sandboxes[sandbox_id] = removed[0]
         logger.info("Reclaimed warm OpenSandbox %s (remote=%s)", sandbox_id, sandbox.remote_id)
-        return sandbox_id
+        return removed[0]
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         with self._lock:
             return self._sandboxes.get(sandbox_id)
+
+    def _prepare_new_skill_view(self, sandbox: OpenSandboxSandbox, *, thread_id: str | None, user_id: str | None) -> None:
+        if not user_id:
+            return
+        from deerflow.skills.projection import ensure_skill_projections, thread_skill_projection_exists
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
+        # Eager middleware installs the scoped view. Until then do not expose
+        # either the shared view or the previous agent's files on a warm remote.
+        projection = None if thread_id is not None and thread_skill_projection_exists(storage, thread_id) else ensure_skill_projections(storage)
+        self._replace_skill_projection(sandbox, projection)
+
+    def _park_failed_skill_upload(self, sandbox: OpenSandboxSandbox, *, was_active: bool) -> None:
+        sandbox_id = sandbox.id
+        with self._lock:
+            if was_active:
+                if self._sandboxes.get(sandbox_id) is not sandbox:
+                    return
+                self._sandboxes.pop(sandbox_id)
+                for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
+                    self._thread_sandboxes.pop(key)
+            if not self._shutdown_called:
+                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
+                return
+        self._destroy_quietly(sandbox, context="skill upload failed during shutdown")
+
+    def sync_agent_skills(self, sandbox_id: str, *, thread_id: str, user_id: str, projection: SkillProjectionPaths) -> None:
+        from deerflow.skills.projection import get_thread_skill_projection_paths
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        with self._acquire_serializer.hold(sandbox_id):
+            with self._lock:
+                sandbox = self._sandboxes.get(sandbox_id)
+                owner_matches = self._thread_sandboxes.get(self._thread_key(thread_id, user_id)) == sandbox_id
+            if sandbox is None or not owner_matches:
+                raise RuntimeError("OpenSandbox is not active for this skill projection scope")
+            storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
+            if projection != get_thread_skill_projection_paths(storage, thread_id):
+                raise RuntimeError("OpenSandbox skill projection does not belong to this scope")
+            try:
+                self._replace_skill_projection(sandbox, projection)
+            except _SkillUploadError:
+                self._park_failed_skill_upload(sandbox, was_active=True)
+                raise
+            except BaseException:
+                self._invalidate_sandbox(sandbox, "skill projection setup failed")
+                raise
+
+    def _replace_skill_projection(self, sandbox: OpenSandboxSandbox, projection: SkillProjectionPaths | None) -> None:
+        root = self._config["skills_root"]
+        stage = root / ".deerflow-skills-stage"
+        deadline = time.monotonic() + self._SYNC_DEADLINE_SECONDS
+        ancestors = [*reversed(root.parents[:-1]), root]
+        no_links = "; ".join(f"test ! -L {shlex.quote(str(path))}" for path in ancestors)
+        destinations = " ".join(shlex.quote(str(root / category)) for category in _SKILL_CATEGORIES)
+        staged = " ".join(shlex.quote(str(stage / category)) for category in _SKILL_CATEGORIES)
+        qroot = shlex.quote(str(root))
+        qstage = shlex.quote(str(stage))
+
+        def run(script: str) -> None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("OpenSandbox skill projection deadline exceeded")
+            result = sandbox._run(f"set -e; {script}", timeout=min(remaining, _BOOTSTRAP_TIMEOUT))
+            if getattr(result, "exit_code", None) != 0:
+                raise RuntimeError("OpenSandbox skill projection command failed")
+
+        try:
+            run(f"{no_links}; mkdir -p -- {qroot}; rm -rf -- {qstage}; mkdir -m 700 -- {qstage}; mkdir -- {staged}")
+        except Exception as exc:
+            raise RuntimeError("Failed to synchronize OpenSandbox skill projection") from exc
+        if projection is not None:
+            try:
+                self._upload_skill_projection(sandbox, projection, stage=stage, run=run, deadline=deadline)
+            except Exception as exc:
+                raise _SkillUploadError("Failed to synchronize OpenSandbox skill projection") from exc
+        try:
+            run(f"{no_links}; test ! -L {qstage}; rm -rf -- {destinations}; mv -- {staged} {qroot}; rmdir -- {qstage}")
+        except Exception as exc:
+            raise RuntimeError("Failed to synchronize OpenSandbox skill projection") from exc
+
+    def _upload_skill_projection(
+        self,
+        sandbox: OpenSandboxSandbox,
+        projection: SkillProjectionPaths,
+        *,
+        stage: PurePosixPath,
+        run: Callable[[str], None],
+        deadline: float,
+    ) -> None:
+        sources = (projection.public, projection.custom, projection.legacy, projection.integrations)
+        entries: list[tuple[PurePosixPath, int, bool]] = []
+        links: list[tuple[PurePosixPath, PurePosixPath, bool]] = []
+        total = 0
+
+        def fail_scan(error: OSError) -> None:
+            raise error
+
+        def check_deadline() -> None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("OpenSandbox skill projection deadline exceeded")
+
+        def portable(name: str) -> bool:
+            if _portable_skill_name(name):
+                return True
+            logger.warning("Skipping non-portable OpenSandbox skill path component %r", name)
+            return False
+
+        # Capture under the publication locks, but do not hold the global
+        # public projection lock across SDK calls for one user's sandbox.
+        with tempfile.TemporaryFile() as payload:
+            with ExitStack() as locks:
+                for lock_root in dict.fromkeys(source.parent for source in sources):
+                    locks.enter_context(_projection_lock(lock_root, timeout=5.0))
+                for category, source in zip(_SKILL_CATEGORIES, sources, strict=True):
+                    if source.is_symlink() or any(parent.is_symlink() for parent in source.parents):
+                        raise ValueError("Symlink in OpenSandbox skill projection root")
+                    packages: set[Path] = set()
+                    category_root = stage / category
+                    for directory, dirnames, filenames in os.walk(source, followlinks=False, onerror=fail_scan):
+                        check_deadline()
+                        parent = Path(directory)
+                        package = next((root for root in (parent, *parent.parents) if root in packages), None)
+                        if package is None and "SKILL.md" in filenames and stat.S_ISREG((parent / "SKILL.md").lstat().st_mode):
+                            packages.add(parent)
+                            package = parent
+                        target_dir = category_root / parent.relative_to(source).as_posix()
+                        dirnames[:] = [name for name in dirnames if portable(name)]
+                        dir_links = {name for name in dirnames if (parent / name).is_symlink()}
+                        dirnames[:] = [name for name in dirnames if name not in dir_links]
+                        for name in (*dir_links, *(name for name in filenames if portable(name))):
+                            check_deadline()
+                            path = parent / name
+                            info = path.lstat()
+                            if stat.S_ISLNK(info.st_mode):
+                                resolved = _skill_link_target(path, package) if package is not None else None
+                                if resolved is None or not (resolved.is_dir() or resolved.is_file()):
+                                    logger.warning("Skipping unsafe OpenSandbox skill link %r", path.relative_to(source).as_posix())
+                                    continue
+                                if len(entries) + len(links) >= self._MAX_SKILL_FILES:
+                                    raise ValueError("OpenSandbox skill projection exceeds upload limits")
+                                links.append((target_dir / name, category_root / resolved.relative_to(source).as_posix(), resolved.is_dir()))
+                                continue
+                            if not stat.S_ISREG(info.st_mode):
+                                continue
+                            if len(entries) + len(links) >= self._MAX_SKILL_FILES or info.st_size > min(self._MAX_SKILL_FILE_BYTES, self._MAX_SKILL_TOTAL_BYTES - total):
+                                raise ValueError("OpenSandbox skill projection exceeds upload limits")
+                            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+                            with os.fdopen(os.open(path, flags), "rb") as file:
+                                opened = os.fstat(file.fileno())
+                                if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(info, opened):
+                                    raise ValueError("OpenSandbox skill projection changed during upload")
+                                data = file.read(info.st_size + 1)
+                            if len(data) != info.st_size:
+                                raise ValueError("OpenSandbox skill projection changed during upload")
+                            payload.write(data)
+                            entries.append((target_dir / name, len(data), bool(info.st_mode & stat.S_IXUSR)))
+                            total += len(data)
+            payload.seek(0)
+            created = {stage / category for category in _SKILL_CATEGORIES}
+
+            def ensure_dir(path: PurePosixPath) -> None:
+                if path not in created:
+                    run(f"mkdir -p -- {shlex.quote(str(path))}")
+                    created.add(path)
+
+            for target, size, executable in entries:
+                ensure_dir(target.parent)
+                check_deadline()
+                sandbox._upload_skill_file(str(target), payload.read(size), executable=executable)
+            files = {target for target, _, _ in entries}
+            for link, target, is_dir in links:
+                if is_dir:
+                    ensure_dir(target)
+                elif target not in files:
+                    continue
+                ensure_dir(link.parent)
+                relative = posixpath.relpath(target, start=link.parent)
+                run(f"ln -sT -- {shlex.quote(relative)} {shlex.quote(str(link))}")
 
     def release(self, sandbox_id: str) -> None:
         # Same scope lock as acquire: no next turn may reuse a client while its

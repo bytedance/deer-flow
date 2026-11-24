@@ -75,15 +75,20 @@ def _confirmation_freshness(
     *,
     now: datetime,
     half_life_days: float,
+    decay_exempt: bool = False,
 ) -> float:
     confirmed_at = _parse_datetime(fact.get("lastConfirmedAt"))
     if confirmed_at is not None:
+        if decay_exempt:
+            return 1.0
         elapsed = (now - confirmed_at).total_seconds() / 86400
         return _decay(elapsed_days=elapsed, half_life_days=half_life_days)
 
     created_at = _parse_datetime(fact.get("createdAt"))
     if created_at is None:
         return 0.0
+    if decay_exempt:
+        return 0.5
     elapsed = (now - created_at).total_seconds() / 86400
     # Creation is weaker evidence than an explicit user confirmation.
     return 0.5 * _decay(elapsed_days=elapsed, half_life_days=half_life_days)
@@ -123,6 +128,7 @@ def _score_fact(
     access_weight: float,
     confirmation_half_life_days: float,
     access_half_life_days: float,
+    decay_exempt_categories: set[str] | None = None,
 ) -> FactEvictionScore:
     confidence = _bounded_number(fact.get("confidence"), default=0.5)
     if policy == EVICTION_POLICY_CONFIDENCE:
@@ -133,10 +139,16 @@ def _score_fact(
     if policy != EVICTION_POLICY_HYBRID_V1:
         raise ValueError(f"Unknown fact eviction policy: {policy!r}")
 
+    decay_exempt = False
+    if decay_exempt_categories:
+        cat = str(fact.get("category") or "").strip().lower()
+        decay_exempt = cat in decay_exempt_categories
+
     confirmation = _confirmation_freshness(
         fact,
         now=now,
         half_life_days=confirmation_half_life_days,
+        decay_exempt=decay_exempt,
     )
     access = _normalized_access_heat(
         usage,
@@ -168,15 +180,23 @@ def select_facts_for_capacity(
     access_half_life_days: float = 30,
     correction_reserved_fraction: float = 0.10,
     correction_reserved_max: int = 10,
+    reserved_categories: list[str] | tuple[str, ...] | None = None,
+    decay_exempt_categories: list[str] | tuple[str, ...] | None = None,
 ) -> FactEvictionDecision:
     """Select facts under the configured cap without mutating the snapshot.
 
     ``confidence`` exactly preserves the historical ranking. ``hybrid-v1``
     combines three bounded signals and reserves only the minimum number of
-    correction slots; unused slots immediately return to ordinary competition.
+    capacity slots for configured reserved categories (defaulting to correction);
+    corrections take priority when included. Unused slots return to ordinary competition.
     """
+    if isinstance(reserved_categories, str):
+        raise TypeError("reserved_categories must be an iterable of strings, not a bare str")
+    if isinstance(decay_exempt_categories, str):
+        raise TypeError("decay_exempt_categories must be an iterable of strings, not a bare str")
     evaluated_at = (now or datetime.now(UTC)).astimezone(UTC)
     usage = usage or {}
+    decay_exempt_set = {c.strip().lower() for c in decay_exempt_categories if isinstance(c, str) and c.strip()} if decay_exempt_categories else None
     indexed_facts = list(enumerate(facts))
     scores: dict[str, FactEvictionScore] = {}
     # Per-position scores: the input list may repeat a fact_id, and the public
@@ -195,6 +215,7 @@ def select_facts_for_capacity(
             access_weight=access_weight,
             confirmation_half_life_days=confirmation_half_life_days,
             access_half_life_days=access_half_life_days,
+            decay_exempt_categories=decay_exempt_set,
         )
         scores[fact_id] = score
         scored.append(score)
@@ -211,16 +232,20 @@ def select_facts_for_capacity(
         indexed_facts,
         key=lambda item: (-scored[item[0]].value, item[0]),
     )
-    reserved_count = 0
+    reserved_correction_count = 0
     selected_indexes: set[int] = set()
     if policy == EVICTION_POLICY_HYBRID_V1 and max_facts > 0:
-        correction_slots = min(
+        target_categories = {c.strip().lower() for c in reserved_categories if isinstance(c, str) and c.strip()} if reserved_categories is not None else {"correction"}
+        reserved_slots = min(
             correction_reserved_max,
             math.ceil(max_facts * correction_reserved_fraction),
         )
-        corrections = [item for item in ranked if str(item[1].get("category") or "").strip().lower() == "correction"]
-        reserved_count = min(correction_slots, len(corrections), max_facts)
-        selected_indexes.update(index for index, _fact in corrections[:reserved_count])
+        reserved_candidates = [item for item in ranked if str(item[1].get("category") or "").strip().lower() in target_categories]
+        reserved_candidates.sort(key=lambda item: str(item[1].get("category") or "").strip().lower() != "correction")
+        reserved_count = min(reserved_slots, len(reserved_candidates), max_facts)
+        reserved_candidates = reserved_candidates[:reserved_count]
+        selected_indexes.update(index for index, _fact in reserved_candidates)
+        reserved_correction_count = sum(str(fact.get("category") or "").strip().lower() == "correction" for _index, fact in reserved_candidates)
 
     for index, _fact in ranked:
         if len(selected_indexes) >= max(0, max_facts):
@@ -248,5 +273,5 @@ def select_facts_for_capacity(
         evicted=evicted,
         scores=scores,
         policy=policy,
-        reserved_correction_slots=reserved_count,
+        reserved_correction_slots=reserved_correction_count,
     )

@@ -234,7 +234,10 @@ async def _skill_manage_impl(
         replace: Replacement text for patch.
         expected_count: Optional expected number of replacements for patch.
     """
-    name = SkillStorage.validate_skill_name(name)
+    # ``create`` also refuses a name that cannot become a directory component
+    # (Windows reserved device names); edits and deletes stay permissive so a
+    # skill an older release created still works.
+    name = SkillStorage.validate_skill_name(name, for_creation=action == "create")
     user_id = resolve_runtime_user_id(runtime)
     lock = _get_lock(user_id, name)
     thread_id = _get_thread_id(runtime)

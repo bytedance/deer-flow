@@ -18,6 +18,7 @@ from app.gateway.auth.models import User
 from app.gateway.routers import channel_connections
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+from deerflow.persistence.engine import close_engine
 
 
 @pytest.fixture(autouse=True)
@@ -154,7 +155,7 @@ def test_get_providers_only_returns_enabled_channels_and_setup_fields(tmp_path):
         },
     ]
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_providers_uses_existing_channels_config(tmp_path):
@@ -221,7 +222,7 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
         "wecom": True,
     }
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_providers_degrades_when_persistence_is_unavailable(monkeypatch):
@@ -257,7 +258,7 @@ def test_get_providers_reports_connected_without_binding_in_auth_disabled_mode(t
     assert by_provider["slack"]["connection_status"] == "connected"
     assert by_provider["feishu"]["connection_status"] == "connected"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_providers_reports_unconfigured_when_runtime_channel_is_missing(tmp_path):
@@ -286,7 +287,7 @@ def test_get_providers_reports_unconfigured_when_runtime_channel_is_missing(tmp_
     assert by_provider["wecom"]["configured"] is False
     assert "WeCom credentials" in by_provider["wecom"]["unavailable_reason"]
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_providers_reports_configured_channel_not_running(tmp_path, monkeypatch):
@@ -317,7 +318,7 @@ def test_get_providers_reports_configured_channel_not_running(tmp_path, monkeypa
     assert by_provider["feishu"]["connection_status"] == "not_connected"
     assert "configured but is not running" in by_provider["feishu"]["unavailable_reason"]
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_providers_provider_unavailable_overrides_stale_connected_row(tmp_path):
@@ -352,7 +353,7 @@ def test_get_providers_provider_unavailable_overrides_stale_connected_row(tmp_pa
     assert by_provider["slack"]["connection_status"] == "not_connected"
     assert "Slack credentials" in by_provider["slack"]["unavailable_reason"]
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_providers_restarts_configured_channel_when_service_can_reconcile(tmp_path, monkeypatch):
@@ -406,7 +407,7 @@ def test_get_providers_restarts_configured_channel_when_service_can_reconcile(tm
     assert by_provider["feishu"]["unavailable_reason"] is None
     assert reconciled == [("feishu", channels_config["feishu"])]
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_providers_uses_newest_connection_status_per_provider(tmp_path):
@@ -441,7 +442,7 @@ def test_get_providers_uses_newest_connection_status_per_provider(tmp_path):
     by_provider = {item["provider"]: item for item in response.json()["providers"]}
     assert by_provider["slack"]["connection_status"] == "connected"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_connections_returns_current_user_connections_only(tmp_path):
@@ -477,7 +478,7 @@ def test_get_connections_returns_current_user_connections_only(tmp_path):
     assert body["connections"][0]["provider"] == "telegram"
     assert body["connections"][0]["external_account_id"] == "42"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_connect_telegram_returns_deep_link_and_persists_state(tmp_path):
@@ -502,7 +503,7 @@ def test_connect_telegram_returns_deep_link_and_persists_state(tmp_path):
 
     assert anyio.run(count_states) == 1
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_connect_slack_returns_binding_command_and_persists_state(tmp_path):
@@ -527,7 +528,7 @@ def test_connect_slack_returns_binding_command_and_persists_state(tmp_path):
 
     assert anyio.run(count_states) == 1
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_connect_binding_code_caps_pending_states_per_provider(tmp_path):
@@ -548,7 +549,7 @@ def test_connect_binding_code_caps_pending_states_per_provider(tmp_path):
 
     assert anyio.run(count_states) == 5
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_connect_discord_returns_binding_command_and_persists_state(tmp_path):
@@ -573,7 +574,7 @@ def test_connect_discord_returns_binding_command_and_persists_state(tmp_path):
 
     assert anyio.run(count_states) == 1
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_connect_existing_binding_code_channels_return_command_and_persist_state(tmp_path):
@@ -606,7 +607,7 @@ def test_connect_existing_binding_code_channels_return_command_and_persist_state
 
         assert anyio.run(count_states) == 1
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 @pytest.mark.parametrize("provider", ["qq", "wecom"])
@@ -648,7 +649,7 @@ def test_browser_group_names_survive_state_consumption_and_bind_two_groups(tmp_p
         assert len({row["workspace_id"] for row in rows}) == 2
         assert {row["workspace_name"] for row in rows} == {"Release team", "Support team"}
     finally:
-        anyio.run(repo.close)
+        anyio.run(close_engine)
 
 
 def test_connect_unconfigured_runtime_channel_returns_400(tmp_path):
@@ -663,7 +664,7 @@ def test_connect_unconfigured_runtime_channel_returns_400(tmp_path):
     assert response.status_code == 400
     assert "Slack credentials" in response.json()["detail"]
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 @pytest.mark.parametrize("provider", ["enabled", "require_bound_identity", "provider_status", "unknown_provider"])
@@ -686,7 +687,7 @@ def test_connect_rejects_non_provider_config_attribute_with_404(tmp_path, provid
     assert response.status_code == 404
     assert response.json()["detail"] == "Unknown channel provider"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_configure_provider_runtime_credentials_enables_connect_without_file_edits(tmp_path):
@@ -722,7 +723,7 @@ def test_configure_provider_runtime_credentials_enables_connect_without_file_edi
     assert connect_response.status_code == 200
     assert connect_response.json()["provider"] == "slack"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_runtime_config_endpoints_require_admin(tmp_path):
@@ -757,7 +758,7 @@ def test_runtime_config_endpoints_require_admin(tmp_path):
     # Read-only provider listing stays available to regular users.
     assert providers_response.status_code == 200
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_configure_provider_runtime_rolls_back_visible_state_when_start_fails(tmp_path, monkeypatch):
@@ -805,7 +806,7 @@ def test_configure_provider_runtime_rolls_back_visible_state_when_start_fails(tm
     assert _channels(app)["slack"] == existing_runtime_config
     assert runtime_config_store.get_provider_config("slack") == existing_runtime_config
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_configure_telegram_runtime_uses_new_bot_username_for_deep_link_without_mutating_config(tmp_path):
@@ -834,7 +835,7 @@ def test_configure_telegram_runtime_uses_new_bot_username_for_deep_link_without_
     # The original config object cached by get_app_config() must stay untouched.
     assert config.telegram.bot_username == "old_bot"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
@@ -884,7 +885,7 @@ def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
         "app_token": "xapp-ui",
     }
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_runtime_config_saved_on_peer_workers_both_survive_restart(tmp_path):
@@ -916,7 +917,7 @@ def test_runtime_config_saved_on_peer_workers_both_survive_restart(tmp_path):
         "slack": {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"},
     }
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_runtime_disconnect_on_one_worker_is_not_undone_by_a_peer_save(tmp_path):
@@ -944,7 +945,7 @@ def test_runtime_disconnect_on_one_worker_is_not_undone_by_a_peer_save(tmp_path)
     assert persisted["slack"] == {"enabled": False, "_runtime_disabled": True}
     assert persisted["telegram"]["bot_token"] == "tg-token"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_configure_provider_runtime_credentials_preserves_masked_secrets(tmp_path):
@@ -1000,7 +1001,7 @@ def test_configure_provider_runtime_credentials_preserves_masked_secrets(tmp_pat
         "app_secret": "********",
     }
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 @pytest.mark.asyncio
@@ -1107,7 +1108,7 @@ def test_disconnect_provider_runtime_config_clears_connected_state(tmp_path):
     by_provider = {item["provider"]: item for item in providers_response.json()["providers"]}
     assert by_provider["slack"]["connection_status"] == "not_connected"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_disconnect_provider_runtime_config_suppresses_file_config_and_stops_channel(tmp_path, monkeypatch):
@@ -1180,7 +1181,7 @@ def test_disconnect_provider_runtime_config_suppresses_file_config_and_stops_cha
     assert by_provider["feishu"]["configured"] is False
     assert by_provider["feishu"]["connection_status"] == "not_connected"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_disconnect_provider_runtime_config_revokes_all_provider_connections(tmp_path):
@@ -1239,7 +1240,7 @@ def test_disconnect_provider_runtime_config_revokes_all_provider_connections(tmp
     assert statuses["other"]["slack"] == "revoked"
     assert statuses["other"]["telegram"] == "connected"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_get_providers_preserves_revoked_status_when_provider_unavailable(tmp_path):
@@ -1276,7 +1277,7 @@ def test_get_providers_preserves_revoked_status_when_provider_unavailable(tmp_pa
     # even when the runtime provider is currently unavailable.
     assert by_provider["slack"]["connection_status"] == "revoked"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_configure_provider_runtime_does_not_clobber_concurrent_config_update(tmp_path, monkeypatch):
@@ -1313,7 +1314,7 @@ def test_configure_provider_runtime_does_not_clobber_concurrent_config_update(tm
     assert _channels(app)["slack"]["bot_token"] == "xoxb-ui"
     assert _channels(app)["telegram"]["bot_token"] == "tg-token"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_disconnect_provider_runtime_keeps_state_consistent_when_revoke_fails(tmp_path):
@@ -1352,7 +1353,7 @@ def test_disconnect_provider_runtime_keeps_state_consistent_when_revoke_fails(tm
         "app_token": "xapp-ui",
     }
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_disconnect_connection_revokes_current_user_connection(tmp_path):
@@ -1382,7 +1383,7 @@ def test_disconnect_connection_revokes_current_user_connection(tmp_path):
 
     assert anyio.run(get_connection_status) == "revoked"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 def test_disconnect_connection_is_current_user_scoped(tmp_path):
@@ -1412,7 +1413,7 @@ def test_disconnect_connection_is_current_user_scoped(tmp_path):
 
     assert anyio.run(get_connection_status) == "connected"
 
-    anyio.run(repo.close)
+    anyio.run(close_engine)
 
 
 @pytest.mark.parametrize("worker_env", [{}, {"GATEWAY_WORKERS": "1"}, {"WEB_CONCURRENCY": "1"}, {"GATEWAY_WORKERS": ""}])
@@ -1653,7 +1654,7 @@ def test_qq_provider_exposes_binding_flow_and_masks_secret(tmp_path):
         assert state["owner_user_id"] == str(_user().id)
         assert anyio.run(consume) is None
     finally:
-        anyio.run(repo.close)
+        anyio.run(close_engine)
 
 
 def test_qq_runtime_credentials_can_be_configured_from_browser(tmp_path):
@@ -1679,4 +1680,4 @@ def test_qq_runtime_credentials_can_be_configured_from_browser(tmp_path):
             assert _channels(app)["qq"]["client_secret"] == "fixture-private-secret"
             assert client.post("/api/channels/qq/connect").status_code == 200
     finally:
-        anyio.run(repo.close)
+        anyio.run(close_engine)
