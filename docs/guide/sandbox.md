@@ -145,7 +145,8 @@ provisioner:
       ephemeral-storage: 2Gi
 ```
 
-Each field can be overridden independently. For a standalone provisioner,
+Each field can be overridden independently. Helm rejects unknown resource names
+in `requests` and `limits` when rendering the chart. For a standalone provisioner,
 set the corresponding environment variables on the provisioner container.
 
 | Resource | Request variable | Default request | Limit variable | Default limit |

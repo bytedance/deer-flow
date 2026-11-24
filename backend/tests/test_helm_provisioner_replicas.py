@@ -81,7 +81,7 @@ def _render_chart(*settings: str) -> list[dict]:
 def _render_failure(*args: str) -> str:
     """Return helm's stderr for a render that must be refused."""
     result = _helm(*args)
-    assert result.returncode != 0, "the render must fail instead of producing a budget that protects nothing"
+    assert result.returncode != 0, "Helm accepted invalid chart values"
     return result.stderr
 
 
@@ -276,6 +276,14 @@ def test_rendered_provisioner_passes_sandbox_resources_as_strings() -> None:
         "SANDBOX_EPHEMERAL_STORAGE_LIMIT": "500Mi",
     }
     assert container["resources"] == _values()["provisioner"]["resources"]
+
+
+@pytest.mark.parametrize(("group", "resource"), [("limits", "memroy"), ("requests", "nvidia.com/gpu")])
+def test_render_rejects_unknown_sandbox_resource(group: str, resource: str, tmp_path: Path) -> None:
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(yaml.safe_dump({"provisioner": {"sandboxResources": {group: {resource: "1"}}}}), encoding="utf-8", newline="\n")
+    error = _render_failure("--values", str(values_file))
+    assert group in error and resource in error
 
 
 def test_gateway_and_provisioner_budgets_render_side_by_side() -> None:
