@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 
 import pytest
-from support.nginx_conf import NGINX_CONFIGS, read_config
+from support.nginx_conf import NGINX_CONFIGS, extract_location_block, read_config
 
 
 def _extract_block(content: str, marker: re.Pattern[str]) -> str:
@@ -124,11 +124,15 @@ def test_websocket_handshake_is_not_redirected(config_path: str, host: str) -> N
 
 
 @pytest.mark.parametrize("config_path", NGINX_CONFIGS)
-def test_main_server_redirects_to_the_canonical_origin(config_path: str) -> None:
+def test_only_frontend_location_redirects_to_the_canonical_origin(config_path: str) -> None:
     content = read_config(config_path)
     server = _extract_block(content, re.compile(r"server\s*\{(?=[^}]*?listen\s+(?:\S+:)?2026\b)"))
-    assert 'if ($loopback_origin != "")' in server
-    assert "return 301 $scheme://$loopback_origin$request_uri;" in server
+    frontend = extract_location_block(server, "/")
+    redirect = "return 301 $scheme://$loopback_origin$request_uri;"
+    # A server-level rewrite runs before nginx selects the API or health location.
+    assert 'if ($loopback_origin != "")' in frontend
+    assert redirect in frontend
+    assert redirect not in server.replace(frontend, "", 1)
 
 
 def test_canonicalization_maps_match_across_configs() -> None:
