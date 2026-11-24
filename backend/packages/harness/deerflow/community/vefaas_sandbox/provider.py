@@ -2459,7 +2459,6 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     if tracked is None:
                         raise RuntimeError(f"veFaaS sandbox {sandbox_id} is not tracked by this provider")
                     remote_id = tracked.remote_sandbox_id
-                    self._acquire_inflight[sandbox_id] = self._acquire_inflight.get(sandbox_id, 0) + 1
                     self._snapshotting_remote_ids[remote_id] = self._snapshotting_remote_ids.get(remote_id, 0) + 1
                 snapshot_id: str | None = None
                 settled = True
@@ -2513,13 +2512,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                                 remote_id,
                                 self._redact(watch_exc),
                             )
-                    with self._lock:
-                        remaining = self._acquire_inflight.get(sandbox_id, 1) - 1
-                        if remaining <= 0:
-                            self._acquire_inflight.pop(sandbox_id, None)
-                        else:
-                            self._acquire_inflight[sandbox_id] = remaining
-                        if not handed_off:
+                    if not handed_off:
+                        with self._lock:
                             self._release_snapshot_fence_locked(remote_id)
 
     def _release_snapshot_fence_locked(self, remote_id: str) -> None:

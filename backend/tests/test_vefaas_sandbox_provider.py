@@ -2523,6 +2523,72 @@ class TestVeFaaSImagePrecache:
             provider.shutdown()
 
     @pytest.mark.parametrize("from_warm_pool", [False, True])
+    def test_sync_manual_snapshot_keeps_ownership_lease_renewed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        from_warm_pool: bool,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.snapshot_status_sequence = ["Creating", "Ready"]
+        orig_handler = server.handler
+        creating_seen = threading.Event()
+        allow_ready = threading.Event()
+
+        def gated_handler(req: httpx.Request) -> httpx.Response:
+            resp = orig_handler(req)
+            if req.url.params.get("Action") == "DescribeSandboxSnapshot":
+                body = resp.json()["Result"]["Snapshot"]
+                if body["Status"] == "Creating":
+                    creating_seen.set()
+                    assert allow_ready.wait(timeout=5)
+            return resp
+
+        server.handler = gated_handler  # type: ignore[method-assign]
+        clock = {"now": 100.0}
+        owner_store = MemoryOwnershipStore(owner_id="worker-snap-owner", ttl_seconds=10.0, time_source=lambda: clock["now"])
+        peer_store = MemoryOwnershipStore(owner_id="worker-snap-peer", ttl_seconds=10.0, time_source=lambda: clock["now"])
+        peer_store._leases = owner_store._leases
+        peer_store._lock = owner_store._lock
+
+        provider, _, _ = _install_provider(monkeypatch, tmp_path, server=server)
+        provider._ownership = owner_store
+        try:
+            sid = provider.acquire("t-sync-snap-renew", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            if from_warm_pool:
+                provider.release(sid)
+                assert sid in provider._warm_pool
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                snap_future = pool.submit(provider.create_snapshot, sid, wait=True)
+                try:
+                    assert creating_seen.wait(timeout=5)
+                    # Synchronous wait must NOT suppress lease renewal via _acquire_inflight.
+                    assert sid not in provider._acquire_inflight
+                    assert remote_id in provider._snapshotting_remote_ids
+
+                    # Renew before original TTL (110.0) expires -> extends lease to 116.0.
+                    clock["now"] = 106.0
+                    provider._renew_leases_once()
+
+                    # Past original TTL (112.0 > 110.0): owner lease is still live and blocks peer teardown.
+                    clock["now"] = 112.0
+                    assert owner_store.owner(sid) == "worker-snap-owner"
+                    assert peer_store.claim(sid, for_destroy=True) is False
+                finally:
+                    allow_ready.set()
+                snap = snap_future.result(timeout=5)
+
+            assert snap.is_ready
+            provider.shutdown()
+            assert remote_id not in server.sandboxes
+            assert sum(1 for action, _, _ in server.requests if action == "KillSandbox") == 1
+        finally:
+            allow_ready.set()
+            provider.shutdown()
+
+    @pytest.mark.parametrize("from_warm_pool", [False, True])
     def test_async_snapshot_retains_fence_across_shutdown_and_warm_reap_until_settled(
         self,
         monkeypatch: pytest.MonkeyPatch,
