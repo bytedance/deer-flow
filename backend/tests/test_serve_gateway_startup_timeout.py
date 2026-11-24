@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,10 @@ lsof() {
     esac
     return 1
 }
-sleep() { printf '%s\n' "$(( $(cat "$TEST_CLOCK") + 1 ))" > "$TEST_CLOCK"; }
+sleep() {
+    printf '%s\n' "$(( $(cat "$TEST_CLOCK") + 1 ))" > "$TEST_CLOCK"
+    SECONDS=$((SECONDS + ${1:-1}))
+}
 python3() { "$TEST_PYTHON" "$@"; }
 env() {
     if [ "$1" = python3 ]; then shift; python3 "$@"; else command env "$@"; fi
@@ -248,6 +252,83 @@ def test_windows_wait_returns_without_calling_powershell(tmp_path: Path) -> None
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "failed to start" not in result.stdout
+
+
+def _run_budgeted_wait(tmp_path: Path, *, timeout: int, netstat: str, subprocess_timeout: int) -> tuple[subprocess.CompletedProcess[str], int]:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("port-listening.sh", "wait-for-port.sh"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    prelude = "\n".join(
+        (
+            "command() {",
+            '    if [ "$1" = -v ] && { [ "$2" = lsof ] || [ "$2" = ss ]; }; then',
+            "        return 1",
+            "    fi",
+            '    builtin command "$@"',
+            "}",
+            netstat,
+            "export -f command netstat",
+            "start=$SECONDS",
+            'bash "$TEST_SCRIPT" 8001 "$TEST_TIMEOUT" Gateway',
+            "status=$?",
+            'echo "ELAPSED:$((SECONDS - start))"',
+            "exit $status",
+        )
+    )
+    bash = require_script_bash()
+    env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV"}}
+    env.update(OSTYPE="msys", TEST_SCRIPT=(scripts / "wait-for-port.sh").as_posix(), TEST_TIMEOUT=str(timeout))
+    result = subprocess.run(
+        [bash, "-c", prelude, "budgeted-wait"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=subprocess_timeout,
+        check=False,
+    )
+    elapsed = re.search(r"ELAPSED:(\d+)", result.stdout)
+    assert elapsed is not None, result.stdout + result.stderr
+    return result, int(elapsed.group(1))
+
+
+_LISTENING_NETSTAT = """
+netstat() {
+    sleep 2
+    printf '%s\\n' '  TCP    127.0.0.1:8001         0.0.0.0:0              LISTENING       9'
+    return 0
+}
+"""
+
+
+def test_probe_that_outlasts_its_budget_is_not_a_success(tmp_path: Path) -> None:
+    """A 1s budget and a 2s probe: the late listener is a timeout."""
+    result, seconds = _run_budgeted_wait(tmp_path, timeout=1, netstat=_LISTENING_NETSTAT, subprocess_timeout=8)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "after 1s" in result.stdout
+    assert seconds < 3, result.stdout + result.stderr
+
+
+def test_later_probe_keeps_only_the_time_still_left(tmp_path: Path) -> None:
+    """Misses spend the budget. The probe that finally listens does not get it back."""
+    netstat = """
+_netstat_calls=0
+netstat() {
+    _netstat_calls=$((_netstat_calls + 1))
+    if [ "$_netstat_calls" -lt 3 ]; then
+        return 1
+    fi
+    sleep 2
+    printf '%s\\n' '  TCP    127.0.0.1:8001         0.0.0.0:0              LISTENING       9'
+    return 0
+}
+"""
+    result, seconds = _run_budgeted_wait(tmp_path, timeout=3, netstat=netstat, subprocess_timeout=8)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "after 3s" in result.stdout
+    assert seconds < 4, result.stdout + result.stderr
 
 
 def test_linux_netstat_listen_check_still_matches_local_address(tmp_path: Path) -> None:
