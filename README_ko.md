@@ -154,7 +154,7 @@ MindIE XML 도구 호출은 [인자 파싱 및 줄바꿈 호환성 가이드](ba
    make setup
    ```
 
-   대화형 마법사가 실행되어 LLM 프로바이더, 선택 사항인 웹 검색, 그리고 샌드박스 모드, bash 접근, 파일 쓰기 도구 같은 실행/안전 관련 선호 사항을 고르도록 안내합니다. 최소한의 `config.yaml`을 생성하고 키를 `.env`에 기록합니다. 약 2분 걸립니다.
+   대화형 마법사에서 LLM 프로바이더, 선택 사항인 웹 검색, 샌드박스 모드, 파일 쓰기 도구를 설정할 수 있습니다. 컨테이너 샌드박스를 선택하면 Bash 명령 실행도 설정할 수 있습니다. 최소한의 `config.yaml`을 생성하고 키를 `.env`에 기록합니다. 약 2분 걸립니다.
 
    마법사에서는 선택 사항인 웹 검색 프로바이더를 설정하거나, 지금은 건너뛸 수도 있습니다.
 
@@ -448,6 +448,8 @@ DeerFlow는 프록시 뒤에서 브라우저 측 스킴과 출처를 복원하�
 
 `config.yaml`, `.env`, `extensions_config.json`은 그대로 유지하세요. 현재 사용 중인 서비스를 중지하고 `git pull --ff-only`를 실행한 다음, 같은 모드로 다시 시작하세요. 일상적인 소스 업그레이드에서는 `make config`나 `make docker-init`을 다시 실행하지 마세요. 새 버전에 설정 변경이 필요하다면 재시작하기 전에 `make config-upgrade`를 실행하세요. 모드별 명령은 [운영 및 문제 해결](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)을 참고하세요.
 
+사용자 지정 접두사를 쓰는 Redis 체크포인트 캐시를 업그레이드할 때는 [Redis 체크포인트 기록 캐시 업그레이드](docs/guide/deployment.md#redis-checkpoint-history-cache-upgrade)를 참고하세요.
+
 재개(resume) 명령 멱등성 수정 사항을 여러 Gateway 워커나 Pod에 배포할 때는, 이 엔드포인트를 서비스하는 모든 워커가 업그레이드될 때까지 **키가 지정된 모든 재개 요청 제출과 재시도**(`command.resume`에 `Idempotency-Key`를 포함해 스레드 범위의 `/runs`, `/runs/stream`, `/runs/wait`로 보내는 요청)를 업그레이드된 워커로만 라우팅하세요. 이전 워커는 비공개 재개 식별 정보를 무시하고 `input`만 비교합니다. 그래서 `input: null`인 경우 `deny`를 재시도하면 이전의 `approve` 실행이 잘못 재사용될 수 있습니다. 로드 밸런서가 업그레이드된 워커를 분리할 수 없다면, 배포가 끝날 때까지 키가 지정된 재개 트래픽을 일시 중지하거나, 새 버전으로 재시작하기 전에 이전 워커를 모두 중지하세요. 추가형 데이터베이스 마이그레이션은 이전 버전의 실행 이력 읽기 코드와 호환성을 유지하지만, 이전 워커가 재개 요청을 안전하게 승인(admission)할 수 있게 만들지는 않습니다. 업그레이드된 워커는 식별 정보가 없는 레거시 재개 실행을 재시도하면 같은 결정이더라도 409를 반환합니다. 새 작업을 제출할지 결정하기 전에 해당 실행과 현재 스레드 상태를 확인하세요. [실행 API 계약](backend/docs/API.md#create-run)을 참고하세요.
 
 커스텀 실행 저장소는 제공된 모든 멱등성 필드를 명시적으로 지원해야 합니다. 저장소가 그 지원을 보장할 수 없으면, 키가 지정된 입력 요청과 재개 요청은 실행 승인 전에 HTTP 503을 반환합니다. 기본 제공 Memory 및 SQL 저장소는 두 필드를 모두 지원하며, 명시적인 `idempotency_key` 매개변수를 가진 이전 커스텀 저장소는 키가 지정된 입력 요청을 계속 수락합니다.
@@ -570,20 +572,21 @@ DeerFlow의 기본 제공 커스텀 이벤트는 두 LangGraph 스트리밍 인�
 ### 고급
 #### 샌드박스 모드
 
-DeerFlow는 여러 샌드박스 실행 모드를 지원합니다.
-- **로컬 실행**(호스트 머신에서 샌드박스 코드를 직접 실행)
+DeerFlow는 여러 샌드박스 모드를 지원합니다.
+
+- **로컬 워크스페이스**(전용 파일 도구와 설정된 마운트로 파일에 접근)
 - **Docker 실행**(격리된 Docker 컨테이너에서 샌드박스 코드를 실행)
 - **Kubernetes를 사용한 Docker 실행**(provisioner 서비스를 통해 Kubernetes Pod에서 샌드박스 코드를 실행)
 
 대화 상태 안의 샌드박스 참조는 서버가 소유합니다. 외부 실행 API와 스레드 상태 API는 호출자가 제공한 `sandbox` 값을 거부합니다. 체크포인트를 복원할 때 런타임은 도구가 그 참조를 재사용하기 전에 인증된 사용자와 스레드를 기준으로 참조를 해석합니다. 런타임 스레드 ID가 없으면, 참조된 샌드박스가 캐시되어 있더라도 오류가 발생합니다.
 
-로컬 실행에서 호스트 Bash가 활성화되어 있으면, DeerFlow는 `uname -s`로 OS 감지를 시작하고 Darwin에서는 이어서 `sw_vers`를 사용합니다. Linux에서는 활성 샌드박스 정책이 허용하는 경우에만 `/etc/os-release` 같은 호스트 시스템 파일을 읽습니다. 호스트 파일 시스템 경로 검사는 여전히 적용됩니다. 경로가 차단되면, 에이전트는 거부된 명령을 반복하는 대신 허용된 명령 전용 확인 방법이나 가상 경로를 사용하도록 안내됩니다.
+로컬 워크스페이스에서는 전용 파일 도구를 사용합니다. Bash 명령을 실행해야 하는 워크플로에는 격리된 샌드박스 프로바이더를 선택하세요. 자세한 내용은 [샌드박스 모드](docs/guide/sandbox.md#sandbox-mode)를 참고하세요.
 
 Docker 개발 환경에서 서비스 시작은 `config.yaml`의 샌드박스 모드를 따릅니다. Local/Docker 모드에서는 `provisioner`가 시작되지 않습니다.
 
 로컬 AIO 샌드박스의 포트 할당은 TCP 포트 65535에서 멈춥니다. 설정된 시작 포트부터 남은 포트가 모두 사용 중이면, 범위를 벗어난 바인드를 시도하는 대신 사용 가능한 포트가 없다고 보고합니다.
 
-원하는 모드를 설정하려면 [샌드박스 설정 가이드](backend/docs/CONFIGURATION.md#sandbox)를 참고하세요.
+원하는 모드를 설정하려면 [샌드박스 설정 가이드](backend/docs/CONFIGURATION.md#sandbox)를 참고하세요. Windows에서 로컬 파일 경로나 마운트를 설정하려면 [스킬 및 샌드박스 경로](backend/docs/CONFIGURATION.md#skills-and-sandbox-paths)를 참고하세요.
 
 원격 디렉터리 목록 조회는 반환된 항목이 없더라도 탐색 실패(예: 읽을 수 없는 디렉터리)를 불완전한 결과로 보고합니다. 시작 경로가 없는 경우는 “Directory not found.”로 별도로 보고합니다.
 
@@ -1075,11 +1078,9 @@ Gateway를 통해 `.skill` 아카이브를 설치하면, DeerFlow는 표준 공�
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
-기본 제공 `image-generation` 스킬은 Gemini, MiniMax, OpenAI 호환 Images API를 지원합니다. OpenAI 호환 API를 사용하려면 `IMAGE_GENERATION_PROVIDER=openai`로 선택한 다음 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, `IMAGE_GENERATION_MODEL`을 설정하세요. 컨테이너화된 샌드박스나 명시적으로 활성화한 로컬 호스트 셸에서는 `sandbox.environment`를 통해 이 변수들을 노출하세요. 샌드박스 명령은 의도적으로 Gateway 프로세스의 API 키를 상속하지 않습니다. 로컬 프로바이더는 해석된 설정 값을 변경 없이 사용하며, 요청 범위 시크릿이 운영자 값보다 우선합니다. 로컬 bash 출력과 명령 오류에서는 자격 증명 값을 마스킹하되, 모델 이름이나 base URL 같은 무해한 설정은 읽을 수 있게 남겨 둡니다.
+기본 제공 `image-generation` 스킬은 Gemini, MiniMax, OpenAI 호환 Images API를 지원합니다. OpenAI 호환 API를 사용하려면 `IMAGE_GENERATION_PROVIDER=openai`로 선택한 다음 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, `IMAGE_GENERATION_MODEL`을 설정하세요. 스킬 스크립트는 Docker/AIO, Kubernetes provisioner 또는 E2B와 같은 격리된 샌드박스에서 실행하고, 이 변수들은 `sandbox.environment`를 통해 전달하세요. 샌드박스 명령은 Gateway 프로세스의 API 키를 상속하지 않습니다.
 
-`LocalSandboxProvider`에서 이는 호스트 파일 시스템 격리가 아니라 관리형 도구 경로 경계입니다. 에이전트별 명시적 스킬 정책은 호스트 bash가 비활성화된 경우(기본값)에만 허용됩니다. 호스트 하위 프로세스는 프로바이더의 가상 경로 매핑을 거치지 않고 정규 경로에 접근할 수 있기 때문입니다. 셸 접근과 함께 파일 시스템 경계를 계속 강제해야 한다면 Docker/AIO, Kubernetes provisioner 또는 E2B를 사용하세요.
-
-Windows에서 로컬 샌드박스의 `cmd.exe` 폴백은 Python의 UTF-8 모드와 무관하게, 콘솔 출력 코드 페이지(`chcp 65001` 이후의 UTF-8 포함)를 사용해 내장 명령 출력을 디코딩합니다. 사용할 수 있는 콘솔 페이지가 없으면 시스템 OEM 페이지를 사용하고, 최후 수단으로 ANSI를 사용합니다. 네이티브 프로그램은 다른 출력 인코딩을 선택할 수 있으므로, 필요하면 해당 프로그램이 콘솔 페이지와 일치하도록 설정하세요.
+로컬 프로바이더는 워크스페이스 파일 도구에 스킬 접근 범위를 적용합니다. Windows에서도 스크립트 기반 스킬을 실행하려면 격리된 샌드박스 프로바이더가 필요합니다.
 
 관리형 통합은 공유되는 읽기 전용 스킬 팩을 커스텀 스킬과 섞지 않고 설치합니다. Lark/Feishu CLI 통합은 `Capability Center → Plugins → Lark / Feishu`에서 사용할 수 있습니다. 관리자가 공식 `lark-*` 팩을 `{DEER_FLOW_HOME}/integrations/skills/lark-cli` 아래에 한 번 설치하거나 업그레이드하면, 모든 사용자가 같은 팩을 각자 독립된 활성화 상태로 찾아 사용합니다. 각 사용자의 앱 설정과 OAuth 데이터는 `{DEER_FLOW_HOME}/users/{user_id}/integrations/lark-cli/{config,data}` 아래에 격리된 상태로 유지됩니다. 이 시크릿 디렉터리는 `0700`으로, 일반 자격 증명 파일은 `0600`으로 권한이 제한되며, 심볼릭 링크는 거부됩니다. Windows에서는 다른 프로세스가 잡고 있는 통합 파일 잠금을 기다릴 때 최대 15분 동안 재시도하며, 그 밖의 파일 잠금 오류는 즉시 보고됩니다.
 
@@ -1533,7 +1534,7 @@ HTML 아티팩트 미리보기는 문서에 실제 `<base>` 요소가 없는 한
 
 `write_file` 안내는 커스텀 에이전트 및 thinking 모드 재정의를 포함해 활성 모델의 출력 토큰 제한을 반영합니다. 더 긴 문서의 경우 에이전트는 `append=True`로 섹션 단위로 작성하도록 안내받으며, 제한이 알려지지 않은 모델은 수치 예산 힌트를 받지 않습니다.
 
-`AioSandboxProvider`에서는 셸 실행이 격리된 컨테이너 안에서 이루어집니다. `LocalSandboxProvider`에서는 파일 도구가 여전히 호스트의 스레드별 디렉터리에 매핑되지만, 호스트 `bash`는 안전한 격리 경계가 아니기 때문에 기본적으로 비활성화되어 있습니다. 호스트 bash는 완전히 신뢰할 수 있는 로컬 워크플로에서만 다시 활성화하세요. 호스트 bash 명령에는 실제 경과 시간(wall-clock) 기준 타임아웃이 있으며, 오래 실행되는 프로세스는 출력을 워크스페이스 로그로 리디렉션해 백그라운드에서 시작해야 합니다. Windows에서는 Git Bash/MSYS 인자 변환 제외 대상이 안전한 비루트 가상 경로 접두사로 한정되므로, 호스트 네이티브 CLI 런처는 일반적인 MSYS 호환성을 유지합니다. 로컬 샌드박스가 PowerShell로 폴백할 때는 출력을 UTF-8로 캡처하므로 CJK 텍스트가 Gateway 호스트의 로캘에 좌우되지 않습니다.
+`AioSandboxProvider`는 샌드박스 컨테이너 안에서 셸 명령을 실행합니다. `LocalSandboxProvider`의 파일 도구는 호스트의 스레드별 디렉터리에 매핑됩니다.
 
 Docker AIO 샌드박스는 호환성을 위해 기본적으로 기존의 개방형 이그레스(egress) 동작을 사용합니다. 운영자는 `sandbox.network.mode`를 `isolated` 또는 `allowlist`로 설정할 수 있습니다. 허용 목록 모드는 운영자가 정의한 도메인과, 일시적 또는 샌드박스 수명 동안의 HTTP(S) 승인을 위한 대화형 Human Input 카드를 지원합니다. 사설, 루프백, 링크 로컬, 멀티캐스트, 클라우드 메타데이터 주소는 계속 승인할 수 없습니다. 거부된 호스트 이름은 DNS 조회 전에 거부됩니다.
 `scheduled`, `webhook`, `autonomous` 상호작용 모드의 실행은 카드를 열지 않고 자동으로 거부됩니다. 이러한 무인 실행은 위험이 낮고 되돌릴 수 있는 작업에 한해서만 최소한의 가정으로 진행합니다. 충분한 권한 없이 위험이 높거나 되돌릴 수 없는 작업은, 모델이 확인 질문(clarification)을 시도하더라도 누락된 결정을 명시한 구조화된 `BLOCKED` 결과를 반환합니다.
@@ -1939,6 +1940,8 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 - [설정 가이드](backend/docs/CONFIGURATION.md) - 설치 및 설정 안내
 - [아키텍처 개요](backend/CLAUDE.md) - 기술 아키텍처 상세
 - [백엔드 아키텍처](backend/README.md) - 백엔드 아키텍처 및 API 레퍼런스
+- [에이전트 팀 확장 기능](examples/deerflow-extension-agent-teams/README.md) - 에이전트 간 협업, SQLite/PostgreSQL 영구 저장 및 종료 동작
+- [GitHub 이벤트 기반 에이전트](backend/docs/GITHUB_AGENTS.md) - GitHub 웹훅 및 도구 설정
 
 ## ⚠️ 보안 고지
 
