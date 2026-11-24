@@ -783,10 +783,11 @@ def _check_file_leaf(
     if family == "file_csv_columns" and csv_columns is None:
         base["detail"] = "csv-columns requires a nonempty JSON array of unique nonempty strings"
         return base
-    if family in ("file_json_valid", "file_csv_columns") and is_local_sandbox(runtime):
+    local = is_local_sandbox(runtime)
+    if local:
         from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
 
-        # Authorize before canonicalization or metadata probes can disclose file existence.
+        # Authorize before canonicalization or metadata probes can disclose file existence or size.
         try:
             authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
         except SandboxError:
@@ -796,7 +797,7 @@ def _check_file_leaf(
     # Symlink escapes are a local-sandbox concern (host-visible links); remote
     # providers resolve paths inside the sandbox where the parent cannot
     # canonicalize, so the check stays lexical there.
-    resolved = _resolve_scoped_path(criterion_path, thread_data, resolve_symlinks=is_local_sandbox(runtime))
+    resolved = _resolve_scoped_path(criterion_path, thread_data, resolve_symlinks=local)
     if resolved is None:
         base["detail"] = "path is outside the shared thread workspace" if thread_data else "shared thread workspace unavailable"
         return base
@@ -857,7 +858,7 @@ def _check_file_leaf(
     except (OSError, SandboxError) as exc:
         base["detail"] = _bound_detail(f"read failed: {exc}")
         return base
-    if not is_local_sandbox(runtime) and content.startswith(_PROVIDER_ERROR_PREFIX):
+    if not local and content.startswith(_PROVIDER_ERROR_PREFIX):
         # A missing/inaccessible file on a REMOTE provider comes back as an
         # error string, not an exception — the check ran and the file cannot
         # be confirmed, so the leaf deterministically does not hold. The

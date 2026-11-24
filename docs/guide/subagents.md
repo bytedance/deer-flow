@@ -254,7 +254,7 @@ summaries establish a hold only when at least one test ran without a reported
 failure. Zero-test or all-skipped modules do not supply positive evidence;
 failures in any module take precedence over passing counts.
 
-For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
+For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result. On the local sandbox, every file criterion that reaches path resolution authorizes `sandbox:execute` before resolving the path or probing metadata; a revoked permission returns `UNVERIFIED` without revealing whether the file exists or how large it is.
 
 To require CSV header columns, set a `task` or `batch_task` item's criterion to
 `file:../outputs/report.csv csv-columns:["id","name"]`. The JSON array must contain
@@ -286,12 +286,12 @@ Reads are capped at 50,001 bytes to detect oversize content. Remote results are 
 for a completion marker, the read exit code, and the probed size. Remote providers lacking
 the required probe tools leave the result unverified rather than falling back to full-content
 reads. Concurrent writes of the same size do not yield an atomic snapshot.
-Local checks authorize sandbox access before resolving paths or probing metadata, and recheck
-before reading content; revoked permissions return `UNVERIFIED` without revealing existence.
+Local checks recheck sandbox authorization before reading content; revoked permissions return
+`UNVERIFIED` without revealing existence.
 Remote probes report missing files only with a searchable ancestor and in-scope canonical path;
 inaccessible directories remain `UNVERIFIED`. UTF-8 BOMs are rejected. Top-level scalars,
 duplicate keys, and syntactically valid large numbers can pass, without validating schemas,
-fields, or business semantics. Other file criteria are unchanged, and `.json` files are not
+fields, or business semantics. Other file criteria keep their syntax and scope, and `.json` files are not
 checked automatically. This criterion standardizes verdicts, path boundaries, and read limits
 instead of requiring ad hoc bash/Python checks, and makes insufficient evidence explicit.
 Execution completion status and automatic retry policy are unchanged.
