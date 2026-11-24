@@ -101,7 +101,16 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         Returns a dict keyed by skill name, each value being
         ``{"enabled": True/False}``.  Returns an empty dict if the file
-        does not exist or is unreadable.
+        does not exist or cannot be decoded.
+
+        Undecodable bytes degrade to "no overrides", i.e. FAIL OPEN: every
+        skill the user had disabled reads as enabled again.  That matches what
+        malformed JSON already did, and it is deliberate - the alternative,
+        denying every custom skill, locks a user out of their own tree over one
+        stray byte.  ``sandbox/tools.py::_is_disabled_skill_path`` says corrupt
+        state must fail CLOSED on purpose: it decides access for one already
+        named skill, where denying is the safe verdict.  The two are not in
+        conflict; do not "align" them without deciding which side loses data.
         """
         if not self._skill_states_file.exists():
             return {}
@@ -110,8 +119,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Failed to read skill states file %s", self._skill_states_file)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            # A decode failure means the user's disabled set is discarded, and the
+            # next toggle rewrites this file: keep the reason in the log.
+            logger.warning("Failed to read skill states file %s: %s", self._skill_states_file, exc)
         return {}
 
     def _write_skill_states(self, states: dict[str, dict[str, bool]]) -> None:

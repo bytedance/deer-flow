@@ -18,6 +18,7 @@ from app.gateway.routers import thread_runs
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 
 THREAD_ID = "thread-archive"
 RUN_ID = "run-archive"
@@ -318,6 +319,27 @@ def test_archive_hides_a_run_from_another_thread(tmp_path, monkeypatch, method: 
     assert response.status_code == 404
 
 
+def test_archive_returns_503_when_sandbox_config_is_unavailable(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=["/mnt/user-data/outputs/report.txt"],
+    )
+
+    async def unavailable():
+        raise SandboxAuthorizationError("Sandbox execution is temporarily unavailable")
+
+    monkeypatch.setattr(thread_runs, "safe_app_config_async", unavailable)
+
+    with client:
+        response = client.post(ARCHIVE_URL)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Artifact archive is temporarily unavailable"
+
+
 def test_archive_conflicts_with_an_active_run(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -386,45 +408,70 @@ def test_archive_rejects_casefolded_entry_collisions(tmp_path, monkeypatch) -> N
 
 
 @pytest.mark.parametrize(
-    "entries",
+    "order",
     [
-        ("Report", "report/slides/lesson.pptx"),
-        ("report/slides/lesson.pptx", "Report"),
-        ("Caf\u00e9", "Cafe\u0301/slides/lesson.pptx"),
-        ("Cafe\u0301/slides/lesson.pptx", "Caf\u00e9"),
-        ("week/Report", "week/report/slides/lesson.pptx"),
-        ("Report.txt", "report.txt"),
+        ["/mnt/user-data/outputs/Report", "/mnt/user-data/outputs/report/slides/lesson.pptx"],
+        ["/mnt/user-data/outputs/report/slides/lesson.pptx", "/mnt/user-data/outputs/Report"],
     ],
 )
-def test_archive_entry_names_reject_portable_collisions(entries) -> None:
-    with pytest.raises(artifact_archive.ArtifactArchiveError) as exc_info:
-        artifact_archive._validate_archive_entry_names(entries)
-    assert exc_info.value.status_code == 409
-
-
-def test_archive_entry_names_accept_files_with_shared_directories() -> None:
-    artifact_archive._validate_archive_entry_names(("report/slides/lesson.pptx", "Report/notes.md"))
-
-
-@pytest.mark.parametrize("file_name,directory_name", [("Report", "report"), ("Caf\u00e9", "Cafe\u0301")])
-@pytest.mark.parametrize("directory_first", [False, True])
-def test_archive_rejects_portable_file_directory_collisions(tmp_path, monkeypatch, file_name, directory_name, directory_first) -> None:
+def test_archive_rejects_file_colliding_with_implicit_directory(tmp_path, monkeypatch, order) -> None:
     outputs = tmp_path / "outputs"
-    nested = outputs / directory_name / "slides"
-    nested.mkdir(parents=True)
-    if (outputs / file_name).exists():
-        pytest.skip("this filesystem already aliases the colliding names")
-    (outputs / file_name).write_bytes(b"lesson summary")
-    (nested / "lesson.pptx").write_bytes(b"slide bytes")
-    paths = [
-        f"/mnt/user-data/outputs/{file_name}",
-        f"/mnt/user-data/outputs/{directory_name}/slides/lesson.pptx",
-    ]
-    if directory_first:
-        paths.reverse()
-    client, _, _ = _archive_app(monkeypatch, outputs, paths=paths)
+    outputs.mkdir()
+    file_entry = outputs / "Report"
+    file_entry.write_text("file content", encoding="utf-8")
+    lower_report = outputs / "report"
+    if lower_report.exists() and file_entry.samefile(lower_report):
+        pytest.skip("case-sensitive filenames are unavailable on this filesystem")
+    nested_dir = outputs / "report" / "slides"
+    try:
+        nested_dir.mkdir(parents=True)
+    except (NotADirectoryError, FileExistsError):
+        pytest.skip("case-sensitive filenames are unavailable on this filesystem")
+    nested_entry = nested_dir / "lesson.pptx"
+    nested_entry.write_text("slides content", encoding="utf-8")
+
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=order,
+    )
+
     with client:
         response = client.post(ARCHIVE_URL)
+
+    assert response.status_code == 409
+
+
+def test_archive_rejects_unicode_nfc_nfd_implicit_directory_collision(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    nfc_name = "Caf\u00e9"
+    nfd_dir = "Cafe\u0301"
+    file_entry = outputs / nfc_name
+    file_entry.write_text("cafe content", encoding="utf-8")
+    nfd_path = outputs / nfd_dir
+    if nfd_path.exists() and file_entry.samefile(nfd_path):
+        pytest.skip("normalization-sensitive filenames are unavailable on this filesystem")
+    nested_dir = outputs / nfd_dir
+    try:
+        nested_dir.mkdir(parents=True)
+    except (NotADirectoryError, FileExistsError):
+        pytest.skip("normalization-sensitive filenames are unavailable on this filesystem")
+    nested_entry = nested_dir / "menu.txt"
+    nested_entry.write_text("menu content", encoding="utf-8")
+
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=[
+            f"/mnt/user-data/outputs/{nfc_name}",
+            f"/mnt/user-data/outputs/{nfd_dir}/menu.txt",
+        ],
+    )
+
+    with client:
+        response = client.post(ARCHIVE_URL)
+
     assert response.status_code == 409
 
 
@@ -667,3 +714,24 @@ async def test_repeated_cancellation_keeps_the_archive_slot_until_worker_exit(mo
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        ("Report", "report/slides/lesson.pptx"),
+        ("report/slides/lesson.pptx", "Report"),
+        ("Caf\u00e9", "Cafe\u0301/slides/lesson.pptx"),
+        ("Cafe\u0301/slides/lesson.pptx", "Caf\u00e9"),
+        ("week/Report", "week/report/slides/lesson.pptx"),
+        ("Report.txt", "report.txt"),
+    ],
+)
+def test_archive_entry_names_reject_portable_collisions(entries) -> None:
+    with pytest.raises(artifact_archive.ArtifactArchiveError) as exc_info:
+        artifact_archive._validate_archive_entry_names(entries)
+    assert exc_info.value.status_code == 409
+
+
+def test_archive_entry_names_accept_files_with_shared_directories() -> None:
+    artifact_archive._validate_archive_entry_names(("report/slides/lesson.pptx", "Report/notes.md"))

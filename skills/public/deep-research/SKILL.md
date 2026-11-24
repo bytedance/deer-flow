@@ -1,17 +1,17 @@
 ---
 name: deep-research
-description: Use this skill instead of WebSearch for ANY question requiring web research. Trigger on queries like "what is X", "explain X", "compare X and Y", "research X", or before content generation tasks. Provides systematic multi-angle research methodology instead of single superficial searches. Use this proactively when the user's question needs online information.
+description: Use for substantial investigations needing current evidence, source comparison, or synthesis across several dimensions. Scale research to the question and requested depth.
 ---
 
 # Deep Research Skill
 
 ## Overview
 
-This skill provides a systematic methodology for conducting thorough web research. **Load this skill BEFORE starting any content generation task** to ensure you gather sufficient information from multiple angles, depths, and sources.
+This skill provides a systematic methodology for conducting thorough web research. Use it when the requested claims need external verification; use supplied material and stable knowledge where sufficient.
 
 ## When to Use This Skill
 
-**Always load this skill when:**
+**Consider this skill when depth and external verification are needed:**
 
 ### Research Questions
 - User asks "what is X", "explain X", "research X", "investigate X"
@@ -28,7 +28,7 @@ This skill provides a systematic methodology for conducting thorough web researc
 
 ## Core Principle
 
-**Never generate content based solely on general knowledge.** The quality of your output directly depends on the quality and quantity of research conducted beforehand. A single search query is NEVER enough.
+Choose effort according to freshness, uncertainty, consequence, and scope. A focused question may be resolved by one authoritative source; broad or disputed claims need independent checks. Stop when requested claims have sufficient support and state remaining gaps.
 
 ## Research Methodology
 
@@ -97,13 +97,13 @@ Ensure comprehensive coverage by seeking diverse information types:
 
 Before proceeding to content generation, verify:
 
-- [ ] Have I searched from at least 3-5 different angles?
+- [ ] Have I covered the dimensions needed to answer the request?
 - [ ] Have I fetched and read the most important sources in full?
 - [ ] Do I have concrete data, examples, and expert perspectives?
 - [ ] Have I explored both positive aspects and challenges/limitations?
 - [ ] Is my information current and from authoritative sources?
 
-**If any answer is NO, continue researching before generating content.**
+Investigate material evidence gaps; omit irrelevant checklist items and disclose unresolved limits.
 
 ## Search Strategy Tips
 
@@ -132,7 +132,7 @@ Before proceeding to content generation, verify:
 
 ### Temporal Awareness
 
-**Always check `<current_date>` in your context before forming ANY search query.**
+For time-sensitive questions, use the actual current date and the requested time range when choosing search filters.
 
 `<current_date>` gives you the full date: year, month, day, and weekday (e.g. `2026-02-28, Saturday`). Use the right level of precision depending on what the user is asking:
 
@@ -179,12 +179,12 @@ Your research is sufficient when you can confidently answer:
 
 ## Common Mistakes to Avoid
 
-- ❌ Stopping after 1-2 searches
+- Stopping before important claims have sufficient evidence
 - ❌ Relying on search snippets without reading full sources
 - ❌ Searching only one aspect of a multi-faceted topic
 - ❌ Ignoring contradicting viewpoints or challenges
 - ❌ Using outdated information when current data exists
-- ❌ Starting content generation before research is complete
+- Presenting unsupported claims as established findings
 
 ## Output
 
@@ -195,4 +195,4 @@ After completing research, you should have:
 4. Expert perspectives and authoritative sources
 5. Current trends and relevant context
 
-**Only then proceed to content generation**, using the gathered information to create high-quality, well-informed content.
+Produce the requested output once its factual claims have adequate support; adapt these phases to the task.

@@ -334,7 +334,7 @@ async def test_event_lines_survive_task_deletion(tmp_path):
         service_for(tasks, runs)
         occurrence_id, run_id = await occurrence(sf, runs)
         await complete(tasks, occurrence_id, run_id)
-        assert await tasks.delete("task", user_id=OWNER) is True
+        assert await tasks.delete_with_queue_cancellation("task", user_id=OWNER, error="deleted", now=datetime.now(UTC)) == "deleted"
         async with http_client(sf) as client:
             response = await client.get("/api/threads/origin/scheduled-task-events")
         assert response.status_code == 200, response.text

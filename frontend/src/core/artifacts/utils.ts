@@ -1,11 +1,13 @@
-import type { Message } from "@langchain/langgraph-sdk";
+import type { AIMessage, Message, ToolMessage } from "@langchain/langgraph-sdk";
 
 import { getBackendBaseURL } from "../config";
+import { indexToolResults } from "../messages/tool-result";
 import { extractPresentFilesFromMessage } from "../messages/utils";
 import { isStaticWebsiteOnly } from "../static-mode";
 import type { AgentThreadState } from "../threads";
 
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
+const SHARED_ARTIFACT_TOOL = "present_shared_artifact";
 
 export function areStringArraysEqual(
   previous: readonly string[],
@@ -104,20 +106,117 @@ export function extractArtifactsFromThread(thread: {
   return thread.values.artifacts ?? EMPTY_ARTIFACT_PATHS;
 }
 
+function normalizeSharedArtifactPath(path: string) {
+  if (
+    path.includes("\\") ||
+    [...path].some((char) => char.charCodeAt(0) < 32)
+  ) {
+    return;
+  }
+
+  // Match the handoff's POSIX path normalization. / 与交接工具的 POSIX 路径规范化一致。
+  const segments: string[] = [];
+  for (const segment of path.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.pop() === undefined) return;
+    } else {
+      segments.push(segment);
+    }
+  }
+
+  const normalized = `/${segments.join("/")}`;
+  return normalized.startsWith("/mnt/user-data/outputs/")
+    ? normalized
+    : undefined;
+}
+
+function extractSharedArtifactPaths(
+  message: AIMessage,
+  results: readonly ToolMessage[],
+) {
+  const paths: string[] = [];
+  const calls = message.tool_calls ?? [];
+  for (const { id, name, args } of calls) {
+    if (
+      name !== SHARED_ARTIFACT_TOOL ||
+      !id ||
+      calls.filter((call) => call.id === id).length !== 1
+    ) {
+      continue;
+    }
+    const { path, origin_thread_id, sha256 } = args ?? {};
+    if (
+      typeof path !== "string" ||
+      typeof origin_thread_id !== "string" ||
+      !origin_thread_id ||
+      typeof sha256 !== "string" ||
+      sha256.length !== 64 ||
+      /[^0-9a-f]/.test(sha256)
+    ) {
+      continue;
+    }
+
+    // Match backend/packages/harness/deerflow/tools/artifact_handoff.py and
+    // backend/tests/test_shared_artifact_handoff.py exactly.
+    // Failures can also have a success status. / 失败回执也可能标为 success。
+    const receipt = `Successfully presented shared artifact; origin_thread_id=${origin_thread_id}; sha256=${sha256}`;
+    const matching = results.filter((result) => result.tool_call_id === id);
+    if (
+      matching.length === 0 ||
+      matching.some((result) => {
+        const metadata = result.additional_kwargs?.deerflow_tool_meta;
+        return (
+          (result.status !== undefined && result.status !== "success") ||
+          (metadata !== undefined &&
+            (typeof metadata !== "object" ||
+              metadata === null ||
+              !("status" in metadata) ||
+              metadata.status !== "success")) ||
+          (result.name != null && result.name !== SHARED_ARTIFACT_TOOL) ||
+          result.content !== receipt
+        );
+      })
+    ) {
+      continue;
+    }
+
+    const normalized = normalizeSharedArtifactPath(path);
+    if (normalized) paths.push(normalized);
+  }
+  return paths;
+}
+
 /**
- * Adds the `/mnt/` paths passed to `present_files` in `messages` to the
- * thread's artifact list. A reopened thread rebuilds its values from the
- * Gateway's POST /history head, which carries messages but not `artifacts`;
- * the backend fills `artifacts` from those same `present_files` calls, so the
- * messages are enough to recover the list. Returns `stateArtifacts` itself
- * when no message presents files.
+ * Recovers artifact paths from history when the Gateway omits `artifacts`.
+ * `present_files` contributes its paths directly. A shared artifact also needs
+ * a confirmed handoff receipt. Returns `stateArtifacts` itself if neither
+ * tool contributes paths.
  */
 export function collectThreadArtifactPaths(
   stateArtifacts: readonly string[],
   messages: readonly Message[],
 ): readonly string[] {
+  let toolResults: ReturnType<typeof indexToolResults<Message>> | undefined;
   const presented = messages
-    .flatMap((message) => extractPresentFilesFromMessage(message))
+    .flatMap((message, index) => {
+      const paths = extractPresentFilesFromMessage(message);
+      if (
+        message.type !== "ai" ||
+        !message.tool_calls?.some((call) => call.name === SHARED_ARTIFACT_TOOL)
+      ) {
+        return paths;
+      }
+      const results = (toolResults ??= indexToolResults(messages)).get(index);
+      if (!results) return paths;
+      return [
+        ...paths,
+        ...extractSharedArtifactPaths(
+          message,
+          results.filter((result) => result.type === "tool"),
+        ),
+      ];
+    })
     .filter(
       (path): path is string =>
         typeof path === "string" && path.startsWith("/mnt/"),

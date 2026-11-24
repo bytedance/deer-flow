@@ -103,6 +103,37 @@ def test_provisioner_threads_shell_capacity_into_sandbox_pod(
     assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
+@pytest.mark.parametrize("capacity", [1, 50, 72])
+def test_provisioner_attests_bash_capacity_from_created_and_reused_pod(monkeypatch, provisioner_module, capacity):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    request = provisioner_module.CreateSandboxRequest(sandbox_id="bash-capacity", max_bash_sessions=capacity)
+    response = provisioner_module.create_sandbox(request)
+    assert response.max_bash_sessions == capacity
+    pod = core.created_pod_specs["bash-capacity"]
+    assert {item.name: item.value for item in pod.spec.containers[0].env}["AIO_BASH_MAX_SESSIONS"] == str(capacity)
+    assert provisioner_module.create_sandbox(request).max_bash_sessions == capacity
+    assert len(core.created_pods) == 1
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(request.model_copy(update={"max_bash_sessions": capacity + 1}))
+    assert error.value.status_code == 409
+    assert len(core.created_pods) == 1
+
+
+def test_bash_capacity_already_exists_race_reads_winning_pod(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    # First observation misses the existing Service. The Pod creation loses
+    # to a peer's default-capacity Pod, so requested capacity is not evidence.
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing", max_bash_sessions=72))
+    assert error.value.status_code == 409
+    assert core.created_pods == []
+
+
 def test_broker_request_without_image_cannot_mount_credentials(monkeypatch, provisioner_module):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", core)

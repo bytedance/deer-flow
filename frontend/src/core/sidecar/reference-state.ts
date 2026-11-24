@@ -13,6 +13,7 @@ export function isSameSidecarContext(
     left.type === right.type &&
     left.role === right.role &&
     left.messageId === right.messageId &&
+    (left.messageId !== undefined || left.label === right.label) &&
     left.content === right.content
   );
 }

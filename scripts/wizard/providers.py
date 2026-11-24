@@ -537,6 +537,23 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="rapid_mlx",
+        display_name="Rapid-MLX (local)",
+        description="OpenAI-compatible local inference on Apple Silicon",
+        use="langchain_openai:ChatOpenAI",
+        models=["qwen3.5-4b-4bit"],
+        default_model="qwen3.5-4b-4bit",
+        env_var=None,
+        package="langchain-openai",
+        extra_config={
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "not-required",
+        },
+        base_url_prompt="Rapid-MLX base URL",
+        model_prompt="Exact model ID from GET /v1/models",
+        auth_hint="Rapid-MLX requires no API key. A non-secret placeholder is used by the OpenAI client.",
+    ),
+    LLMProvider(
         name="vllm",
         display_name="vLLM",
         description="Self-hosted OpenAI-compatible serving",
@@ -734,6 +751,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var=None,
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="specstream",
+        display_name="SpecStream",
+        description="Answers from the live web with a source for each result, API key required",
+        use="deerflow.community.specstream.tools:web_search_tool",
+        env_var="SPECSTREAM_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -811,5 +836,13 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         env_var=None,
         tool_name="web_fetch",
         extra_config={"base_url": "http://localhost:11235", "timeout": 30},
+    ),
+    WebProvider(
+        name="specstream",
+        display_name="SpecStream",
+        description="Page text as markdown, also PDF, Word and Excel, API key required",
+        use="deerflow.community.specstream.tools:web_fetch_tool",
+        env_var="SPECSTREAM_API_KEY",
+        tool_name="web_fetch",
     ),
 ]

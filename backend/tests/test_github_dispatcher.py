@@ -48,6 +48,34 @@ async def _drain(bus: MessageBus) -> list[InboundMessage]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("configured_repo, payload_repo", [("Acme/Widget", "acme/widget"), ("acme/widget", "Acme/Widget")])
+async def test_fanout_matches_repository_case_insensitively(base_dir: Path, configured_repo: str, payload_repo: str) -> None:
+    """GitHub repository names identify the same repository regardless of case."""
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {"name": "reviewer", "github": {"bindings": [{"repo": configured_repo, "triggers": {"issues": {"actions": ["opened"]}}}]}},
+    )
+    bus = MessageBus()
+    result = await fanout_event(
+        bus,
+        "issues",
+        "delivery-mixed-case",
+        {
+            "action": "opened",
+            "issue": {"number": 7, "user": {"login": "alice"}, "title": "Bug", "body": "Details"},
+            "repository": {"full_name": payload_repo},
+            "sender": {"login": "alice"},
+        },
+    )
+    assert result["fired_agents"] == ["reviewer"]
+    messages = await _drain(bus)
+    assert len(messages) == 1
+    assert messages[0].chat_id == payload_repo
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("event, object_key", [("issues", "issue"), ("pull_request", "pull_request")])
 @pytest.mark.parametrize("author, sender, should_fire", [("owner", "other", False), ("other", "owner", True)])
 async def test_allow_authors_uses_update_sender(base_dir: Path, event: str, object_key: str, author: str, sender: str, should_fire: bool) -> None:

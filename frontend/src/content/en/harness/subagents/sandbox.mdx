@@ -43,9 +43,9 @@ The `bash` subagent enters the catalog only when `is_host_bash_allowed()` is tru
 | --------------------------- | --------------------------------------------------------- |
 | No `sandbox` section        | Not available                                             |
 | Container or remote provider | Available                                                |
-| `LocalSandboxProvider`      | Depends on `sandbox.allow_host_bash`, default `false`     |
+| `LocalSandboxProvider`      | File tools only                                      |
 
-Delegating to `bash` under the local sandbox returns an explicit failure explaining that the subagent is disabled and that `allow_host_bash` belongs only in a fully trusted local environment.
+Use an isolated provider to delegate to `bash`.
 
 ## Identity propagation into commands
 

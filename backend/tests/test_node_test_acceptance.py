@@ -355,7 +355,7 @@ def test_summary_cache_is_bounded_and_tracks_compaction(executor_module, monkeyp
         assert len(entries) == len(cache) == 20
     assert classify.call_count == 20
     executor_module._harvest_bash_executions({"messages": [ai, tools[-1]]}, summary_cache=cache)
-    assert list(cache) == ["call-24"]
+    assert list(cache) == [("call", "call-24")]
     assert classify.call_count == 20
     executor_module._harvest_bash_executions({"messages": [AIMessage(content="compacted")]}, summary_cache=cache)
     assert cache == {}

@@ -5,12 +5,16 @@ entry, so a consumer classifies raw -> visible transforms from facts instead of
 sniffing output wording.
 """
 
+import pytest
 from langchain_core.messages import ToolMessage
+from langchain_core.messages.content import create_text_block
 
 from deerflow.agents.middlewares.tool_transform_meta import (
     TOOL_TRANSFORMS_KEY,
     append_tool_transform,
     read_tool_transforms,
+    tool_content_fingerprint,
+    tool_result_source_digest,
 )
 
 
@@ -37,6 +41,33 @@ def test_read_drops_entries_without_a_string_kind():
         additional_kwargs={TOOL_TRANSFORMS_KEY: [{"kind": "ok", "by": "m"}, {"by": "m"}, "junk"]},
     )
     assert read_tool_transforms(message) == ({"kind": "ok", "by": "m"},)
+
+
+def test_source_digest_comes_from_the_first_replacement():
+    kwargs: dict = {}
+    append_tool_transform(kwargs, "sanitized", by="ToolResultSanitizationMiddleware")
+    append_tool_transform(kwargs, "externalized", by="ToolOutputBudgetMiddleware", source_sha256="a" * 64)
+    append_tool_transform(kwargs, "truncated", by="ToolOutputBudgetMiddleware", source_sha256="b" * 64)
+    assert "source_sha256" not in kwargs[TOOL_TRANSFORMS_KEY][0]
+    assert tool_result_source_digest(ToolMessage(content="preview", tool_call_id="1", additional_kwargs=kwargs)) == "a" * 64
+
+
+@pytest.mark.parametrize("digest", [None, "", "a" * 63, "g" * 64, 123, ["a" * 64]])
+def test_source_digest_ignores_malformed_persisted_values(digest):
+    trail = [{"kind": "externalized", "by": "ToolOutputBudgetMiddleware", "source_sha256": digest}]
+    message = ToolMessage(content="preview", tool_call_id="1", additional_kwargs={TOOL_TRANSFORMS_KEY: trail})
+    assert tool_result_source_digest(message) is None
+
+
+def test_content_fingerprint_ignores_block_ids_but_not_data():
+    first, second = ([create_text_block("page")] for _ in range(2))
+    assert first[0]["id"] != second[0]["id"]
+    assert tool_content_fingerprint(first) == tool_content_fingerprint(second)
+    assert tool_content_fingerprint([create_text_block("other page")]) != tool_content_fingerprint(first)
+    assert tool_content_fingerprint("page") != tool_content_fingerprint("other page")
+    # Outside a standard content block an id can be the data that changed.
+    assert tool_content_fingerprint([{"id": "row-1", "status": "pending"}]) != tool_content_fingerprint([{"id": "row-2", "status": "pending"}])
+    assert tool_content_fingerprint([{"type": ["text"], "id": "a"}]) != tool_content_fingerprint([{"type": ["text"], "id": "b"}])
 
 
 def test_mcp_source_projection_is_credential_free_and_defaults_transport():

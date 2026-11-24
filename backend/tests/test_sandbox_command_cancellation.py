@@ -7,13 +7,14 @@ import signal
 import subprocess
 import sys
 import threading
+from functools import partial
 from pathlib import Path
 
 import pytest
 
 from deerflow.sandbox.command_scope import command_owner
-from deerflow.sandbox.lease import run_sync_lifecycle_operation
-from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.lease import run_sync_lifecycle_operation, sandbox_lease_owner
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
 
 def _alive(pid: int) -> bool:
@@ -224,7 +225,7 @@ async def test_cancelled_aio_waiter_never_starts_or_interrupts_another_scope(mon
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["interrupt", "failure", "loop_capped"])
-async def test_native_bash_to_worker_stops_owned_processes_before_release(monkeypatch, tmp_path, outcome):
+async def test_worker_stops_owned_provider_processes_before_release(tmp_path, outcome):
     from types import SimpleNamespace as N
     from unittest.mock import AsyncMock, MagicMock
 
@@ -232,15 +233,14 @@ async def test_native_bash_to_worker_stops_owned_processes_before_release(monkey
     from deerflow.runtime.runs.worker import RunContext, run_agent
     from deerflow.sandbox.lease import get_sandbox_lease_manager
     from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
-    from deerflow.sandbox.tools import bash_tool
+    from deerflow.sandbox.tools import _execute_bash_command, ensure_sandbox_initialized_async
 
-    sandbox = LocalSandbox("local:worker-cancel")
+    sandbox = LocalSandbox("local:worker-cancel", [PathMapping("/mnt/user-data/workspace", str(tmp_path))])
     provider = MagicMock()
     provider.get.return_value = sandbox
     provider.get_scoped.return_value = sandbox
     provider.acquire.return_value = sandbox.id
     provider.acquire_async = AsyncMock(return_value=sandbox.id)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
     run_manager = RunManager()
     record = await run_manager.create("native-bash-cancellation")
     background = tmp_path / "background.pid"
@@ -255,18 +255,25 @@ async def test_native_bash_to_worker_stops_owned_processes_before_release(monkey
 
     provider.release.side_effect = release
 
+    async def execute_owned(runtime, command):
+        active = await ensure_sandbox_initialized_async(runtime)
+        owner = sandbox_lease_owner(runtime.context)
+        assert owner is not None
+        execute = partial(_execute_bash_command, active, command, runtime=runtime, env=None)
+        return await run_sync_lifecycle_operation(execute, _on_cancel=partial(active.request_command_cancel, owner))
+
     class Agent:
         async def astream(self, graph_input, config, **kwargs):
             context = config["configurable"]["__pregel_runtime"].context
             state = {"sandbox": {"sandbox_id": sandbox.id}, "thread_data": {key: str(tmp_path) for key in ("workspace_path", "outputs_path", "uploads_path")}}
             runtime = N(context=context, state=state, config=config)
             command = "nohup " + _command(background, background=True).replace(shlex.quote(sys.executable), "python3").replace(str(tmp_path), "/mnt/user-data/workspace")
-            result = await bash_tool.coroutine(runtime=runtime, command=command)
+            result = await execute_owned(runtime, command)
             assert not result.startswith("Error:"), result
             await _pid(background)
             if outcome == "interrupt":
                 command = _command(foreground, background=False).replace(shlex.quote(sys.executable), "python3").replace(str(tmp_path), "/mnt/user-data/workspace")
-                await bash_tool.coroutine(runtime=runtime, command=command)
+                await execute_owned(runtime, command)
             elif outcome == "failure":
                 raise RuntimeError("scripted model failure after starting a process")
             else:

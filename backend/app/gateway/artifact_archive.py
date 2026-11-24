@@ -206,16 +206,16 @@ def _copy_member(
 
 def _validate_archive_entry_names(entries: Iterable[str]) -> None:
     collision_keys = [unicodedata.normalize("NFC", entry).casefold() for entry in entries]
-    file_keys = set(collision_keys)
-    if len(collision_keys) != len(file_keys):
+    collision_set = set(collision_keys)
+    if len(collision_keys) != len(collision_set):
         raise _reject()
-    for entry in collision_keys:
-        # A file can collide with an implicit directory after normalization.
-        parent = entry.rpartition("/")[0]
-        while parent:
-            if parent in file_keys:
-                raise _reject()
-            parent = parent.rpartition("/")[0]
+    implicit_dirs = set()
+    for key in collision_keys:
+        parts = key.split("/")
+        for i in range(1, len(parts)):
+            implicit_dirs.add("/".join(parts[:i]))
+    if collision_set & implicit_dirs:
+        raise _reject()
 
 
 def build_artifact_archive(

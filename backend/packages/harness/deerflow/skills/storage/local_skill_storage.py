@@ -21,6 +21,14 @@ from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
+
+def _publication_path_limit(root: Path) -> int:
+    """Host path limit for the staged publication directory (indirection for tests)."""
+    from deerflow.skills.installer import _host_path_limit
+
+    return _host_path_limit(root)
+
+
 # Bound for the best-effort temp-dir cleanup so a stalled filesystem (e.g. NFS)
 # cannot hold back the install outcome propagating out of the finally block.
 _INSTALL_TMP_CLEANUP_TIMEOUT_SECONDS = 5.0
@@ -205,6 +213,10 @@ class LocalSkillStorage(SkillStorage):
             raise ValueError(f"Invalid skill: {message}")
         if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
             raise ValueError(f"Invalid skill name: {skill_name}")
+        # The skill name becomes ``custom/<name>``; refuse names that cannot be
+        # created as a host path component (Windows reserved device names) so
+        # the install fails here instead of mid-write on the target host.
+        self.validate_skill_name(skill_name, for_creation=True)
 
         target = custom_dir / skill_name
         if target.exists():
@@ -214,13 +226,30 @@ class LocalSkillStorage(SkillStorage):
 
     def _commit_skill_install(self, skill_dir: Path, skill_name: str, custom_dir: Path, target: Path) -> None:
         """Stage and move the validated skill into place (blocking; runs off the event loop)."""
-        from deerflow.skills.installer import _move_staged_skill_into_reserved_target
+        from deerflow.skills.installer import _host_path_length, _move_staged_skill_into_reserved_target
 
         with self._skill_projection_mutation(names=(skill_name,)):
             with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
                 staging_target = Path(staging_root) / skill_name
-                shutil.copytree(skill_dir, staging_target)
-                _move_staged_skill_into_reserved_target(staging_target, target)
+                publication_limit = _publication_path_limit(custom_dir)
+                if _host_path_length(staging_target) >= publication_limit:
+                    raise ValueError(f"Skill '{skill_name}' cannot be published: the temporary publication path is too long for this filesystem")
+                # The staging root's temp-dir name lengthens every member path, so
+                # a nested member can outgrow the limit while the skill root fits.
+                # Check members before copying: copytree wraps a child's
+                # ENAMETOOLONG in shutil.Error, which carries no errno/winerror for
+                # the translation below to recognize.
+                for member in skill_dir.rglob("*"):
+                    relative = member.relative_to(skill_dir)
+                    if _host_path_length(staging_target / relative) >= publication_limit:
+                        raise ValueError(f"Skill '{skill_name}' cannot be published: the temporary publication path for '{relative.as_posix()}' is too long for this filesystem")
+                try:
+                    shutil.copytree(skill_dir, staging_target)
+                    _move_staged_skill_into_reserved_target(staging_target, target)
+                except OSError as exc:
+                    if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
+                        raise ValueError(f"Skill '{skill_name}' cannot be published: the path is too long for this filesystem") from exc
+                    raise
             make_skill_written_path_sandbox_readable(custom_dir, target)
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:

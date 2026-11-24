@@ -27,17 +27,18 @@ def connection(**kw):
 
 
 @pytest.mark.asyncio
-async def test_discovery_uses_saved_key_and_never_writes(setup, monkeypatch):
-    saved = setup.save(ManagedModel(provider="openai", model="existing", api_key="catalog-secret"), expected_revision=None)
+@pytest.mark.parametrize("provider,endpoint", [("openai", "https://api.openai.com/v1/models"), ("stepfun", "https://api.stepfun.com/v1/models")])
+async def test_discovery_uses_saved_key_and_never_writes(setup, monkeypatch, provider, endpoint):
+    saved = setup.save(ManagedModel(provider=provider, model="existing", api_key="catalog-secret"), expected_revision=None)
     before = setup.path.read_bytes()
 
     async def send(client, request, **kwargs):
-        assert str(request.url) == "https://api.openai.com/v1/models"
+        assert str(request.url) == endpoint
         assert request.headers["authorization"] == "Bearer catalog-secret"
         return httpx.Response(200, request=request, json={"data": [{"id": "existing"}, {"id": "new"}, {"id": "new"}, {"id": "bad\n"}, {"id": 5}]})
 
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
-    body = router.ModelConnection(provider="openai", saved_model_name=saved.name, expected_revision=saved.revision)
+    body = router.ModelConnection(provider=provider, saved_model_name=saved.name, expected_revision=saved.revision)
     result = await router.discover_models(ADMIN, body)
     assert result == {"models": [{"id": "existing", "configured": True}, {"id": "new", "configured": False}], "truncated": False}
     assert setup.path.read_bytes() == before

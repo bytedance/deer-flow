@@ -57,11 +57,20 @@ def _append_text(content: Any, text: str) -> Any:
     return f"{content}\n\n{text}"
 
 
-def _delegation_id(entry: object) -> str | None:
+def _delegation_id(entry: object) -> tuple[str, str | None] | None:
+    """One delegation: its call id plus the AIMessage that issued it.
+
+    Providers can reuse a call id in a later response of the same run, so the
+    call id alone would count several delegations as one. Same fields as
+    ``thread_state.delegation_key``, without the run id this count filters on.
+    """
     if not isinstance(entry, dict):
         return None
     entry_id = entry.get("id")
-    return str(entry_id) if entry_id else None
+    if not entry_id:
+        return None
+    dispatch_id = entry.get("dispatch_message_id")
+    return str(entry_id), str(dispatch_id) if dispatch_id else None
 
 
 def _delegation_run_id(entry: object) -> str | None:

@@ -13,12 +13,12 @@ from collections import deque
 from collections.abc import Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, TypeVar
 
 from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
-from app.channels.connection_identity import attach_connection_identity, lookup_thread_id
+from app.channels.connection_identity import attach_connection_identity, fallback_store_channel, lookup_thread_id
 from app.channels.feishu_card_interaction import (
     ClarificationCardRequest,
     PendingCardEntry,
@@ -55,6 +55,9 @@ PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
 FEISHU_STOP_TIMEOUT_SECONDS = 5
 FEISHU_WS_CLOSE_TIMEOUT_SECONDS = 2
 _PENDING_CARD_METADATA_KEY = "_feishu_pending_card_id"
+# Number of attachments from a post's top-level ``files`` array.
+_POST_FILES_COUNT_METADATA_KEY = "_feishu_post_files_count"
+_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY = "_feishu_defer_post_file_placeholders"
 # Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
 # which also carries the SDK's websocket reads, pongs and its 120s ping loop:
 # every second the bridge blocks that loop is a second the connection cannot
@@ -107,6 +110,7 @@ class _ParsedMessage:
     chat_type: str | None
     text: str
     files: list[dict[str, Any]]
+    post_file_count: int = 0
     msg_type: InboundMessageType = InboundMessageType.CHAT
 
 
@@ -118,6 +122,9 @@ class _Routing:
     from_stored_mapping: bool
     from_pending: bool
     clarification_card_id: str | None = None
+    connection_id: str | None = None
+    owner_user_id: str | None = None
+    workspace_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -153,6 +160,62 @@ FEISHU_MAX_CARDS_PER_REPLY = 10
 _CARD_TRUNCATION_MARKER = "\n\n... (truncated)"
 _CARD_CONTINUES_MARKER = "\n\n…"
 _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+# A markdown image marker, rewritten for the card so Feishu never sees one.
+_MARKDOWN_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]*)[^)]*\)")
+_FENCED_CODE = re.compile(r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[ \t]*$")
+# Both delimiters are complete backtick runs of the same length.
+_INLINE_CODE_SPAN = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?!`)")
+# A fence a streamed snapshot cut open: what follows its opener is still code.
+_UNCLOSED_FENCE = re.compile(r"(?m)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*$")
+
+
+def _rewrite_outside_inline_code(chunk: str, rewrite: Callable[[str], str]) -> str:
+    """Apply *rewrite* to the parts of *chunk* that are not inline code spans."""
+    out: list[str] = []
+    cursor = 0
+    for span in _INLINE_CODE_SPAN.finditer(chunk):
+        out.append(rewrite(chunk[cursor : span.start()]))
+        out.append(span.group(0))
+        cursor = span.end()
+    out.append(rewrite(chunk[cursor:]))
+    return "".join(out)
+
+
+def _card_markdown(text: str) -> str:
+    """Rewrite the markdown a Feishu card cannot render.
+
+    A card markdown element only accepts a markdown image whose target is an
+    uploaded ``image_key``. A URL target makes Feishu reject every update of that
+    card with 230099 / 11310 ("the card contains images but no imagekey is passed
+    in"), which is how a reply carrying ``![alt](url)`` loses the rest of its
+    streamed text. Dropping the marker keeps the reference, and its link, in a
+    form the card renders. Code stays literal: a fenced block renders as code
+    there, and rewriting what it shows would misreport the answer.
+    """
+    if "![" not in text:
+        return text
+
+    def as_link(chunk: str) -> str:
+        return _MARKDOWN_IMAGE.sub(lambda match: f"[{match.group('alt')}]({match.group('target')})", chunk)
+
+    out: list[str] = []
+    cursor = 0
+    for fenced in _FENCED_CODE.finditer(text):
+        out.append(_rewrite_outside_inline_code(text[cursor : fenced.start()], as_link))
+        out.append(fenced.group(0))
+        cursor = fenced.end()
+
+    tail = text[cursor:]
+    # A snapshot streamed before its closing fence arrives has an open block at the
+    # end; that content is code too, so what follows the opener stays literal.
+    open_fence = _UNCLOSED_FENCE.search(tail)
+    literal_from = open_fence.start() if open_fence else len(tail)
+    out.append(_rewrite_outside_inline_code(tail[:literal_from], as_link))
+    out.append(tail[literal_from:])
+    return "".join(out)
+
+
 # Characters JSON escapes, measured after the second escape: ``"`` is ``\\\"``.
 _ESCAPED_CARD_CHAR_BYTES = {'"': 4, "\\": 4, "\b": 3, "\f": 3, "\n": 3, "\r": 3, "\t": 3}
 
@@ -242,6 +305,12 @@ def _is_feishu_command(text: str) -> bool:
     return is_known_channel_command(text)
 
 
+def _append_post_file_placeholders(text: str, count: int) -> str:
+    paragraphs = [text] if text else []
+    paragraphs.extend(["[file]"] * count)
+    return "\n\n".join(paragraphs)
+
+
 class FeishuChannel(Channel):
     """Feishu/Lark IM channel using the ``lark-oapi`` WebSocket client.
 
@@ -278,9 +347,9 @@ class FeishuChannel(Channel):
         self._background_tasks: set[asyncio.Task] = set()
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
-        # Thread aliases (chat_id, thread_id, topic_id, user_id) already written
+        # Thread aliases (chat_id, thread_id, topic_id, sender_id, connection_id) written
         # for each in-flight reply, keyed by source message id.
-        self._remembered_thread_aliases: dict[str, set[tuple[str, str, str, str]]] = {}
+        self._remembered_thread_aliases: dict[str, set[tuple[str, str, str, str, str | None]]] = {}
         self._pending_clarifications: dict[tuple[str, str], list[dict[str, Any]]] = {}
         # Interactive clarification cards (button answers). Off by default: the
         # feature needs a one-time console subscription to card.action.trigger.
@@ -809,6 +878,10 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] received message with no files: %s", msg)
             return msg
         text = msg.text
+        post_file_count = msg.metadata.pop(_POST_FILES_COUNT_METADATA_KEY, 0)
+        defer_post_file_placeholders = msg.metadata.pop(_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY, False)
+        if not isinstance(post_file_count, int) or post_file_count < 0:
+            post_file_count = 0
         search_from = 0
 
         def replace_next_placeholder(placeholder: str, replacement: str) -> None:
@@ -819,13 +892,36 @@ class FeishuChannel(Channel):
             text = f"{text[:idx]}{replacement}{text[idx + len(placeholder) :]}"
             search_from = idx + len(replacement)
 
+        downloaded: list[tuple[str, str]] = []
         for file in files:
             if file.get("image_key"):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id, user_id=user_id)
-                replace_next_placeholder("[image]", virtual_path)
+                downloaded.append(("[image]", virtual_path))
             elif file.get("file_key"):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, user_id=user_id)
-                replace_next_placeholder("[file]", virtual_path)
+                downloaded.append(("[file]", virtual_path))
+
+        # Top-level post attachments append their ``[file]`` placeholders
+        # after the parsed body, so their slots are the final
+        # ``post_file_count`` ones. Fill them from the end first: a literal
+        # ``[file]`` typed by the user must not consume a top-level
+        # attachment's path. Inline rich-text attachments keep the historical
+        # left-to-right matching below; that path is deliberately unchanged.
+        post_file_count = min(post_file_count, len(downloaded))
+        if defer_post_file_placeholders is True:
+            # A command such as /goal has now entered the chat path. Add the
+            # generated slots to the chat text after its arguments were parsed.
+            text = _append_post_file_placeholders(text, post_file_count)
+        suffix_end = len(text)
+        for placeholder, virtual_path in reversed(downloaded[len(downloaded) - post_file_count :] if post_file_count else []):
+            idx = text.rfind(placeholder, 0, suffix_end)
+            if idx < 0:
+                continue
+            text = f"{text[:idx]}{virtual_path}{text[idx + len(placeholder) :]}"
+            suffix_end = idx
+
+        for placeholder, virtual_path in downloaded[: len(downloaded) - post_file_count]:
+            replace_next_placeholder(placeholder, virtual_path)
         msg.text = text
         # Clear the descriptors so the generic URL-based _ingest_inbound_files
         # pass does not try to re-fetch files that were downloaded by key.
@@ -962,7 +1058,7 @@ class FeishuChannel(Channel):
         card = {
             "config": {"wide_screen_mode": True, "update_multi": True},
             # Unpaired surrogates cannot be encoded as UTF-8.
-            "elements": [{"tag": "markdown", "content": _LONE_SURROGATE.sub("\ufffd", text)}],
+            "elements": [{"tag": "markdown", "content": _card_markdown(_LONE_SURROGATE.sub("\ufffd", text))}],
         }
         # ASCII escapes would make each CJK character 6 bytes instead of 3.
         return json.dumps(card, ensure_ascii=False)
@@ -1116,15 +1212,7 @@ class FeishuChannel(Channel):
         # is reused across a thread's cards without exposing callback tokens.
         topic_id = f"feishu-card:{msg.thread_id}"
         try:
-            if msg.connection_id:
-                if self._connection_repo is None or not msg.owner_user_id:
-                    return None
-                await self._connection_repo.set_thread_id(connection_id=msg.connection_id, owner_user_id=msg.owner_user_id, provider=self.name, external_conversation_id=msg.chat_id, thread_id=msg.thread_id, external_topic_id=topic_id)
-            else:
-                store = self.config.get("channel_store")
-                if store is None:
-                    return None
-                await store.set_thread_id(self.name, msg.chat_id, msg.thread_id, topic_id=topic_id, user_id=user_id)
+            await self._record_thread_alias(msg.chat_id, topic_id, msg.thread_id, user_id, msg.connection_id, msg.owner_user_id)
         except Exception:
             logger.exception("[Feishu] cannot bind clarification card to thread %s; using text fallback", msg.thread_id)
             return None
@@ -1263,17 +1351,25 @@ class FeishuChannel(Channel):
 
     # -- internal ----------------------------------------------------------
 
+    async def _record_thread_alias(self, chat_id: str, topic_id: str, thread_id: str, user_id: str, connection_id: str | None, owner_id: str | None) -> None:
+        if connection_id:
+            if self._connection_repo is None or not owner_id:
+                raise ValueError("Missing Feishu connection owner or repository")
+            # A late reply can add an alias, but /new owns explicit topic rebinding.
+            await self._connection_repo.claim_thread_id(connection_id=connection_id, owner_user_id=owner_id, provider=self.name, external_conversation_id=chat_id, external_topic_id=topic_id, thread_id=thread_id)
+        else:
+            store = self.config["channel_store"]
+            await store.set_thread_id(fallback_store_channel(self.name, topic_id, self._connection_repo), chat_id, thread_id, topic_id=topic_id, user_id=user_id)
+
     async def _remember_thread_mapping(self, msg: OutboundMessage, *topic_ids: str | None) -> None:
         """Map the reply's message, card and topic ids to its DeerFlow thread.
 
         Every streamed chunk of a reply carries the same aliases, and each write
         is a full ``store.json`` rewrite or a database upsert, so a non-final
-        chunk only writes the aliases this reply has not stored yet. The final
-        outbound writes all of them again, leaving the store as it was when every
-        chunk wrote them.
+        chunk only records new aliases. The final outbound checks them all again
+        so a missing alias can be restored.
         """
-        store = self.config.get("channel_store")
-        if store is None or not msg.thread_id:
+        if not msg.thread_id or (not msg.connection_id and self.config.get("channel_store") is None):
             return
 
         topic_id = self._non_empty_str(msg.metadata.get("topic_id"))
@@ -1296,17 +1392,11 @@ class FeishuChannel(Channel):
             if not topic_id or topic_id in seen:
                 continue
             seen.add(topic_id)
-            alias = (msg.chat_id, msg.thread_id, topic_id, user_id)
+            alias = (msg.chat_id, msg.thread_id, topic_id, user_id, msg.connection_id)
             if alias in remembered:
                 continue
             try:
-                await store.set_thread_id(
-                    self.name,
-                    msg.chat_id,
-                    msg.thread_id,
-                    topic_id=topic_id,
-                    user_id=user_id,
-                )
+                await self._record_thread_alias(msg.chat_id, topic_id, msg.thread_id, user_id, msg.connection_id, msg.owner_user_id)
             except Exception:
                 # Not remembered, so the next chunk retries it.
                 logger.exception("[Feishu] failed to remember thread mapping for topic_id=%s", topic_id)
@@ -1493,6 +1583,8 @@ class FeishuChannel(Channel):
             "topic_id": topic_id,
             "source_message_id": source_message_id,
             "card_message_id": card_message_id,
+            "connection_id": msg.connection_id,
+            "owner_user_id": msg.owner_user_id if msg.connection_id else None,
             "created_at": time.time(),
         }
         with self._thread_lock:
@@ -1508,7 +1600,7 @@ class FeishuChannel(Channel):
             msg.thread_id,
         )
 
-    def _consume_pending_clarification(self, chat_id: str, user_id: str, *, reply_to_ids: list[str] | None = None) -> dict[str, Any] | None:
+    def _consume_pending_clarification(self, chat_id: str, user_id: str, *, reply_to_ids: list[str] | None = None, connection_id: str | None = None, owner_user_id: str | None = None) -> dict[str, Any] | None:
         key = self._pending_key(chat_id, user_id)
         with self._thread_lock:
             pending_items = self._pending_clarifications.get(key)
@@ -1517,14 +1609,15 @@ class FeishuChannel(Channel):
 
             now = time.time()
             pending_items = [pending for pending in pending_items if isinstance(pending.get("created_at"), (int, float)) and now - pending["created_at"] <= PENDING_CLARIFICATION_TTL_SECONDS]
+            candidates = [(i, p) for i, p in enumerate(pending_items) if (p.get("connection_id"), p.get("owner_user_id")) == (connection_id, owner_user_id if connection_id else None)]
             # Explicit replies target a card/source, while accepted ordinary
             # replies use their current thread alias. Shared roots cannot select
             # a card belonging to a conversation replaced by /new.
             if reply_to_ids is None:
-                matched = 0 if pending_items else None
+                matched = candidates[0][0] if candidates else None
             else:
                 matched = next(
-                    (index for field in ("card_message_id", "source_message_id", "topic_id") for candidate in reply_to_ids for index, pending in enumerate(pending_items) if pending.get(field) == candidate),
+                    (index for field in ("card_message_id", "source_message_id", "topic_id") for candidate in reply_to_ids for index, pending in candidates if pending.get(field) == candidate),
                     None,
                 )
             pending = pending_items.pop(matched) if matched is not None else None
@@ -1553,45 +1646,60 @@ class FeishuChannel(Channel):
     async def _resolve_routing(self, attempt: _RoutingAttempt) -> _Routing:
         """Decide a message's topic on the Gateway loop, consulting and updating the channel store.
 
-        Stored mappings for the root / parent / thread ids win (``_first_stored_topic``);
-        otherwise the route is the root (or the message itself; ``None`` in P2P chats),
-        unless a pending clarification for the sender names a topic — that topic's
-        mapping is then persisted so the manager finds the clarified thread. The
-        pending clarification is consumed once: a retried attempt keeps the decision
-        and only redoes the write.
+        Bound chat replies prefer the parent message so an earlier card can still
+        be followed after ``/new``. Commands and unbound messages prefer the root.
+        The Feishu thread ID is checked last. A miss falls back to the root or
+        the message itself (``None`` in P2P chats). If a pending clarification
+        supplies a topic, persist its mapping so the manager finds that thread.
+        A retry reuses the same clarification and only repeats the write.
         """
         store = self.config.get("channel_store")
         parsed = attempt.parsed
+        route = InboundMessage(channel_name=self.name, chat_id=parsed.chat_id, user_id=parsed.sender_id, text="")
+        if self._connection_repo is not None:
+            await self._attach_connection_identity(route)
+        default = _Routing(
+            topic_id=None if parsed.chat_type == "p2p" else (parsed.root_id or parsed.msg_id),
+            from_stored_mapping=False,
+            from_pending=False,
+            connection_id=route.connection_id,
+            owner_user_id=route.owner_user_id,
+            workspace_id=route.workspace_id,
+        )
         if attempt.pending is None:
-            candidates = [candidate for candidate in (self._non_empty_str(parsed.root_id), parsed.parent_id, parsed.feishu_thread_id) if candidate]
+            root_id = self._non_empty_str(parsed.root_id)
+            message_ids = (parsed.parent_id, root_id) if route.connection_id and parsed.msg_type == InboundMessageType.CHAT else (root_id, parsed.parent_id)
+            candidates = [candidate for candidate in (*message_ids, parsed.feishu_thread_id) if candidate]
             if candidates:
-                stored = await self._first_stored_topic(store, parsed.chat_id, candidates)
+                stored = await self._first_stored_topic(store, route, candidates)
                 if stored:
                     pending = (
-                        self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=[parsed.parent_id]) if self._card_interaction_enabled and parsed.msg_type == InboundMessageType.CHAT and parsed.parent_id else None
+                        self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=[parsed.parent_id], connection_id=route.connection_id, owner_user_id=route.owner_user_id)
+                        if self._card_interaction_enabled and parsed.msg_type == InboundMessageType.CHAT and parsed.parent_id
+                        else None
                     )
                     if pending:
-                        return _Routing(pending["topic_id"], True, True, self._non_empty_str(pending.get("card_message_id")))
-                    return _Routing(stored, True, False)
-            topic_id: str | None = parsed.root_id or parsed.msg_id
-            if parsed.chat_type == "p2p":
-                topic_id = None
+                        return replace(default, topic_id=pending["topic_id"], from_stored_mapping=True, from_pending=True, clarification_card_id=self._non_empty_str(pending.get("card_message_id")))
+                    return replace(default, topic_id=stored, from_stored_mapping=True)
             if parsed.msg_type != InboundMessageType.CHAT:
-                return _Routing(topic_id, False, False)
+                return default
             if self._card_interaction_enabled and parsed.chat_type == "p2p" and not candidates:
                 # Unthreaded P2P messages follow the current conversation,
                 # including /new. Only explicit card replies use the old alias.
-                return _Routing(None, False, False)
+                return default
             reply_to_ids = [parsed.parent_id] if self._card_interaction_enabled and parsed.parent_id else None
-            pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=reply_to_ids)
+            pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=reply_to_ids, connection_id=route.connection_id, owner_user_id=route.owner_user_id)
             if not (pending and self._non_empty_str(pending.get("topic_id"))):
-                return _Routing(topic_id, False, False)
+                return default
             attempt.pending = pending
         pending_topic_id = self._non_empty_str(attempt.pending.get("topic_id"))
         thread_id = self._non_empty_str(attempt.pending.get("thread_id"))
-        if thread_id:
-            await store.set_thread_id(self.name, parsed.chat_id, thread_id, topic_id=pending_topic_id, user_id=parsed.sender_id)
-        return _Routing(pending_topic_id, False, True, self._non_empty_str(attempt.pending.get("card_message_id")))
+        if (attempt.pending.get("connection_id"), attempt.pending.get("owner_user_id")) != (route.connection_id, route.owner_user_id):
+            attempt.pending = None
+            return default
+        if thread_id and (route.connection_id or store is not None):
+            await self._record_thread_alias(parsed.chat_id, pending_topic_id, thread_id, parsed.sender_id, route.connection_id, route.owner_user_id)
+        return replace(default, topic_id=pending_topic_id, from_pending=True, clarification_card_id=self._non_empty_str(attempt.pending.get("card_message_id")))
 
     async def _resolve_routing_bounded(self, attempt: _RoutingAttempt) -> _Routing | StoreLookupUnresolved:
         """``_resolve_routing`` under the store deadline; no answer in time (or a store error) is *unresolved*.
@@ -1611,10 +1719,11 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] channel store call failed for message %s (%s); treating the lookup as unresolved", attempt.parsed.msg_id, exc.__class__.__name__, exc_info=True)
             return StoreLookupUnresolved(f"channel store error: {exc.__class__.__name__}")
 
-    async def _first_stored_topic(self, store: Any, chat_id: str, candidates: list[str]) -> str | None:
+    async def _first_stored_topic(self, store: Any, route: InboundMessage, candidates: list[str]) -> str | None:
         """The first candidate topic id the store already maps to a thread, in priority order."""
         for candidate in candidates:
-            if await store.get_thread_id(self.name, chat_id, topic_id=candidate):
+            route.topic_id = candidate
+            if await lookup_thread_id(route, repo=self._connection_repo, store=store):
                 return candidate
         return None
 
@@ -1750,6 +1859,10 @@ class FeishuChannel(Channel):
             }
             if source_preview:
                 metadata[SOURCE_PREVIEW_METADATA_KEY] = source_preview
+            if parsed.post_file_count:
+                metadata[_POST_FILES_COUNT_METADATA_KEY] = parsed.post_file_count
+                if parsed.msg_type == InboundMessageType.COMMAND:
+                    metadata[_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY] = True
             if routing.clarification_card_id:
                 metadata[_PENDING_CARD_METADATA_KEY] = routing.clarification_card_id
 
@@ -1763,6 +1876,9 @@ class FeishuChannel(Channel):
                 metadata=metadata,
             )
             inbound.topic_id = routing.topic_id
+            inbound.connection_id = routing.connection_id
+            inbound.owner_user_id = routing.owner_user_id
+            inbound.workspace_id = routing.workspace_id
 
             if self._is_batchable_file_inbound(
                 msg_type=parsed.msg_type,
@@ -1844,14 +1960,15 @@ class FeishuChannel(Channel):
     def _queue_file_inbound_batch(self, msg_id: str, inbound: InboundMessage) -> bool:
         key = self._pending_key(inbound.chat_id, inbound.user_id)
         should_schedule_flush = False
-        expired_batch: tuple[str, InboundMessage, list[str]] | None = None
+        previous_batch: tuple[str, InboundMessage, list[str]] | None = None
 
         with self._thread_lock:
             batch = self._pending_inbound_batches.get(key)
             now = time.time()
             if batch:
-                if now - batch["created_at"] <= FEISHU_INBOUND_BATCH_WINDOW_SECONDS:
-                    batched_inbound = batch["inbound"]
+                batched_inbound = batch["inbound"]
+                same_binding = (batched_inbound.connection_id, batched_inbound.owner_user_id) == (inbound.connection_id, inbound.owner_user_id)
+                if same_binding and now - batch["created_at"] <= FEISHU_INBOUND_BATCH_WINDOW_SECONDS:
                     batch["message_ids"].append(msg_id)
                     batch["text_parts"].append(inbound.text)
                     batched_inbound.text = "\n\n".join(part for part in batch["text_parts"] if part)
@@ -1867,7 +1984,7 @@ class FeishuChannel(Channel):
                     )
                     return True
 
-                expired_batch = (batch["anchor_message_id"], batch["inbound"], list(batch["message_ids"]))
+                previous_batch = (batch["anchor_message_id"], batch["inbound"], list(batch["message_ids"]))
 
             self._pending_inbound_batches[key] = {
                 "anchor_message_id": msg_id,
@@ -1881,9 +1998,9 @@ class FeishuChannel(Channel):
 
         if should_schedule_flush:
             self._schedule_batch_flush(key, msg_id)
-        if expired_batch:
-            anchor_message_id, expired_inbound, source_message_ids = expired_batch
-            self._schedule_prepare_inbound(anchor_message_id, expired_inbound, source_message_ids=source_message_ids)
+        if previous_batch:
+            anchor_message_id, previous_inbound, source_message_ids = previous_batch
+            self._schedule_prepare_inbound(anchor_message_id, previous_inbound, source_message_ids=source_message_ids)
         return True
 
     def _pop_pending_inbound_batch(self, key: tuple[str, str], *, anchor_message_id: str | None = None) -> tuple[str, InboundMessage, list[str]] | None:
@@ -1943,12 +2060,11 @@ class FeishuChannel(Channel):
         """Kick off Feishu side effects without delaying inbound dispatch."""
         try:
             clarification_card_id = inbound.metadata.pop(_PENDING_CARD_METADATA_KEY, None)
-            inbound = await self._attach_connection_identity(inbound)
             if self._card_interaction_enabled and not clarification_card_id and inbound.msg_type == InboundMessageType.CHAT:
                 # Ordinary answers retire only the current thread's buttons;
                 # older cards cannot redirect a fresh /new conversation.
                 thread_id = await lookup_thread_id(inbound, repo=self._connection_repo, store=self.config.get("channel_store"))
-                pending = self._consume_pending_clarification(inbound.chat_id, inbound.user_id, reply_to_ids=[f"feishu-card:{thread_id}"]) if thread_id else None
+                pending = self._consume_pending_clarification(inbound.chat_id, inbound.user_id, reply_to_ids=[f"feishu-card:{thread_id}"], connection_id=inbound.connection_id, owner_user_id=inbound.owner_user_id) if thread_id else None
                 if pending:
                     clarification_card_id = pending.get("card_message_id")
                     inbound.metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] = True
@@ -2088,6 +2204,26 @@ class FeishuChannel(Channel):
             text = ""
         text = text.strip()
 
+        # Feishu desktop attaches files to a message as a post whose rich-text
+        # body holds the caption and whose top-level ``files`` array holds the
+        # attachments. The body may be empty. Keep these attachments last so
+        # ``receive_file`` can match their placeholders from the end. Skip
+        # folders and attachments already represented by a rich-text element.
+        attachments = content.get("files") if isinstance(content, dict) else None
+        if not isinstance(attachments, list):
+            attachments = []
+        post_file_count = 0
+        for attachment in attachments:
+            if not isinstance(attachment, dict) or attachment.get("is_folder"):
+                continue
+            file_key = attachment.get("file_key")
+            if not isinstance(file_key, str) or not file_key:
+                continue
+            if any(existing.get("file_key") == file_key for existing in files_list):
+                continue
+            files_list.append({"file_key": file_key})
+            post_file_count += 1
+
         logger.info(
             "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, parent_id=%s, thread_id=%s, chat_type=%s, sender=%s, text_len=%d",
             chat_id,
@@ -2113,6 +2249,7 @@ class FeishuChannel(Channel):
             chat_type=chat_type,
             text=text,
             files=files_list,
+            post_file_count=post_file_count,
         )
 
     def _on_message(self, event) -> None:
@@ -2155,11 +2292,13 @@ class FeishuChannel(Channel):
             if _is_feishu_command(command_text):
                 parsed.msg_type = InboundMessageType.COMMAND
                 parsed.text = command_text
+            elif parsed.post_file_count:
+                parsed.text = _append_post_file_placeholders(text, parsed.post_file_count)
 
             # topic_id determines which LangGraph thread the message maps to.
             # P2P chats: topic_id=None so all messages share one thread (like Telegram DMs).
             # But check stored mappings first for backward compatibility with pre-upgrade P2P threads.
-            if self.config.get("channel_store") is None:
+            if self.config.get("channel_store") is None and self._connection_repo is None:
                 self._dispatch_inbound(parsed, self._route_without_store(parsed))
                 return
 

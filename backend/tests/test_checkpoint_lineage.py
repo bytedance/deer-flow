@@ -14,6 +14,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.gateway.checkpoint_lineage import (
+    CheckpointLineageIntegrityError,
     CheckpointParentMissingError,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
@@ -133,16 +134,25 @@ def test_chronological_scan_prefers_the_previous_turn_boundary():
     assert base.config["configurable"]["checkpoint_id"] == "ckpt-turn1-tail"
 
 
-def test_lineage_walk_reports_missing_parent_when_no_settled_ancestor_exists():
-    """Fail closed rather than fork a mid-run checkpoint."""
+@pytest.mark.parametrize(
+    ("parent_config", "expected_error"),
+    [
+        (None, CheckpointParentMissingError),
+        ({"configurable": {"thread_id": THREAD_ID, "checkpoint_id": "ckpt-mid"}}, CheckpointLineageIntegrityError),
+        ({"configurable": None}, CheckpointLineageIntegrityError),
+    ],
+    ids=["unlinked-head", "linked-exhaustion", "malformed-link"],
+)
+def test_lineage_walk_only_reports_missing_parent_for_unlinked_head(parent_config, expected_error):
     human = HumanMessage(id="h1__user", content="question")
     history = [
-        _snapshot("ckpt-head", [human, AIMessage(id="ai-1", content="answer")], parent_id="ckpt-mid"),
+        _snapshot("ckpt-head", [human, AIMessage(id="ai-1", content="answer")]),
         _snapshot("ckpt-mid", [HumanMessage(id="h1", content="question")], next_tasks=("DynamicContextMiddleware.before_agent",)),
     ]
+    history[0].parent_config = parent_config
     accessor = _Accessor(history)
 
-    with pytest.raises(CheckpointParentMissingError):
+    with pytest.raises(expected_error):
         asyncio.run(find_checkpoint_before_message(accessor, history[0], "h1__user", max_depth=10))
 
 
@@ -225,6 +235,20 @@ def test_goal_leaf_inheriting_stamps_is_not_duration_only():
     )
 
     assert is_duration_only_checkpoint(goal_leaf, parent=parent) is False
+
+
+def test_swapped_channel_versions_are_not_a_duration_checkpoint():
+    """Version values belong to channel names; a permutation is a state change."""
+    parent = _snapshot("ckpt-parent", [], channel_versions={"messages": 5, "goal": 2})
+    swapped_leaf = _snapshot(
+        "ckpt-swapped",
+        [],
+        parent_id="ckpt-parent",
+        metadata=dict(_POSTGRES_DURATION_METADATA),
+        channel_versions={"messages": 2, "goal": 5},
+    )
+
+    assert is_duration_only_checkpoint(swapped_leaf, parent=parent) is False
 
 
 def test_postgres_attribution_only_duration_checkpoint_is_recognised():

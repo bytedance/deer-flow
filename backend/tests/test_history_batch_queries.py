@@ -431,10 +431,15 @@ async def test_run_manager_computes_edit_replay_visibility_by_latest_attempt():
         metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-retry-success"},
     )
     newer_success_after_failure.status = RunStatus.success
+    paused = await manager.create(
+        "t1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-paused"},
+    )
+    paused.status = RunStatus.waiting_for_input
 
     visibility = await manager.list_edit_replay_visibility("t1", user_id=None)
 
     assert visibility == EditReplayVisibility(
-        hidden_source_run_ids={"source-running", "source-success", "source-retry-success"},
+        hidden_source_run_ids={"source-running", "source-success", "source-retry-success", "source-paused"},
         hidden_attempt_run_ids={failed.run_id, newer_failed.run_id, older_failed_then_success.run_id},
     )

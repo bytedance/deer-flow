@@ -34,7 +34,8 @@ a background task must *not* see the foreground user, wrap it with
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Final, Protocol, runtime_checkable
 
@@ -51,6 +52,30 @@ class CurrentUser(Protocol):
 
 
 _current_user: Final[ContextVar[CurrentUser | None]] = ContextVar("deerflow_current_user", default=None)
+_authenticated_user_id: Final[ContextVar[str | None]] = ContextVar("deerflow_authenticated_user_id", default=None)
+
+
+@contextmanager
+def bind_authenticated_user(user_id: str | None) -> Iterator[None]:
+    """Bind verified end-user identity at a trusted host authentication boundary.
+
+    Storage ownership alone is not authentication: internal and auth-disabled
+    callers also have user IDs. Bind ``None`` for them, and never derive this
+    value from run context, configuration, request parameters or model input.
+    Child tasks/threads inherit this proof; a fresh context fails closed.
+    """
+    if user_id is not None and (not isinstance(user_id, str) or not user_id.strip() or user_id != user_id.strip()):
+        raise ValueError("Authenticated user ID must be a nonblank exact host identity")
+    token = _authenticated_user_id.set(user_id)
+    try:
+        yield
+    finally:
+        _authenticated_user_id.reset(token)
+
+
+def get_authenticated_user_id() -> str | None:
+    """Return host-verified end-user identity, without a storage-ID fallback."""
+    return _authenticated_user_id.get()
 
 
 def set_current_user(user: CurrentUser) -> Token[CurrentUser | None]:

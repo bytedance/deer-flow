@@ -105,7 +105,10 @@ export function isGoalOutcomeCurrent(
 
 /** A row of the stand-down copy in `inputBox.goalBar.next`. */
 export type GoalNextKey = keyof Translations["inputBox"]["goalBar"]["next"];
-export type GoalStopKey = Exclude<GoalNextKey, "paused">;
+export type GoalStopKey = Exclude<
+  GoalNextKey,
+  "paused" | "needsApproval" | "needsApprovalReload"
+>;
 /** Who acts next: amber "Stopped", primary "Waiting for you", muted otherwise. */
 export type GoalBarChip = "stopped" | "waitingForYou" | "waiting" | "unchecked";
 
@@ -114,6 +117,11 @@ export type GoalBarView =
   | { kind: "set"; goal: GoalState }
   | { kind: "inProgress"; goal: GoalState }
   | { kind: "continuing"; goal: GoalState; count: number; max: number }
+  | {
+      kind: "awaitingApproval";
+      goal: GoalState;
+      metadataError?: boolean;
+    }
   | {
       kind: "stopped";
       goal: GoalState;
@@ -194,12 +202,23 @@ export function describeGoalBar({
   outcome,
   isRunning,
   hasOpenHumanInputCard = false,
+  hasPendingApproval = false,
+  approvalMetadataError = false,
 }: {
   goal: GoalState | null;
   outcome: ThreadGoalOutcome | null;
   isRunning: boolean;
   hasOpenHumanInputCard?: boolean;
+  hasPendingApproval?: boolean;
+  approvalMetadataError?: boolean;
 }): GoalBarView {
+  if (goal && hasPendingApproval) {
+    return {
+      kind: "awaitingApproval",
+      goal,
+      ...(approvalMetadataError ? { metadataError: true } : {}),
+    };
+  }
   if (goal) {
     const evaluation = goal.last_evaluation;
     const code = evaluation?.stand_down_reason?.trim() ?? "";
@@ -314,6 +333,13 @@ export function describeGoalBarCopy(
       return copy;
     case "inProgress":
       return { ...copy, chip: bar.inProgress };
+    case "awaitingApproval":
+      return withDetail(
+        bar.waitingApproval,
+        view.metadataError
+          ? bar.next.needsApprovalReload
+          : bar.next.needsApproval,
+      );
     case "continuing": {
       const chip = fill(t.inputBox.goalContinuing, {
         count: view.count,
@@ -359,7 +385,12 @@ export function goalBarAnnounceKey(view: GoalBarView): string {
   if (view.kind === "met") {
     return `met:${goalOutcomeKey(view.outcome)}`;
   }
-  const state = view.kind === "stopped" ? `stopped:${view.stop}` : view.kind;
+  const state =
+    view.kind === "stopped"
+      ? `stopped:${view.stop}`
+      : view.kind === "awaitingApproval" && view.metadataError
+        ? "awaitingApproval:metadataError"
+        : view.kind;
   return [state, view.goal.objective, view.goal.created_at].join("|");
 }
 

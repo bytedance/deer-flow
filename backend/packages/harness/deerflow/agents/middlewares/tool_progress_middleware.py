@@ -31,8 +31,10 @@ Division of labor with LoopDetectionMiddleware (middleware position 23):
 
   LoopDetectionMiddleware is a call-pattern guard — it fires after the model
   responds (before tools execute), inspects the tool_calls signature in the
-  AIMessage, and forces the *whole turn* to stop when the model keeps issuing
-  the same calls regardless of results.
+  AIMessage alongside completed results, and can force the *whole turn* to stop
+  when the model repeats calls with unchanged outcomes (call+result fingerprint
+  repetition). Per-tool frequency thresholds are INFO-only observability metrics
+  and do not warn or hard-stop execution.
 
   They are complementary, not competing:
   - ToolProgressMiddleware is fine-grained (per-tool BLOCK, other tools normal).
@@ -64,10 +66,12 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.middlewares._bounded_dict import BoundedDict
 from deerflow.agents.middlewares.audit_context import (
     TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.model_response import is_empty_stop_response
 from deerflow.agents.middlewares.tool_result_meta import (
     PROGRESS_GUARD_ERROR_TYPE,
     TOOL_META_KEY,
@@ -280,6 +284,9 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         self._lock = threading.Lock()
         # LRU-evicting store: thread_id → {tool_name → ToolPhaseState}
         self._phase_states: OrderedDict[str, dict[str, ToolPhaseState]] = OrderedDict()
+        # Results retain the epoch captured before their handler started. A new
+        # graph entry invalidates in-flight assessments, even for the same run.
+        self._entry_epochs: BoundedDict[str, object] = BoundedDict(max_tracked_threads)
         # Pending hint queue: (thread_id, run_id) → [hint texts]
         self._pending: dict[tuple[str, str], list[str]] = defaultdict(list)
 
@@ -310,6 +317,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
 
     def _pending_key(self, runtime: Runtime) -> tuple[str, str]:
         return self._thread_id(runtime), self._run_id(runtime)
+
+    def _entry_epoch(self, runtime: Runtime) -> object:
+        thread_id = self._thread_id(runtime)
+        with self._lock:
+            epoch = self._entry_epochs.setdefault(thread_id, object())
+            self._entry_epochs.move_to_end(thread_id)
+            return epoch
 
     def _record_phase_transition(
         self,
@@ -411,6 +425,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         tool_call_id: str,
         *,
         hook: Literal["wrap_tool_call", "awrap_tool_call"],
+        entry_epoch: object,
     ) -> ToolMessage | Command:
         """Update the state machine from a tool result; queue hints if warranted."""
         message = _result_tool_message(result, tool_call_id)
@@ -428,6 +443,8 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         thread_id = self._thread_id(runtime)
         phase_change: tuple[ToolPhaseState, ToolPhaseState, ToolPhaseTransition] | None = None
         with self._lock:
+            if self._entry_epochs.get(thread_id) is not entry_epoch:
+                return result
             state = self._get_state(thread_id, tool_name)
             new_state, hint, transition = self._assess_and_transition(state, meta, content)
             self._set_state(thread_id, tool_name, new_state)
@@ -466,7 +483,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                     tool_name,
                 )
         if hint and self._inject_assessment:
-            self._queue_assessment(runtime, hint)
+            self._queue_assessment(runtime, hint, entry_epoch=entry_epoch)
         return result
 
     # ------------------------------------------------------------------
@@ -493,6 +510,10 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         # recoverable-error result from silently demoting the phase back to warned.)
         if state.phase == "blocked":
             return state, None, None
+
+        # Legacy content guesses cannot assert tool unavailability.
+        if meta.source == "content_analysis" and not meta.recoverable_by_model:
+            meta = replace(meta, error_type="unknown", recoverable_by_model=True, recommended_next_action="try_alternative")
 
         # Count this call as a problem before branching so all exit paths leave
         # consecutive_problems in a consistent state (never 0 when the tool has failed).
@@ -557,10 +578,12 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
     # ------------------------------------------------------------------
     # Pending queue helpers
 
-    def _queue_assessment(self, runtime: Runtime, text: str) -> None:
+    def _queue_assessment(self, runtime: Runtime, text: str, *, entry_epoch: object | None = None) -> None:
         key = self._pending_key(runtime)
         thread_id = key[0]
         with self._lock:
+            if entry_epoch is not None and self._entry_epochs.get(thread_id) is not entry_epoch:
+                return
             # Guard against creating a phantom _pending entry for a thread that was just
             # evicted from _phase_states by the LRU.  Such entries can never be cleaned up
             # by the eviction loop (which only walks _phase_states) and accumulate silently.
@@ -575,17 +598,19 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             return self._pending.pop(key, [])
 
-    def _restore_pending(self, runtime: Runtime, hints: list[str]) -> None:
-        """Requeue hints taken for a model call that raised.
+    def _restore_pending(self, runtime: Runtime, hints: list[str], *, entry_epoch: object | None = None) -> None:
+        """Requeue hints taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the hints.
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the hints.
         """
         if not hints:
             return
         key = self._pending_key(runtime)
         with self._lock:
+            if entry_epoch is not None and self._entry_epochs.get(key[0]) is not entry_epoch:
+                return
             if key[0] not in self._phase_states:
                 return
             queue = self._pending[key]
@@ -627,6 +652,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         thread_id = self._thread_id(runtime)
         transitions: list[tuple[str, ToolPhaseState, ToolPhaseState]] = []
         with self._lock:
+            self._entry_epochs[thread_id] = object()
             thread_tools = self._phase_states.get(thread_id)
             if thread_tools is None:
                 return
@@ -668,6 +694,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         runtime = getattr(request, "runtime", None)
         if runtime is None:
             return handler(request)
+        entry_epoch = self._entry_epoch(runtime)
         block_reason = self._get_block_reason(runtime, tool_name)
         if block_reason:
             logger.info(
@@ -683,6 +710,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             runtime,
             str(request.tool_call.get("id") or ""),
             hook="wrap_tool_call",
+            entry_epoch=entry_epoch,
         )
 
     @override
@@ -697,6 +725,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         runtime = getattr(request, "runtime", None)
         if runtime is None:
             return await handler(request)
+        entry_epoch = self._entry_epoch(runtime)
         block_reason = self._get_block_reason(runtime, tool_name)
         if block_reason:
             logger.info(
@@ -712,6 +741,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             runtime,
             str(request.tool_call.get("id") or ""),
             hook="awrap_tool_call",
+            entry_epoch=entry_epoch,
         )
 
     # ------------------------------------------------------------------
@@ -738,12 +768,16 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        entry_epoch = self._entry_epoch(request.runtime)
         hints = self._drain_pending(request.runtime)
         try:
-            return handler(self._inject_hints(request, hints))
+            response = handler(self._inject_hints(request, hints))
         except Exception:
-            self._restore_pending(request.runtime, hints)
+            self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
+        return response
 
     @override
     async def awrap_model_call(
@@ -751,12 +785,16 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
+        entry_epoch = self._entry_epoch(request.runtime)
         hints = self._drain_pending(request.runtime)
         try:
-            return await handler(self._inject_hints(request, hints))
+            response = await handler(self._inject_hints(request, hints))
         except Exception:
-            self._restore_pending(request.runtime, hints)
+            self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
+        return response
 
     # ------------------------------------------------------------------
     # before_agent: clean up stale pending hints from previous runs

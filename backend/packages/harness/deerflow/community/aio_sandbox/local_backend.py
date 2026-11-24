@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 
 
+def _parse_bash_capacity(config: dict) -> int:
+    value = _extract_container_environment(config, "AIO_BASH_MAX_SESSIONS")
+    try:
+        return max(0, int(value)) if value is not None else 50
+    except (TypeError, ValueError):
+        return 0
+
+
 class _ExistingRestrictedSandbox(RuntimeError):
     def __init__(self, info: SandboxInfo):
         super().__init__(f"restricted sandbox {info.sandbox_id} already exists")
@@ -58,6 +66,7 @@ class _ContainerInspection:
     networks: frozenset[str]
     relay_token: str | None = None
     max_shell_sessions: int | None = None
+    max_bash_sessions: int | None = None
     container_id: str | None = None
 
 
@@ -712,7 +721,13 @@ class LocalContainerBackend(SandboxBackend):
         except (TypeError, ValueError):
             return False
         actual = inspection.max_shell_sessions if inspection.max_shell_sessions is not None else _AIO_DEFAULT_MAX_SHELL_SESSIONS
-        return actual >= required
+        if actual < required:
+            return False
+        # A reused container may predate the current Bash environment override.
+        # Never admit it using the new client's larger semaphore budget.
+        required_bash = int(self._environment.get("AIO_BASH_MAX_SESSIONS", "50"))
+        actual_bash = inspection.max_bash_sessions if inspection.max_bash_sessions is not None else 50
+        return actual_bash >= required_bash
 
     def _network_policy_digest(self) -> str:
         allow_domains = self._network_config.get("allow_domains", [])
@@ -1998,6 +2013,7 @@ class LocalContainerBackend(SandboxBackend):
                 networks=frozenset(str(value) for value in (network_settings.get("Networks") or {})),
                 relay_token=_extract_container_environment(config, RELAY_TOKEN_ENV),
                 max_shell_sessions=max_shell_sessions,
+                max_bash_sessions=_parse_bash_capacity(config),
                 container_id=entry.get("Id") if isinstance(entry.get("Id"), str) and entry.get("Id") else None,
             )
         return out

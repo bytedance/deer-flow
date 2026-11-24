@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import ssl
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -529,6 +530,37 @@ async def test_enabled_retries_reuse_one_client(monkeypatch):
     assert await crawl(max_retries=1, retry_budget_seconds=2) == "ok"
     assert calls == 2
     assert len(clients) == 1
+
+
+async def test_admitted_client_builds_tls_off_loop(monkeypatch):
+    loop_thread = threading.get_ident()
+    original_context = ssl.create_default_context
+    contexts = []
+    clients = []
+
+    def create_context(*args, **kwargs):
+        assert threading.get_ident() != loop_thread, "TLS trust loading blocks the event loop"
+        context = original_context(*args, **kwargs)
+        contexts.append(context)
+        return context
+
+    class RecordingClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            clients.append(self)
+
+    async def send(self, request, **kwargs):
+        assert threading.get_ident() == loop_thread
+        return httpx.Response(200, text="ok", request=request)
+
+    monkeypatch.setattr(ssl, "create_default_context", create_context)
+    monkeypatch.setattr(httpx, "AsyncClient", RecordingClient)
+    monkeypatch.setattr(RecordingClient, "send", send)
+
+    assert await crawl(max_retries=0) == "ok"
+    assert contexts
+    assert len(clients) == 1
+    assert clients[0].is_closed
 
 
 async def test_client_pool_close_does_not_hold_attempt_permit(monkeypatch):

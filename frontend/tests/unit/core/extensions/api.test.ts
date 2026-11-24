@@ -15,8 +15,64 @@ const entry = {
   description: "",
 };
 
+const documentation = {
+  schema_version: 1,
+  id: "company.helper",
+  locales: {
+    "en-US": {
+      title: "Helper",
+      description: "Package instructions",
+      usage: [{ title: "Start", description: "Open the helper" }],
+    },
+  },
+};
+
 afterEach(() => {
   rs.restoreAllMocks();
+});
+
+for (const docs_url of [
+  "https://example.org:bad/docs",
+  "https://example.org:65536/docs",
+  "https://[",
+  "http://example.org/docs",
+  "https://user:password@example.org/docs",
+]) {
+  test(`invalid optional documentation URL is isolated: ${docs_url}`, async () => {
+    const healthy = { ...entry, settings: { enabled: true } };
+    const helper = {
+      ...healthy,
+      namespace: documentation.id,
+      documentation: { ...documentation, docs_url },
+    };
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify([healthy, helper])),
+    );
+
+    const discovered = await fetchFrontendExtensions();
+    expect(discovered).toHaveLength(2);
+    expect(discovered[0]).toEqual(healthy);
+    expect(discovered[1]?.namespace).toBe(documentation.id);
+    expect(discovered[1]?.documentation).toBeUndefined();
+  });
+}
+
+test("valid HTTPS documentation with an explicit port is retained", async () => {
+  const helper = {
+    ...entry,
+    settings: {},
+    namespace: documentation.id,
+    documentation: {
+      ...documentation,
+      docs_url: "https://example.org:8443/docs",
+    },
+  };
+  rs.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify([helper])),
+  );
+  expect((await fetchFrontendExtensions())[0]?.documentation).toEqual(
+    helper.documentation,
+  );
 });
 
 for (const [label, settings] of [

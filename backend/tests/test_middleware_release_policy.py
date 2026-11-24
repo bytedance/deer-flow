@@ -124,6 +124,16 @@ def _make_loop_detection_middleware():
     return LoopDetectionMiddleware()
 
 
+def test_loop_result_aware_policy_changes_release_identity():
+    policies = collect_release_policies([_make_loop_detection_middleware()])
+    parameters = policies["LoopDetectionMiddleware"]
+    assert parameters["repetition_key"] == "call_and_result_v1"
+    assert parameters["read_prediction"] == "refresh_after_successful_write"
+    assert parameters["frequency_action"] == "observe_only"
+    legacy = {"LoopDetectionMiddleware": {key: value for key, value in parameters.items() if key != "repetition_key"}}
+    assert canonical_hash(policies) != canonical_hash(legacy)
+
+
 def _make_subagent_limit_middleware():
     from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 
@@ -301,6 +311,77 @@ def _middleware_fingerprint(middleware):
         enabled_skills=[],
         effective_policies={},
     ).fingerprint
+
+
+def test_todo_hard_stop_policy_changes_assembly_identity(monkeypatch):
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    current = TodoMiddleware()
+    previous = TodoMiddleware()
+    previous_params = previous.release_policy_parameters()
+    assert previous_params["completion_reminder_hard_stop_reasons"] == ["loop_capped", "token_capped", "safety_capped", "model_length_capped"]
+    previous_params["completion_reminder_hard_stop_reasons"] = ["loop_capped", "token_capped"]
+    assert previous_params.pop("skip_completion_reminder_on_safety_cap") is True
+    monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
+    assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
+
+
+def test_todo_completion_reminder_template_changes_assembly_identity(monkeypatch):
+    """Model-visible reminder text belongs in the assembly fingerprint.
+
+    The template is hashed with an empty item list, so per-run todo content
+    stays out while a wording change still changes the descriptor.
+    """
+    from deerflow_extension_api import canonical_hash
+
+    from deerflow.agents.middlewares import todo_middleware
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    baseline_params = TodoMiddleware().release_policy_parameters()
+    assert baseline_params["completion_reminder_template_hash"] == canonical_hash(todo_middleware._format_completion_reminder([]))
+    baseline = _middleware_fingerprint(TodoMiddleware())
+
+    monkeypatch.setattr(todo_middleware, "_format_completion_reminder", lambda _todos: "<system_reminder>changed</system_reminder>")
+
+    assert _middleware_fingerprint(TodoMiddleware()) != baseline
+
+
+def test_todo_reminder_template_changes_assembly_identity(monkeypatch):
+    """Model-visible persisted reminder text belongs in the assembly fingerprint.
+
+    The edited / truncated / cleared templates are hashed with an empty item
+    list, so per-run todo content stays out while a wording change still
+    changes the descriptor.
+    """
+    from deerflow_extension_api import canonical_hash
+
+    from deerflow.agents.middlewares import todo_middleware
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    baseline_params = TodoMiddleware().release_policy_parameters()
+    assert baseline_params["todo_reminder_template_hash"] == canonical_hash(
+        "\n".join(
+            (
+                todo_middleware._build_todo_reminder("", edited_after_write=True).content,
+                todo_middleware._build_todo_reminder("", edited_after_write=False).content,
+                todo_middleware._build_todo_cleared_notice().content,
+            )
+        )
+    )
+    baseline = _middleware_fingerprint(TodoMiddleware())
+
+    monkeypatch.setattr(todo_middleware, "_TODO_REMINDER_FOOTER", "changed footer")
+
+    assert _middleware_fingerprint(TodoMiddleware()) != baseline
+
+
+def test_safety_text_only_stop_policy_changes_assembly_identity(monkeypatch):
+    current = _make_safety_finish_reason_middleware()
+    previous = _make_safety_finish_reason_middleware()
+    previous_params = previous.release_policy_parameters()
+    assert previous_params.pop("mark_text_only_termination") is True
+    monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
+    assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
 
 
 def _continuity_summarizer(config):
