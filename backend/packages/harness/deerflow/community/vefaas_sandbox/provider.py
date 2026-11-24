@@ -172,6 +172,10 @@ class _VeFaaSShutdownIncompleteError(RuntimeError):
     """Raised when shutdown leaves unconfirmed teardowns or running workers."""
 
 
+class _VeFaaSSnapshotSettledFailureError(RuntimeError):
+    """Raised when the control plane confirms a snapshot failed or disappeared."""
+
+
 class _PeerTeardownError(RuntimeError):
     """Raised when a peer holds a destructive teardown lease for a sandbox."""
 
@@ -269,6 +273,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
     supports_agent_skill_isolation = True
     supports_lazy_agent_skill_isolation = False
     _idle_checker_thread_name = "vefaas-sandbox-idle-reaper"
+    _snapshot_watch_interval = _POLL_STATUS_INTERVAL_SECONDS
 
     def __init__(self, *, client: VeFaaSClient | None = None) -> None:
         self._lock = threading.Lock()
@@ -282,6 +287,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         self._destroying_remote_ids: set[str] = set()
         self._mirroring_output_ids: set[str] = set()
         self._snapshotting_remote_ids: dict[str, int] = {}
+        self._snapshot_watchers: set[threading.Thread] = set()
         # Same-process exclusion against warm-pool reaping and stale lease renewals:
         # - _local_teardown: refcount of teardowns currently active in this process
         # - _acquire_inflight: refcount of acquires currently publishing ownership
@@ -717,7 +723,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: _TrackedVeFaaSSandbox, *, reason: str) -> bool:
         def still_reapable(sid: str = sandbox_id, expected: _TrackedVeFaaSSandbox = entry) -> bool:
-            return self._warm_pool.get(sid, (None, 0.0))[0] is expected and sid not in self._sandboxes and sid not in self._acquire_inflight
+            return self._warm_pool.get(sid, (None, 0.0))[0] is expected and sid not in self._sandboxes and sid not in self._acquire_inflight and expected.remote_sandbox_id not in self._snapshotting_remote_ids
 
         is_dirty = self._is_sandbox_dirty(entry.sandbox)
         want_pause = bool(self._config["pause_on_idle"]) and not is_dirty
@@ -742,7 +748,11 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         attempted: set[str] = set()
         while True:
             with self._lock:
-                candidates = [(sid, entry, ts) for sid, (entry, ts) in self._warm_pool.items() if sid not in attempted and sid not in self._local_teardown and sid not in self._acquire_inflight and sid not in self._sandboxes]
+                candidates = [
+                    (sid, entry, ts)
+                    for sid, (entry, ts) in self._warm_pool.items()
+                    if sid not in attempted and sid not in self._local_teardown and sid not in self._acquire_inflight and sid not in self._sandboxes and entry.remote_sandbox_id not in self._snapshotting_remote_ids
+                ]
                 if not candidates:
                     return None
                 sandbox_id, entry, _ = min(candidates, key=lambda item: item[2])
@@ -757,7 +767,11 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             return
         now = time.monotonic()
         with self._lock:
-            expired = [(sandbox_id, entry) for sandbox_id, (entry, timestamp) in self._warm_pool.items() if now - timestamp > timeout and sandbox_id not in self._local_teardown and sandbox_id not in self._acquire_inflight]
+            expired = [
+                (sandbox_id, entry)
+                for sandbox_id, (entry, timestamp) in self._warm_pool.items()
+                if now - timestamp > timeout and sandbox_id not in self._local_teardown and sandbox_id not in self._acquire_inflight and entry.remote_sandbox_id not in self._snapshotting_remote_ids
+            ]
         for sandbox_id, entry in expired:
             self._destroy_warm_entry(sandbox_id, entry, reason="idle_timeout")
 
@@ -837,7 +851,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
 
     def _renew_leases_once(self) -> None:
         with self._lock:
-            tracked_ids = sorted(set(self._sandboxes) | set(self._warm_pool))
+            tracked_ids = sorted(set(self._sandboxes) | set(self._warm_pool) | {entry.sandbox_id for rid, entry in self._pending_destroys.items() if rid in self._snapshotting_remote_ids})
         for sandbox_id in tracked_ids:
             with self._lock:
                 if sandbox_id in self._local_teardown or sandbox_id in self._acquire_inflight:
@@ -1900,11 +1914,11 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 raise RuntimeError(f"Lost teardown lease while waiting for veFaaS snapshot {snapshot_id}")
             record = client.describe_sandbox_snapshot(function_id, snapshot_id)
             if record is None:
-                raise RuntimeError(f"veFaaS snapshot {snapshot_id} disappeared before becoming ready")
+                raise _VeFaaSSnapshotSettledFailureError(f"veFaaS snapshot {snapshot_id} disappeared before becoming ready")
             if record.is_ready:
                 return record
             if record.is_terminal_failure:
-                raise RuntimeError(f"veFaaS snapshot {snapshot_id} entered terminal state {record.status!r}")
+                raise _VeFaaSSnapshotSettledFailureError(f"veFaaS snapshot {snapshot_id} entered terminal state {record.status!r}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(f"Timed out waiting for veFaaS snapshot {snapshot_id} to become Ready")
@@ -2447,6 +2461,9 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     remote_id = tracked.remote_sandbox_id
                     self._acquire_inflight[sandbox_id] = self._acquire_inflight.get(sandbox_id, 0) + 1
                     self._snapshotting_remote_ids[remote_id] = self._snapshotting_remote_ids.get(remote_id, 0) + 1
+                snapshot_id: str | None = None
+                settled = True
+                handed_off = False
                 try:
                     if self._is_sandbox_dirty(tracked.sandbox):
                         raise RuntimeError(f"Refusing to snapshot corrupted veFaaS sandbox {sandbox_id}")
@@ -2458,6 +2475,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                         retention_days=resolved_retention,
                         metadata=metadata,
                     )
+                    settled = False
                     if not wait:
                         return VeFaaSSnapshotRecord(
                             id=snapshot_id,
@@ -2468,23 +2486,114 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                             retention_days=resolved_retention,
                             metadata=metadata,
                         )
-                    return self._wait_for_snapshot_ready(
-                        function_id,
-                        snapshot_id,
-                        deadline=time.monotonic() + resolved_timeout,
-                    )
+                    try:
+                        record = self._wait_for_snapshot_ready(
+                            function_id,
+                            snapshot_id,
+                            deadline=time.monotonic() + resolved_timeout,
+                        )
+                        settled = True
+                        return record
+                    except _VeFaaSSnapshotSettledFailureError:
+                        settled = True
+                        raise
                 finally:
+                    if not settled and snapshot_id is not None:
+                        try:
+                            self._start_snapshot_watcher(
+                                function_id=function_id,
+                                remote_id=remote_id,
+                                snapshot_id=snapshot_id,
+                            )
+                            handed_off = True
+                        except Exception as watch_exc:
+                            logger.warning(
+                                "Failed to start completion watcher for veFaaS snapshot %s (remote=%s): %s",
+                                snapshot_id,
+                                remote_id,
+                                self._redact(watch_exc),
+                            )
                     with self._lock:
                         remaining = self._acquire_inflight.get(sandbox_id, 1) - 1
                         if remaining <= 0:
                             self._acquire_inflight.pop(sandbox_id, None)
                         else:
                             self._acquire_inflight[sandbox_id] = remaining
-                        snap_remaining = self._snapshotting_remote_ids.get(remote_id, 1) - 1
-                        if snap_remaining <= 0:
-                            self._snapshotting_remote_ids.pop(remote_id, None)
-                        else:
-                            self._snapshotting_remote_ids[remote_id] = snap_remaining
+                        if not handed_off:
+                            self._release_snapshot_fence_locked(remote_id)
+
+    def _release_snapshot_fence_locked(self, remote_id: str) -> None:
+        snap_remaining = self._snapshotting_remote_ids.get(remote_id, 1) - 1
+        if snap_remaining <= 0:
+            self._snapshotting_remote_ids.pop(remote_id, None)
+        else:
+            self._snapshotting_remote_ids[remote_id] = snap_remaining
+
+    def _start_snapshot_watcher(self, *, function_id: str, remote_id: str, snapshot_id: str) -> None:
+        thread = threading.Thread(
+            target=self._watch_snapshot_completion,
+            kwargs={
+                "function_id": function_id,
+                "remote_id": remote_id,
+                "snapshot_id": snapshot_id,
+            },
+            name=f"vefaas-snapshot-watch-{snapshot_id[:12]}",
+            daemon=True,
+        )
+        with self._lock:
+            self._snapshot_watchers.add(thread)
+        try:
+            thread.start()
+        except Exception:
+            with self._lock:
+                self._snapshot_watchers.discard(thread)
+            raise
+
+    def _watch_snapshot_completion(self, *, function_id: str, remote_id: str, snapshot_id: str) -> None:
+        """Keep ``remote_id`` fenced until the control plane confirms ``snapshot_id`` settled."""
+        waiter = threading.Event()
+        try:
+            client = self._get_client()
+            while True:
+                try:
+                    record = client.describe_sandbox_snapshot(function_id, snapshot_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Transient error polling veFaaS snapshot %s (remote=%s): %s",
+                        snapshot_id,
+                        remote_id,
+                        self._redact(exc),
+                    )
+                else:
+                    if record is None:
+                        logger.info("veFaaS snapshot %s (remote=%s) disappeared; releasing teardown fence", snapshot_id, remote_id)
+                        return
+                    if record.is_ready:
+                        logger.info("veFaaS snapshot %s (remote=%s) is Ready; releasing teardown fence", snapshot_id, remote_id)
+                        return
+                    if record.is_terminal_failure:
+                        logger.warning(
+                            "veFaaS snapshot %s (remote=%s) entered terminal state %r; releasing teardown fence",
+                            snapshot_id,
+                            remote_id,
+                            record.status,
+                        )
+                        return
+                waiter.wait(self._snapshot_watch_interval)
+        finally:
+            with self._lock:
+                self._release_snapshot_fence_locked(remote_id)
+                self._snapshot_watchers.discard(threading.current_thread())
+
+    def _join_snapshot_watchers(self) -> None:
+        current = threading.current_thread()
+        with self._lock:
+            watchers = [thread for thread in self._snapshot_watchers if thread is not current]
+        for thread in watchers:
+            if thread.is_alive():
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    raise RuntimeError("veFaaS snapshot completion watcher is still running after join timeout")
 
     def list_snapshots(self, sandbox_id: str | None = None) -> list[VeFaaSSnapshotRecord]:
         """List DeerFlow-scoped snapshots for this veFaaS function, newest first."""
@@ -2689,6 +2798,10 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 self._stop_precache_thread()
             except RuntimeError:
                 threads_stopped = False
+            try:
+                self._join_snapshot_watchers()
+            except RuntimeError:
+                threads_stopped = False
 
             with self._lock:
                 active = list(self._sandboxes.values())
@@ -2708,7 +2821,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             with self._lock:
                 still_pending = len(self._pending_destroys) + len(self._pending_rollbacks)
                 in_flight_acquires = self._acquires
-                if in_flight_acquires or still_pending or not threads_stopped:
+                if in_flight_acquires or still_pending or not threads_stopped or self._snapshotting_remote_ids:
                     raise _VeFaaSShutdownIncompleteError(f"veFaaS shutdown incomplete: {in_flight_acquires} acquire(s) active, {still_pending} teardown(s) pending, threads_stopped={threads_stopped}; retry shutdown")
                 self._shutdown_complete = True
 

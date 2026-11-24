@@ -2185,6 +2185,7 @@ class TestVeFaaSSnapshotLifecycleAndIsolation:
         server = _FakeVeFaaSServer()
         server.snapshot_status_sequence = ["Creating", "Ready"]
         provider, _, _ = _install_provider(monkeypatch, tmp_path, server=server)
+        provider._snapshot_watch_interval = 0.01
         try:
             sid = provider.acquire("t-pub-snap", user_id="u1")
             snap_ready = provider.create_snapshot(sid, snapshot_type="full", retention_days=10, wait=True)
@@ -2208,6 +2209,13 @@ class TestVeFaaSSnapshotLifecycleAndIsolation:
 
             with pytest.raises(RuntimeError, match="not tracked"):
                 provider.create_snapshot("unknown-sandbox")
+
+            # Wait for the async snapshot watcher to observe Ready and clear the teardown fence.
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            assert not provider._snapshotting_remote_ids
         finally:
             provider.shutdown()
 
@@ -2512,6 +2520,169 @@ class TestVeFaaSImagePrecache:
             assert sum(1 for action, _, _ in server.requests if action == "KillSandbox") == 1
         finally:
             allow_ready.set()
+            provider.shutdown()
+
+    @pytest.mark.parametrize("from_warm_pool", [False, True])
+    def test_async_snapshot_retains_fence_across_shutdown_and_warm_reap_until_settled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        from_warm_pool: bool,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.snapshot_status_sequence = ["Creating"]
+        orig_handler = server.handler
+        transient_503_seen = threading.Event()
+        creating_seen = threading.Event()
+        allow_ready = threading.Event()
+        describe_calls = {"count": 0}
+
+        def gated_handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "DescribeSandboxSnapshot":
+                describe_calls["count"] += 1
+                if describe_calls["count"] == 1:
+                    transient_503_seen.set()
+                    return httpx.Response(
+                        503,
+                        json={"ResponseMetadata": {"RequestId": "req-snap-503", "Error": {"Code": "ServiceUnavailable", "Message": "transient 503"}}},
+                    )
+                if not allow_ready.is_set():
+                    creating_seen.set()
+                    return orig_handler(req)
+                payload = json.loads(req.content.decode("utf-8"))
+                snap_rec = server.snapshots.get(payload["SnapshotId"])
+                if snap_rec is not None:
+                    snap_rec["Status"] = "Ready"
+                    snap_rec["_status_queue"] = ["Ready"]
+            return orig_handler(req)
+
+        server.handler = gated_handler  # type: ignore[method-assign]
+        provider, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={"idle_timeout": 10},
+        )
+        provider._snapshot_watch_interval = 0.01
+        try:
+            sid = provider.acquire("t-async-snap", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            remote_aio = provider._sandboxes[sid].sandbox
+            if from_warm_pool:
+                provider.release(sid)
+                assert sid in provider._warm_pool
+
+            snap = provider.create_snapshot(sid, wait=False)
+            assert snap.status == "Creating"
+            assert snap.sandbox_id == remote_id
+            assert not provider._acquire_inflight
+            assert transient_503_seen.wait(timeout=5)
+            assert creating_seen.wait(timeout=5)
+            assert remote_id in provider._snapshotting_remote_ids
+
+            if from_warm_pool:
+                # Warm-pool idle reaping and replica eviction must skip the fenced source.
+                provider._warm_pool[sid] = (provider._warm_pool[sid][0], time.monotonic() - 120.0)
+                provider._reap_expired_warm(idle_timeout=10)
+                assert provider._evict_oldest_warm() is None
+                assert sid in provider._warm_pool
+                assert remote_id in server.sandboxes
+                assert not any(action == "KillSandbox" for action, _, _ in server.requests)
+
+            # Shutdown must defer teardown and keep the client open until the watcher sees settlement.
+            with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError, match="snapshot"):
+                provider.shutdown()
+            assert not remote_aio.closed
+            assert remote_id in server.sandboxes
+            assert not any(action == "KillSandbox" for action, _, _ in server.requests)
+            assert provider._client is not None and not provider._client._closed
+
+            # Let the snapshot settle to Ready; watcher releases the fence and shutdown succeeds.
+            allow_ready.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            assert not provider._snapshotting_remote_ids
+
+            provider.shutdown()
+            assert remote_id not in server.sandboxes
+            assert not provider._snapshot_watchers
+            assert sum(1 for action, _, _ in server.requests if action == "KillSandbox") == 1
+        finally:
+            allow_ready.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            provider.shutdown()
+
+    def test_timed_out_sync_snapshot_retains_fence_until_watcher_confirms_settlement(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.snapshot_status_sequence = ["Creating"]
+        orig_handler = server.handler
+        allow_terminal = threading.Event()
+        watcher_polled_creating = threading.Event()
+        sync_finished = threading.Event()
+
+        def gated_handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "DescribeSandboxSnapshot":
+                if allow_terminal.is_set():
+                    payload = json.loads(req.content.decode("utf-8"))
+                    snap_rec = server.snapshots.get(payload["SnapshotId"])
+                    if snap_rec is not None:
+                        snap_rec["Status"] = "Failed"
+                        snap_rec["_status_queue"] = ["Failed"]
+                elif sync_finished.is_set():
+                    watcher_polled_creating.set()
+            return orig_handler(req)
+
+        server.handler = gated_handler  # type: ignore[method-assign]
+        provider, _, _ = _install_provider(monkeypatch, tmp_path, server=server)
+        provider._snapshot_watch_interval = 0.01
+        try:
+            sid = provider.acquire("t-timeout-snap", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            remote_aio = provider._sandboxes[sid].sandbox
+
+            # Synchronous wait times out while remote snapshot is still Creating.
+            with pytest.raises(TimeoutError, match="Timed out waiting for veFaaS snapshot"):
+                provider.create_snapshot(sid, wait=True, timeout=0.01)
+            sync_finished.set()
+
+            assert not provider._acquire_inflight
+            assert remote_id in provider._snapshotting_remote_ids
+            assert watcher_polled_creating.wait(timeout=5)
+
+            # Shutdown must remain deferred while the watcher continues polling.
+            with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError, match="snapshot"):
+                provider.shutdown()
+            assert not remote_aio.closed
+            assert remote_id in server.sandboxes
+            assert not any(action == "KillSandbox" for action, _, _ in server.requests)
+
+            # Once control plane reports terminal failure, watcher clears the fence and shutdown succeeds.
+            allow_terminal.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            assert not provider._snapshotting_remote_ids
+
+            provider.shutdown()
+            assert remote_id not in server.sandboxes
+            assert not provider._snapshot_watchers
+            assert sum(1 for action, _, _ in server.requests if action == "KillSandbox") == 1
+        finally:
+            allow_terminal.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
             provider.shutdown()
 
     @pytest.mark.parametrize("auto_pause", [True, False])
