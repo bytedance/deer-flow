@@ -116,6 +116,27 @@ def test_before_summarization_hook_receives_messages_before_compression() -> Non
     assert [message.content for message in result["messages"][1:]] == ["user-2", "assistant-2"]
 
 
+def test_before_summarization_hook_receives_the_imported_history_channel() -> None:
+    """Compaction removes the copied messages and their marks; the hook still learns the thread is a copy."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+
+    middleware.before_model({"messages": _messages(), "imported_history": "share"}, _runtime())
+    middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert [event.imported_history for event in captured] == ["share", None]
+
+
+@pytest.mark.anyio
+async def test_abefore_summarization_hook_receives_the_imported_history_channel() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+
+    await middleware.abefore_model({"messages": _messages(), "imported_history": "share"}, _runtime())
+
+    assert [event.imported_history for event in captured] == ["share"]
+
+
 def test_compaction_preserves_all_state_system_messages_in_order() -> None:
     """State-level instructions, including legacy untagged reminders, stay authoritative."""
     captured: list[SummarizationEvent] = []

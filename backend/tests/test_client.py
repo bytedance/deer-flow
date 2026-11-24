@@ -1582,21 +1582,23 @@ class TestClientMcpSelection:
 
 class TestEnsureAgent:
     @pytest.mark.parametrize(
-        ("selection", "saved_model"),
+        ("selection", "saved_model", "when_thinking_disabled"),
         [
-            ("agent", "agent-model"),
-            ("constructor", "agent-model"),
-            ("request", "agent-model"),
-            ("global", "agent-model"),
-            ("agent", ""),
-            ("agent", "retired-profile"),
-            ("constructor", "retired-profile"),
-            ("request", "retired-profile"),
-            ("invalid-constructor", "agent-model"),
-            ("invalid-request", "agent-model"),
+            ("agent", "agent-model", None),
+            ("constructor", "agent-model", None),
+            ("request", "agent-model", None),
+            ("global", "agent-model", None),
+            ("agent", "", None),
+            ("agent", "retired-profile", None),
+            ("constructor", "retired-profile", None),
+            ("request", "retired-profile", None),
+            ("invalid-constructor", "agent-model", None),
+            ("invalid-request", "agent-model", None),
+            pytest.param("agent", "agent-model", {"max_tokens": 16}, id="thinking-disabled-lower-budget"),
+            pytest.param("agent", "agent-model", {"max_tokens": None}, id="thinking-disabled-uncapped"),
         ],
     )
-    def test_named_agent_model_profile_reaches_provider(self, client, tmp_path, monkeypatch, selection, saved_model):
+    def test_named_agent_model_profile_reaches_provider(self, client, tmp_path, monkeypatch, selection, saved_model, when_thinking_disabled):
         import httpx
 
         from deerflow.config.app_config import AppConfig
@@ -1620,10 +1622,21 @@ class TestEnsureAgent:
         with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
             app_config = AppConfig(
                 models=[
-                    {"name": name, "use": "langchain_openai:ChatOpenAI", "model": name, "api_key": "offline-placeholder", "http_client": transport, "use_responses_api": False, "temperature": 0.2, "max_tokens": 64}
+                    {
+                        "name": name,
+                        "use": "langchain_openai:ChatOpenAI",
+                        "model": name,
+                        "api_key": "offline-placeholder",
+                        "http_client": transport,
+                        "use_responses_api": False,
+                        "temperature": 0.2,
+                        "max_tokens": 64,
+                        "supports_thinking": True,
+                        "when_thinking_disabled": when_thinking_disabled,
+                    }
                     for name in ("global-default", "agent-model", "explicit-model")
                 ],
-                tools=[],
+                tools=[{"name": "write_file", "group": "file:write", "use": "deerflow.sandbox.tools:write_file_tool"}],
                 sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
             )
             app_config.tool_search.enabled = False
@@ -1633,6 +1646,8 @@ class TestEnsureAgent:
             client._agent_name = None if selection == "global" else "researcher"
             client._model_name = "explicit-model" if selection == "constructor" else "unknown-explicit" if selection == "invalid-constructor" else None
             overrides = {"model_name": "explicit-model"} if selection == "request" else {"model_name": "unknown-explicit"} if selection == "invalid-request" else {}
+            if when_thinking_disabled is not None:
+                overrides["thinking_enabled"] = False
             # Keep saved configuration, the real graph, model factory and SDK;
             # isolate prompt/middleware work unrelated to model selection.
             with (
@@ -1651,11 +1666,22 @@ class TestEnsureAgent:
                 assert client.chat("Again", thread_id="model-profile", user_id="test-user", **overrides) == "Done"
 
         expected_model = "explicit-model" if selection in {"constructor", "request"} else "global-default" if selection == "global" or saved_model in {"", "retired-profile"} else "agent-model"
+        expected_max_tokens = 64 if selection == "global" else 32
+        if when_thinking_disabled is not None:
+            expected_max_tokens = when_thinking_disabled["max_tokens"]
         assert len(requests) == 2
         for request in requests:
             assert request["model"] == expected_model
             assert request["temperature"] == (0.2 if selection == "global" else 0.7)
-            assert request["max_completion_tokens"] == (64 if selection == "global" else 32)
+            write_file = next(tool["function"] for tool in request["tools"] if tool["function"]["name"] == "write_file")
+            budget_notes = [line for line in write_file["description"].splitlines() if line.startswith("PER-RESPONSE BUDGET:")]
+            if expected_max_tokens is None:
+                assert "max_completion_tokens" not in request
+                assert not budget_notes
+            else:
+                assert request["max_completion_tokens"] == expected_max_tokens
+                assert len(budget_notes) == 1
+                assert budget_notes[0].startswith(f"PER-RESPONSE BUDGET: your output limit is {expected_max_tokens} tokens")
 
     @pytest.mark.parametrize(
         ("groups", "expected"),

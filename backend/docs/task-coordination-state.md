@@ -40,8 +40,22 @@ an optional `project_id` to create its thread in an existing project.
 POST /api/coordination/tasks
 Content-Type: application/json
 
-{"request_id":"review-27","objective":"Review the report","assistant_id":"lead_agent"}
+{
+  "request_id": "review-27",
+  "objective": "Review the report",
+  "assistant_id": "lead_agent",
+  "run": {"recursion_limit": 400, "thinking_enabled": true, "is_plan_mode": false}
+}
 ```
+
+The optional `run` object accepts a positive integer `recursion_limit` and
+boolean `thinking_enabled` and `is_plan_mode` flags. Omit any field to use the
+normal run default. Each admission caps the requested recursion limit at the
+Gateway's current `max_recursion_limit`. The task view shows the requested
+settings in `task.run_settings`, or `null` when the task uses defaults.
+Settings are saved at creation and apply to every turn, including follow-ups,
+approval responses, and restart recovery. Reusing a create request ID with
+changed settings returns HTTP 409.
 
 The response includes the task, its assignment (agent and thread), and the
 latest execution. After the task has admitted a Run, replaying the same create
