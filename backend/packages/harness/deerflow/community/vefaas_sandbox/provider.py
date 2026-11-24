@@ -1467,14 +1467,26 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 if current.is_running:
                     already_running = True
                 elif current.is_paused:
-                    claimed = self._ownership.claim(sandbox_id)
-                    if claimed:
-                        lease_held = True
-                        try:
+                    taken = self._ownership.take(sandbox_id)
+                    if not taken:
+                        raise _PeerTeardownError(f"veFaaS sandbox {sandbox_id} is being destroyed by a peer")
+                    lease_held = True
+                    try:
+                        lease_lost = False
+                        resumed_by_us = False
+                        with self._ownership_lease_heartbeat(sandbox_id) as heartbeat:
+
+                            def _refresh_resume_lease() -> bool:
+                                if heartbeat["lost"]:
+                                    return False
+                                if not self._refresh_owned_lease(sandbox_id):
+                                    heartbeat["lost"] = True
+                                    return False
+                                return True
+
                             refreshed = client.describe_sandbox(function_id, remote_id)
                             if refreshed is None or refreshed.is_terminal_failure:
                                 return "absent", None
-                            resumed_by_us = False
                             if refreshed.is_paused:
                                 try:
                                     client.resume_sandbox(
@@ -1485,11 +1497,33 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                                     resumed_by_us = True
                                 except VeFaaSSandboxNotFoundError:
                                     return "absent", None
-                            self._wait_for_remote_running(function_id, remote_id, deadline=resume_deadline)
-                            url, headers = self._resolve_data_plane(remote_id)
-                            remaining = max(1, int(math.ceil(resume_deadline - time.monotonic())))
-                            if not wait_for_sandbox_ready(url, timeout=remaining, headers=headers):
-                                raise TimeoutError(f"Resumed veFaaS sandbox {remote_id} did not become HTTP-ready within {self._config['ready_timeout']}s")
+                            running = self._wait_for_remote_running(
+                                function_id,
+                                remote_id,
+                                deadline=resume_deadline,
+                                refresh_lease=_refresh_resume_lease,
+                            )
+                            if running is None:
+                                lease_lost = True
+                            else:
+                                url, headers = self._resolve_data_plane(remote_id)
+                                remaining = max(1, int(math.ceil(resume_deadline - time.monotonic())))
+                                if not wait_for_sandbox_ready(url, timeout=remaining, headers=headers):
+                                    if heartbeat["lost"]:
+                                        lease_lost = True
+                                    else:
+                                        raise TimeoutError(f"Resumed veFaaS sandbox {remote_id} did not become HTTP-ready within {self._config['ready_timeout']}s")
+
+                        if lease_lost or heartbeat["lost"] or not self._verify_owned_lease_strict(sandbox_id):
+                            lease_held = False
+                            post = client.describe_sandbox(function_id, remote_id)
+                            if post is None or post.is_terminal_failure:
+                                return "absent", None
+                            if post.is_running:
+                                already_running = True
+                            else:
+                                raise _PeerTeardownError(f"Lost ownership lease while resuming veFaaS sandbox {sandbox_id} (remote={remote_id})")
+                        else:
                             # Hand ownership lifecycle to _adopt_running_sandbox from this point on.
                             lease_held = False
                             tracked = self._adopt_running_sandbox(
@@ -1505,9 +1539,9 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                                 logger.info("Resumed paused veFaaS sandbox %s (remote=%s)", sandbox_id, remote_id)
                                 return "adopted", tracked
                             return "unadoptable", None
-                        finally:
-                            if lease_held:
-                                self._release_ownership_best_effort(sandbox_id, context="failed resume")
+                    finally:
+                        if lease_held:
+                            self._release_ownership_best_effort(sandbox_id, context="failed resume")
 
             if already_running:
                 url, headers = self._resolve_data_plane(remote_id)
@@ -1606,9 +1640,18 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 return adopted
         return None
 
-    def _wait_for_remote_running(self, function_id: str, remote_sandbox_id: str, *, deadline: float) -> VeFaaSSandboxRecord:
+    def _wait_for_remote_running(
+        self,
+        function_id: str,
+        remote_sandbox_id: str,
+        *,
+        deadline: float,
+        refresh_lease: Callable[[], bool] | None = None,
+    ) -> VeFaaSSandboxRecord | None:
         client = self._get_client()
         while True:
+            if refresh_lease is not None and not refresh_lease():
+                return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(f"Timed out waiting for veFaaS sandbox {remote_sandbox_id} to reach Running state")
@@ -1837,6 +1880,66 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         if record is None:
             return True
         return record.is_terminal_failure
+
+    def _refresh_owned_lease(self, sandbox_id: str) -> bool:
+        """Refresh our normal ``own:`` lease; return False if a peer took or started destroying it."""
+        try:
+            outcome = self._ownership.renew(sandbox_id)
+        except OwnershipBackendError as exc:
+            logger.warning("Failed to refresh ownership lease for veFaaS sandbox %s: %s", sandbox_id, exc)
+            return True
+        if outcome is RenewOutcome.RENEWED:
+            return True
+        if outcome is RenewOutcome.LAPSED:
+            try:
+                return self._ownership.claim(sandbox_id)
+            except OwnershipBackendError as exc:
+                logger.warning("Failed to re-claim lapsed ownership lease for veFaaS sandbox %s: %s", sandbox_id, exc)
+                return True
+        return False
+
+    def _verify_owned_lease_strict(self, sandbox_id: str) -> bool:
+        """Authoritatively confirm we still hold ``own:`` for ``sandbox_id`` (fail closed on backend errors)."""
+        outcome = self._ownership.renew(sandbox_id)
+        if outcome is RenewOutcome.RENEWED:
+            return True
+        if outcome is RenewOutcome.LAPSED:
+            return self._ownership.claim(sandbox_id)
+        return False
+
+    @contextmanager
+    def _ownership_lease_heartbeat(self, sandbox_id: str) -> Iterator[dict[str, bool]]:
+        """Keep ``sandbox_id``'s normal ownership lease alive across long resume/readiness waits."""
+        state = {"lost": False}
+        stop = threading.Event()
+        interval = self._ownership_config.renewal_interval_seconds
+
+        def _beat() -> None:
+            while not stop.wait(interval):
+                try:
+                    if not self._refresh_owned_lease(sandbox_id):
+                        state["lost"] = True
+                        logger.warning("Lost ownership lease for veFaaS sandbox %s during resume", sandbox_id)
+                        return
+                except Exception as exc:
+                    logger.warning("Failed to refresh ownership lease for veFaaS sandbox %s: %s", sandbox_id, self._redact(exc))
+
+        thread: threading.Thread | None = None
+        if interval > 0:
+            thread = threading.Thread(
+                target=_beat,
+                name="vefaas-sandbox-resume-lease",
+                daemon=True,
+            )
+            thread.start()
+        try:
+            yield state
+        finally:
+            stop.set()
+            if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    logger.warning("veFaaS resume lease heartbeat for %s did not exit within 5s", sandbox_id)
 
     @contextmanager
     def _teardown_lease_heartbeat(self, sandbox_id: str) -> Iterator[dict[str, bool]]:

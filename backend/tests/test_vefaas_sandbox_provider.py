@@ -3122,6 +3122,238 @@ class TestVeFaaSImagePrecache:
             allow_resume.set()
             provider_d.shutdown()
 
+    def test_auto_paused_warm_sandbox_hands_off_ownership_to_peer_and_rejects_teardown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: Worker A retains an auto-paused sandbox in its warm pool and keeps renewing its normal
+        # `own:` lease. Worker B receives the next turn, takes ownership, resumes the sandbox, and Worker A
+        # forgets it on renewal without killing it.
+        server = _FakeVeFaaSServer()
+        store_a = MemoryOwnershipStore(owner_id="worker-a", ttl_seconds=60.0)
+        store_b = MemoryOwnershipStore(owner_id="worker-b", ttl_seconds=60.0)
+        store_b._leases = store_a._leases
+        store_b._lock = store_a._lock
+        monkeypatch.setattr(store_a, "close", lambda: None)
+        monkeypatch.setattr(store_b, "close", lambda: None)
+
+        persisted_files: dict[str, bytes] = {}
+
+        class _PersistingAio(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_files
+
+        worker_a, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "worker-a",
+            server=server,
+            sandbox_overrides={"vefaas": {"auto_pause": True}},
+        )
+        worker_b, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "worker-b",
+            server=server,
+            sandbox_overrides={"vefaas": {"auto_pause": True}},
+        )
+        worker_a._ownership = store_a
+        worker_b._ownership = store_b
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAio)
+        monkeypatch.setattr(
+            provider_mod,
+            "wait_for_sandbox_ready",
+            lambda _url, timeout=30, headers=None: bool(headers and server.sandboxes.get(headers.get(provider_mod.INSTANCE_ROUTING_HEADER, ""), {}).get("Status") == "Running"),
+        )
+        try:
+            sid = worker_a.acquire("t-auto-pause-handoff", user_id="u1")
+            remote_id = worker_a._sandboxes[sid].remote_sandbox_id
+            persisted_files["state"] = b"kept-across-workers"
+            worker_a.release(sid)
+            assert sid in worker_a._warm_pool
+            # Worker A keeps renewing its normal lease while veFaaS auto-pauses the remote sandbox.
+            server.sandboxes[remote_id]["Status"] = "Paused"
+            worker_a._renew_leases_once()
+            assert store_a.owner(sid) == "worker-a"
+
+            # Next turn lands on Worker B: must hand off normal ownership and resume without timing out.
+            adopted_sid = worker_b.acquire("t-auto-pause-handoff", user_id="u1")
+            assert adopted_sid == sid
+            assert worker_b._sandboxes[sid].remote_sandbox_id == remote_id
+            assert store_b.owner(sid) == "worker-b"
+            assert sum(1 for action, _, _ in server.requests if action == "CreateSandbox") == 1
+            assert sum(1 for action, _, _ in server.requests if action == "ResumeSandbox") == 1
+            assert persisted_files["state"] == b"kept-across-workers"
+
+            # Worker A observes LOST on its next renewal and forgets the sandbox without killing it.
+            worker_a._renew_leases_once()
+            assert sid not in worker_a._warm_pool
+            worker_a.shutdown()
+            assert remote_id in server.sandboxes
+            assert not any(action == "KillSandbox" for action, _, _ in server.requests)
+        finally:
+            worker_a.shutdown()
+            worker_b.shutdown()
+
+        # Case B: Destructive teardown lease (`del:`) held by Worker A MUST still reject Worker B's resume.
+        server_del = _FakeVeFaaSServer()
+        sid_del = derive_sandbox_scope_token(user_id="u1", thread_id="t-peer-del-paused")
+        server_del.sandboxes["vefaas-del-paused"] = {
+            "Id": "vefaas-del-paused",
+            "FunctionId": "fn-demo-app",
+            "Status": "Paused",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_del,
+            },
+        }
+        store_del_a = MemoryOwnershipStore(owner_id="worker-del-a", ttl_seconds=60.0)
+        store_del_b = MemoryOwnershipStore(owner_id="worker-del-b", ttl_seconds=60.0)
+        store_del_b._leases = store_del_a._leases
+        store_del_b._lock = store_del_a._lock
+        assert store_del_a.claim(sid_del, for_destroy=True) is True
+
+        worker_del_b, _, _ = _install_provider(monkeypatch, tmp_path / "worker-del-b", server=server_del)
+        worker_del_b._ownership = store_del_b
+        try:
+            with pytest.raises(provider_mod._PeerTeardownError, match="destroyed by a peer"):
+                worker_del_b.acquire("t-peer-del-paused", user_id="u1")
+            assert not any(action == "ResumeSandbox" for action, _, _ in server_del.requests)
+            assert not any(action == "CreateSandbox" for action, _, _ in server_del.requests)
+            assert store_del_a.owner(sid_del) == "worker-del-a"
+        finally:
+            worker_del_b.shutdown()
+
+    def test_resume_refreshes_ownership_lease_across_long_running_and_http_readiness_waits(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: Resume status polling + HTTP readiness together exceed the ownership TTL.
+        # Poll-tick refresh and the resume lease heartbeat keep ownership alive so a peer cannot
+        # obtain a destructive claim and kill the sandbox mid-resume.
+        server = _FakeVeFaaSServer()
+        sid = derive_sandbox_scope_token(user_id="u1", thread_id="t-resume-long-ttl")
+        server.sandboxes["vefaas-long-resume"] = {
+            "Id": "vefaas-long-resume",
+            "FunctionId": "fn-demo-app",
+            "Status": "Paused",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid,
+            },
+        }
+        server.resume_status_sequence = ["Resuming", "Resuming", "Running"]
+        clock = {"now": 100.0}
+        owner_store = MemoryOwnershipStore(owner_id="worker-resumer", ttl_seconds=10.0, time_source=lambda: clock["now"])
+        peer_store = MemoryOwnershipStore(owner_id="worker-peer", ttl_seconds=10.0, time_source=lambda: clock["now"])
+        peer_store._leases = owner_store._leases
+        peer_store._lock = owner_store._lock
+
+        orig_handler = server.handler
+
+        def advancing_handler(req: httpx.Request) -> httpx.Response:
+            resp = orig_handler(req)
+            if req.url.params.get("Action") == "DescribeSandbox":
+                body = resp.json().get("Result", {})
+                if body.get("Status") == "Resuming":
+                    # Advance clock by 6s per poll (12s total > 10s TTL) to verify poll-tick renewal.
+                    clock["now"] += 6.0
+            return resp
+
+        server.handler = advancing_handler  # type: ignore[method-assign]
+        provider, _, _ = _install_provider(monkeypatch, tmp_path / "long-resume", server=server)
+        provider._ownership = owner_store
+        provider._ownership_config = provider._ownership_config.model_copy(update={"renewal_interval_seconds": 0.01})
+
+        class _PreInitAio(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files[provider_mod._INIT_MARKER_PATH] = f"{sid}\n".encode()
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PreInitAio)
+
+        readiness_peer_claims: list[bool] = []
+        heartbeat_renewed = threading.Event()
+        orig_renew = owner_store.renew
+
+        def tracking_renew(target_sid: str) -> RenewOutcome:
+            outcome = orig_renew(target_sid)
+            heartbeat_renewed.set()
+            return outcome
+
+        monkeypatch.setattr(owner_store, "renew", tracking_renew)
+
+        def slow_ready(_url: str, timeout: int = 30, headers: Any = None) -> bool:
+            del timeout, headers
+            # Advance past TTL in two steps during HTTP readiness while the background heartbeat refreshes.
+            for _ in range(2):
+                heartbeat_renewed.clear()
+                clock["now"] += 6.0
+                assert heartbeat_renewed.wait(timeout=5)
+                readiness_peer_claims.append(peer_store.claim(sid, for_destroy=True))
+            return True
+
+        monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", slow_ready)
+        try:
+            acquired = provider.acquire("t-resume-long-ttl", user_id="u1")
+            assert acquired == sid
+            assert provider._sandboxes[sid].remote_sandbox_id == "vefaas-long-resume"
+            assert clock["now"] >= 124.0
+            assert readiness_peer_claims == [False, False]
+            assert owner_store.owner(sid) == "worker-resumer"
+        finally:
+            provider.shutdown()
+
+        # Case B: If ownership is lost to a peer's destructive claim before HTTP readiness completes,
+        # strict verification refuses adoption with ownership_claimed=True and raises _PeerTeardownError.
+        server_lost = _FakeVeFaaSServer()
+        sid_lost = derive_sandbox_scope_token(user_id="u1", thread_id="t-resume-lost-lease")
+        server_lost.sandboxes["vefaas-lost-resume"] = {
+            "Id": "vefaas-lost-resume",
+            "FunctionId": "fn-demo-app",
+            "Status": "Paused",
+            "Pending": False,
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_lost,
+            },
+        }
+        clock_b = {"now": 200.0}
+        owner_b = MemoryOwnershipStore(owner_id="worker-resumer-b", ttl_seconds=10.0, time_source=lambda: clock_b["now"])
+        peer_b = MemoryOwnershipStore(owner_id="worker-destroyer-b", ttl_seconds=60.0, time_source=lambda: clock_b["now"])
+        peer_b._leases = owner_b._leases
+        peer_b._lock = owner_b._lock
+
+        provider_b, _, _ = _install_provider(monkeypatch, tmp_path / "lost-resume", server=server_lost)
+        provider_b._ownership = owner_b
+        provider_b._ownership_config = provider_b._ownership_config.model_copy(update={"renewal_interval_seconds": 60.0})
+
+        class _PreInitAioB(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files[provider_mod._INIT_MARKER_PATH] = f"{sid_lost}\n".encode()
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PreInitAioB)
+
+        def steal_during_ready(_url: str, timeout: int = 30, headers: Any = None) -> bool:
+            del timeout, headers
+            # Simulate worker stall past TTL + peer obtaining a destructive teardown lease.
+            clock_b["now"] += 15.0
+            assert peer_b.claim(sid_lost, for_destroy=True) is True
+            return True
+
+        monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", steal_during_ready)
+        try:
+            with pytest.raises(provider_mod._PeerTeardownError, match="destroyed by a peer|Lost ownership"):
+                provider_b.acquire("t-resume-lost-lease", user_id="u1")
+            assert sid_lost not in provider_b._sandboxes
+            assert peer_b.owner(sid_lost) == "worker-destroyer-b"
+        finally:
+            provider_b.shutdown()
+
 
 # ── 10. Prewarm Integration ──────────────────────────────────────────────
 
