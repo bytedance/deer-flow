@@ -20,9 +20,9 @@ ROUTINE_SHELL_EXAMPLE = "- Run a routine test, build, or git command directly. U
 NO_BASH_ROUTINE_EXAMPLE = "- Do a routine file read, search, or edit directly. No `bash` tool is bound, and a subagent has none either."
 
 
-def _app_config(*, allow_host_bash=False, acp_agents=None):
+def _app_config(*, sandbox_use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=False, acp_agents=None):
     return SimpleNamespace(
-        sandbox=SimpleNamespace(use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=allow_host_bash, mounts=[]),
+        sandbox=SimpleNamespace(use=sandbox_use, allow_host_bash=allow_host_bash, mounts=[]),
         skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
@@ -71,9 +71,9 @@ def test_prompt_defaults_to_the_script_guidance(render):
 
 @pytest.mark.parametrize("max_concurrent", [1, 3])
 def test_subagent_section_agrees_with_the_lead_about_bash(render, max_concurrent):
-    # Host bash allowed, so the registry offers the bash subagent, but the lead's own tools lack bash
+    # The provider supports bash, but the lead's own tools can lack it
     # (for example a custom agent's tool_groups); the bash subagent inherits those groups.
-    config = _app_config(allow_host_bash=True)
+    config = _app_config(sandbox_use="deerflow.community.aio_sandbox:AioSandboxProvider")
 
     with_bash = render(config, subagent_enabled=True, max_concurrent_subagents=max_concurrent, bash_available=True)
     without_bash = render(config, subagent_enabled=True, max_concurrent_subagents=max_concurrent, bash_available=False)
@@ -94,9 +94,8 @@ def test_subagent_section_agrees_with_the_lead_about_bash(render, max_concurrent
 
 
 @pytest.mark.parametrize("max_concurrent", [1, 3])
-def test_subagent_examples_drop_shell_work_when_host_bash_is_off(render, max_concurrent):
-    # The default local sandbox: the registry drops the bash subagent and the lead binds no bash.
-    prompt = render(_app_config(allow_host_bash=False), subagent_enabled=True, max_concurrent_subagents=max_concurrent, bash_available=False)
+def test_subagent_examples_drop_shell_work_on_local_provider(render, max_concurrent):
+    prompt = render(_app_config(allow_host_bash=True), subagent_enabled=True, max_concurrent_subagents=max_concurrent, bash_available=False)
 
     assert "- **bash**:" not in prompt
     assert "Run a routine test, build, or git command" not in prompt
@@ -107,7 +106,7 @@ def test_subagent_examples_drop_shell_work_when_host_bash_is_off(render, max_con
 @pytest.mark.parametrize("max_concurrent", [1, 3])
 def test_subagent_examples_do_not_name_a_bash_subagent_that_is_not_offered(render, max_concurrent):
     # A custom agent may bind bash itself while its allowed_subagents leave the bash subagent out.
-    prompt = render(_app_config(allow_host_bash=True), subagent_enabled=True, max_concurrent_subagents=max_concurrent, allowed_subagents=["general-purpose"], bash_available=True)
+    prompt = render(_app_config(sandbox_use="deerflow.community.aio_sandbox:AioSandboxProvider"), subagent_enabled=True, max_concurrent_subagents=max_concurrent, allowed_subagents=["general-purpose"], bash_available=True)
 
     assert "- **bash**:" not in prompt
     assert "- Run a routine test, build, or git command directly.\n" in prompt

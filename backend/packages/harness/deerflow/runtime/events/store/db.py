@@ -50,13 +50,11 @@ class DbRunEventStore(RunEventStore):
         # single-process case where two coroutines interleave between the
         # max(seq) read and the INSERT and would otherwise collide on seq.
         #
-        # The weak registry preserves one lock generation while an admitted
-        # holder/waiter still references it. A separate pin keeps the historical
-        # one-lock-per-live-thread behavior until delete_by_thread() explicitly
-        # retires that thread; after retirement, outstanding users alone keep
-        # the generation alive until they drain.
+        # The registry is weak, as in the JSONL store: a lock generation lives
+        # exactly as long as an admitted holder/waiter references it, and an
+        # idle thread keeps no entry. Never pin locks strongly; every thread a
+        # process ever wrote would then hold one until it was deleted.
         self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
-        self._write_lock_pins: dict[str, asyncio.Lock] = {}
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         """Return (creating if needed) the per-thread seq-assignment lock."""
@@ -64,9 +62,6 @@ class DbRunEventStore(RunEventStore):
         if lock is None:
             lock = asyncio.Lock()
             self._write_locks[thread_id] = lock
-        # A fresh caller after deletion makes the thread live again. Repin the
-        # current generation so normal live-thread registry lifetime is stable.
-        self._write_lock_pins[thread_id] = lock
         return lock
 
     async def validate_producer_fencing(self) -> None:
@@ -707,14 +702,12 @@ class DbRunEventStore(RunEventStore):
                     # owner still need the allocation floor for deleted runs.
                     remaining_events = select(RunEventRow.id).where(RunEventRow.thread_id == thread_id).exists()
                     await session.execute(delete(RunEventThreadSeqRow).where(RunEventThreadSeqRow.thread_id == thread_id, ~remaining_events))
-            # Retire the live-thread pin, but never remove the weak registry
-            # entry directly. asyncio.Lock.release() clears ``locked()`` before
-            # a queued waiter resumes, so an unlocked check can observe the
-            # handoff window and split one thread onto two lock generations.
-            # Holders/waiters keep the old generation alive until they drain; a
-            # later caller therefore resolves that same lock instead of racing
-            # it with a fresh one.
-            self._write_lock_pins.pop(thread_id, None)
+            # The weak registry entry is left alone on purpose.
+            # asyncio.Lock.release() clears ``locked()`` before a queued waiter
+            # resumes, so an unlocked check can observe the handoff window and
+            # split one thread onto two lock generations. Holders/waiters keep
+            # the generation alive until they drain; a later caller therefore
+            # resolves that same lock instead of racing it with a fresh one.
         return count
 
     async def delete_by_run(
@@ -726,8 +719,7 @@ class DbRunEventStore(RunEventStore):
     ):
         """Delete one run's events inside the thread mutation fence.
 
-        Shares ``delete_by_thread``'s critical section; deleting a single run
-        leaves the thread alive, so the write-lock pin is deliberately kept.
+        Shares ``delete_by_thread``'s critical section.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_run")
         async with self._get_write_lock(thread_id):
