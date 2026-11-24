@@ -1779,6 +1779,7 @@ sandbox:
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
+   overflow_policy: wait              # optional: reject adds a process-local hard cap
    idle_timeout: 600                  # warm seconds before destroy; 0 disables
    environment:
       PYTHONUNBUFFERED: "1"
@@ -1820,7 +1821,12 @@ horizon. File transfer uses OpenSandbox's native filesystem API; bounded
 `find`/`grep` commands implement the directory and content-search surface.
 Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
-implemented, so `replicas` is a per-Gateway-process soft cap.
+implemented, so `replicas` is a per-Gateway-process soft cap by default. With
+`overflow_policy: reject`, it becomes a process-local hard cap that also counts
+in-flight creates. If all slots are occupied and no warm sandbox can be evicted,
+acquisition raises `SandboxCapacityExceededError` before calling the SDK. This
+can protect a namespace ResourceQuota only when one Gateway process owns the
+provider and `replicas` does not exceed the quota's pod capacity.
 
 **boxd Machine Sandbox** (runs each sandbox as an isolated [boxd](https://boxd.sh?ref=deer-flow) machine):
 

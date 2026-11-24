@@ -37,6 +37,7 @@ from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
 from deerflow.config import ExtensionsConfig, SkillsConfig
 from deerflow.config.extensions_config import SkillStateConfig
 from deerflow.config.paths import Paths
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 from deerflow.skills.projection import get_thread_skill_projection_paths
@@ -295,6 +296,117 @@ def _box(
         default_command_timeout=default_command_timeout,
         on_terminal_failure=on_terminal_failure,
     )
+
+
+def test_wait_policy_preserves_the_legacy_soft_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "wait"})
+    try:
+        provider.acquire("thread-1")
+        provider.acquire("thread-2")
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_enforces_capacity_and_transfers_warm_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "reject"})
+    try:
+        first_id = provider.acquire("thread-1")
+        with pytest.raises(SandboxCapacityExceededError) as caught:
+            provider.acquire("thread-2")
+        assert caught.value.details["code"] == SandboxCapacityExceededError.CODE
+        assert caught.value.details["active"] == 1
+        assert caught.value.details["replicas"] == 1
+        assert caught.value.details["retryable"] is True
+        assert caught.value.details["retry_after_seconds"] == 5
+        assert len(sdk.create_calls) == 1
+
+        provider.release(first_id)
+        second_id = provider.acquire("thread-2")
+        assert sdk.remotes[0].destroy_calls == 1
+        assert len(sdk.create_calls) == 2
+        with pytest.raises(SandboxCapacityExceededError):
+            provider.acquire("thread-3")
+        assert len(sdk.create_calls) == 2
+        assert provider.get(second_id) is not None
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_reserves_capacity_during_inflight_create(monkeypatch: pytest.MonkeyPatch) -> None:
+    first_create_entered = threading.Event()
+    release_first_create = threading.Event()
+    second_finished = threading.Event()
+    factory_calls = 0
+
+    def remote_factory(index: int) -> _FakeRemote:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            first_create_entered.set()
+            assert release_first_create.wait(timeout=5)
+        return _FakeRemote(f"remote-{factory_calls}")
+
+    provider, sdk = _install(
+        monkeypatch,
+        sdk=_FakeSandboxClass(remote_factory=remote_factory),
+        config={"replicas": 1, "overflow_policy": "reject"},
+    )
+    results: dict[str, str] = {}
+    errors: dict[str, Exception] = {}
+
+    def acquire(name: str) -> None:
+        try:
+            results[name] = provider.acquire(name)
+        except Exception as exc:
+            errors[name] = exc
+        finally:
+            if name == "thread-2":
+                second_finished.set()
+
+    first = threading.Thread(target=acquire, args=("thread-1",))
+    second = threading.Thread(target=acquire, args=("thread-2",))
+    try:
+        first.start()
+        assert first_create_entered.wait(timeout=5)
+        second.start()
+        assert second_finished.wait(timeout=5)
+        assert isinstance(errors.get("thread-2"), SandboxCapacityExceededError)
+        assert errors["thread-2"].details["reserved"] == 1
+        assert len(sdk.create_calls) == 1
+    finally:
+        release_first_create.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        provider.shutdown()
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert "thread-1" not in errors
+    assert results["thread-1"]
+
+
+def test_reject_policy_releases_capacity_after_create_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    factory_calls = 0
+
+    def fail_first_create(index: int) -> _FakeRemote:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            raise RuntimeError("synthetic create failure")
+        return _FakeRemote(f"remote-{factory_calls}")
+
+    provider, sdk = _install(
+        monkeypatch,
+        sdk=_FakeSandboxClass(remote_factory=fail_first_create),
+        config={"replicas": 1, "overflow_policy": "reject"},
+    )
+    try:
+        with pytest.raises(RuntimeError, match="synthetic create failure"):
+            provider.acquire("thread-1")
+        assert provider.acquire("thread-2")
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
 
 
 def test_missing_sdk_has_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:

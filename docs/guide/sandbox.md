@@ -266,6 +266,14 @@ from a complete scan with no produced outputs; it does not prove that no outputs
 were produced. Outputs modified and observed in both snapshots still participate
 in that check.
 
+`OpenSandboxProvider` preserves its legacy soft cap by default. Set
+`overflow_policy: reject` to make `replicas` a process-local hard cap covering
+active sandboxes, the warm pool and in-flight create reservations. A full pool
+with no warm sandbox to evict raises `SandboxCapacityExceededError` before an
+SDK create. Failed creates release their reservations. This is not a
+multi-process quota: use it only when one Gateway process owns the provider and
+`replicas` fits the Kubernetes ResourceQuota.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.
