@@ -31,14 +31,16 @@ from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveRe
 from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
+    CheckpointLineageTimeoutError,
     CheckpointParentMissingError,
     checkpoint_configurable,
     checkpoint_messages,
-    find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    find_replay_checkpoint_before_message,
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
+    replay_lineage_timeout_http_error,
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
@@ -738,8 +740,8 @@ async def _find_target_run_id(
     if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
-            message_id,
-            thread_id,
+            sanitize_log_param(message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
@@ -758,15 +760,12 @@ async def _find_base_checkpoint_before_human(
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     if head_checkpoint is not None:
         try:
-            return await find_checkpoint_before_message(
-                accessor,
-                head_checkpoint,
-                human_message_id,
-                max_depth=REGENERATE_HISTORY_RAW_SCAN_LIMIT,
-            )
+            return await find_replay_checkpoint_before_message(accessor, head_checkpoint, human_message_id)
+        except CheckpointLineageTimeoutError as exc:
+            raise replay_lineage_timeout_http_error(thread_id, exc) from exc
         except CheckpointParentMissingError:
-            # Old checkpoints and imported histories may not have parent links.
-            # Preserve the bounded chronological fallback for those records.
+            # Some legacy or imported heads have no recorded parent link.
+            # Only those heads can use the chronological compatibility scan.
             logger.debug(
                 "Could not resolve parent lineage for regenerate thread %s; falling back to history scan",
                 sanitize_log_param(thread_id),
@@ -807,8 +806,8 @@ async def _find_base_checkpoint_before_human(
     if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not locate target user message %s in recent checkpoint history for thread %s (limit=%s)",
-            human_message_id,
-            thread_id,
+            sanitize_log_param(human_message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(

@@ -124,12 +124,37 @@ def test_truncating_write_would_have_destroyed_it(tmp_path):
     assert target.read_bytes() != b"old runtime"
 
 
-def test_the_install_path_uses_the_atomic_publish():
-    import inspect
+def test_the_install_path_preserves_previous_binary_on_publish_failure(tmp_path, monkeypatch):
+    import io
+    import tarfile
 
-    from deerflow.integrations import lark_cli
+    from deerflow.integrations.lark_cli import _extract_lark_cli_runtime_binary
 
-    source = inspect.getsource(lark_cli)
+    buf = io.BytesIO()
+    payload = b"#!/bin/sh\necho new-runtime\n"
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo(name="bin/lark-cli")
+        info.size = len(payload)
+        info.mode = 0o755
+        tf.addfile(info, io.BytesIO(payload))
+    archive_bytes = buf.getvalue()
 
-    assert "destination.write_bytes(" not in source
-    assert "_publish_bytes_atomically(destination" in source
+    destination = tmp_path / "runtime" / "lark-cli"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"old runtime")
+
+    def fail_replace(*args):
+        raise OSError("replace failed mid-install")
+
+    with monkeypatch.context() as patches:
+        patches.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError, match="replace failed mid-install"):
+            _extract_lark_cli_runtime_binary(archive_bytes, destination)
+
+    assert destination.read_bytes() == b"old runtime"
+    assert list(destination.parent.glob("*.tmp")) == []
+
+    _extract_lark_cli_runtime_binary(archive_bytes, destination)
+    assert destination.read_bytes() == payload
+    if os.name != "nt":
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o755

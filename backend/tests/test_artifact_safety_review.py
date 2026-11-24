@@ -4,15 +4,20 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.types import Overwrite
 
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
 from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware, build_lead_runtime_middlewares
@@ -28,6 +33,45 @@ from deerflow.tools.artifact_registry import extract_artifacts_from_result, rend
 
 def entry(ref="/mnt/user-data/outputs/report.md", handle="art_1234abcd"):
     return {"handle": handle, "tool_name": "mcp_tool", "tool_call_id": "make", "call_index": 0, "artifact_type": "file", "display_name": "report.md", "real_ref": ref, "created_at": "now"}
+
+
+@pytest.mark.parametrize(
+    "unusable",
+    [
+        pytest.param({**entry(handle="art_bad"), "display_name": None}, id="null-display-name"),
+        pytest.param({**entry(handle="art_bad"), "tool_name": 7}, id="numeric-tool-name"),
+        pytest.param({**entry(handle="art_bad"), "artifact_type": []}, id="list-artifact-type"),
+        pytest.param(None, id="non-object"),
+        pytest.param([list(item) for item in entry(handle="art_bad").items()], id="key-value-pairs"),
+        pytest.param({"display_name": "invalid-artifact.md", "real_ref": "/mnt/user-data/outputs/legacy.md"}, id="missing-handle"),
+        pytest.param({**entry(handle=""), "display_name": "invalid-artifact.md"}, id="empty-handle"),
+    ],
+)
+def test_resumed_agent_omits_unusable_artifact_rows(unusable):
+    stored = [entry(handle="art_valid"), unusable]
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "chatcmpl-artifact", "object": "chat.completion", "model": "offline", "choices": [{"index": 0, "message": {"role": "assistant", "content": "Done"}, "finish_reason": "stop"}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+        model = ChatOpenAI(model="offline", api_key="offline-placeholder", http_client=transport, use_responses_api=False)
+        agent = create_agent(model, tools=[], middleware=[DurableContextMiddleware(inject_tool_artifacts=True)], state_schema=ThreadState, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "artifact-labels"}}
+        # State-update routes use Overwrite for reducer-backed channels, so
+        # stored integration/legacy rows are restored without merging.
+        agent.update_state(config, {"tool_artifacts": Overwrite(stored)})
+        assert agent.get_state(config).values["tool_artifacts"] == stored
+        result = agent.invoke({"messages": [HumanMessage("Hello")]}, config=config)
+        assert result["messages"][-1].content == "Done"
+        assert agent.get_state(config).values["tool_artifacts"] == stored
+
+    assert len(requests) == 1
+    visible = json.dumps(requests[0]["messages"])
+    assert "art_valid" in visible
+    assert "art_bad" not in visible
+    assert "invalid-artifact.md" not in visible
 
 
 def request(args, entries=()):
@@ -185,9 +229,10 @@ def test_structured_fallback_keeps_complete_json_within_utf8_budget():
     assert json.loads(captured["real_ref"]) == result.artifact["structured_content"]
 
 
-def test_render_shows_omitted_count_without_exceeding_budget():
+@pytest.mark.parametrize("unusable", [[], [None, {**entry(), "display_name": None}, {"display_name": "missing handle"}, entry(handle="")]])
+def test_render_shows_omitted_count_without_exceeding_budget(unusable):
     entries = [entry(handle=f"art_{i:08x}") for i in range(20)]
-    rendered = render_artifact_registry(entries, max_chars=600)
+    rendered = render_artifact_registry([*unusable, *entries, *unusable], max_chars=600)
     shown = sum(e["handle"] in rendered for e in entries)
     assert 0 < shown < len(entries)
     assert f"{len(entries) - shown} more artifact handles not shown" in rendered

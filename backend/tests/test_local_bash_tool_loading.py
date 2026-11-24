@@ -34,7 +34,7 @@ def test_get_available_tools_hides_bash_for_default_local_sandbox(monkeypatch):
     assert "ls" in names
 
 
-def test_get_available_tools_keeps_bash_when_explicitly_enabled(monkeypatch):
+def test_get_available_tools_hides_bash_with_legacy_local_setting(monkeypatch):
     monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: _make_config(allow_host_bash=True))
     monkeypatch.setattr(
         "deerflow.tools.tools.resolve_variable",
@@ -43,7 +43,7 @@ def test_get_available_tools_keeps_bash_when_explicitly_enabled(monkeypatch):
 
     names = [tool.name for tool in get_available_tools(include_mcp=False, subagent_enabled=False)]
 
-    assert "bash" in names
+    assert "bash" not in names
     assert "ls" in names
 
 

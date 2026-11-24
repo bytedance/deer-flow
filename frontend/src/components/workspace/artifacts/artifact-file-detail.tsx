@@ -80,6 +80,7 @@ import {
 } from "./artifact-file-preview";
 import { useArtifacts } from "./context";
 import { PluginArtifactPreview } from "./plugin-artifact-preview";
+import { useArtifactSelection } from "./use-artifact-selection";
 
 const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
 
@@ -271,15 +272,38 @@ export function ArtifactFileDetail({
   }, [content, filepath, isWriteFile, setDrafts, sha256, truncated]);
 
   const [viewMode, setViewMode] = useState<"code" | "preview">(
-    artifactViewState.initialViewMode,
+    isEditing ? "code" : artifactViewState.initialViewMode,
   );
   const [isInstalling, setIsInstalling] = useState(false);
   const isLoadingFullContent = fullContentRequested && isLoading;
   const effectiveViewMode =
     truncated && language === "html" ? "code" : viewMode;
+  const selection = useArtifactSelection({
+    filepath,
+    threadId,
+    ownerId: user?.id,
+    source: editorContent,
+    revision: activeDraft.baselineSha256,
+    enabled:
+      isCodeFile &&
+      !isWriteFile &&
+      !isSkillFile &&
+      !isMock &&
+      !isLoading &&
+      !error &&
+      !thread.isLoading &&
+      !isSaving &&
+      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true",
+    editable:
+      canEdit &&
+      !thread.isLoading &&
+      !isSaving &&
+      !activeDraft.conflict &&
+      activeDraft.baselineSha256 === sha256,
+  });
   useEffect(() => {
-    setViewMode(artifactViewState.initialViewMode);
-  }, [artifactViewState.initialViewMode, filepathFromProps]);
+    setViewMode(isEditing ? "code" : artifactViewState.initialViewMode);
+  }, [artifactViewState.initialViewMode, filepathFromProps, isEditing]);
 
   const confirmDiscard = useCallback(() => {
     return !isDirty || window.confirm(t.artifactEditing.discardChanges);
@@ -669,6 +693,7 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="flex flex-col p-0">
+        {selection.toolbar}
         {truncated && !(isTabular && effectiveViewMode === "preview") && (
           <div className="border-border bg-muted/40 flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2 text-sm">
             <span className="text-muted-foreground">
@@ -712,6 +737,7 @@ export function ArtifactFileDetail({
                 url={url}
                 truncated={truncated}
                 active={effectiveViewMode === "preview" && !isLoading}
+                onTextSelection={selection.onTextSelection}
               />
             )}
           {isCodeFile &&
@@ -735,6 +761,7 @@ export function ArtifactFileDetail({
                   }));
                 }}
                 onSave={() => void handleSave()}
+                onSelectionChange={selection.onSourceSelection}
                 language={language}
               />
             )}

@@ -53,6 +53,30 @@ logger = logging.getLogger(__name__)
 # timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 
+# Upper bound (seconds) a delegated-restore call may wait for the AgentRuns
+# host to be installed during Gateway startup. Startup normally signals within
+# its first seconds; the bound only fails a stuck startup instead of leaving
+# unattended recovery hanging, and per-record failures keep manual recovery.
+_EXTENSION_RESTORE_READY_TIMEOUT_SECONDS = 60.0
+
+
+async def _agent_runs_host_after_install(app, installed: asyncio.Event):
+    """Resolve the AgentRuns host once startup has installed it.
+
+    Extension services start before the run-admission stack (thread store, run
+    manager, AgentRuns host) exists, and unattended restoration can run during
+    that window, so wait for the explicit installation signal instead of
+    failing the whole recovery scan.
+    """
+    try:
+        await asyncio.wait_for(installed.wait(), _EXTENSION_RESTORE_READY_TIMEOUT_SECONDS)
+    except TimeoutError:
+        pass
+    host = getattr(app.state, "agent_runs_host", None)
+    if host is None:
+        raise RuntimeError("Agent run host unavailable")
+    return host
+
 
 def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
     """Return whether process-local agentic browser sessions are configured."""
@@ -313,6 +337,8 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     if extensions is not None:
         # deerflow.mcp.oauth_store keeps rotating refresh tokens in the database.
         for name, server in extensions.get_enabled_mcp_servers().items():
+            if server.uses_browser_oauth:
+                consumers.append(f"mcpServers.{name}.user_oauth.enabled=true")
             oauth = server.oauth
             if oauth is not None and oauth.enabled and oauth.grant_type == "refresh_token":
                 consumers.append(f"mcpServers.{name}.oauth.enabled=true")
@@ -383,6 +409,33 @@ def _validate_agent_storage(config: AppConfig) -> None:
             "across workers/nodes. Set agent_storage.backend='db' to share them.",
             signal[0],
         )
+
+
+def _validate_provisioner_environment(config: AppConfig) -> None:
+    """Refuse a ``sandbox.environment`` map the provisioner would reject.
+
+    The sandbox provider is built lazily, so the map used to pass startup and
+    fail on the first sandbox create instead: no Pod appeared, the upload path
+    turned the resulting ``ValueError`` into a 400 against a request that was
+    fine, and ``/health/ready`` still reported ready. The limits checked here
+    are the provisioner's own, applied to the same filtered map the backend
+    forwards, and sandbox allocation itself stays lazy.
+    """
+    from app.gateway.health import resolve_provisioner_url
+
+    sandbox = getattr(config, "sandbox", None)
+    if resolve_provisioner_url(config) is None or not str(getattr(sandbox, "use", "")).endswith(":AioSandboxProvider"):
+        return
+    environment = dict(getattr(sandbox, "environment", None) or {})
+    if not environment:
+        return
+
+    from deerflow.community.aio_sandbox.remote_backend import check_provisioner_environment, operator_provisioner_environment
+
+    try:
+        check_provisioner_environment(operator_provisioner_environment(environment))
+    except ValueError as exc:
+        raise SystemExit(f"{exc}. Correct sandbox.environment in config.yaml, or remove it to use the image defaults.") from None
 
 
 def _probe_managed_subagent_file_storage() -> None:
@@ -842,6 +895,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)
+    # Reject a sandbox.environment map the provisioner cannot accept while the
+    # provider is still unbuilt, so the failure lands on the setting upstream of
+    # the first sandbox create instead of on a request that did nothing wrong.
+    _validate_provisioner_environment(startup_config)
     if getattr(getattr(startup_config, "agent_storage", None), "backend", None) == "file":
         await asyncio.to_thread(_probe_managed_subagent_file_storage)
     # Warn when login lockouts stay per-process under several Gateway processes.
@@ -951,6 +1008,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
+            app.state.coordination_workers = None
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
             # Memory backend has no durable PAT store, so Bearer credentials
@@ -1020,6 +1078,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Register cleanup before starting: start() can partially acquire
         # resources and then fail or be cancelled.
         stack.push_async_callback(stop_extension_services)
+
+        agent_runs_host_installed = asyncio.Event()
+
+        async def restore_agent_runs_authority(*, user_id: str, grant: dict, validator=None, plugin_namespace: str | None = None):
+            host = await _agent_runs_host_after_install(app, agent_runs_host_installed)
+            return await host.restore_delegated_authority(user_id=user_id, grant=grant, validator=validator, plugin_namespace=plugin_namespace)
+
         record_runtime_diagnostics(
             await start_services(
                 extensions,
@@ -1028,6 +1093,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 run_evidence_reader=app.state.run_evidence_reader,
                 host_capabilities=host_capabilities.bindings,
                 attempted_services=attempted_services,
+                agent_runs_restore=restore_agent_runs_authority,
             )
         )
 
@@ -1125,6 +1191,16 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.agent_runs_host = GatewayAgentRunsHost(app, load_user=SQLiteUserRepository(sf).get_user_by_id if sf is not None else None)
         stack.callback(app.state.agent_runs_host.close)
+        if sf is not None:
+            from app.gateway.coordination_workers import CoordinationWorkers
+            from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
+            from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
+
+            app.state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(sf), app.state.agent_runs_host, ChannelConnectionRepository(sf))
+            stack.push_async_callback(app.state.coordination_workers.close)
+        # Extension unattended recovery waits on this before restoring grants;
+        # past it, the whole run-admission stack above is ready.
+        agent_runs_host_installed.set()
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
@@ -1530,13 +1606,24 @@ async def is_admin_user(request: Request) -> bool:
     return getattr(user, "system_role", None) == "admin"
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
+async def require_admin_user(request: Request, *, detail: str, pat_scope: str | None = None) -> None:
     """Require the authenticated caller to be an admin user.
 
     ``detail`` is the route-specific 403 message. The shared predicate keeps
     read-side redaction and write authorization on the same admin definition.
-    """
 
+    ``pat_scope`` names the one opt-in exception to "PATs never carry admin
+    capability": a route that passes it also admits a PAT whose owner is an
+    admin *and* which holds that scope. Only routes that pass it are affected;
+    ``is_admin_user`` stays False for every PAT.
+    """
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if pat_scope is not None and getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        user = getattr(request.state, "user", None)
+        if pat_scope in getattr(request.state, "pat_scopes", frozenset()) and getattr(user, "system_role", None) == "admin":
+            return
+        raise HTTPException(status_code=403, detail=detail)
     if not await is_admin_user(request):
         raise HTTPException(status_code=403, detail=detail)
 
