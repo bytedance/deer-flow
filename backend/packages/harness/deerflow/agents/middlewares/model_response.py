@@ -56,6 +56,22 @@ def append_visible_text(message: AIMessage, text: str) -> Any:
     return text
 
 
+def is_empty_stop_response(response: Any) -> bool:
+    """Return whether a model call completed without any content.
+
+    ``LLMErrorHandlingMiddleware`` turns such a response into
+    ``EmptyModelResponseError`` and retries the call by running the inner
+    model wrappers again. A wrapper that took queued hints out for this call
+    puts them back on this response, as it does when the call raises.
+    """
+    message = last_ai_message(response)
+    if message is None:
+        return True
+    if has_visible_content(message) or has_tool_call_intent(message):
+        return False
+    return finish_reason(message) in (None, "", "stop", "end_turn")
+
+
 def finish_reason(message: AIMessage) -> str | None:
     """Read and normalize common provider termination-reason fields."""
     for metadata in (message.response_metadata or {}, message.additional_kwargs or {}):

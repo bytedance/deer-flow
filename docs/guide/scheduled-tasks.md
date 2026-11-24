@@ -23,6 +23,7 @@ Current MVP capabilities:
 - A scheduled run whose completion hook fails is finalized from its durable terminal run on the next scheduler poll instead of staying `running` until a restart.
 - A storage or bookkeeping error on one occurrence during queue cleanup or dispatch is logged without stopping the remaining occurrences and healthy due tasks in that poll. The affected occurrence remains subject to normal queue and lease recovery; persistent storage failures can delay its recovery. A run that has exceeded `scheduler.queue_timeout_seconds` never starts while cleanup is retried, and expired rows do not consume capacity or fair-queue slots from healthy waiting work; they stay queued until a later timeout sweep records the skip.
 - A recurring task whose saved schedule can no longer be computed (for example, its timezone is missing from the time zone database after an upgrade) is paused with the reason as its last error, and every other task keeps running. Resuming it reports the problem until you fix the schedule.
+- A late failure or busy-thread retry from a recovered scheduled launch no longer releases the execution slot of the newer claim that replaced it.
 - Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
@@ -32,6 +33,8 @@ Current MVP capabilities:
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
 Derived run summaries omit leading inline `<think>` reasoning before limiting the text, so a long thought does not replace the actual answer in previews or scheduled notices. Original response history and literal tags in the answer are unchanged; previously stored run summaries are not rewritten.
+
+Text that leaves for an IM platform through a notice is scrubbed first: known token shapes, key assignments, private-key blocks, a URL's embedded user info, and `Authorization` or `Cookie` header values are replaced with `[redacted]` in the task title, stop condition, and result summary. The scrub is best effort. Most rules keep the surrounding sentence, but a `Cookie` header and a `Digest` credential are replaced through the end of the line, so text that follows them on the same line is removed too. Check a notice before forwarding it somewhere else.
 
 **Filter execution history through the API**
 
@@ -117,6 +120,9 @@ still unchecked; stop when everything is checked.” In the web app the result i
 live card with the schedule, the stop condition and buttons, and the agent
 replies in one or two sentences; IM and other non-web turns describe the
 schedule, the next run and the stop condition in plain text.
+
+Conversation scheduling actions require an active owner account. The Gateway
+returns `authority_expired` when the account is no longer active.
 
 - **Which tasks a conversation manages.** The tasks created in it, and, in a run
   conversation (the chat a scheduled run posted into), the task that run belongs

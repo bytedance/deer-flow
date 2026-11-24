@@ -29,20 +29,29 @@ from sqlalchemy.exc import IntegrityError
 from app.gateway.authz import _is_internal_caller, authorize_model_use, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
+    CheckpointLineageTimeoutError,
     CheckpointParentMissingError,
-    find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    find_replay_checkpoint_before_message,
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
+    replay_lineage_timeout_http_error,
     resolve_history_versions,
     resolve_stamp_candidate_versions,
+)
+from app.gateway.checkpoint_mode_errors import (
+    CHECKPOINT_MODE_ERRORS as _CHECKPOINT_MODE_ERRORS,
+)
+from app.gateway.checkpoint_mode_errors import (
+    checkpoint_mode_http_error as _checkpoint_mode_http_error,
 )
 from app.gateway.deps import get_checkpointer, get_config, get_current_user_from_request, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.hitl_approval import find_pending_interrupts
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
+    _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
     abuild_checkpoint_state_accessor,
     build_checkpoint_state_mutation_accessor,
     build_thread_checkpoint_state_accessor,
@@ -51,6 +60,7 @@ from app.gateway.services import (
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
+from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY, branch_share_provenance, mark_imported, prepare_share_copy_compaction
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
@@ -59,8 +69,7 @@ from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
-from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
-from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
+from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels, validate_state_mutation_node
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
@@ -96,13 +105,12 @@ from deerflow.runtime.serialization import serialize_lc_object
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.companions import register_companion, resolve_companion
 from deerflow.utils.file_io import await_drained, run_file_io
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
-
-_CHECKPOINT_MODE_ERRORS = (CheckpointModeMismatchError, CheckpointModeReconfigurationError)
 
 
 def _optional_run_event_store(request: Request) -> Any:
@@ -116,20 +124,6 @@ def _optional_run_event_store(request: Request) -> Any:
     return getattr(request.app.state, "run_event_store", None)
 
 
-def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException:
-    """Map checkpoint-mode guard failures to precise HTTP statuses.
-
-    A mismatch means the thread's persisted checkpoints conflict with the
-    process's frozen mode (operator-actionable, 409); a reconfiguration means
-    the process itself is mid mode-flip (transient, 503). Both must surface
-    their message — a generic 500 would force operators to grep logs to
-    discover the root cause after a mode flip.
-    """
-    if isinstance(exc, CheckpointModeMismatchError):
-        return HTTPException(status_code=409, detail=f"Thread {thread_id}: {exc}")
-    return HTTPException(status_code=503, detail=str(exc))
-
-
 # Metadata keys that the server controls; clients are not allowed to set
 # them. Pydantic ``@field_validator("metadata")`` strips them on every
 # inbound model below so a malicious client cannot reflect a forged
@@ -138,7 +132,8 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+# The share-import keys decide whether run admission rewrites a copy's history.
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY})
 # Checkpoint metadata the server writes and later reads back as trusted:
 # LangGraph's lineage keys and delta counters (``step`` drives the next turn,
 # ``parents`` the history walk, and ``counters_since_delta_snapshot`` is read
@@ -312,22 +307,18 @@ async def _find_branch_replay_base(
 ) -> Any | None:
     """Resolve a replay base while preserving unlinked legacy histories."""
 
+    thread_id = config.get("configurable", {}).get("thread_id", "")
     try:
-        return await find_checkpoint_before_message(
-            accessor,
-            snapshot,
-            target_human_id,
-            max_depth=_BRANCH_HISTORY_RAW_SCAN_LIMIT,
-        )
+        return await find_replay_checkpoint_before_message(accessor, snapshot, target_human_id)
+    except CheckpointLineageTimeoutError as exc:
+        raise replay_lineage_timeout_http_error(thread_id, exc) from exc
     except CheckpointParentMissingError:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.debug(
             "Could not resolve parent lineage for branch thread %s; falling back to history scan",
             sanitize_log_param(thread_id),
             exc_info=True,
         )
     except CheckpointLineageError as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.warning(
             "Rejected unsafe checkpoint lineage for branch thread %s",
             sanitize_log_param(thread_id),
@@ -338,10 +329,8 @@ async def _find_branch_replay_base(
     try:
         history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
     except _CHECKPOINT_MODE_ERRORS as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.exception("Failed to scan replay checkpoint history for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
@@ -350,7 +339,7 @@ async def _find_branch_replay_base(
         logger.warning(
             "Could not locate branch user message %s in chronological history for thread %s",
             sanitize_log_param(target_human_id),
-            sanitize_log_param(config.get("configurable", {}).get("thread_id", "")),
+            sanitize_log_param(thread_id),
         )
     return replay_base
 
@@ -598,6 +587,16 @@ class ThreadStateUpdateRequest(BaseModel):
     checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
     as_node: str | None = Field(default=None, description="Node identity for the update")
 
+    @field_validator("as_node")
+    @classmethod
+    def _as_node_is_a_graph_node_name(cls, value: str | None) -> str | None:
+        # The name becomes the mutation graph's node; reject what LangGraph
+        # cannot compile as a 422 instead of an unhandled 500. An empty value
+        # keeps falling back to the default node in the route.
+        if value:
+            validate_state_mutation_node(value)
+        return value
+
 
 class ThreadGoalRequest(BaseModel):
     """Request body for setting a thread-scoped goal."""
@@ -663,7 +662,15 @@ class ThreadHistoryRequest(BaseModel):
     """Request body for checkpoint history."""
 
     limit: int = Field(default=10, ge=1, le=100, description="Maximum entries")
-    before: str | None = Field(default=None, description="Cursor for pagination")
+    before: str | None = Field(
+        default=None,
+        description=(
+            "Inclusive checkpoint ID cursor. The page starts with the cursor checkpoint if it still exists, "
+            "followed by older checkpoints up to `limit` entries. If retention removed the cursor, the page starts "
+            "with the first surviving older checkpoint, if any. When continuing, skip the first entry only if "
+            "its `checkpoint_id` equals `before`."
+        ),
+    )
 
 
 class ThreadBranchRequest(BaseModel):
@@ -1170,6 +1177,9 @@ async def _branch_thread_with_reservation(
         snapshot,
         target_human_id,
     )
+    # A copy imported before share provenance moved into state has nothing for
+    # the branch to inherit, so the branch gets it from the source's import.
+    branch_provenance = await branch_share_provenance(request, source_metadata, snapshot.values, source_accessor, source_config)
 
     # Workspace files are not checkpointed, so they only reflect the *current* thread
     # state. Cloning them onto a branch from an older turn would leak files created
@@ -1234,10 +1244,14 @@ async def _branch_thread_with_reservation(
         for key, value in source_values.items():
             if key in _BRANCH_EXCLUDED_CHANNELS:
                 continue
+            if key == "messages" and isinstance(value, list) and branch_provenance is not None:
+                value = mark_imported(value, branch_provenance[1])
             if key in branch_reducer_fields:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:
                 values[key] = value
+        if branch_provenance is not None:
+            values[IMPORTED_HISTORY_CHANNEL] = branch_provenance[0]
         if replaces is not None:
             # The head write lands on the replay base, so goal state the head
             # lacks (write_thread_goal pops goal and goal_outcome) would keep
@@ -1482,6 +1496,10 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
     if not moved:
         raise HTTPException(status_code=404, detail="Thread or project not found")
     record = await thread_store.get(thread_id)
+    if record is None:
+        # The move takes no thread lock, so a DELETE can remove the row
+        # between ``set_project`` and this read. The thread is gone either way.
+        raise HTTPException(status_code=404, detail="Thread or project not found")
     return ThreadResponse(
         thread_id=thread_id,
         status=record.get("status", "idle"),
@@ -1787,6 +1805,9 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
     keep = body.keep.to_tuple() if body.keep is not None else None
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            # Migrate an older share copy under this reservation before its
+            # copied turns can reach the memory flush.
+            memory_flush = await prepare_share_copy_compaction(request, thread_id, accessor, read_config, as_node="manual_compaction", metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
             result = await compact_thread_context(
                 accessor,
                 thread_id,
@@ -1795,6 +1816,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
                 model_name=body.model_name,
+                memory_flush=memory_flush,
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None
@@ -2127,8 +2149,9 @@ async def get_thread_history(
 
     Only the latest (first) checkpoint carries the ``messages`` key to
     avoid duplicating the complete conversation across every entry. It also
-    carries an active ``goal`` and an achieved ``goal_outcome``, because
-    ``useStream`` rebuilds thread values from this head after every run.
+    carries the persisted ``todos`` list, an active ``goal`` and an achieved
+    ``goal_outcome``, because ``useStream`` rebuilds thread values from this
+    head after every run.
     """
     checkpointer = get_checkpointer(request)
     try:
@@ -2160,6 +2183,8 @@ async def get_thread_history(
                 values["thread_data"] = thread_data
 
             if is_latest_checkpoint:
+                if isinstance(todos := materialized_values.get("todos"), list):
+                    values["todos"] = [todo for todo in todos if isinstance(todo, dict) and isinstance(todo.get("content"), str)]
                 if is_active_goal(goal := materialized_values.get("goal")):
                     values["goal"] = goal
                 outcome = materialized_values.get(GOAL_OUTCOME_CHANNEL)

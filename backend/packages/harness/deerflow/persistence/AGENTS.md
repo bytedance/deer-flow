@@ -66,6 +66,7 @@ with best-effort cleanup, preserving the original publication outcome.
 - **A scan selects candidates; it grants nothing.** After you take the row locks,
   check status and lease expiry again. The row can have been requeued and
   reclaimed while recovery waited, also by the same process.
+  Late launch writes require the `attempt_count` generation from `claim_queued_run`.
 - **Check expiry against the database clock after the lock wait.** The
   transaction-start time is already stale. A lease that expires exactly at scan
   time is still live.
@@ -93,6 +94,9 @@ with best-effort cleanup, preserving the original publication outcome.
 - **Recovery never takes over a live run.** It finalizes an occurrence whose
   durable run row is already terminal, and it returns expired launch claims to
   the queue.
+- **Late launch reconciliation keeps a terminal occurrence terminal** when a
+  newer occurrence owns the active slot; attach only `run_id`/`started_at`,
+  since reviving would violate the one-active index.
 - **The scheduler is single-instance by default.** Multi-instance mode needs
   shared PostgreSQL and the settings that startup validates.
 - **Run-history filters are occurrence states**, not task states. Apply the

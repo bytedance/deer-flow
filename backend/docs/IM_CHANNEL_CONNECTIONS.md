@@ -203,6 +203,16 @@ the last card is clipped and marked `... (truncated)`. A retry of a partially
 delivered answer resumes after the cards already sent, and a reply to any of the
 cards continues the conversation.
 
+Discord caps a message at 2,000 characters, so a longer answer is sent as
+several messages, split at line breaks where possible. When a split falls inside
+a code block, the message ends with closing backticks and the next one reopens
+the block with its language tag, so both parts render as code. A block that
+would start too close to the end of a message, before any of its code fits,
+moves to the next message whole. Blocks are read the way Discord's client reads
+them, not as CommonMark: a block runs from three backticks to the next three,
+also when those follow the last code on its line, CRLF line endings count as
+line breaks, and `~~~` fences are plain text.
+
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
 
 ## Attachment delivery feedback
@@ -400,6 +410,18 @@ channel_connections:
 When `channel_connections.enabled` and `require_bound_identity` are true, auth-enabled deployments reject ordinary unbound IM messages before creating a DeerFlow thread or run. Users must connect the channel from DeerFlow Settings first. Auth-disabled local mode still routes channel messages to the auth-disabled default user, and legacy open-bot behavior can be restored explicitly with `require_bound_identity: false`.
 
 Upgrade note: existing auth-enabled deployments that already have `channel_connections.enabled: true` will start rejecting ordinary unbound IM messages after this field is introduced because `require_bound_identity` defaults to true. Legacy operator-owned/open-bot deployments that intentionally allow unbound platform users to create DeerFlow runs should set `require_bound_identity: false` before upgrading and restart the service.
+
+When channel connections are enabled, Feishu stores topic and card aliases
+for bound senders with their connection. After `/new`, ordinary topic messages and
+commands follow the new conversation even if an earlier answer finishes streaming.
+Replying directly to that earlier card continues its original conversation. Feishu
+requires the connection repository to be available before its transport starts.
+Unbound chats use a separate topic namespace.
+After upgrading a mixed deployment, unbound replies to older topics
+start a fresh conversation. Unthreaded chats and legacy-only deployments keep
+their existing routing. Upgrade all Gateway workers together. If a previously
+mixed deployment switches off channel connections, clear its old Feishu topic
+aliases before reopening legacy routing.
 
 ## Connect Flow
 

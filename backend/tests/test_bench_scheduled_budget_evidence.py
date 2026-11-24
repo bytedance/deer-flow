@@ -13,6 +13,8 @@ from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_sta
 from deerflow.runtime.goal import build_goal_state, write_thread_goal
 from scripts.benchmark.scheduled_tasks.protocol import goal_history_evidence
 
+pytestmark = pytest.mark.benchmark
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["full", "delta"])

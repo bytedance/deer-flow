@@ -10,15 +10,25 @@ import os
 import threading
 import time
 import weakref
+from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
+import httpx
 from pydantic import PrivateAttr
 
 from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryReadError
 
 from .config import OpenVikingConfig
+from .credentials import (
+    OpenVikingCredential,
+    load_credential_provider,
+    normalize_resolved_credential,
+    validate_user_key,
+)
 from .session import (
     _advanced_cursor,
     _canonical_peer_id,
@@ -32,9 +42,25 @@ from .session import (
 
 logger = logging.getLogger(__name__)
 
+_ClientPoolKey = tuple[str | None, str, str]  # (tenant_id, user_id, key_fingerprint)
+
+
+@dataclass(slots=True, eq=False)
+class _ScopedClientEntry:
+    """Pooled OpenViking SDK handles bound to one resolved credential scope."""
+
+    key: _ClientPoolKey
+    recorder: Any
+    retriever: Any
+    client: Any
+    active_ops: int = 0
+    last_used: float = 0.0
+    retired: bool = False
+    closed: bool = False
+
 
 class OpenVikingMemoryManager(MemoryManager):
-    """Single-user OpenViking backend using the official integration package.
+    """OpenViking memory backend supporting single-user and multi-user isolation.
 
     DeerFlow continues to choose when capture and recall occur. The official
     adapter owns SDK transport, message conversion, batching, commit retries,
@@ -44,10 +70,18 @@ class OpenVikingMemoryManager(MemoryManager):
     supports_search: ClassVar[bool] = True
 
     _config: OpenVikingConfig = PrivateAttr()
-    _client: Any = PrivateAttr()
-    _recorder: Any = PrivateAttr()
-    _retriever: Any = PrivateAttr()
+    _integration: dict[str, Any] = PrivateAttr()
+    _credential_provider: Any = PrivateAttr(default=None)
+    _single_user_credential: OpenVikingCredential | None = PrivateAttr(default=None)
+    _pool: OrderedDict[_ClientPoolKey, _ScopedClientEntry] = PrivateAttr(default_factory=OrderedDict)
+    _pool_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _inflight_entries: set[_ScopedClientEntry] = PrivateAttr(default_factory=set)
+    _clock: Callable[[], float] = PrivateAttr(default=time.monotonic)
+    _client: Any = PrivateAttr(default=None)
+    _recorder: Any = PrivateAttr(default=None)
+    _retriever: Any = PrivateAttr(default=None)
     _use_actor_peer: Any = PrivateAttr()
+    _use_home_alias_uris: bool = PrivateAttr(default=False)
     _partial_write_error: type[Exception] = PrivateAttr()
     _should_keep_hidden_message: Any = PrivateAttr(default=None)
     _session_locks: weakref.WeakValueDictionary[str, threading.RLock] = PrivateAttr(default_factory=weakref.WeakValueDictionary)
@@ -57,34 +91,69 @@ class OpenVikingMemoryManager(MemoryManager):
     _closed: bool = PrivateAttr(default=False)
     _close_requested: bool = PrivateAttr(default=False)
     _resources_closed: bool = PrivateAttr(default=False)
+    _cleanup_started: bool = PrivateAttr(default=False)
+    _cleanup_done: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _cleanup_failed: bool = PrivateAttr(default=False)
+    _flush_timed_out: bool = PrivateAttr(default=False)
     _resource_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def model_post_init(self, __context: Any) -> None:
-        self._config = OpenVikingConfig.from_backend_config(self.backend_config)
-        integration = _load_official_integration()
-        commit_policy = integration["OpenVikingCommitPolicy"](mode="always")
-        self._recorder = integration["OpenVikingSessionRecorder"](
-            url=self._config.base_url,
-            api_key=self._config.api_key,
-            timeout=self._config.timeout_seconds,
-            # An explicit mapping disables the SDK's ovcli.conf header fallback.
-            extra_headers={},
-            commit_policy=commit_policy,
+        if self.mode != "middleware":
+            raise ValueError("The OpenViking automatic-memory backend supports memory.mode='middleware' only; use OpenViking MCP for explicit model tools")
+
+        injected_provider = __context.get("credential_provider") if isinstance(__context, Mapping) else None
+        if injected_provider is not None and (isinstance(injected_provider, type) or not (callable(getattr(injected_provider, "resolve", None)) or callable(injected_provider))):
+            raise ValueError("OpenViking injected credential_provider must expose a callable 'resolve(user_id)' method or be callable")
+
+        self._config = OpenVikingConfig.from_backend_config(
+            self.backend_config,
+            has_injected_credential_provider=injected_provider is not None,
         )
-        # The recorder owns one recovery-aware SDK client. Retrieval borrows the
-        # same handle, so this backend has one connection pool and one owner.
-        self._client = self._recorder.client
-        self._retriever = integration["OpenVikingRetriever"](
-            client=self._client,
-            search_mode="find",
-            limit=self._config.search_top_k,
-            score_threshold=self._config.score_threshold,
-            context_types=("memory",),
-            content_mode=self._config.content_mode,
-            max_content_chars=self._config.max_injection_chars,
-        )
-        self._use_actor_peer = integration["use_actor_peer"]
-        self._partial_write_error = integration["OpenVikingPartialWriteError"]
+        if injected_provider is not None and self._config.credential_provider is not None:
+            raise ValueError("OpenViking cannot configure both backend_config.credential_provider and an injected credential_provider")
+
+        loaded_provider = False
+        if injected_provider is not None:
+            self._credential_provider = injected_provider
+        elif self._config.credential_provider is not None:
+            self._credential_provider = load_credential_provider(
+                self._config.credential_provider,
+                self._config.credential_provider_config,
+            )
+            loaded_provider = True
+
+        try:
+            self._integration = _load_official_integration()
+            self._use_actor_peer = self._integration["use_actor_peer"]
+            self._partial_write_error = self._integration["OpenVikingPartialWriteError"]
+
+            if self._config.isolation_mode == "single_user":
+                assert self._config.owner_user_id is not None
+                credential = OpenVikingCredential(
+                    api_key=self._config.api_key,
+                    tenant_id=None,
+                    api_key_env=self._config.api_key_env,
+                )
+                self._single_user_credential = credential
+                key: _ClientPoolKey = (None, self._config.owner_user_id, credential.key_fingerprint)
+                try:
+                    entry = self._build_scoped_entry(
+                        key=key,
+                        api_key=credential.api_key,
+                        now=self._clock(),
+                    )
+                except (MemoryManagerError, ValueError):
+                    raise
+                except Exception as exc:
+                    raise MemoryManagerError(f"Failed to initialize OpenViking client ({type(exc).__name__})") from None
+                self._pool[key] = entry
+                self._recorder = entry.recorder
+                self._client = entry.client
+                self._retriever = entry.retriever
+        except BaseException:
+            if loaded_provider:
+                self._close_credential_provider()
+            raise
 
     @classmethod
     def from_config(
@@ -96,7 +165,11 @@ class OpenVikingMemoryManager(MemoryManager):
     ) -> OpenVikingMemoryManager:
         if mode != "middleware":
             raise ValueError("The OpenViking automatic-memory backend supports memory.mode='middleware' only; use OpenViking MCP for explicit model tools")
-        instance = cls(backend_config=backend_config or {}, mode=mode)
+        injected_provider = host_hooks.get("credential_provider")
+        instance = cls.model_validate(
+            {"backend_config": backend_config or {}, "mode": mode},
+            context={"credential_provider": injected_provider},
+        )
         hidden_filter = host_hooks.get("should_keep_hidden_message")
         instance._should_keep_hidden_message = hidden_filter if callable(hidden_filter) else None
         return instance
@@ -124,6 +197,18 @@ class OpenVikingMemoryManager(MemoryManager):
         backend_config: dict[str, Any] | None,
     ) -> bool:
         return OpenVikingConfig.from_backend_config(backend_config).read_failure_policy == "raise"
+
+    @property
+    def read_failures_are_fatal(self) -> bool:
+        """Whether read failures or timeouts abort for this manager instance.
+
+        ``DynamicContextMiddleware`` consults the classmethod
+        :meth:`read_failures_are_fatal_for_config` over ``backend_config`` (which
+        requires ``user_credentials`` or ``credential_provider``), whereas this
+        instance property also covers direct programmatic callers injecting
+        ``host_hooks["credential_provider"]``.
+        """
+        return self._config.read_failure_policy == "raise"
 
     def add_nowait(
         self,
@@ -168,22 +253,33 @@ class OpenVikingMemoryManager(MemoryManager):
         thread_id: str | None = None,
         query: str | None = None,
     ) -> str:
+        del query
         if not self._begin_operation():
             return ""
+        entry: _ScopedClientEntry | None = None
         try:
-            peer_id = self._resolve_read_scope(user_id, agent_name)
-            retriever = copy.copy(self._retriever)
-            retriever.target_uri = _memory_target_uris(peer_id)
+            resolved_user, credential, peer_id = self._resolve_read_scope(user_id, agent_name)
+            try:
+                entry = self._acquire_client(resolved_user, credential)
+            except MemoryManagerError as exc:
+                if self._config.read_failure_policy == "raise":
+                    raise MemoryReadError(str(exc)) from exc
+                raise
+            retriever = copy.copy(entry.retriever)
             if thread_id:
                 retriever.search_mode = "search"
                 retriever.session_id = _session_id(
-                    self._config.owner_user_id,
+                    resolved_user,
                     peer_id,
                     thread_id,
+                    tenant_id=credential.tenant_id,
                 )
             try:
-                with self._actor_peer_scope(peer_id):
-                    documents = retriever.invoke(self._config.injection_query)
+                documents = self._invoke_retriever(
+                    retriever,
+                    self._config.injection_query,
+                    peer_id=peer_id,
+                )
             except Exception as exc:
                 if self._config.read_failure_policy == "raise":
                     raise MemoryReadError("OpenViking context retrieval failed") from exc
@@ -197,6 +293,8 @@ class OpenVikingMemoryManager(MemoryManager):
                 max_chars=self._config.max_injection_chars,
             )
         finally:
+            if entry is not None:
+                self._release_client(entry)
             self._end_operation()
 
     async def aget_context(
@@ -226,10 +324,16 @@ class OpenVikingMemoryManager(MemoryManager):
     ) -> list[dict[str, Any]]:
         if not query.strip() or not self._begin_operation():
             return []
+        entry: _ScopedClientEntry | None = None
         try:
-            peer_id = self._resolve_read_scope(user_id, agent_name)
-            retriever = copy.copy(self._retriever)
-            retriever.target_uri = _memory_target_uris(peer_id)
+            resolved_user, credential, peer_id = self._resolve_read_scope(user_id, agent_name)
+            try:
+                entry = self._acquire_client(resolved_user, credential)
+            except MemoryManagerError as exc:
+                if self._config.read_failure_policy == "raise":
+                    raise MemoryReadError(str(exc)) from exc
+                raise
+            retriever = copy.copy(entry.retriever)
             retriever.search_mode = "find"
             retriever.session_id = None
             retriever.limit = max(1, min(int(top_k), 100))
@@ -240,8 +344,11 @@ class OpenVikingMemoryManager(MemoryManager):
                     "conds": [category],
                 }
             try:
-                with self._actor_peer_scope(peer_id):
-                    documents = retriever.invoke(query.strip())
+                documents = self._invoke_retriever(
+                    retriever,
+                    query.strip(),
+                    peer_id=peer_id,
+                )
             except Exception as exc:
                 if self._config.read_failure_policy == "raise":
                     raise MemoryReadError("OpenViking memory search failed") from exc
@@ -252,6 +359,8 @@ class OpenVikingMemoryManager(MemoryManager):
                 return []
             return [_document_to_fact(document) for document in documents]
         finally:
+            if entry is not None:
+                self._release_client(entry)
             self._end_operation()
 
     async def asearch(
@@ -277,11 +386,16 @@ class OpenVikingMemoryManager(MemoryManager):
             return False
         try:
             try:
-                health = getattr(self._client, "health", None)
-                healthy = bool(health()) if callable(health) else True
-            except Exception:
+                if self._config.isolation_mode == "single_user":
+                    health = getattr(self._client, "health", None)
+                    healthy = bool(health()) if callable(health) else True
+                else:
+                    healthy = self._probe_health_unauthenticated()
+            except Exception as exc:
                 if self._config.startup_policy == "fail_fast":
-                    raise
+                    if isinstance(exc, MemoryManagerError):
+                        raise
+                    raise MemoryManagerError("OpenViking startup validation failed") from exc
                 logger.warning(
                     "OpenViking startup validation failed; memory will run in degraded mode",
                     exc_info=True,
@@ -295,6 +409,18 @@ class OpenVikingMemoryManager(MemoryManager):
         finally:
             self._end_operation()
 
+    def _probe_health_unauthenticated(self) -> bool:
+        url = f"{self._config.base_url}/health"
+        with httpx.Client(timeout=self._config.timeout_seconds) as client:
+            response = client.get(url)
+        if response.status_code != 200:
+            return False
+        try:
+            payload = response.json()
+        except ValueError:
+            return False
+        return isinstance(payload, dict) and payload.get("status") == "ok"
+
     def shutdown_flush(self, timeout: float) -> bool:
         """Stop new work, drain accepted calls, and close owned resources."""
 
@@ -305,10 +431,18 @@ class OpenVikingMemoryManager(MemoryManager):
             while self._active_operations:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    self._flush_timed_out = True
                     return False
                 self._lifecycle.wait(remaining)
-        self._close_resources()
-        return True
+        done = self._start_resource_cleanup()
+        if done.is_set():
+            return not self._cleanup_failed
+        finished = done.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if not finished:
+            with self._lifecycle:
+                self._flush_timed_out = True
+            return False
+        return not self._cleanup_failed
 
     def close(self) -> None:
         """Request idempotent closure after any active operation finishes."""
@@ -317,8 +451,12 @@ class OpenVikingMemoryManager(MemoryManager):
             self._closed = True
             self._close_requested = True
             can_close = self._active_operations == 0
-        if can_close:
-            self._close_resources()
+            already_timed_out = self._flush_timed_out
+        if not can_close:
+            return
+        done = self._start_resource_cleanup()
+        if not done.is_set() and not already_timed_out:
+            done.wait(timeout=self._config.timeout_seconds)
 
     def _write_conversation(
         self,
@@ -331,17 +469,30 @@ class OpenVikingMemoryManager(MemoryManager):
         if not self._begin_operation():
             logger.warning("OpenViking write ignored after backend shutdown")
             return
+        entry: _ScopedClientEntry | None = None
         try:
             if not thread_id:
                 raise ValueError("OpenViking memory write requires thread_id")
-            peer_id = self._resolve_scope(user_id, agent_name)
+            try:
+                resolved_user, credential, peer_id = self._resolve_scope(user_id, agent_name)
+                entry = self._acquire_client(resolved_user, credential)
+            except MemoryManagerError as exc:
+                # Scope/credential checks have already refused the write before
+                # any remote call; the write policy decides whether that refusal
+                # also fails a turn whose answer was already generated.
+                if self._config.write_failure_policy == "raise":
+                    raise
+                logger.error("%s Dropping the memory write (thread=%s).", exc, thread_id)
+                return
             session_id = _session_id(
-                self._config.owner_user_id,
+                resolved_user,
                 peer_id,
                 thread_id,
+                tenant_id=credential.tenant_id,
             )
             with self._session_lock(session_id):
                 self._capture_locked(
+                    entry.recorder,
                     session_id,
                     peer_id,
                     _captureable_messages(
@@ -350,10 +501,13 @@ class OpenVikingMemoryManager(MemoryManager):
                     ),
                 )
         finally:
+            if entry is not None:
+                self._release_client(entry)
             self._end_operation()
 
     def _capture_locked(
         self,
+        recorder: Any,
         session_id: str,
         peer_id: str,
         messages: list[Any],
@@ -364,7 +518,7 @@ class OpenVikingMemoryManager(MemoryManager):
         if state.get("commit_pending"):
             try:
                 with self._actor_peer_scope(peer_id):
-                    self._recorder.flush(session_id)
+                    recorder.flush(session_id)
             except Exception as exc:
                 self._handle_write_error(
                     exc,
@@ -373,7 +527,8 @@ class OpenVikingMemoryManager(MemoryManager):
                 )
                 return
             state = {**state, "commit_pending": False}
-            self._save_cursor(session_id, state)
+            if not self._save_cursor_with_policy(session_id, state):
+                return
 
         start = _matching_prefix_count(state, signatures)
         append_only = start is not None
@@ -387,7 +542,7 @@ class OpenVikingMemoryManager(MemoryManager):
             pending_signatures = [signature for _, signature in pending_pairs]
 
         if not pending:
-            self._save_cursor(
+            self._save_cursor_with_policy(
                 session_id,
                 _advanced_cursor(
                     state,
@@ -401,7 +556,7 @@ class OpenVikingMemoryManager(MemoryManager):
 
         try:
             with self._actor_peer_scope(peer_id):
-                self._recorder.record(
+                recorder.record(
                     session_id,
                     pending,
                     peer_id=peer_id,
@@ -418,16 +573,23 @@ class OpenVikingMemoryManager(MemoryManager):
             commit_pending = bool(getattr(exc, "commit_pending", False))
             if confirmed or commit_pending:
                 confirmed_prefix = signatures[: int(start or 0) + consumed] if append_only else None
-                self._save_cursor(
-                    session_id,
-                    _advanced_cursor(
-                        state,
-                        confirmed_prefix,
-                        confirmed,
-                        max_seen=self._config.max_seen_message_ids,
-                        commit_pending=commit_pending,
-                    ),
-                )
+                try:
+                    self._save_cursor(
+                        session_id,
+                        _advanced_cursor(
+                            state,
+                            confirmed_prefix,
+                            confirmed,
+                            max_seen=self._config.max_seen_message_ids,
+                            commit_pending=commit_pending,
+                        ),
+                    )
+                except OSError as cursor_exc:
+                    logger.warning(
+                        "Failed to persist partial OpenViking capture cursor (session=%s, error=%s)",
+                        session_id,
+                        type(cursor_exc).__name__,
+                    )
             self._handle_write_error(
                 exc,
                 "OpenViking partially recorded a conversation; confirmed progress was preserved",
@@ -442,7 +604,7 @@ class OpenVikingMemoryManager(MemoryManager):
             )
             return
 
-        self._save_cursor(
+        self._save_cursor_with_policy(
             session_id,
             _advanced_cursor(
                 state,
@@ -457,23 +619,325 @@ class OpenVikingMemoryManager(MemoryManager):
         self,
         user_id: str | None,
         agent_name: str | None,
-    ) -> str:
-        resolved_user = str(user_id or "default")
-        if resolved_user != self._config.owner_user_id:
-            raise MemoryManagerError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
-        return _canonical_peer_id(agent_name, self._config.default_peer_id)
+    ) -> tuple[str, OpenVikingCredential, str]:
+        if self._config.isolation_mode == "single_user":
+            resolved_user = str(user_id or "default")
+            if resolved_user != self._config.owner_user_id:
+                raise MemoryManagerError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
+            assert self._single_user_credential is not None
+            try:
+                peer_id = _canonical_peer_id(agent_name, self._config.default_peer_id)
+            except ValueError as exc:
+                raise MemoryManagerError(str(exc)) from exc
+            return resolved_user, self._single_user_credential, peer_id
+
+        if user_id is None:
+            raise MemoryManagerError("OpenViking multi-user mode requires a non-empty DeerFlow user_id; refusing anonymous fallback.")
+        resolved_user = str(user_id)
+        if not resolved_user or not resolved_user.strip():
+            raise MemoryManagerError("OpenViking multi-user mode requires a non-empty DeerFlow user_id; refusing blank fallback.")
+        try:
+            resolved_user = validate_user_key(resolved_user)
+        except ValueError as exc:
+            raise MemoryManagerError(f"OpenViking multi-user mode requires a stripped DeerFlow user_id without control characters, got {resolved_user!r}") from exc
+
+        credential = self._config.user_credentials.get(resolved_user)
+        if credential is None and self._credential_provider is not None:
+            try:
+                resolve_fn = getattr(self._credential_provider, "resolve", None)
+                if callable(resolve_fn):
+                    raw = resolve_fn(resolved_user)
+                else:
+                    raw = self._credential_provider(resolved_user)
+            except Exception as exc:
+                raise MemoryManagerError(f"OpenViking credential provider failed for DeerFlow user {resolved_user!r} ({type(exc).__name__})") from None
+            try:
+                credential = normalize_resolved_credential(raw, user_id=resolved_user)
+            except ValueError as exc:
+                raise MemoryManagerError(str(exc)) from exc
+
+        if credential is None:
+            self._retire_user_entries(resolved_user)
+            raise MemoryManagerError(f"No OpenViking USER API key is configured for DeerFlow user {resolved_user!r}. Refusing to share or fall back to another credential.")
+
+        try:
+            peer_id = _canonical_peer_id(agent_name, self._config.default_peer_id)
+        except ValueError as exc:
+            raise MemoryManagerError(str(exc)) from exc
+        return resolved_user, credential, peer_id
 
     def _resolve_read_scope(
         self,
         user_id: str | None,
         agent_name: str | None,
-    ) -> str:
+    ) -> tuple[str, OpenVikingCredential, str]:
         try:
             return self._resolve_scope(user_id, agent_name)
         except MemoryManagerError as exc:
             if self._config.read_failure_policy == "raise":
                 raise MemoryReadError(str(exc)) from exc
             raise
+
+    def _build_scoped_entry(
+        self,
+        *,
+        key: _ClientPoolKey,
+        api_key: str,
+        now: float,
+    ) -> _ScopedClientEntry:
+        if not api_key:
+            raise MemoryManagerError("Refusing to construct OpenViking client with an empty API key")
+        commit_policy = self._integration["OpenVikingCommitPolicy"](mode="always")
+        recorder = self._integration["OpenVikingSessionRecorder"](
+            url=self._config.base_url,
+            api_key=api_key,
+            timeout=self._config.timeout_seconds,
+            # An explicit mapping disables the SDK's ovcli.conf header fallback.
+            extra_headers={},
+            commit_policy=commit_policy,
+        )
+        try:
+            # The recorder owns one recovery-aware SDK client. Retrieval borrows the
+            # same handle, so each scope has one connection pool and one owner.
+            client = recorder.client
+            retriever = self._integration["OpenVikingRetriever"](
+                client=client,
+                search_mode="find",
+                limit=self._config.search_top_k,
+                score_threshold=self._config.score_threshold,
+                context_types=("memory",),
+                content_mode=self._config.content_mode,
+                max_content_chars=self._config.max_injection_chars,
+            )
+        except BaseException:
+            try:
+                recorder.close()
+            except Exception as close_exc:
+                logger.debug("Failed to close OpenViking recorder after setup error (%s)", type(close_exc).__name__)
+            raise
+        return _ScopedClientEntry(
+            key=key,
+            recorder=recorder,
+            retriever=retriever,
+            client=client,
+            last_used=now,
+        )
+
+    def _acquire_client(
+        self,
+        user_id: str,
+        credential: OpenVikingCredential,
+    ) -> _ScopedClientEntry:
+        key: _ClientPoolKey = (credential.tenant_id, user_id, credential.key_fingerprint)
+        if self._config.isolation_mode == "single_user":
+            with self._pool_lock:
+                if self._resources_closed:
+                    raise MemoryManagerError("OpenViking memory backend is closed")
+                entry = self._pool.get(key)
+                if entry is None or entry.retired or entry.closed:
+                    raise MemoryManagerError("OpenViking client handle is unavailable")
+                entry.active_ops += 1
+                entry.last_used = self._clock()
+                self._pool.move_to_end(key)
+                self._inflight_entries.add(entry)
+                return entry
+
+        to_close: list[_ScopedClientEntry] = []
+        error: MemoryManagerError | None = None
+        acquired: _ScopedClientEntry | None = None
+        now = self._clock()
+
+        with self._pool_lock:
+            if self._resources_closed:
+                raise MemoryManagerError("OpenViking memory backend is closed")
+            to_close.extend(self._evict_idle_ttl_locked(now))
+            error = self._check_fingerprint_conflict_locked(user_id=user_id, credential=credential)
+            if error is None:
+                existing = self._pool.get(key)
+                if existing is not None and not existing.retired and not existing.closed:
+                    existing.active_ops += 1
+                    existing.last_used = now
+                    self._pool.move_to_end(key)
+                    self._inflight_entries.add(existing)
+                    acquired = existing
+
+        self._close_entries(to_close)
+        if error is not None:
+            raise error
+        if acquired is not None:
+            return acquired
+
+        # Build the SDK handles outside _pool_lock so concurrent users never stall on init/I/O.
+        try:
+            new_entry = self._build_scoped_entry(
+                key=key,
+                api_key=credential.api_key,
+                now=now,
+            )
+        except MemoryManagerError:
+            raise
+        except Exception as exc:
+            raise MemoryManagerError(f"Failed to initialize OpenViking client for DeerFlow user {user_id!r} ({type(exc).__name__})") from None
+
+        to_close = []
+        discard_new = False
+        publish_error: MemoryManagerError | None = None
+        winner: _ScopedClientEntry | None = None
+        now = self._clock()
+
+        with self._pool_lock:
+            if self._resources_closed:
+                discard_new = True
+                publish_error = MemoryManagerError("OpenViking memory backend is closed")
+            else:
+                to_close.extend(self._evict_idle_ttl_locked(now))
+                publish_error = self._check_fingerprint_conflict_locked(user_id=user_id, credential=credential)
+                if publish_error is not None:
+                    discard_new = True
+                else:
+                    existing = self._pool.get(key)
+                    if existing is not None and not existing.retired and not existing.closed:
+                        existing.active_ops += 1
+                        existing.last_used = now
+                        self._pool.move_to_end(key)
+                        self._inflight_entries.add(existing)
+                        winner = existing
+                        discard_new = True
+                    else:
+                        to_close.extend(self._retire_scope_rotations_locked(key))
+                        to_close.extend(self._evict_lru_locked())
+                        new_entry.active_ops = 1
+                        new_entry.last_used = now
+                        self._pool[key] = new_entry
+                        self._inflight_entries.add(new_entry)
+                        winner = new_entry
+
+        if discard_new:
+            to_close.append(new_entry)
+        self._close_entries(to_close)
+        if publish_error is not None:
+            raise publish_error
+        assert winner is not None
+        return winner
+
+    def _release_client(self, entry: _ScopedClientEntry) -> None:
+        should_close = False
+        with self._pool_lock:
+            if entry.active_ops > 0:
+                entry.active_ops -= 1
+            if self._config.isolation_mode == "multi_user":
+                entry.last_used = self._clock()
+            if entry.active_ops == 0:
+                self._inflight_entries.discard(entry)
+                if entry.retired and not entry.closed:
+                    entry.closed = True
+                    should_close = True
+        if should_close:
+            self._close_entries([entry])
+
+    def _evict_idle_ttl_locked(self, now: float) -> list[_ScopedClientEntry]:
+        ttl = self._config.pool_idle_ttl_seconds
+        if ttl is None:
+            return []
+        evicted: list[_ScopedClientEntry] = []
+        for entry_key in list(self._pool):
+            entry = self._pool[entry_key]
+            if entry.active_ops == 0 and (now - entry.last_used) >= ttl:
+                del self._pool[entry_key]
+                entry.retired = True
+                if not entry.closed:
+                    entry.closed = True
+                    evicted.append(entry)
+        return evicted
+
+    def _check_fingerprint_conflict_locked(
+        self,
+        *,
+        user_id: str,
+        credential: OpenVikingCredential,
+    ) -> MemoryManagerError | None:
+        target_scope = (credential.tenant_id, user_id)
+        # In hybrid mode, also reject reuse of uncached or LRU/TTL-evicted static credentials.
+        for static_user, static_cred in self._config.user_credentials.items():
+            static_scope = (static_cred.tenant_id, static_user)
+            if static_cred.key_fingerprint == credential.key_fingerprint and static_scope != target_scope:
+                return MemoryManagerError(f"OpenViking USER API key cannot be shared across distinct DeerFlow scopes ({static_scope!r} and {target_scope!r})")
+        for entry in (*self._pool.values(), *self._inflight_entries):
+            if entry.key[2] == credential.key_fingerprint and (entry.key[0], entry.key[1]) != target_scope:
+                other_scope = (entry.key[0], entry.key[1])
+                return MemoryManagerError(f"OpenViking USER API key cannot be shared across distinct DeerFlow scopes ({other_scope!r} and {target_scope!r})")
+        return None
+
+    def _retire_scope_rotations_locked(
+        self,
+        new_key: _ClientPoolKey,
+    ) -> list[_ScopedClientEntry]:
+        user_id = new_key[1]
+        retired: list[_ScopedClientEntry] = []
+        for entry_key in list(self._pool):
+            if entry_key[1] == user_id and entry_key != new_key:
+                entry = self._pool.pop(entry_key)
+                entry.retired = True
+                if entry.active_ops == 0 and not entry.closed:
+                    entry.closed = True
+                    retired.append(entry)
+        for entry in self._inflight_entries:
+            if entry.key[1] == user_id and entry.key != new_key:
+                entry.retired = True
+        return retired
+
+    def _evict_lru_locked(self) -> list[_ScopedClientEntry]:
+        evicted: list[_ScopedClientEntry] = []
+        while len(self._pool) >= self._config.pool_max_clients:
+            victim_key = next(
+                (k for k, entry in self._pool.items() if entry.active_ops == 0),
+                None,
+            )
+            if victim_key is None:
+                victim_key, victim = self._pool.popitem(last=False)
+            else:
+                victim = self._pool.pop(victim_key)
+            victim.retired = True
+            if victim.active_ops == 0 and not victim.closed:
+                victim.closed = True
+                evicted.append(victim)
+        return evicted
+
+    def _retire_user_entries(self, user_id: str) -> None:
+        to_close: list[_ScopedClientEntry] = []
+        with self._pool_lock:
+            for entry_key in [k for k in self._pool if k[1] == user_id]:
+                entry = self._pool.pop(entry_key)
+                entry.retired = True
+                if entry.active_ops == 0 and not entry.closed:
+                    entry.closed = True
+                    to_close.append(entry)
+            for entry in self._inflight_entries:
+                if entry.key[1] == user_id:
+                    entry.retired = True
+        self._close_entries(to_close)
+
+    @staticmethod
+    def _close_entries(entries: list[_ScopedClientEntry]) -> None:
+        for entry in entries:
+            try:
+                entry.recorder.close()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to close OpenViking recorder for scope (%r, %r) (%s)",
+                    entry.key[0],
+                    entry.key[1],
+                    type(exc).__name__,
+                )
+
+    def _close_credential_provider(self) -> None:
+        provider = self._credential_provider
+        close_fn = getattr(provider, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception as exc:
+                logger.warning("Failed to close OpenViking credential provider (%s)", type(exc).__name__)
 
     def _actor_peer_scope(
         self,
@@ -503,17 +967,59 @@ class OpenVikingMemoryManager(MemoryManager):
                 self._lifecycle.notify_all()
                 should_close = self._close_requested
         if should_close:
-            try:
-                self._close_resources()
-            except Exception:
-                logger.exception("Failed to close OpenViking memory resources")
+            # Start single-flight cleanup without blocking the finishing operation's
+            # executor worker; shutdown_flush()/close() own any cleanup wait budget.
+            self._start_resource_cleanup()
 
-    def _close_resources(self) -> None:
+    def _start_resource_cleanup(self) -> threading.Event:
+        to_close: list[_ScopedClientEntry] = []
+        should_spawn = False
         with self._resource_lock:
-            if self._resources_closed:
-                return
-            self._recorder.close()
-            self._resources_closed = True
+            if not self._cleanup_started:
+                self._cleanup_started = True
+                with self._pool_lock:
+                    self._resources_closed = True
+                    drained = list(self._pool.values())
+                    self._pool.clear()
+                    for entry in drained:
+                        entry.retired = True
+                        if entry.active_ops == 0 and not entry.closed:
+                            entry.closed = True
+                            to_close.append(entry)
+                    for entry in self._inflight_entries:
+                        entry.retired = True
+                        if entry.active_ops == 0 and not entry.closed:
+                            entry.closed = True
+                            to_close.append(entry)
+                close_fn = getattr(self._credential_provider, "close", None)
+                if not to_close and not callable(close_fn):
+                    self._cleanup_done.set()
+                else:
+                    should_spawn = True
+
+        if should_spawn:
+
+            def _run_cleanup() -> None:
+                try:
+                    self._close_entries(to_close)
+                    self._close_credential_provider()
+                except Exception as exc:
+                    logger.warning("Failed to close OpenViking memory resources (%s)", type(exc).__name__)
+                finally:
+                    self._cleanup_done.set()
+
+            try:
+                threading.Thread(
+                    target=_run_cleanup,
+                    name="openviking-resource-cleanup",
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                logger.warning("Failed to start OpenViking cleanup worker (%s)", type(exc).__name__)
+                self._cleanup_failed = True
+                self._cleanup_done.set()
+
+        return self._cleanup_done
 
     def _state_path(self, session_id: str) -> Path:
         root = Path(self._config.storage_path or ".") / "openviking" / "sessions"
@@ -551,6 +1057,36 @@ class OpenVikingMemoryManager(MemoryManager):
                     exc_info=True,
                 )
 
+    def _save_cursor_with_policy(self, session_id: str, state: dict[str, Any]) -> bool:
+        try:
+            self._save_cursor(session_id, state)
+            return True
+        except OSError as exc:
+            self._handle_write_error(
+                exc,
+                "OpenViking capture cursor persistence failed",
+                session_id,
+            )
+            return False
+
+    def _invoke_retriever(self, retriever: Any, query: str, *, peer_id: str) -> list[Any]:
+        use_home = self._use_home_alias_uris
+        retriever.target_uri = _memory_target_uris(peer_id, use_home_alias=use_home)
+        try:
+            with self._actor_peer_scope(peer_id):
+                return retriever.invoke(query)
+        except Exception as exc:
+            if use_home or not _should_retry_with_home_alias(exc):
+                raise
+            # OpenViking >=0.5.5 rejects uid-less ``viking://user/<reserved>`` shorthands;
+            # retry once with ``viking://~/...`` and remember it for future calls.
+            self._use_home_alias_uris = True
+            logger.info("OpenViking server requires 'viking://~/' user-space URIs; switching target_uri format")
+            retry_retriever = copy.copy(retriever)
+            retry_retriever.target_uri = _memory_target_uris(peer_id, use_home_alias=True)
+            with self._actor_peer_scope(peer_id):
+                return retry_retriever.invoke(query)
+
     def _handle_write_error(
         self,
         exc: Exception,
@@ -561,6 +1097,14 @@ class OpenVikingMemoryManager(MemoryManager):
         if self._config.write_failure_policy == "raise":
             raise MemoryManagerError(detail) from exc
         logger.error(detail, exc_info=True)
+
+
+def _should_retry_with_home_alias(exc: Exception) -> bool:
+    """Return True when an OpenViking >=0.5.5 server rejected legacy uid-less URIs."""
+
+    if "viking://~/" not in str(exc):
+        return False
+    return getattr(exc, "code", None) == "INVALID_URI" or type(exc).__name__ == "InvalidURIError"
 
 
 def _load_official_integration() -> dict[str, Any]:

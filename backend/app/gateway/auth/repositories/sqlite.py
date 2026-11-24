@@ -406,7 +406,16 @@ class SQLiteUserRepository(UserRepository):
             row.oauth_id = user.oauth_id
             row.needs_setup = user.needs_setup
             row.token_version = user.token_version
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                # The caller's email pre-check cannot see an insert or update
+                # of the same address that commits before this one. Report the
+                # lost race the way create_user does; any other violation
+                # propagates unchanged.
+                if _is_email_violation(exc):
+                    raise ValueError(f"Email already registered: {user.email}") from exc
+                raise
         return user
 
     async def count_users(self) -> int:
