@@ -430,11 +430,14 @@ def test_aio_cleanup_stops_the_rest_of_a_persistent_shell_command(tmp_path, job_
             else:
                 continue
             break
-        assert state.read_text().strip() == f"{tmp_path}|{token}", "the shell must survive with its state"
+        assert state.exists() and state.read_text().strip() == f"{tmp_path}|{token}", "the shell must survive with its state"
         assert not (tmp_path / "tail.txt").exists(), "cancel must stop the rest of the command"
     finally:
-        os.kill(shell, signal.SIGKILL)
-        os.waitpid(shell, 0)
+        try:
+            os.kill(shell, signal.SIGKILL)
+            os.waitpid(shell, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
         os.close(terminal)
 
 
