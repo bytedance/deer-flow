@@ -315,9 +315,13 @@ def _post_link_text(element: dict) -> str:
     """Render a post ``a`` element as a Markdown link, keeping its label and URL."""
     label = element.get("text") if isinstance(element.get("text"), str) else ""
     href = element.get("href") if isinstance(element.get("href"), str) else ""
-    if label and href and label != href:
-        return f"[{label}]({href})"
-    return href or label
+    if not (label and href) or label == href:
+        return href or label
+    # Escape brackets so a "]" in the label cannot end the link text early, and
+    # put a URL with parentheses or spaces in <...>, where it needs no escaping.
+    label = re.sub(r"[\\\[\]]", lambda match: "\\" + match.group(), label)
+    destination = f"<{href}>" if re.search(r"[\s()]", href) else href
+    return f"[{label}]({destination})"
 
 
 def _post_code_block_text(element: dict) -> str:
@@ -2212,7 +2216,12 @@ class FeishuChannel(Channel):
                             elif element.get("tag") == "code_block":
                                 code_block_text = _post_code_block_text(element)
                                 if code_block_text:
-                                    paragraph_text_parts.append(code_block_text)
+                                    # A fence must start its own line, so the block
+                                    # becomes its own paragraph.
+                                    if paragraph_text_parts:
+                                        text_paragraphs.append(" ".join(paragraph_text_parts))
+                                        paragraph_text_parts.clear()
+                                    text_paragraphs.append(code_block_text)
                             elif element.get("tag") == "img":
                                 image_key = element.get("image_key")
                                 if isinstance(image_key, str) and image_key:
