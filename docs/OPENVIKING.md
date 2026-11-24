@@ -405,10 +405,11 @@ boundary; peers separate memory scopes within that user.
 - Capture cursors remain local per Gateway instance. Shared DB-backed capture
   cursors for multi-replica Gateways writing concurrently to the same thread
   remain a Phase 2 follow-up.
-- Graceful shutdown stops new memory work, waits up to
-  `shutdown_flush_timeout_seconds` for accepted operations, closes all pooled
-  recorder-owned SDK clients, and calls `credential_provider.close()` if
-  defined. It does not introduce a new DeerFlow lifecycle or background worker.
+- Graceful shutdown stops new memory work, drains accepted operations, and
+  bounds closing pooled recorder-owned SDK clients and
+  `credential_provider.close()` (if defined) within the same
+  `shutdown_flush_timeout_seconds` budget via a single-flight teardown, without
+  introducing a new DeerFlow lifecycle or persistent background worker.
 
 For deployments where a lost memory update is unacceptable, a durable outbox
 is still required. This integration does not claim at-least-once delivery.

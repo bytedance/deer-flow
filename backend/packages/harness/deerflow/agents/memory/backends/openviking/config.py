@@ -289,8 +289,8 @@ def _resolve_user_credentials(raw_user_credentials: dict[str, dict[str, Any]]) -
         env_name: str | None = None
         if has_env:
             raw_env = spec["api_key_env"]
-            if not isinstance(raw_env, str) or not raw_env.strip():
-                raise ValueError(f"OpenViking user_credentials.{uid}.api_key_env must be a non-empty string")
+            if not isinstance(raw_env, str) or not raw_env.strip() or has_control_chars(raw_env):
+                raise ValueError(f"OpenViking user_credentials.{uid}.api_key_env must be a non-empty string without control characters")
             env_name = raw_env.strip()
             api_key_value = os.environ.get(env_name, "").strip()
             if not api_key_value:

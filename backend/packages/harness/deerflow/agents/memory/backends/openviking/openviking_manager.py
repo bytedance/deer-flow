@@ -93,6 +93,7 @@ class OpenVikingMemoryManager(MemoryManager):
     _resources_closed: bool = PrivateAttr(default=False)
     _cleanup_started: bool = PrivateAttr(default=False)
     _cleanup_done: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _cleanup_failed: bool = PrivateAttr(default=False)
     _flush_timed_out: bool = PrivateAttr(default=False)
     _resource_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
@@ -435,13 +436,13 @@ class OpenVikingMemoryManager(MemoryManager):
                 self._lifecycle.wait(remaining)
         done = self._start_resource_cleanup()
         if done.is_set():
-            return True
+            return not self._cleanup_failed
         finished = done.wait(timeout=max(0.0, deadline - time.monotonic()))
         if not finished:
             with self._lifecycle:
                 self._flush_timed_out = True
             return False
-        return True
+        return not self._cleanup_failed
 
     def close(self) -> None:
         """Request idempotent closure after any active operation finishes."""
@@ -1007,11 +1008,16 @@ class OpenVikingMemoryManager(MemoryManager):
                 finally:
                     self._cleanup_done.set()
 
-            threading.Thread(
-                target=_run_cleanup,
-                name="openviking-resource-cleanup",
-                daemon=True,
-            ).start()
+            try:
+                threading.Thread(
+                    target=_run_cleanup,
+                    name="openviking-resource-cleanup",
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                logger.warning("Failed to start OpenViking cleanup worker (%s)", type(exc).__name__)
+                self._cleanup_failed = True
+                self._cleanup_done.set()
 
         return self._cleanup_done
 

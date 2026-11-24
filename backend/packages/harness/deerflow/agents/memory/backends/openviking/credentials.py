@@ -75,8 +75,8 @@ class OpenVikingCredential:
         object.__setattr__(self, "api_key", validated_key)
         object.__setattr__(self, "tenant_id", validated_tenant)
         if self.api_key_env is not None:
-            if not isinstance(self.api_key_env, str) or not self.api_key_env.strip():
-                raise ValueError("OpenViking api_key_env must be a non-empty string when provided")
+            if not isinstance(self.api_key_env, str) or not self.api_key_env.strip() or has_control_chars(self.api_key_env):
+                raise ValueError("OpenViking api_key_env must be a non-empty string without control characters when provided")
             object.__setattr__(self, "api_key_env", self.api_key_env.strip())
         digest = hashlib.sha256(validated_key.encode("utf-8")).hexdigest()
         object.__setattr__(self, "key_fingerprint", digest)

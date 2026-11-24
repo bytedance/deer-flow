@@ -3164,6 +3164,11 @@ def test_single_user_config_parity_and_multi_user_edge_cases(
     for bad_env in (123, "ENV\x00KEY", "ENV\nKEY"):
         with pytest.raises(ValueError, match="api_key_env must be a string without control characters"):
             OpenVikingConfig.from_backend_config(_backend_config(tmp_path, api_key_env=bad_env))
+        with pytest.raises(ValueError, match=r"user_credentials\.alice\.api_key_env must be a non-empty string without control characters"):
+            OpenVikingConfig.from_backend_config(_multi_user_backend_config(tmp_path, user_credentials={"alice": {"api_key_env": bad_env}}))
+
+    with pytest.raises(ValueError, match="api_key_env must be a non-empty string without control characters"):
+        OpenVikingCredential(api_key="valid-key", api_key_env="OV\nKEY")
 
     # Duplicate secrets across two different env vars in multi-user mode
     monkeypatch.setenv("ALICE_ENV_KEY", "shared-env-secret")
@@ -3423,3 +3428,35 @@ async def test_admitted_async_write_does_not_wait_on_slow_recorder_teardown(
     assert manager.shutdown_flush(1.0) is True
     assert recorder.closed is True
     assert close_calls == 1
+
+
+def test_cleanup_worker_start_failure_marks_cleanup_done_and_sanitizes_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import deerflow.agents.memory.backends.openviking.openviking_manager as module
+
+    _track_official_integration(monkeypatch)
+    manager = OpenVikingMemoryManager.from_config(_multi_user_backend_config(tmp_path, user_credentials={"alice": {"api_key": "alice-secret"}}))
+    manager.search("warmup", user_id="alice")
+
+    class _FailingThread:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread: secret-stack-info")
+
+    monkeypatch.setattr(module.threading, "Thread", _FailingThread)
+
+    with caplog.at_level(logging.WARNING, logger=OpenVikingMemoryManager.__module__):
+        assert manager.shutdown_flush(1.0) is False
+
+    assert manager._cleanup_done.is_set()
+    assert manager._cleanup_failed is True
+    warnings = [r for r in caplog.records if "Failed to start OpenViking cleanup worker" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == "Failed to start OpenViking cleanup worker (RuntimeError)"
+    assert warnings[0].exc_info is None
+    assert "secret-stack-info" not in caplog.text
