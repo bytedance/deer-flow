@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
+import pytest
+
 
 class _FakePydanticV2:
     """Object with model_dump (Pydantic v2)."""
@@ -122,6 +126,57 @@ def test_serialize_channel_values_keeps_durable_snapshot_out_of_public_values():
     assert result == {"messages": [], "title": "Test"}
     assert serialize(raw, mode="values") == result
     assert raw["durable_context_snapshot"]["content"] == "middleware-internal"
+
+
+@pytest.mark.parametrize(
+    ("mode", "frame"),
+    [
+        (
+            "checkpoints",
+            ({"values": {"durable_context_snapshot": {"content": "checkpoint-only"}, "summary_text": "public", "payload": {"durable_context_snapshot": "ordinary application data"}}}, {"step": 1}),
+        ),
+        (
+            "checkpoints",
+            ({"channel_values": {"durable_context_snapshot": {"content": "checkpoint-only"}, "summary_text": "public", "payload": {"durable_context_snapshot": "ordinary application data"}}}, {"step": 1}),
+        ),
+        (
+            "tasks",
+            {
+                "id": "task-1",
+                "input": {"durable_context_snapshot": {"content": "checkpoint-only"}, "summary_text": "public", "payload": {"durable_context_snapshot": "ordinary application data"}},
+                "result": {"durable_context_snapshot": {"content": "checkpoint-only"}, "summary_text": "public", "payload": {"durable_context_snapshot": "ordinary application data"}},
+            },
+        ),
+        (
+            "debug",
+            {
+                "type": "checkpoint",
+                "payload": {"values": {"durable_context_snapshot": {"content": "checkpoint-only"}, "summary_text": "public", "payload": {"durable_context_snapshot": "ordinary application data"}}},
+            },
+        ),
+        (
+            "debug",
+            {
+                "type": "task",
+                "payload": {
+                    "input": {"durable_context_snapshot": {"content": "checkpoint-only"}, "summary_text": "public", "payload": {"durable_context_snapshot": "ordinary application data"}},
+                    "result": {"durable_context_snapshot": {"content": "checkpoint-only"}, "summary_text": "public", "payload": {"durable_context_snapshot": "ordinary application data"}},
+                },
+            },
+        ),
+    ],
+    ids=["checkpoint-values", "checkpoint-channel-values", "task-input-result", "debug-values", "debug-input-result"],
+)
+def test_public_state_stream_modes_hide_only_checkpoint_owned_channels(mode, frame):
+    from deerflow.runtime.serialization import serialize
+
+    original = deepcopy(frame)
+    result = serialize(frame, mode=mode)
+
+    assert "checkpoint-only" not in str(result)
+    assert "ordinary application data" in str(result)
+    assert "public" in str(result)
+    assert frame == original
 
 
 def test_serialize_channel_values_serializes_objects():

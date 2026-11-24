@@ -163,6 +163,15 @@ def serialize_messages_tuple(obj: Any) -> Any:
     return serialize_lc_object(obj)
 
 
+def _serialize_state_frame(frame: Any, state_keys: frozenset[str]) -> Any:
+    """Filter only documented state-bearing fields on one public stream frame."""
+    if isinstance(frame, (list, tuple)):
+        return [_serialize_state_frame(item, state_keys) for item in frame]
+    if not isinstance(frame, dict):
+        return serialize_lc_object(frame)
+    return {key: serialize_channel_values(value) if key in state_keys and isinstance(value, dict) else serialize_lc_object(value) for key, value in frame.items()}
+
+
 def serialize(obj: Any, *, mode: str = "") -> Any:
     """Serialize LangChain objects with mode-specific handling.
 
@@ -170,6 +179,8 @@ def serialize(obj: Any, *, mode: str = "") -> Any:
     * ``values`` — obj is the full state dict; ``__pregel_*`` keys stripped and
       base64 ``data:`` image blocks dropped from hide_from_ui messages
     * ``updates``: node state writes have internal channels stripped
+    * ``checkpoints`` / ``tasks`` / ``debug``: the same channel filter applies
+      only to their documented state-bearing fields, not to nested app data
     * everything else — recursive ``model_dump()`` / ``dict()`` fallback
     """
     if mode == "messages":
@@ -180,4 +191,10 @@ def serialize(obj: Any, *, mode: str = "") -> Any:
         return serialize_channel_values_for_api(obj) if isinstance(obj, dict) else serialize_lc_object(obj)
     if mode == "updates" and isinstance(obj, dict):
         return {node: serialize_channel_values(update) if isinstance(update, dict) else serialize_lc_object(update) for node, update in obj.items()}
+    if mode == "checkpoints":
+        return _serialize_state_frame(obj, frozenset({"values", "channel_values"}))
+    if mode == "tasks":
+        return _serialize_state_frame(obj, frozenset({"input", "result"}))
+    if mode == "debug" and isinstance(obj, dict):
+        return {key: _serialize_state_frame(value, frozenset({"values", "channel_values", "input", "result"})) if key == "payload" else serialize_lc_object(value) for key, value in obj.items()}
     return serialize_lc_object(obj)

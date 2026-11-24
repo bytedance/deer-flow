@@ -174,3 +174,53 @@ def test_updates_stream_filters_internal_channels_only_at_the_node_boundary(node
     assert result[node]["messages"][0]["content"] == "public reply"
     assert result["__interrupt__"] == [{"value": "approve", "id": "pause"}]
     assert raw == original
+
+
+@pytest.mark.parametrize("history_blocks", [False, True], ids=["text", "content-blocks"])
+def test_artifact_injection_switch_filters_replayed_history_without_rewriting_state(history_blocks):
+    config = {"configurable": {"thread_id": f"artifact-switch-{history_blocks}"}}
+    saver = InMemorySaver()
+    first = {
+        "handle": "artifact-handle-1",
+        "display_name": "first-private-artifact",
+        "artifact_type": "file",
+        "tool_name": "write_file",
+        "mime_type": "text/plain",
+        "real_ref": "synthetic-first",
+    }
+    second = {
+        "handle": "artifact-handle-2",
+        "display_name": "second-private-artifact",
+        "artifact_type": "file",
+        "tool_name": "write_file",
+        "mime_type": "text/plain",
+        "real_ref": "synthetic-second",
+    }
+    old_model = RecordingModel(responses=[AIMessage(content="saved reply")] * 2)
+    old_agent = create_agent(model=old_model, tools=[], middleware=[DurableContextMiddleware(inject_tool_artifacts=True)], state_schema=ThreadState, checkpointer=saver)
+    old_agent.invoke({"messages": [HumanMessage(content="first")], "tool_artifacts": [first]}, config)
+    old_agent.invoke({"messages": [HumanMessage(content="second")], "tool_artifacts": [first, second]}, config)
+    if history_blocks:
+        history = old_agent.get_state(config).values["messages"]
+        old_agent.update_state(config, {"messages": [message.model_copy(update={"content": [{"type": "text", "text": message.content}]}) for message in history if message.additional_kwargs.get("durable_context_data")]})
+    saved = old_agent.get_state(config).values
+    snapshot = deepcopy(saved["durable_context_snapshot"])
+    old_updates = {message.id: message.content for message in saved["messages"] if message.additional_kwargs.get("durable_context_data")}
+    assert "artifact-handle-1" in snapshot["content"]
+    assert any("artifact-handle-2" in str(content) for content in old_updates.values())
+
+    resumed_model = RecordingModel(responses=[AIMessage(content="resumed reply")] * 2)
+    resumed = create_agent(model=resumed_model, tools=[], middleware=[DurableContextMiddleware(inject_tool_artifacts=False)], state_schema=ThreadState, checkpointer=saver)
+    result = resumed.invoke({"messages": [HumanMessage(content="resume without artifacts")]}, config)
+    resumed.invoke({"messages": [HumanMessage(content="keep artifacts hidden")]}, config)
+
+    for received in resumed_model.received[-2:]:
+        visible = "\n".join(str(message.content) for message in received)
+        assert "artifact-handle-1" not in visible
+        assert "artifact-handle-2" not in visible
+        assert "first-private-artifact" not in visible
+        assert "second-private-artifact" not in visible
+        assert "## Available artifact handles" not in visible
+    assert result["durable_context_snapshot"] == snapshot
+    assert result["tool_artifacts"] == saved["tool_artifacts"]
+    assert {message.id: message.content for message in result["messages"] if message.id in old_updates} == old_updates

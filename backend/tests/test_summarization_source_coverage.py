@@ -116,11 +116,11 @@ def _raw_sections(prompt: str) -> list[tuple[str, str]]:
     return [(name, html.unescape(body)) for name, body in matches]
 
 
-def _middleware(model, *, raw_budget=_RAW_BUDGET, **kwargs):
+def _middleware(model, *, raw_budget=_RAW_BUDGET, keep=("messages", 2), **kwargs):
     return DeerFlowSummarizationMiddleware(
         model=model,
         trigger=("messages", 4),
-        keep=("messages", 2),
+        keep=keep,
         token_counter=_char_count,
         trim_tokens_to_summarize=raw_budget,
         summary_prompt="{messages}",
@@ -207,6 +207,46 @@ async def test_superseded_durable_projections_never_reach_the_summary_model(asyn
     assert "CURRENT_WORKING_NOTE" not in captured
     assert "ORDINARY_OLD_QUESTION" in captured
     assert "ORDINARY_OLD_ANSWER" in captured
+    assert state == original
+
+
+@pytest.mark.parametrize("content_blocks", [False, True], ids=["text", "content-blocks"])
+def test_retained_partition_drops_superseded_durable_projections(content_blocks):
+    from deerflow.agents.middlewares.durable_context_middleware import is_durable_context_refresh
+
+    obsolete = HumanMessage(
+        content="<durable_context_update>\n## Task working notes\nRETIRED_NOTE</durable_context_update>",
+        id="obsolete-update",
+        additional_kwargs={"durable_context_data": True},
+    )
+    current = HumanMessage(
+        content="<durable_context_data>\n## Task working notes\nCURRENT_NOTE</durable_context_data>",
+        id="current-refresh",
+        additional_kwargs={"durable_context_data": True},
+    )
+    if content_blocks:
+        current = current.model_copy(update={"content": [{"type": "text", "text": current.content}]})
+    assert is_durable_context_refresh(current)
+    state = {
+        "messages": [
+            HumanMessage(content="OLD_QUESTION", id="q1"),
+            HumanMessage(content="CURRENT_QUESTION", id="q2"),
+            obsolete,
+            AIMessage(content="ANSWER_TWO", id="answer2"),
+            current,
+            AIMessage(content="ANSWER_THREE", id="answer3"),
+        ]
+    }
+    original = copy.deepcopy(state)
+    middleware = _middleware(RecordingSummaryModel(), keep=("messages", 4))
+
+    result = middleware.compact_state(state, SimpleNamespace(context={"thread_id": "retained-durable-cutoff"}))
+
+    assert result is not None
+    preserved_ids = [message.id for message in result.preserved_messages]
+    assert preserved_ids == ["answer2", "current-refresh", "answer3"]
+    assert "obsolete-update" not in {message.id for message in result.messages_to_summarize}
+    assert "q1" in {message.id for message in result.messages_to_summarize}
     assert state == original
 
 

@@ -184,6 +184,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             # Only the scheduler's internal launch may mark a message as a
             # scheduled run prompt.
             SCHEDULED_ORIGIN_KEY,
+            # Framework-written durable projections are not caller-owned metadata.
+            "durable_context_data",
+            "durable_context_sections",
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,

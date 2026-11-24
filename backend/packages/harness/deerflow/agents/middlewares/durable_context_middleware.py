@@ -76,6 +76,7 @@ _DATA_BLOCK_CLOSE = "</durable_context_data>"
 _UPDATE_BLOCK_OPEN = "<durable_context_update>"
 _UPDATE_BLOCK_CLOSE = "</durable_context_update>"
 _SKILL_SECTION_HEADER = "## Active skills (loaded earlier - re-read the file before applying its instructions)"
+_ARTIFACT_SECTION_HEADER = "## Available artifact handles"
 _SUMMARY_RENDER_CHAR_BUDGET = 6000
 # Same cap as ``runtime.goal.MAX_GOAL_OBJECTIVE_CHARS``. The goal routes enforce
 # it, but ``POST /threads/{id}/state`` can write the channel without them.
@@ -278,6 +279,48 @@ def _project_skill_visibility_in_content(content: object, visible_paths: frozens
     return projected
 
 
+def _project_artifact_injection(text: str, artifacts_digest: str | None) -> str:
+    """Remove only the renderer-owned artifact section from a model projection."""
+    if _ARTIFACT_SECTION_HEADER not in text:
+        return text
+    lines = text.split("\n")
+    projected: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index] != _ARTIFACT_SECTION_HEADER:
+            projected.append(lines[index])
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].startswith("## ") and lines[end] not in {_DATA_BLOCK_CLOSE, _UPDATE_BLOCK_CLOSE}:
+            end += 1
+        section_lines = lines[index:end]
+        digest_source = section_lines[:]
+        while digest_source and not digest_source[-1]:
+            digest_source.pop()
+        if artifacts_digest is not None and _section_digest("\n".join(digest_source)) != artifacts_digest:
+            projected.extend(section_lines)
+        elif end < len(lines) and lines[end] in {_DATA_BLOCK_CLOSE, _UPDATE_BLOCK_CLOSE} and projected and not projected[-1]:
+            projected.pop()
+        index = end
+    return "\n".join(projected)
+
+
+def _project_artifact_injection_in_content(content: object, artifacts_digest: str | None) -> object:
+    if isinstance(content, str):
+        return _project_artifact_injection(content, artifacts_digest)
+    if not isinstance(content, list):
+        return content
+    projected = []
+    for block in content:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            text = _project_artifact_injection(block["text"], artifacts_digest)
+            projected.append({**block, "text": text} if text != block["text"] else block)
+        else:
+            projected.append(block)
+    return projected
+
+
 def _last_durable_data_message(messages: list[AnyMessage]) -> HumanMessage | None:
     for message in reversed(messages):
         if isinstance(message, HumanMessage) and message.additional_kwargs.get(_DURABLE_CONTEXT_DATA_KEY):
@@ -299,13 +342,22 @@ def is_durable_context_data(message: object) -> bool:
     return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_DURABLE_CONTEXT_DATA_KEY))
 
 
+def _durable_message_text(message: object) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return next((block["text"] for block in content if isinstance(block, dict) and isinstance(block.get("text"), str)), "")
+    return ""
+
+
 def is_durable_context_refresh(message: object) -> bool:
     """True for the ``<durable_context_data>`` blocks that restate every field.
 
     A refresh supersedes the blocks before it; an ``<durable_context_update>``
     block only supersedes the fields it lists.
     """
-    return is_durable_context_data(message) and str(getattr(message, "content", "") or "").startswith(f"{_DATA_BLOCK_OPEN}\n")
+    return is_durable_context_data(message) and _durable_message_text(message).startswith(f"{_DATA_BLOCK_OPEN}\n")
 
 
 def durable_context_messages_to_rescue(candidates: list[AnyMessage], *, later: list[AnyMessage] = ()) -> list[AnyMessage]:
@@ -323,6 +375,14 @@ def durable_context_messages_to_rescue(candidates: list[AnyMessage], *, later: l
     if last_refresh is None:
         return [message for message in candidates if is_durable_context_data(message)]
     return [message for index, message in enumerate(candidates) if index >= last_refresh and is_durable_context_data(message)]
+
+
+def durable_context_history_to_keep(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Drop superseded durable projections while preserving ordinary message order."""
+    last_refresh = max((index for index, message in enumerate(messages) if is_durable_context_refresh(message)), default=None)
+    if last_refresh is None:
+        return list(messages)
+    return [message for index, message in enumerate(messages) if index >= last_refresh or not is_durable_context_data(message)]
 
 
 def _apply_to_history(messages: list[AnyMessage], pending: list[AnyMessage]) -> list[AnyMessage]:
@@ -654,8 +714,10 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             return entries
         return [entry for entry in entries if isinstance(entry, dict) and decisions.get(posixpath.normpath(entry.get("path") or ""), False)]
 
-    def _project_outgoing_content(self, content: object, runtime: Runtime | None, skills_digest: str | None) -> object:
+    def _project_outgoing_content(self, content: object, runtime: Runtime | None, skills_digest: str | None, artifacts_digest: str | None) -> object:
         """Apply current visibility before PII projection, without changing state."""
+        if not self._inject_tool_artifacts:
+            content = _project_artifact_injection_in_content(content, artifacts_digest)
         decisions = self._skill_entry_decisions(runtime)
         if decisions is not None:
             visible_paths = frozenset(posixpath.normpath(path) for path, allowed in decisions.items() if allowed)
@@ -756,7 +818,12 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         anchor_message = None
         if snapshot.get("content"):
             anchor_message = HumanMessage(
-                content=self._project_outgoing_content(snapshot["content"], runtime, (snapshot.get("sections") or {}).get("skills")),
+                content=self._project_outgoing_content(
+                    snapshot["content"],
+                    runtime,
+                    (snapshot.get("sections") or {}).get("skills"),
+                    (snapshot.get("sections") or {}).get("artifacts"),
+                ),
                 additional_kwargs={
                     "hide_from_ui": True,
                     _DURABLE_CONTEXT_DATA_KEY: True,
@@ -841,7 +908,12 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         # Project old and newly emitted blocks without rewriting stored contents.
         for index, message in enumerate(placed):
             if is_durable_context_data(message):
-                content = self._project_outgoing_content(message.content, request.runtime, _recorded_section_digests(message).get("skills"))
+                content = self._project_outgoing_content(
+                    message.content,
+                    request.runtime,
+                    _recorded_section_digests(message).get("skills"),
+                    _recorded_section_digests(message).get("artifacts"),
+                )
                 if content != message.content:
                     placed[index] = message.model_copy(update={"content": content})
         # The authority contract rides only when durable content exists on the
