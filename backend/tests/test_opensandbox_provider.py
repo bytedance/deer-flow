@@ -29,6 +29,7 @@ from typing import Any
 
 import httpx
 import pytest
+from langchain.tools import ToolRuntime
 from langgraph.runtime import Runtime
 
 from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
@@ -38,6 +39,7 @@ from deerflow.config.extensions_config import SkillStateConfig
 from deerflow.config.paths import Paths
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
+from deerflow.sandbox.tools import ensure_sandbox_initialized, ensure_sandbox_initialized_async
 from deerflow.skills.projection import get_thread_skill_projection_paths
 from deerflow.skills.storage import get_or_new_user_skill_storage
 
@@ -615,6 +617,55 @@ def _remote_skills(remote):
     return {item.parent.name for item in remote.skill_root.rglob("SKILL.md")}
 
 
+def _tool_runtime(state, context):
+    return ToolRuntime(
+        state=state,
+        context=context,
+        config={"configurable": {}},
+        stream_writer=lambda _: None,
+        tools=[],
+        tool_call_id="first-sandbox-tool",
+        store=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_init", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("existing_remote", [False, True], ids=["fresh", "active"])
+async def test_opensandbox_empty_skill_projection_precedes_tool_access(opensandbox_skill_view, async_init, existing_remote):
+    env = opensandbox_skill_view
+    env.skill("shared")
+    if existing_remote:
+        env.provider.acquire("thread", user_id="alice")
+        assert _remote_skills(env.sdk.remotes[0]) == {"shared"}
+
+    middleware = SandboxMiddleware(lazy_init=True, available_skills=set())
+    context = {"thread_id": "thread", "user_id": "alice"}
+    state = {}
+    runtime = Runtime(context=context)
+    update = await middleware.abefore_agent(state, runtime) if async_init else middleware.before_agent(state, runtime)
+    assert len(env.sdk.create_calls) == int(existing_remote)
+    if existing_remote:
+        assert update is not None
+        assert update == {"sandbox": {"sandbox_id": context["sandbox_id"]}}
+        assert _remote_skills(env.sdk.remotes[0]) == set()
+        state.update(update)
+    else:
+        assert update is None
+        assert "sandbox_id" not in context
+
+    tool_runtime = _tool_runtime(state, context)
+    sandbox = await ensure_sandbox_initialized_async(tool_runtime) if async_init else ensure_sandbox_initialized(tool_runtime)
+    assert len(env.sdk.create_calls) == 1
+    assert state["sandbox"] == {"sandbox_id": sandbox.id}
+    assert _remote_skills(env.sdk.remotes[0]) == set()
+
+    remote = env.sdk.remotes[0]
+    commands = len(remote.commands.calls)
+    assert env.provider.acquire("thread", user_id="alice") == sandbox.id
+    assert len(remote.commands.calls) == commands
+
+
 def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
     env = opensandbox_skill_view
     package = env.skill("alpha")
@@ -645,11 +696,14 @@ def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
 
     for allowlist, expected in [({"alpha"}, {"alpha"}), (set(), set()), (None, {"alpha", "beta", "alice-only"})]:
         runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-        update = SandboxMiddleware(lazy_init=True, available_skills=allowlist).before_agent({}, runtime)
-        assert update == {"sandbox": {"sandbox_id": alice_id}}
+        middleware = SandboxMiddleware(lazy_init=True, available_skills=allowlist)
+        state = {}
+        assert middleware.before_agent(state, runtime) is None
+        assert env.provider.get(alice_id) is None
+        assert ensure_sandbox_initialized(_tool_runtime(state, runtime.context)).id == alice_id
         assert _remote_skills(alice) == expected
         assert {p.name for p in alice.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
-        env.provider.release(alice_id)
+        middleware.after_agent(state, runtime)
     assert len(env.sdk.remotes) == 2
     assert _remote_skills(bob) == {"alpha", "beta", "bob-only"}
 
@@ -684,7 +738,7 @@ def test_opensandbox_skill_partial_upload_preserves_warm_workspace(opensandbox_s
     assert "sandbox_id" not in runtime.context
     assert env.provider.get(sandbox_id) is None
     assert remote.destroy_calls == 0
-    assert (remote.skill_root / "custom" / "allowed").exists() is not restricted
+    assert _remote_skills(remote) == {"alpha", "beta", "allowed"}
 
     assert middleware.before_agent({}, runtime) == {"sandbox": {"sandbox_id": sandbox_id}}
     assert len(env.sdk.remotes) == 1
@@ -711,7 +765,9 @@ def test_opensandbox_skill_upload_preserves_package_links(opensandbox_skill_view
     (package / "empty link").symlink_to("assets/empty", target_is_directory=True)
 
     runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-    SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent({}, runtime)
+    state = {}
+    SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent(state, runtime)
+    ensure_sandbox_initialized(_tool_runtime(state, runtime.context))
     uploaded = env.sdk.remotes[0].skill_root / "custom" / "allowed"
     assert (uploaded / "file link").is_symlink()
     assert (uploaded / "file link").read_bytes() == b"data"
@@ -1874,10 +1930,11 @@ def test_concurrent_same_scope_acquire_creates_once(monkeypatch: pytest.MonkeyPa
     provider, sdk = _install(monkeypatch)
     original_create = sdk.create
     started = threading.Event()
+    release = threading.Event()
 
     def slow_create(image: str, **kwargs: Any) -> _FakeRemote:
         started.set()
-        time.sleep(0.05)
+        assert release.wait(timeout=5)
         return original_create(image, **kwargs)
 
     sdk.create = slow_create  # type: ignore[method-assign]
@@ -1885,13 +1942,19 @@ def test_concurrent_same_scope_acquire_creates_once(monkeypatch: pytest.MonkeyPa
 
     first = threading.Thread(target=lambda: results.append(provider.acquire("thread", user_id="user")))
     second = threading.Thread(target=lambda: results.append(provider.acquire("thread", user_id="user")))
+    assert provider.can_defer_agent_skill_acquisition(thread_id="thread", user_id="user")
     first.start()
-    assert started.wait(timeout=2)
-    second.start()
+    try:
+        assert started.wait(timeout=2)
+        assert not provider.can_defer_agent_skill_acquisition(thread_id="thread", user_id="user")
+        second.start()
+    finally:
+        release.set()
     first.join(timeout=2)
     second.join(timeout=2)
     assert len(results) == 2 and results[0] == results[1]
     assert len(sdk.create_calls) == 1
+    assert not provider.can_defer_agent_skill_acquisition(thread_id="thread", user_id="user")
     provider.shutdown()
 
 

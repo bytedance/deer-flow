@@ -103,9 +103,11 @@ and terminal failures affect only the instance that reported them.
 
 OpenSandbox also uploads enabled skills to `skills.container_path`. An explicit
 Agent skill list replaces the managed skill directories before tools run; an
-empty list exposes no skills there. Switching Agents in the same thread
-refreshes the managed view. It does not delete files already copied to the
-workspace.
+empty list exposes no skills there. With lazy initialization, a scope with no
+active or in-flight sandbox can wait until a sandbox-backed tool needs it.
+OpenSandbox publishes the prepared thread skill view during acquire. An
+existing binding is refreshed before tools run. Switching Agents refreshes the
+managed view without deleting files already copied to the workspace.
 
 The optional [boxd provider](../../backend/packages/harness/deerflow/community/boxd_sandbox/README.md)
 runs each user/thread scope in an isolated boxd machine. A new machine receives

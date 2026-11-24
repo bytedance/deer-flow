@@ -139,7 +139,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if projection is not None and not provider.supports_agent_skill_isolation:
             raise SandboxRuntimeError(f"Sandbox provider {provider.__class__.__name__} cannot enforce per-Agent skill filesystem isolation")
 
-    def _can_defer_sandbox_acquisition(self, state: SandboxMiddlewareState, runtime: Runtime, projection) -> bool:
+    def _can_defer_sandbox_acquisition(self, state: SandboxMiddlewareState, runtime: Runtime, projection, *, thread_id: str, user_id: str) -> bool:
         if not self._lazy_init:
             return False
         if projection is None:
@@ -150,9 +150,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return False
         provider = get_sandbox_provider()
         self._require_projection_support(provider, projection)
-        # AIO mounts the stable projection roots during canonical acquisition.
-        # Upload-based providers still need eager acquire + strict skill sync.
-        return provider.supports_lazy_agent_skill_isolation
+        return provider.can_defer_agent_skill_acquisition(thread_id=thread_id, user_id=user_id)
 
     def _acquire_sandbox(
         self,
@@ -264,7 +262,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id)
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
-        if self._can_defer_sandbox_acquisition(state, runtime, projection):
+        if self._can_defer_sandbox_acquisition(state, runtime, projection, thread_id=thread_id, user_id=user_id):
             # Bind the execution lease only when a sandbox-backed tool actually
             # touches the persisted sandbox. Runs that only answer or return a
             # terminal Command must not leave an unused owner behind when the
@@ -388,7 +386,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         )
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
-        if self._can_defer_sandbox_acquisition(state, runtime, projection):
+        if self._can_defer_sandbox_acquisition(state, runtime, projection, thread_id=thread_id, user_id=user_id):
             return await super().abefore_agent(state, runtime)
 
         existing_sandbox_id = self._read_sandbox_id_from_state(state)

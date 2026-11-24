@@ -30,6 +30,10 @@ class SandboxProvider(ABC):
 
     _signal_handlers_deferred = False
 
+    def can_defer_agent_skill_acquisition(self, *, thread_id: str, user_id: str) -> bool:
+        """Check whether this scope can install its prepared view at first acquire."""
+        return self.supports_lazy_agent_skill_isolation
+
     def _register_signal_handlers(self) -> None:
         """Install process signal handlers for providers that own sandbox resources."""
 
