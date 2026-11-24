@@ -114,8 +114,9 @@ Each guide is the full reference for its topic. Open the one you need.
 | Docker, local development, upgrades, production deployment | [Running the Application](docs/guide/deployment.md) |
 | Workspace file tools, isolated shell providers, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
 | boxd machines, bounded output copies and cleanup retries | [boxd sandbox provider](backend/packages/harness/deerflow/community/boxd_sandbox/README.md) |
+| BytePlus veFaaS cloud sandboxes, SigV4 control plane and optional TOS mounts | [veFaaS sandbox provider](backend/packages/harness/deerflow/community/vefaas_sandbox/README.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
-| MCP servers | [MCP Server](docs/guide/mcp.md) |
+| MCP servers and model-specific image handling | [MCP Server](docs/guide/mcp.md), [Image results](backend/docs/MCP_SERVER.md#image-results-and-model-capabilities) |
 | Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Inspect one thread's child history](docs/guide/subagents.md#inspect-one-threads-child-history), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
 | Agent teams, SQLite/PostgreSQL persistence and shutdown behavior | [Agent teams extension](examples/deerflow-extension-agent-teams/README.md) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |

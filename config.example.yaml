@@ -2068,6 +2068,37 @@ sandbox:
 #   # environment:                    # merged into every command's environment
 #   #   PYTHONUNBUFFERED: "1"
 
+# Option 8: BytePlus veFaaS Cloud Sandbox
+# Provisions managed All-in-One Sandbox instances via BytePlus Function Service
+# (veFaaS) OpenAPI (Version=2024-06-06) and reuses AioSandbox for the data plane.
+# Requires no extra cloud SDK dependency (uses httpx + SigV4 directly).
+# sandbox:
+#   use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+#   vefaas:
+#     region: ap-southeast-1
+#     endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+#     function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+#     sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL   # unified domain or https://{sandbox_id}.example.com
+#     access_key_env: BYTEPLUS_ACCESS_KEY_ID
+#     secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+#     # session_token_env: BYTEPLUS_SESSION_TOKEN           # optional STS temporary credentials
+#     # sandbox_access_token: $BYTEPLUS_VEFAAS_SANDBOX_ACCESS_TOKEN  # optional APIG data-plane token
+#     # cpu_milli: 1000                                     # 250..16000
+#     # memory_mb: 2048                                     # 512..131072
+#     # timeout_minutes: 60                                 # 3..1440
+#     # ready_timeout: 60                                   # seconds to wait for Running + HTTP readiness
+#     # tos_mount:                                          # optional per-thread scoped TOS mount
+#     #   enabled: false
+#     #   bucket: $BYTEPLUS_TOS_BUCKET
+#     #   prefix: deerflow-user-data
+#   # replicas: 3                     # active + warm soft cap per gateway process
+#   # idle_timeout: 600               # warm seconds before KillSandbox; 0 disables
+#   # bash_command_timeout: 600       # default remote command timeout seconds
+#   # ownership:
+#   #   type: redis                   # required for multi-worker gateways sharing one veFaaS app
+#   # environment:
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================

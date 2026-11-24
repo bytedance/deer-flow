@@ -371,7 +371,7 @@ class _BoundAgentRuns:
 
         async with self._request("runs:create") as request:
             try:
-                worker, frozen, project_id = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
+                worker, frozen, project_id, saved_settings = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
             except TaskNotFound as exc:
                 raise AgentRunError(404, "Worker task unavailable") from exc
             except TaskConflict as exc:
@@ -381,12 +381,16 @@ class _BoundAgentRuns:
             record = await request.app.state.thread_store.get(thread_id, user_id=self._user_id)
             if record is None or record.get("assistant_id") != worker["assistant_id"] or (record.get("metadata") or {}).get(THREAD_PROJECT_METADATA_KEY) != project_id:
                 raise AgentRunError(409, "Worker thread binding changed")
+            settings = saved_settings or {}
+            context = {key: settings[key] for key in ("thinking_enabled", "is_plan_mode") if key in settings}
+            context["subagent_enabled"] = True
             body = RunCreateRequest(
                 assistant_id=worker["assistant_id"],
                 input=frozen if "messages" in frozen else None,
                 command=frozen.get("command"),
                 checkpoint_id=frozen.get("checkpoint_id"),
-                context={"subagent_enabled": True},
+                config={"recursion_limit": settings["recursion_limit"]} if "recursion_limit" in settings else None,
+                context=context,
                 on_disconnect="continue",
             )
             request.state.coordination_execution_id = execution_id

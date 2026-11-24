@@ -45,6 +45,8 @@ An empty or removed saved model falls back to the global default, matching the G
 The agent's `model_settings` sampling overrides apply to the selected model,
 as they do through the Gateway. Call `client.reset_agent()` after editing the
 saved model configuration.
+The [`write_file` budget hint](sandbox.md#sandbox--file-system) reflects the
+effective model's output token limit after agent and thinking-mode overrides.
 
 User messages are framed as untrusted input. Reserved XML-like tags are escaped
 for model context only when present; tag-free URLs and shell commands retain

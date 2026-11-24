@@ -424,7 +424,10 @@ every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
 `--skip-frontend-build` when calling `./scripts/serve.sh --prod` directly). This
 is opt-in: it fails fast when `frontend/.next` has no completed build.
 
-Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
+With the bundled nginx configuration, nginx rewrites public LangGraph-compatible
+requests from `/api/langgraph/*` to `/api/*` before proxying them to the Gateway.
+For example, `POST /api/langgraph/threads` reaches the Gateway as
+`POST /api/threads`.
 
 Cold agent imports during run creation use a dedicated worker pool, keeping
 unrelated Gateway requests responsive while the agent stack loads. A failed

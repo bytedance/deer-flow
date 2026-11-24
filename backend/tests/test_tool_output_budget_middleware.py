@@ -45,6 +45,7 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     _tool_message_over_budget,
 )
 from deerflow.agents.middlewares.tool_output_synopsis import build_tool_output_synopsis
+from deerflow.agents.middlewares.tool_transform_meta import tool_content_fingerprint, tool_result_source_digest
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -1041,6 +1042,16 @@ class TestWrapToolCallExternalize:
             assert len(files) == 1
             with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
                 assert f.read() == content
+
+    def test_identical_outputs_record_the_same_source_digest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100))
+            content = "x" * 500
+            results = [mw.wrap_tool_call(_make_request(tool_call_id=call_id, outputs_path=tmpdir), lambda _, call_id=call_id: _tm(content, name="remote_executor", tool_call_id=call_id)) for call_id in ("tc-1", "tc-2")]
+
+            # Each call names its own file; the trail records what both replaced.
+            assert results[0].content != results[1].content
+            assert tool_result_source_digest(results[0]) == tool_result_source_digest(results[1]) == tool_content_fingerprint(content)
 
 
 class TestToolOutputBlobPersistence:
