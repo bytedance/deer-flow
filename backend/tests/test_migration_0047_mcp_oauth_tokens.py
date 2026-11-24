@@ -50,8 +50,8 @@ async def test_0047_remains_in_the_single_migration_chain():
     assert bootstrap._get_head_revision() == HEAD
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [HEAD]
-    assert script.get_revision(HEAD).down_revision == COORDINATION_RUN_SETTINGS_REVISION
-    assert script.get_revision(COORDINATION_RUN_SETTINGS_REVISION).down_revision == COORDINATION_GRANTS_REVISION
+    assert script.get_revision(HEAD).down_revision == "0060_coordination_run_settings"
+    assert script.get_revision("0060_coordination_run_settings").down_revision == COORDINATION_GRANTS_REVISION
     assert script.get_revision(COORDINATION_GRANTS_REVISION).down_revision == BROWSER_OAUTH_REVISION
     assert script.get_revision(BROWSER_OAUTH_REVISION).down_revision == "0057_coordination_workers"
     assert script.get_revision("0057_coordination_workers").down_revision == "0056_coordination_task_state"
