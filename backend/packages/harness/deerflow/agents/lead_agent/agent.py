@@ -756,7 +756,7 @@ def build_middlewares(
     # after every built-in content transform so it sanitizes the near-final
     # message list, and outer of the MODEL_PHYSICAL extension anchor so
     # extensions placed there keep their final-request guarantee.
-    middlewares.append(ModelContentCompatibilityMiddleware())
+    middlewares.append(ModelContentCompatibilityMiddleware(supports_vision=model_config.supports_vision if model_config is not None else True))
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:

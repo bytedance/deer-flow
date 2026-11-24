@@ -7,7 +7,7 @@ from typing import Annotated
 from deerflow_extension_api.agent_runs import AgentRunError
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints
 
 from app.gateway.authz import require_permission
 from app.gateway.coordination_workers import worker_context, worker_error
@@ -20,11 +20,20 @@ RequestId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1
 TaskText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16384)]
 
 
+class WorkerRunSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recursion_limit: int | None = Field(default=None, strict=True, ge=1)
+    thinking_enabled: StrictBool | None = None
+    is_plan_mode: StrictBool | None = None
+
+
 class CreateWorkerTask(BaseModel):
     request_id: RequestId
     objective: TaskText
     assistant_id: str = Field(default="lead_agent", min_length=1, max_length=128)
     project_id: str | None = Field(default=None, min_length=1, max_length=64)
+    run: WorkerRunSettings | None = None
 
 
 class WorkerInput(BaseModel):
@@ -42,7 +51,13 @@ async def create_worker_task(body: CreateWorkerTask, request: Request):
     service, owner, runs = worker_context(request)
 
     async def dispatch():
-        task = await service.repo.create(owner, request_id=body.request_id, objective=body.objective, project_id=body.project_id)
+        task = await service.repo.create(
+            owner,
+            request_id=body.request_id,
+            objective=body.objective,
+            project_id=body.project_id,
+            run_settings=body.run.model_dump(exclude_none=True) if body.run is not None else None,
+        )
         return await service.dispatch(runs, owner, task["id"], body.assistant_id)
 
     try:

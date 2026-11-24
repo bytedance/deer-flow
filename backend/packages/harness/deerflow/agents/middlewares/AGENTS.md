@@ -53,6 +53,9 @@ make test-blocking-io
 - **State and UI keep the raw result.** The model-facing projection of a tool
   result (metadata envelope, shortening) is built per request. Receipt hashes and
   the UI read the stored value.
+- **Content compatibility rewrites replay Responses history.** Clear OpenAI
+  response chain IDs from the model request copy so the provider sees the
+  projected messages. Checkpoints retain the original content and IDs.
 - **Persisted metadata is untrusted.** Checkpoints written by older versions and
   by direct integrations contain malformed values. Every history reader validates
   what it reads, and a bad value must not abort compaction or a model call.
