@@ -262,6 +262,22 @@ def test_rendered_default_matches_the_previous_single_replica_deployment() -> No
     assert not any(document.get("kind") == "PodDisruptionBudget" for document in documents)
 
 
+def test_rendered_provisioner_passes_sandbox_resources_as_strings() -> None:
+    documents = _render_chart("provisioner.sandboxResources.limits.cpu=2", "provisioner.sandboxResources.requests.ephemeral-storage=0")
+    deployment = _by_kind(documents, "Deployment", "-provisioner")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert {key: value for key, value in env.items() if key.endswith(("_REQUEST", "_LIMIT"))} == {
+        "SANDBOX_CPU_REQUEST": "100m",
+        "SANDBOX_MEMORY_REQUEST": "256Mi",
+        "SANDBOX_EPHEMERAL_STORAGE_REQUEST": "0",
+        "SANDBOX_CPU_LIMIT": "2",
+        "SANDBOX_MEMORY_LIMIT": "1Gi",
+        "SANDBOX_EPHEMERAL_STORAGE_LIMIT": "500Mi",
+    }
+    assert container["resources"] == _values()["provisioner"]["resources"]
+
+
 def test_gateway_and_provisioner_budgets_render_side_by_side() -> None:
     documents = _render_chart("gateway.replicas=2", "provisioner.replicas=2")
     names = sorted(document["metadata"]["name"] for document in documents if document.get("kind") == "PodDisruptionBudget")

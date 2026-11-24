@@ -175,6 +175,9 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
+For the sandbox CPU, memory and ephemeral storage environment variables and their
+defaults, see [Kubernetes sandbox Pod resources](../../docs/guide/sandbox.md#kubernetes-sandbox-pod-resources).
+
 For new sandbox requests, the Gateway also sends the effective AIO shell-session
 capacity derived from `subagent_runtime.max_running`. The provisioner writes it
 to the sandbox Pod as `MAX_SHELL_SESSIONS`; requests from older Gateways omit the
