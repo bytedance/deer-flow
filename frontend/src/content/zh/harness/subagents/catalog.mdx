@@ -22,7 +22,7 @@ import { Callout } from "nextra/components";
 
 - 没有 `sandbox` 配置时不可用。
 - 使用容器沙箱（任何非本地 provider）时可用。
-- 使用本地沙箱时取决于 `sandbox.allow_host_bash`，默认为 `false`。此时委派 `bash` 会得到一条明确的失败结果，提示只在完全可信的本地环境里开启该选项。
+- 委派 Bash 任务需要隔离沙箱。本地提供器用于工作区文件操作。
 
 `general-purpose` 的系统提示里有一段 `tool_restrictions`，明确告诉它 `task` 不可用、不得再派生子 Agent；需要并行时用 bash 后台进程或顺序执行。
 

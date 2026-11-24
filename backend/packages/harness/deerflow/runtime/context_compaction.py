@@ -18,6 +18,7 @@ from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
 from deerflow.runtime.goal import _call_checkpointer_method
 from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 
 logger = logging.getLogger(__name__)
 _AGENT_CONFIG_NOT_LOADED = object()
@@ -156,8 +157,13 @@ async def compact_thread_context(
     agent_name: str | None = None,
     model_name: str | None = None,
     app_config: AppConfig | None = None,
+    memory_flush: bool = True,
 ) -> ThreadCompactionResult:
-    """Summarize old messages in a thread and write a compacted checkpoint."""
+    """Summarize old messages in a thread and write a compacted checkpoint.
+
+    ``memory_flush=False`` compacts without handing the removed messages to
+    memory, for a caller that cannot tell which of them the user wrote.
+    """
     # Off the event loop (see utils/AGENTS.md): reading the live config stats
     # and hashes config.yaml. The route passes no app_config.
     resolved_app_config = app_config or await run_assembly(get_app_config)
@@ -216,7 +222,7 @@ async def compact_thread_context(
         app_config=resolved_app_config,
         keep=keep,
         run_model_name=run_model_name,
-        skip_memory_flush=not memory_enabled,
+        skip_memory_flush=not (memory_enabled and memory_flush),
     )
 
     channel_values = snapshot.values or {}
@@ -228,6 +234,7 @@ async def compact_thread_context(
         "messages": list(messages),
         "summary_text": channel_values.get("summary_text"),
         "task_history": channel_values.get("task_history"),
+        IMPORTED_HISTORY_CHANNEL: channel_values.get(IMPORTED_HISTORY_CHANNEL),
     }
 
     runtime_context = {"thread_id": thread_id, "user_id": user_id}

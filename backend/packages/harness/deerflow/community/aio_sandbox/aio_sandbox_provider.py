@@ -316,7 +316,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         # Register shutdown handler
         atexit.register(self.shutdown)
-        self._register_signal_handlers()
+        self._register_or_defer_signal_handlers()
 
         # Reconcile orphaned containers from previous process lifecycles
         self._reconcile_orphans()

@@ -42,9 +42,18 @@ class Contributor:
 @extension(api="0.2.11", name="agent-teams")
 def install(registry, config):
     enabled = config.get("enabled", False)
-    if type(enabled) is not bool or not isinstance(config.get("storage_path"), str):
-        raise ValueError("Configure boolean enabled and absolute storage_path")
-    teams = Teams(config["storage_path"])
+    if type(enabled) is not bool:
+        raise ValueError("Configure boolean enabled")
+    if ("storage_path" in config) == ("storage_url" in config):
+        raise ValueError("Configure exactly one of storage_path or storage_url")
+    if "storage_url" in config:
+        from .postgres_store import PostgresStore
+
+        teams = Teams(store=PostgresStore(config["storage_url"], config.get("storage_schema", "agent_teams")))
+    else:
+        if not isinstance(config["storage_path"], str) or "storage_schema" in config:
+            raise ValueError("Configure an absolute storage_path; storage_schema requires storage_url")
+        teams = Teams(config["storage_path"])
     send_schema = {
         "type": "object",
         "properties": {key: {"type": "string", "maxLength": limit} for key, limit in (("team_id", 64), ("member_id", 64), ("text", 4000), ("request_id", 128))},

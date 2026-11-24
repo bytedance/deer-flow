@@ -1063,6 +1063,11 @@ Authentication, payment/credit and other statuses remain terminal even with hint
 error-body prose never enables retries. Empty successful responses, read/write
 timeouts and arbitrary exceptions are not retried.
 
+When Jina returns a terminal HTTP error, `web_fetch` passes its status code to
+the harness for error classification. On HTTP 401, the tool result points to
+`JINA_API_KEY` and advises the agent to use another available source or report
+the fetch limitation.
+
 `Retry-After` accepts non-negative ASCII integer seconds or an HTTP-date
 (including obsolete HTTP date forms); past dates mean a zero server floor.
 Signed/fractional delays and non-HTTP dates are invalid. Local backoff ceilings
@@ -1169,10 +1174,11 @@ Enabled fetches stream and count actual content-decoded bytes (after decompressi
 before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
 The first chunk exceeding it stops consumption and closes the response, returning
 an explicit size `Error:` without body content, partial success or readability
-extraction. This applies to all statuses, including 502/503/504, and oversize never
-retries. Each retry response has its own counter within the existing shared time
-budget. Streams close on success, errors, cancellation and read failures. Responses
-within the limit retain charset decoding and existing status/retry handling.
+extraction. The tool result retains the received HTTP status. Oversize responses
+are terminal for all statuses, including 502/503/504. Each retry response has its
+own counter within the existing shared time budget. Streams close on success,
+errors, cancellation and read failures. Responses within the limit retain charset
+decoding and existing status/retry handling.
 
 This limits response retention/consumption, not wire-byte bandwidth or allocations
 inside HTTPX's decompressor; it is not a hard process-memory bound. The final
@@ -1571,11 +1577,10 @@ externalized to `.tool-results`. To allow larger pages, raise
 
 DeerFlow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
 
-**Local Execution** (runs sandbox code directly on the host machine):
+**Local Workspace** (provides workspace file tools):
 ```yaml
 sandbox:
    use: deerflow.sandbox.local:LocalSandboxProvider # Local execution
-   allow_host_bash: false # default; host bash is disabled unless explicitly re-enabled
 ```
 
 **Docker Execution** (runs sandbox code in isolated Docker containers):
@@ -1884,10 +1889,12 @@ Choose between local execution or Docker-based isolation:
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false
 ```
 
-`allow_host_bash` is intentionally `false` by default. DeerFlow's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
+The local provider serves workspace file operations. To run shell commands, set
+`sandbox.use` to an isolated provider such as `AioSandboxProvider`. Existing
+configurations can still contain the deprecated `allow_host_bash` setting. The
+local provider ignores it and logs migration guidance when it is set to `true`.
 
 When `LocalSandboxProvider` runs under `make up`, it runs inside the `deer-flow-gateway` container. In that mode, `sandbox.mounts[].host_path` is resolved from the gateway container's filesystem, not from your Docker host. If you need a local-sandbox custom mount in production Docker, bind the host directory into the gateway service first, then use the in-container path in `config.yaml`:
 
@@ -2237,11 +2244,9 @@ This field is a discovery and activation allowlist; a listed skill's `allowed-to
 
 The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A skill's `allowed-tools` declaration never removes baseline tools; it is compatibility metadata for other agent frameworks.
 
-`LocalSandboxProvider` enforces this filesystem view through its managed virtual
-path mappings only. Explicit per-Agent skill policies therefore fail closed when
-`sandbox.allow_host_bash` is enabled, because host subprocesses can bypass those
-mappings. Keep host bash disabled (the default), or use AIO/provisioner/E2B when
-shell access and filesystem isolation are both required.
+`LocalSandboxProvider` applies this view through the workspace file tools and
+managed virtual path mappings. Use AIO, provisioner or E2B for workflows that
+also require shell commands.
 
 ### Title Generation
 
@@ -2398,7 +2403,7 @@ before exposing an instance to untrusted input.
 
 | Mode | `config.yaml` | Host Docker socket | Isolation |
 |------|---------------|--------------------|-----------|
-| `local` (default) | `deerflow.sandbox.local:LocalSandboxProvider` | Not mounted | Commands run **inside the gateway container** on its filesystem. Not a strong boundary — `allow_host_bash` is `false` by default and should stay off for untrusted workloads. |
+| `local` (default) | `deerflow.sandbox.local:LocalSandboxProvider` | Not mounted | Workspace file operations use the Gateway filesystem and configured mounts. |
 | `aio` (pure DooD) | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon. |
 | `provisioner` (Kubernetes) | `AioSandboxProvider` + `provisioner_url` | Not mounted | Sandbox pods are created through the provisioner's K8s API over HTTP. Strongest isolation. |
 

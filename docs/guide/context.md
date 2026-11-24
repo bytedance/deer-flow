@@ -52,6 +52,11 @@ and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool
 and filters before limiting results to eight distinct sources. Omitting `role` or
 passing `null` preserves search across all roles. Repeated archives of one source
 share one result slot.
+To recover a recent correction among older drafts, use
+`history_search(query="retention", role="user", order="latest")`. This searches
+active messages from newest to oldest, then reads archived matches from the
+newest batches in the current checkpoint. A batch recaptured after a retry
+is ordered by its position in that checkpoint.
 Search excerpts contain at most 600 characters around the earliest locatable
 matching occurrence that fits and include `excerpt_start` / `excerpt_end`, a
 zero-based, half-open character range
@@ -71,6 +76,9 @@ string `content` and a `pending` / `in_progress` / `completed` status (a missing
 status defaults to `pending`); another shape is rejected with HTTP 400, and an
 already-stored entry of an unusable shape is ignored instead of failing the model
 call.
+The read-only `inspect_run_status` tool reports todo counts from the visible
+state. For embedded integrations and restored checkpoints, it counts missing
+and null statuses as pending.
 In planning mode, if the original `write_todos` call is no longer visible,
 DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.

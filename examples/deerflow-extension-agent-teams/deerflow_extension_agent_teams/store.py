@@ -13,6 +13,10 @@ def has_pending_jobs(team):
     return int(any(job["status"] not in TERMINAL for job in team["jobs"]))
 
 
+class StoreUnavailable(RuntimeError):
+    """The store has lost its service ownership or cannot be reached."""
+
+
 class Store:
     def __init__(self, path):
         self.path = Path(path)
@@ -35,6 +39,19 @@ class Store:
 
     def connection(self):
         return sqlite3.connect(self.path, timeout=5)
+
+    def acquire_service_lock(self):
+        db = sqlite3.connect(str(self.path) + ".service-lock", timeout=0, check_same_thread=False)
+        try:
+            db.execute("BEGIN EXCLUSIVE")
+        except BaseException:
+            db.close()
+            raise
+        return db
+
+    def check_service_lock(self):
+        # The SQLite lock is held on a local connection until service shutdown.
+        pass
 
     def scheduling_snapshots(self):
         # Service-only, indexed projection. Completed history is never decoded;

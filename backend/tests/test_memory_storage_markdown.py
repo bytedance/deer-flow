@@ -142,6 +142,46 @@ def test_cached_load_does_not_scan_all_fact_files(storage: FileMemoryStorage, mo
     assert storage.load("agent-a", user_id="alice")["facts"][0]["content"] == "Project uses Python 3.12"
 
 
+def test_memory_cache_keeps_only_the_most_recently_used_scopes(storage: FileMemoryStorage, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(storage_module, "MEMORY_CACHE_MAX_SCOPES", 2)
+    # A commit drops the user's cached scopes, so each scope here is its own user.
+    assert storage.save(_memory_with_fact("A"), "agent-a", user_id="alice")
+    assert storage.save(_memory_with_fact("B"), "agent-a", user_id="bob")
+    assert list(storage._memory_cache) == [("alice", "agent-a"), ("bob", "agent-a")]
+    reads: list[str | None] = []
+    read_document = storage._read_document
+
+    def counting_read(path: Path, agent_name: str | None, *, user_id: str | None) -> dict:
+        reads.append(user_id)
+        return read_document(path, agent_name, user_id=user_id)
+
+    monkeypatch.setattr(storage, "_read_document", counting_read)
+
+    # A cache hit marks the scope as recently used without reading its files.
+    assert storage.load("agent-a", user_id="alice")["facts"][0]["content"] == "A"
+    assert reads == []
+    # A scope a request only names (no files) still takes a cache slot, so it
+    # evicts the least recently used scope instead of growing the cache.
+    assert storage.load("agent-unknown", user_id="carol")["facts"] == []
+    assert list(storage._memory_cache) == [("alice", "agent-a"), ("carol", "agent-unknown")]
+
+    # An evicted scope is read from its files again, with the same document.
+    assert storage.load("agent-a", user_id="bob")["facts"][0]["content"] == "B"
+    assert reads == ["carol", "bob"]
+    assert list(storage._memory_cache) == [("carol", "agent-unknown"), ("bob", "agent-a")]
+
+    # A save caches the document it committed as the most recent scope.
+    assert storage.save(_memory_with_fact("A2"), "agent-a", user_id="alice")
+    assert list(storage._memory_cache) == [("bob", "agent-a"), ("alice", "agent-a")]
+    assert reads == ["carol", "bob", "alice"]
+    assert storage.load("agent-a", user_id="alice")["facts"][0]["content"] == "A2"
+    assert reads == ["carol", "bob", "alice"]
+
+    # A reload replaces a scope that is still cached and makes it the most recent.
+    assert storage.reload("agent-a", user_id="bob")["facts"][0]["content"] == "B"
+    assert list(storage._memory_cache) == [("alice", "agent-a"), ("bob", "agent-a")]
+
+
 @pytest.mark.parametrize("read", ["load", "reload"])
 def test_unlocked_read_skips_fact_deleted_after_directory_listing(storage: FileMemoryStorage, monkeypatch: pytest.MonkeyPatch, read: str) -> None:
     for fact_id in ("fact_keep", "fact_drop"):

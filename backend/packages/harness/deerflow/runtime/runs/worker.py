@@ -1224,10 +1224,13 @@ async def run_agent(
                     exc_info=True,
                 )
         else:
+            from deerflow.persistence.coordination.workers import WORKER_SHUTDOWN
+
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
                 error=cleanup_error,
+                stop_reason=WORKER_SHUTDOWN if record.coordination_shutdown else None,
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
@@ -1452,6 +1455,10 @@ async def run_agent(
             checkpoint_metadata = {}
             config["metadata"] = checkpoint_metadata
         checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+        from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, WORKER_CHECKPOINT_RUN
+
+        if (record.metadata or {}).get(RUN_GRANT_METADATA):
+            checkpoint_metadata[WORKER_CHECKPOINT_RUN] = run_id
         _pin_admission_project_context(config, runtime_ctx)
         if knowledge_scope is not None:
             runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
