@@ -322,12 +322,15 @@ If you prefer running services locally:
 Before starting local development, follow the [configuration guide](configuration.md)
 to run `make setup` from the repository root or prepare `config.yaml` manually.
 
-`make dev` requires a valid `config.yaml` in the project root. Set
-`DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH`
-to point at a specific config file. Runtime state defaults to `.deer-flow` under
-the project root and can be moved with `DEER_FLOW_HOME`. Skills default to
-`skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`.
-Run `make doctor` to verify your setup before starting.
+`make dev` needs a valid configuration file. Set `DEER_FLOW_CONFIG_PATH` to
+point at a specific file. Otherwise, DeerFlow looks for `config.yaml` under
+`DEER_FLOW_PROJECT_ROOT`, which defaults to the checkout root. It then falls back
+to the checkout's `backend/config.yaml` and `config.yaml` in that order.
+
+When started with `make dev`, DeerFlow stores runtime state in `backend/.deer-flow`
+in the checkout by default. Set `DEER_FLOW_HOME` to choose a different location.
+Skills default to `skills/` under the project root and can be moved with
+`DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
 
 Configuration checks and agent-storage migrations use the installed backend environment through `uv run --no-sync --project backend` from the repository root. This preserves relative runtime paths and installed optional dependencies; see the [setup checks](../../backend/docs/SETUP.md#steps) and [agent-storage migration](../../backend/docs/CONFIGURATION.md#agent-storage).
 
