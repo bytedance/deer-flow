@@ -65,7 +65,7 @@ def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, a
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
     (checkout / "backend").mkdir()
-    for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "port-listening.sh", "detect_uv_extras.py"):
+    for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "wait-for-port-bash4.sh", "port-listening.sh", "detect_uv_extras.py"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     (scripts / "nginx-local-conf.sh").write_text("printf 'test-nginx.conf\\n'\n", encoding="utf-8", newline="\n")
     (scripts / "config-upgrade.sh").write_text("exit 0\n", encoding="utf-8", newline="\n")
@@ -169,7 +169,7 @@ def _run_port_probe(tmp_path: Path, script: str, args: list[str], *, uname_s: st
     """Run a copied probe with lsof/ss absent and a powershell.exe that hangs."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("port-listening.sh", "wait-for-port.sh"):
+    for name in ("port-listening.sh", "wait-for-port.sh", "wait-for-port-bash4.sh"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     marker = tmp_path / "powershell-called"
     fixture = tmp_path / "netstat.txt"
@@ -257,7 +257,7 @@ def test_windows_wait_returns_without_calling_powershell(tmp_path: Path) -> None
 def _run_budgeted_wait(tmp_path: Path, *, timeout: int, netstat: str, subprocess_timeout: int) -> tuple[subprocess.CompletedProcess[str], int]:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("port-listening.sh", "wait-for-port.sh"):
+    for name in ("port-listening.sh", "wait-for-port.sh", "wait-for-port-bash4.sh"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     prelude = "\n".join(
         (
@@ -367,7 +367,7 @@ def test_term_reaps_a_probe_that_ignores_term(tmp_path: Path) -> None:
     """TERM ends the wait, and a probe that ignores TERM does not stay behind."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("port-listening.sh", "wait-for-port.sh"):
+    for name in ("port-listening.sh", "wait-for-port.sh", "wait-for-port-bash4.sh"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     probe_pid = tmp_path / "probe.pid"
     prelude = r"""
@@ -472,7 +472,7 @@ def test_preflight_rejects_a_windows_listener(tmp_path: Path) -> None:
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
     (checkout / "backend").mkdir()
-    for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "port-listening.sh", "detect_uv_extras.py"):
+    for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "wait-for-port-bash4.sh", "port-listening.sh", "detect_uv_extras.py"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     (scripts / "nginx-local-conf.sh").write_text("printf 'test-nginx.conf\\n'\n", encoding="utf-8", newline="\n")
     (scripts / "config-upgrade.sh").write_text("exit 0\n", encoding="utf-8", newline="\n")
@@ -613,3 +613,444 @@ bash "$TEST_SCRIPT" "$@"
 """,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _bash_version(bash: str) -> tuple[int, str]:
+    major = subprocess.run([bash, "-c", 'printf %s "$BASH_VERSINFO"'], capture_output=True, text=True, timeout=10, check=False)
+    full = subprocess.run([bash, "-c", 'printf %s "$BASH_VERSION"'], capture_output=True, text=True, timeout=10, check=False)
+    assert major.returncode == 0 and full.returncode == 0, major.stderr + full.stderr
+    return int(major.stdout.strip()), full.stdout.strip()
+
+
+def _bash32_binary() -> str | None:
+    candidates = [os.environ.get("DEER_FLOW_BASH32", ""), str(REPO_ROOT / ".tools" / "bash-3.2" / "bash")]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return None
+
+
+@pytest.fixture(params=["installed", "bash32"])
+def wait_shell(request: pytest.FixtureRequest) -> tuple[str, str, int]:
+    """Return (bash path, branch name, major version) for one real interpreter."""
+    if request.param == "installed":
+        bash = require_script_bash()
+    else:
+        found = _bash32_binary()
+        if found is None:
+            pytest.skip("No Bash 3.2 binary (DEER_FLOW_BASH32 or .tools/bash-3.2/bash). macOS /bin/bash was not run.")
+        bash = found
+    major, _full = _bash_version(bash)
+    if request.param == "bash32" and major >= 4:
+        pytest.fail(f"{bash} is bash {major}, not Bash 3.2")
+    branch = "compat" if major < 4 else "bash4"
+    return bash, branch, major
+
+
+def _process_state(bash: str, pid: str) -> str:
+    """Return gone, zombie, or a live state. An empty ps error is not treated as gone."""
+    if not pid.strip().isdigit():
+        return f"bad-pid:{pid!r}"
+    posix = subprocess.run(
+        [bash, "-c", 'ps -o stat= -p "$1"', "ps-state", pid],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    err = (posix.stderr or "").lower()
+    if posix.returncode != 0 and ("not found" in err or "no such file" in err):
+        return "no-ps"
+    if "unknown option" in err or "illegal option" in err or "invalid option" in err:
+        listing = subprocess.run(
+            [bash, "-c", 'ps -l -p "$1"', "ps-state", pid],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if listing.returncode != 0 and "PID" not in listing.stdout:
+            return "no-ps"
+        for line in listing.stdout.splitlines():
+            parts = line.split()
+            if parts and parts[0] == pid:
+                return "running"
+        return "gone"
+    state = posix.stdout.strip()
+    if not state:
+        return "gone"
+    if state.startswith("Z"):
+        return "zombie"
+    return state
+
+
+def _kill_pid(bash: str, pid: str) -> None:
+    if not pid.strip().isdigit():
+        return
+    if _process_state(bash, pid) == "gone":
+        return
+    subprocess.run(
+        [bash, "-c", 'kill -KILL "$1" 2>/dev/null || true', "kill-pid", pid],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+
+def _read_pid(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip().splitlines()[0]
+
+
+class _WaitRun:
+    def __init__(self, result: subprocess.CompletedProcess[str], elapsed: int, branch_line: str, pids: list[str], bash: str) -> None:
+        self.result = result
+        self.elapsed = elapsed
+        self.branch_line = branch_line
+        self.pids = pids
+        self.bash = bash
+
+
+def _run_on_shell(
+    tmp_path: Path,
+    bash: str,
+    *,
+    netstat: str,
+    timeout: int,
+    signal: str = "",
+    subprocess_timeout: int = 20,
+) -> _WaitRun:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("port-listening.sh", "wait-for-port.sh", "wait-for-port-bash4.sh"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    branch_log = tmp_path / "branch.txt"
+    called = tmp_path / "bash-called"
+    probe_pid = tmp_path / "probe.pid"
+    child_pid = tmp_path / "child.pid"
+    calls = tmp_path / "probe-calls"
+    slow = tmp_path / "probe-slow"
+    done = tmp_path / "probe-done"
+    if signal:
+        launch = f"""
+set -m
+"$TEST_BASH" "$TEST_SCRIPT" 8001 "$TEST_TIMEOUT" Gateway >"$TEST_OUT" 2>"$TEST_ERR" &
+child=$!
+set +m
+i=0
+while [ "$i" -lt 8 ]; do
+    if [ -s "$TEST_PROBE_PID" ] && [ -s "$TEST_CHILD_PID" ]; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+if [ ! -s "$TEST_PROBE_PID" ] || [ ! -s "$TEST_CHILD_PID" ]; then
+    echo "probe never started"
+    kill -KILL "$child" 2>/dev/null || true
+    exit 1
+fi
+kill -{signal} "$child" 2>/dev/null || true
+i=0
+while kill -0 "$child" 2>/dev/null && [ "$i" -lt 8 ]; do
+    i=$((i + 1))
+    sleep 1
+done
+if kill -0 "$child" 2>/dev/null; then
+    echo "STILL_RUNNING"
+    kill -KILL "$child" 2>/dev/null || true
+    exit 1
+fi
+echo "SIGNAL_DONE"
+cat "$TEST_OUT" 2>/dev/null || true
+"""
+    else:
+        launch = """
+start=$SECONDS
+"$TEST_BASH" "$TEST_SCRIPT" 8001 "$TEST_TIMEOUT" Gateway
+status=$?
+echo "ELAPSED:$((SECONDS - start))"
+exit $status
+"""
+    prelude = "\n".join(
+        (
+            "command() {",
+            '    if [ "$1" = -v ] && { [ "$2" = lsof ] || [ "$2" = ss ]; }; then',
+            "        return 1",
+            "    fi",
+            '    builtin command "$@"',
+            "}",
+            "bash() { printf 'called\\n' >> \"$TEST_BASH_CALLED\"; return 99; }",
+            netstat,
+            "export -f command bash netstat",
+            launch,
+        )
+    )
+    env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV"}}
+    env.update(
+        OSTYPE="msys",
+        TEST_BASH=bash,
+        TEST_SCRIPT=(scripts / "wait-for-port.sh").as_posix(),
+        TEST_TIMEOUT=str(timeout),
+        TEST_PROBE_CALLS=calls.as_posix(),
+        TEST_PROBE_SLOW=slow.as_posix(),
+        TEST_PROBE_DONE=done.as_posix(),
+        TEST_PROBE_PID=probe_pid.as_posix(),
+        TEST_CHILD_PID=child_pid.as_posix(),
+        TEST_BASH_CALLED=called.as_posix(),
+        DEER_FLOW_WAIT_PORT_BRANCH_LOG=branch_log.as_posix(),
+        TEST_OUT=(tmp_path / "stdout.txt").as_posix(),
+        TEST_ERR=(tmp_path / "stderr.txt").as_posix(),
+    )
+    proc = subprocess.Popen(
+        [bash, "-c", prelude, "versioned-wait"],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=subprocess_timeout)
+    finally:
+        if proc.poll() is None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+            else:
+                proc.kill()
+            proc.wait(timeout=5)
+    result = subprocess.CompletedProcess(proc.args, proc.returncode if proc.returncode is not None else 1, stdout or "", stderr or "")
+    elapsed_match = re.search(r"ELAPSED:(\d+)", result.stdout)
+    elapsed = int(elapsed_match.group(1)) if elapsed_match else -1
+    branch_line = branch_log.read_text(encoding="utf-8").strip() if branch_log.exists() else ""
+    pids = [_read_pid(probe_pid), _read_pid(child_pid)]
+    assert not called.exists(), "wait script invoked bash again\n" + result.stdout + result.stderr
+    return _WaitRun(result, elapsed, branch_line, pids, bash)
+
+
+def _assert_branch(run: _WaitRun, bash: str) -> None:
+    _major, full = _bash_version(bash)
+    assert run.branch_line == f"{'compat' if _major < 4 else 'bash4'} {full}", run.branch_line
+
+
+def _assert_reaped(run: _WaitRun) -> None:
+    for pid in run.pids:
+        if not pid:
+            continue
+        state = _process_state(run.bash, pid)
+        assert state == "gone", f"pid {pid} is {state}, not reaped"
+
+
+_LISTENER_LINE = "  TCP    127.0.0.1:8001         0.0.0.0:0              LISTENING       9"
+
+
+def test_wait_accepts_a_listener_that_is_already_up(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
+    bash, _branch, _major = wait_shell
+    netstat = f"""
+netstat() {{
+    printf 'x\\n' >> "$TEST_PROBE_CALLS"
+    printf '%s\\n' '{_LISTENER_LINE}'
+    return 0
+}}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=5)
+    try:
+        assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+        _assert_branch(run, bash)
+        assert _probe_lines(tmp_path / "probe-calls") == ["x"]
+        assert 0 <= run.elapsed < 4, run.result.stdout
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+
+
+def test_wait_succeeds_after_two_misses(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
+    bash, _branch, _major = wait_shell
+    netstat = f"""
+netstat() {{
+    printf 'x\\n' >> "$TEST_PROBE_CALLS"
+    count=0
+    while IFS= read -r _; do
+        count=$((count + 1))
+    done < "$TEST_PROBE_CALLS"
+    if [ "$count" -lt 3 ]; then
+        return 1
+    fi
+    printf '%s\\n' '{_LISTENER_LINE}'
+    return 0
+}}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=12, subprocess_timeout=20)
+    try:
+        assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+        _assert_branch(run, bash)
+        assert len(_probe_lines(tmp_path / "probe-calls")) == 3
+        assert 0 <= run.elapsed < 10, run.result.stdout
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+
+
+def test_slow_third_probe_keeps_one_deadline(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
+    """Misses spend the one budget. The third probe does not get a fresh timeout.
+
+    Two fast misses plus the poll sleeps leave less than 7s. The budget is 8s
+    and the third probe sleeps 7s, so the slow branch runs but does not finish.
+    A fresh 8s budget would let that sleep complete.
+    """
+    bash, _branch, _major = wait_shell
+    netstat = f"""
+netstat() {{
+    printf 'x\\n' >> "$TEST_PROBE_CALLS"
+    count=0
+    while IFS= read -r _; do
+        count=$((count + 1))
+    done < "$TEST_PROBE_CALLS"
+    if [ "$count" -lt 3 ]; then
+        return 1
+    fi
+    printf 'slow\\n' >> "$TEST_PROBE_SLOW"
+    sleep 7
+    printf 'done\\n' >> "$TEST_PROBE_DONE"
+    printf '%s\\n' '{_LISTENER_LINE}'
+    return 0
+}}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=8, subprocess_timeout=20)
+    try:
+        assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+        assert "after 8s" in run.result.stdout
+        _assert_branch(run, bash)
+        assert len(_probe_lines(tmp_path / "probe-calls")) == 3, run.result.stdout + run.result.stderr
+        assert (tmp_path / "probe-slow").is_file()
+        assert not (tmp_path / "probe-done").exists()
+        assert 0 <= run.elapsed < 11, run.result.stdout
+        _assert_reaped(run)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+
+
+def test_listener_after_the_deadline_is_not_success(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
+    bash, _branch, _major = wait_shell
+    netstat = f"""
+netstat() {{
+    printf 'x\\n' >> "$TEST_PROBE_CALLS"
+    printf 'slow\\n' >> "$TEST_PROBE_SLOW"
+    sleep 4
+    printf 'done\\n' >> "$TEST_PROBE_DONE"
+    printf '%s\\n' '{_LISTENER_LINE}'
+    return 0
+}}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=2, subprocess_timeout=12)
+    try:
+        assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+        assert "after 2s" in run.result.stdout
+        _assert_branch(run, bash)
+        assert (tmp_path / "probe-slow").is_file()
+        assert not (tmp_path / "probe-done").exists()
+        assert 0 <= run.elapsed < 5, run.result.stdout
+        _assert_reaped(run)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+
+
+def test_probe_that_never_returns_still_hits_the_deadline(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
+    bash, _branch, _major = wait_shell
+    netstat = """
+netstat() {
+    probe=$(sh -c 'echo "$PPID"')
+    printf '%s\\n' "$probe" > "$TEST_PROBE_PID"
+    sleep 30 &
+    printf '%s\\n' "$!" > "$TEST_CHILD_PID"
+    wait
+}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=2, subprocess_timeout=12)
+    try:
+        assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+        assert "after 2s" in run.result.stdout
+        _assert_branch(run, bash)
+        assert 0 <= run.elapsed < 5, run.result.stdout
+        assert run.pids[0] and run.pids[1], "probe and sleep pids were not recorded"
+        _assert_reaped(run)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+
+
+def test_probe_that_ignores_term_is_still_reaped(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
+    bash, _branch, _major = wait_shell
+    netstat = """
+netstat() {
+    probe=$(sh -c 'echo "$PPID"')
+    printf '%s\\n' "$probe" > "$TEST_PROBE_PID"
+    trap '' TERM
+    sleep 30 &
+    printf '%s\\n' "$!" > "$TEST_CHILD_PID"
+    wait
+}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=2, subprocess_timeout=12)
+    try:
+        assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+        _assert_branch(run, bash)
+        assert 0 <= run.elapsed < 5, run.result.stdout
+        assert run.pids[0] and run.pids[1]
+        _assert_reaped(run)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+
+
+def test_probe_child_is_reaped_with_the_probe(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
+    bash, _branch, _major = wait_shell
+    netstat = """
+netstat() {
+    probe=$(sh -c 'echo "$PPID"')
+    printf '%s\\n' "$probe" > "$TEST_PROBE_PID"
+    trap '' TERM
+    ( trap '' TERM; exec sleep 40 ) &
+    printf '%s\\n' "$!" > "$TEST_CHILD_PID"
+    wait
+}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=2, subprocess_timeout=12)
+    try:
+        assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+        _assert_branch(run, bash)
+        assert run.pids[0] and run.pids[1]
+        _assert_reaped(run)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+
+
+@pytest.mark.parametrize("signal", ["TERM", "INT"])
+def test_signal_reaps_the_probe_and_its_child(tmp_path: Path, wait_shell: tuple[str, str, int], signal: str) -> None:
+    bash, _branch, _major = wait_shell
+    netstat = """
+netstat() {
+    probe=$(sh -c 'echo "$PPID"')
+    printf '%s\\n' "$probe" > "$TEST_PROBE_PID"
+    trap '' TERM
+    ( trap '' TERM; exec sleep 40 ) &
+    printf '%s\\n' "$!" > "$TEST_CHILD_PID"
+    wait
+}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=30, signal=signal, subprocess_timeout=20)
+    try:
+        assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+        assert "SIGNAL_DONE" in run.result.stdout
+        _assert_branch(run, bash)
+        assert run.pids[0] and run.pids[1]
+        _assert_reaped(run)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
