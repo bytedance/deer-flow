@@ -1808,6 +1808,7 @@ POST   /api/scheduled-tasks/preview-cron
 
 | Field | Type | Notes |
 |---|---|---|
+| `subagent_enabled` | boolean | Opt in to delegation for automatic and manual runs. Defaults to false on create. PATCH omission or null preserves the setting. Agent allowlists and runtime capacity limits still apply. |
 | `goal_objective` | string \| null | What one run must achieve (at most 4000 characters after whitespace normalization); requires `fresh_thread_per_run`. |
 | `max_runs` | integer \| null | Safety cap: automatic runs over the task's lifetime (trial runs excluded); at least 1. |
 | `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |

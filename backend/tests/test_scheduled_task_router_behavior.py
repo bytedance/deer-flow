@@ -1092,6 +1092,40 @@ def _create_request(**overrides):
     return scheduled_tasks.ScheduledTaskCreateRequest(**kwargs)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("options", [{}, {"subagent_enabled": False}, {"subagent_enabled": True}])
+async def test_delegation_setting_create_patch_and_get(tmp_path, monkeypatch, options):
+    config = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+    await init_engine_from_config(config)
+    try:
+        repo = ScheduledTaskRepository(get_session_factory())
+        task = await _call_create(_create_request(**options), repo=repo)
+        assert task["subagent_enabled"] is options.get("subagent_enabled", False)
+        task_id = task["id"]
+
+        for enabled in (True, False):
+            body = scheduled_tasks.ScheduledTaskUpdateRequest(subagent_enabled=enabled)
+            assert (await _call_update(repo, task_id, body))["subagent_enabled"] is enabled
+            for unchanged in (
+                scheduled_tasks.ScheduledTaskUpdateRequest(title="Updated title"),
+                scheduled_tasks.ScheduledTaskUpdateRequest(subagent_enabled=None),
+            ):
+                assert (await _call_update(repo, task_id, unchanged))["subagent_enabled"] is enabled
+
+        await _call_update(repo, task_id, scheduled_tasks.ScheduledTaskUpdateRequest(subagent_enabled=True))
+    finally:
+        await close_engine()
+
+    await init_engine_from_config(config)
+    try:
+        monkeypatch.setattr(scheduled_tasks, "get_scheduled_task_repo", lambda _: ScheduledTaskRepository(get_session_factory()))
+        monkeypatch.setattr(scheduled_tasks, "get_optional_user_from_request", AsyncMock(return_value=SimpleNamespace(id="user-1")))
+        response = await call_unwrapped(scheduled_tasks.get_scheduled_task, task_id=task_id, request=SimpleNamespace())
+        assert response["subagent_enabled"] is True
+    finally:
+        await close_engine()
+
+
 async def _seed_task(repo: _Repo | ScheduledTaskRepository, **overrides):
     kwargs = {
         "task_id": "task-1",
@@ -1840,12 +1874,14 @@ def test_is_scheduler_running_reads_the_service_of_this_process():
 
 @pytest.mark.asyncio
 async def test_trigger_reports_outcome_thread_and_an_already_waiting_run(http):
-    await _seed(http.repo, next_run_at=datetime.now(UTC) + timedelta(hours=1))
+    await _seed(http.repo, next_run_at=datetime.now(UTC) + timedelta(hours=1), subagent_enabled=True)
     launched = await http.client.post("/api/scheduled-tasks/task-l/trigger")
     assert launched.status_code == 200, launched.text
     body = launched.json()
     assert (body["id"], body["triggered"], body["outcome"], body["existing"]) == ("task-l", True, "launched", False)
     assert body["thread_id"] == http.launches[0]["thread_id"]
+    assert http.launches[0]["subagent_enabled"] is True
+    assert http.launches[0]["owner_user_id"] == OWNER
     await _seed(http.repo, "task-q", next_run_at=datetime.now(UTC) + timedelta(hours=1))
     async with http.sf() as session:
         session.add(occurrence("waiting", "task-q", seq=1, status="queued", accounted=False, thread_id="thread-waiting"))

@@ -178,6 +178,8 @@ originating chat.
 
 To start a trial, use the task card's **Run once now** button or the corresponding action on `/workspace/scheduled-tasks`. A request in chat can bring up the card, but its wording alone does not dispatch a run. The action uses the existing authenticated, owner-checked endpoint; an already waiting run is not duplicated. A trial does not count toward `max_runs`.
 
+Automatic runs and manual trials both use the unattended tool policy. Native subagents inherit its clarification restriction and unattended guidance, including when a durable batch resumes after a restart. When durable batches are enabled, these runs can submit batch work and inspect results. Automatic batch follow-ups require an originating interactive session with follow-up authority.
+
 A goal occurrence can use up to nine agent turns, with an evaluator request after
 each. Evaluator requests and provider-reported tokens are included in run usage;
 missing usage makes the corresponding cost estimate unknown. `token_budget`

@@ -1018,12 +1018,16 @@ def _assemble_lead_agent(
     skill_storage: SkillStorage | None = None,
 ) -> LeadAgentAssembly:
     # Lazy import to avoid circular dependency
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
+    from deerflow.tools.builtins.batch_task_tool import restrict_batch_continuation
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
     from deerflow.tools.conversation import CONVERSATION_READER_CONTEXT_KEY
 
     cfg = _get_runtime_config(config)
+    batch_continuation_available = cfg.get(AGENT_RUNS_CONTEXT_KEY) is not None
     resolved_app_config = app_config
     mode = (config.get("configurable", {}) or {}).get(
         INTERNAL_CHECKPOINT_MODE_KEY,
@@ -1252,7 +1256,7 @@ def _assemble_lead_agent(
         )
         chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False)
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config, chat_model=chat_model) + [setup_agent]
-        configured_tools = raw_tools
+        configured_tools = restrict_batch_continuation(raw_tools, available=batch_continuation_available)
         configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
         authorization_candidates = [*configured_tools]
         if skill_setup.describe_skill_tool:
@@ -1423,7 +1427,7 @@ def _assemble_lead_agent(
             raise ValueError("A child model selection requires enabled subagents and a configured model name.")
         authorize_selected_model(selected_child_model, context=cfg, app_config=resolved_app_config)
         raw_tools = bind_selected_task_model(raw_tools, selected_child_model)
-    configured_tools = raw_tools + extra_tools
+    configured_tools = restrict_batch_continuation(raw_tools, available=batch_continuation_available) + extra_tools
     configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
     authorization_candidates = [*configured_tools]
     if skill_setup.describe_skill_tool:

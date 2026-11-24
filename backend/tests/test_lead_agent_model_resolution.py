@@ -1552,10 +1552,11 @@ def test_request_thinking_overrides_agent_default(monkeypatch):
 
 
 @pytest.mark.parametrize("mcp_plugins", [None, [], ["installed-plugin"]])
-def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_plugins):
+@pytest.mark.parametrize("allowed, enabled", [([], False), (["planner"], True)])
+def test_scheduled_delegation_respects_agent_allowlist(monkeypatch, mcp_plugins, allowed, enabled):
     """A request switch cannot widen an explicit Custom Agent hard deny."""
     app_config = _make_app_config([_make_model("agent-model", supports_thinking=False)])
-    agent_config = _make_agent_config(model="agent-model", allowed_subagents=[])
+    agent_config = _make_agent_config(model="agent-model", allowed_subagents=allowed)
     agent_config.mcp_plugins = mcp_plugins
 
     import deerflow.tools as tools_module
@@ -1571,6 +1572,8 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_
         "context": {
             "agent_name": "researcher",
             "subagent_enabled": True,
+            "non_interactive": True,
+            "user_id": "owner",
         }
     }
     lead_agent_module._make_lead_agent(config, app_config=app_config)
@@ -1579,14 +1582,14 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_
         model_name="agent-model",
         groups=None,
         mcp_plugins=mcp_plugins,
-        subagent_enabled=False,
+        subagent_enabled=enabled,
         include_conversation_reader=False,
         app_config=app_config,
         chat_model=ANY,
     )
-    assert config["context"]["subagent_enabled"] is False
-    assert config["configurable"]["subagent_enabled"] is False
-    assert config["metadata"]["allowed_subagents"] == []
+    assert config["context"]["subagent_enabled"] is enabled
+    assert config["configurable"]["subagent_enabled"] is enabled
+    assert config["metadata"]["allowed_subagents"] == allowed
     assert config["metadata"]["mcp_plugins"] == mcp_plugins
 
 

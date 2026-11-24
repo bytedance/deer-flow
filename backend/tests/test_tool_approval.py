@@ -631,6 +631,36 @@ async def test_child_in_an_isolated_loop_waits_for_parent_decision(cancel):
 
 
 @pytest.mark.asyncio
+async def test_unattended_child_cannot_open_an_approval_wait():
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from deerflow.approvals.runtime import ApprovalRuntime
+    from deerflow.approvals.store import ApprovalStore
+
+    store = ApprovalStore()
+    scope = ("owner", "scheduled-thread", "incarnation")
+    bridge = ApprovalRuntime(
+        store,
+        scope=scope,
+        run_id="scheduled-run",
+        mode="ask",
+        timeout=5,
+        record=SimpleNamespace(ownership_lost=False, abort_event=threading.Event()),
+        interactive=False,
+    )
+    graph, config, calls = graph_fixture()
+    context = {"is_subagent": True, "__tool_approval_runtime": bridge.child(), "user_id": "owner", "thread_id": "scheduled-thread"}
+    try:
+        result = await asyncio.wait_for(graph.ainvoke({"messages": [("user", "delegated work")]}, config, context=context), timeout=2)
+        assert not calls and not result.get("__interrupt__")
+        assert not await store.list(scope=scope, status="pending")
+    finally:
+        await bridge.close()
+
+
+@pytest.mark.asyncio
 async def test_exact_thread_grant_is_reused_then_revoked():
     import threading
     from types import SimpleNamespace
