@@ -25,19 +25,20 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from uuid import uuid4
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.errors import GraphRecursionError
-from langgraph.types import Command, Overwrite
+from langgraph.types import Command, Overwrite, StateSnapshot
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
@@ -119,6 +120,10 @@ from .naming import resolve_root_run_name
 from .schemas import GOAL_RUN_HARD_STOP_REASONS as _GOAL_RUN_HARD_STOP_REASONS
 from .schemas import RunStatus, ThreadOperationKind
 from .store.base import canonical_run_created_at
+
+if TYPE_CHECKING:
+    from deerflow.runtime.journal import RunJournal
+
 
 logger = logging.getLogger(__name__)
 _THREAD_INCARNATION_UNSET = object()
@@ -366,6 +371,41 @@ _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
 # ends in error without an exception; the Gateway spells it the same way.
 _RUN_ERROR_NAME = "RunError"
 _RECURSION_CAPPED_LISTED_OUTPUTS = 5
+
+
+_GRAPH_INVOCATION_KEY = "deerflow_graph_invocation_id"
+
+
+async def _graph_stream_events(stream: AsyncIterator[Any], accessor: CheckpointStateAccessor, thread_id: str, invocation_id: str, journal: RunJournal | None = None) -> AsyncIterator[Any]:
+    """Accept a step-boundary completion only with this invocation's idle root checkpoint."""
+    try:
+        async for event in stream:
+            yield event
+    except GraphRecursionError as error:
+        completed = None
+        try:
+            if accessor.checkpointer is not None:
+                snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+                if (
+                    isinstance(snapshot, StateSnapshot)
+                    and snapshot.metadata
+                    and snapshot.metadata.get("source") == "loop"
+                    and snapshot.metadata.get(_GRAPH_INVOCATION_KEY) == invocation_id
+                    and not snapshot.next
+                    and not snapshot.tasks
+                    and not snapshot.interrupts
+                ):
+                    completed = snapshot
+        except Exception:
+            logger.debug("Could not verify the checkpoint at the graph step limit", exc_info=True)
+        finally:
+            if journal is not None:
+                try:
+                    journal.record_step_limit_outcome(error, completed)
+                except Exception:
+                    logger.warning("Could not journal the graph step-limit outcome", exc_info=True)
+        if completed is None:
+            raise
 
 
 def _recursion_capped_message(recursion_limit: object, delivery_content: dict[str, Any] | None) -> str:
@@ -1782,6 +1822,14 @@ async def run_agent(
             if input_control is not None:
                 await input_control.inputs.reopen()
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
+            # A Goal continuation is a distinct graph invocation on the same run and thread.
+            invocation = uuid4()
+            invocation_id = invocation.hex
+            stream_config["metadata"] = {**(stream_config.get("metadata") or {}), _GRAPH_INVOCATION_KEY: invocation_id}
+            if journal is not None:
+                root_id = stream_config.get("run_id") or invocation
+                stream_config["run_id"] = root_id
+                journal.step_limit_root = root_id
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
@@ -1790,7 +1838,7 @@ async def run_agent(
                         stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
                         broke_on_abort = False
                         try:
-                            async for chunk in stream:
+                            async for chunk in _graph_stream_events(stream, accessor, thread_id, invocation_id, journal):
                                 if record.abort_event.is_set():
                                     broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
@@ -1840,7 +1888,7 @@ async def run_agent(
                     )
                     broke_on_abort = False
                     try:
-                        async for item in stream:
+                        async for item in _graph_stream_events(stream, accessor, thread_id, invocation_id, journal):
                             if record.abort_event.is_set():
                                 broke_on_abort = True
                                 logger.info("Run %s abort requested — stopping", run_id)
@@ -1892,6 +1940,8 @@ async def run_agent(
                             else:
                                 logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
             finally:
+                if journal is not None:
+                    journal.step_limit_root = None
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
                     try:
