@@ -141,14 +141,14 @@ def render_project_block(snapshot: Mapping[str, Any] | None, *, include_memory: 
     the block always carries the pinned ``id``/``name`` (§7.2). Instructions
     are untrusted user text and pass through ``neutralize_untrusted_tags`` so a
     literal ``</project>`` cannot close the block early; attribute values are
-    escaped for quotes, ampersands and angle brackets.
+    folded to one line and escaped for quotes, ampersands and angle brackets.
     """
     if not isinstance(snapshot, Mapping):
         return None
     project_id = str(snapshot.get("project_id") or "")
     if not project_id:
         return None
-    name = str(snapshot.get("name") or "")
+    name = _one_line(str(snapshot.get("name") or ""))
     instructions = neutralize_untrusted_tags(str(snapshot.get("instructions") or "")).strip()
     open_tag = f'<project id="{_escape_attribute(project_id)}" name="{_escape_attribute(name)}">'
     from deerflow.projects.memory import render_memory
