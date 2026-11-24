@@ -1155,6 +1155,7 @@ def test_shutdown_timeout_closes_resources_after_active_write_finishes(
     writer.join(2.0)
 
     assert not writer.is_alive()
+    assert manager._cleanup_done.wait(timeout=2.0)
     assert manager._recorder.closed is True
     assert manager._recorder.client.closed is True
     assert manager.shutdown_flush(1.0) is True
@@ -2337,9 +2338,9 @@ def test_multi_user_shutdown_flush_drains_inflight_and_closes_provider(
         writer.join(5.0)
 
     assert not writer.is_alive()
+    assert manager._cleanup_done.wait(timeout=2.0)
     assert rec_alice.closed is True
     assert rec_bob.closed is True
-    assert manager.shutdown_flush(1.0) is True
     assert close_calls == 1
     assert manager.shutdown_flush(1.0) is True
     assert close_calls == 1
@@ -3258,12 +3259,12 @@ async def test_admitted_async_write_does_not_wait_on_slow_provider_cleanup_durin
         await asyncio.wait_for(write_task, timeout=1.0)
         assert len(recorders) == 1
         assert len(recorders[0].calls) == 1
-        assert recorders[0].closed is True
         assert manager._state_path(_session_id("alice", "deerflow", "thread-1")).exists()
 
         # Shutdown flush owns the bounded cleanup wait and times out on schedule.
         assert await asyncio.wait_for(flush_task, timeout=1.0) is False
         assert await asyncio.to_thread(close_started.wait, 1.0)
+        assert recorders[0].closed is True
         assert not release_close.is_set()
 
         # Follow-up Gateway close() must not block past the already-timed-out flush.
@@ -3278,4 +3279,147 @@ async def test_admitted_async_write_does_not_wait_on_slow_provider_cleanup_durin
             await asyncio.wait_for(flush_task, timeout=5.0)
 
     assert manager.shutdown_flush(1.0) is True
+    assert close_calls == 1
+
+
+@pytest.mark.parametrize("mode", ["single_user", "multi_user"])
+def test_shutdown_flush_bounds_slow_recorder_teardown_without_provider_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    recorders, _ = _track_official_integration(monkeypatch)
+    monkeypatch.setenv("OPENVIKING_API_KEY", "single-secret")
+
+    if mode == "single_user":
+        manager = OpenVikingMemoryManager.from_config(_backend_config(tmp_path, timeout_seconds=2.0))
+    else:
+        manager = OpenVikingMemoryManager.from_config(
+            _multi_user_backend_config(
+                tmp_path,
+                timeout_seconds=2.0,
+                user_credentials={"alice": {"api_key": "alice-secret"}},
+            )
+        )
+        manager.search("warmup", user_id="alice")
+
+    assert len(recorders) == 1
+    recorder = recorders[0]
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_calls = 0
+    orig_close = recorder.close
+
+    def slow_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_started.set()
+        assert release_close.wait(timeout=5.0)
+        orig_close()
+
+    recorder.close = slow_close
+
+    try:
+        t0 = time.monotonic()
+        assert manager.shutdown_flush(0.05) is False
+        assert time.monotonic() - t0 < 0.5
+        assert close_started.wait(timeout=1.0)
+        assert not release_close.is_set()
+
+        t1 = time.monotonic()
+        manager.close()
+        assert time.monotonic() - t1 < 0.5
+        assert close_calls == 1
+    finally:
+        release_close.set()
+
+    assert manager.shutdown_flush(1.0) is True
+    assert recorder.closed is True
+    assert close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_admitted_async_write_does_not_wait_on_slow_recorder_teardown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    recorders, _ = _track_official_integration(monkeypatch)
+    manager = OpenVikingMemoryManager.from_config(
+        _multi_user_backend_config(
+            tmp_path,
+            timeout_seconds=5.0,
+            user_credentials={"alice": {"api_key": "alice-secret"}},
+        )
+    )
+    manager.search("warmup", user_id="alice")
+    assert len(recorders) == 1
+    recorder = recorders[0]
+
+    record_started = threading.Event()
+    release_record = threading.Event()
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_calls = 0
+    orig_record = recorder.record
+    orig_close = recorder.close
+
+    def blocked_record(*args: Any, **kwargs: Any) -> object:
+        record_started.set()
+        assert release_record.wait(timeout=5.0)
+        return orig_record(*args, **kwargs)
+
+    def slow_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_started.set()
+        assert release_close.wait(timeout=5.0)
+        orig_close()
+
+    recorder.record = blocked_record
+    recorder.close = slow_close
+
+    write_task = asyncio.create_task(
+        manager.aadd(
+            "thread-1",
+            [HumanMessage("admitted async write", id="h1")],
+            user_id="alice",
+        )
+    )
+    flush_task: asyncio.Task[bool] | None = None
+    try:
+        assert await asyncio.to_thread(record_started.wait, 5.0)
+
+        flush_task = asyncio.create_task(asyncio.to_thread(manager.shutdown_flush, 0.15))
+        deadline = time.monotonic() + 5.0
+        while not manager._closed and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert manager._closed is True
+
+        release_record.set()
+
+        # Finishing write starts cleanup worker and returns promptly without waiting on slow recorder.close().
+        await asyncio.wait_for(write_task, timeout=1.0)
+        assert len(recorder.calls) == 1
+        assert manager._state_path(_session_id("alice", "deerflow", "thread-1")).exists()
+
+        # Bounded shutdown_flush returns False on schedule while recorder.close() is still pending.
+        assert await asyncio.wait_for(flush_task, timeout=1.0) is False
+        assert await asyncio.to_thread(close_started.wait, 1.0)
+        assert not release_close.is_set()
+
+        # Follow-up Gateway close() returns promptly without double-closing recorder.
+        await asyncio.wait_for(asyncio.to_thread(manager.close), timeout=0.5)
+        assert close_calls == 1
+    finally:
+        release_record.set()
+        release_close.set()
+        if not write_task.done():
+            await asyncio.wait_for(write_task, timeout=5.0)
+        if flush_task is not None and not flush_task.done():
+            await asyncio.wait_for(flush_task, timeout=5.0)
+
+    assert manager.shutdown_flush(1.0) is True
+    assert recorder.closed is True
     assert close_calls == 1

@@ -972,8 +972,7 @@ class OpenVikingMemoryManager(MemoryManager):
 
     def _start_resource_cleanup(self) -> threading.Event:
         to_close: list[_ScopedClientEntry] = []
-        should_close_entries = False
-        should_spawn_provider_close = False
+        should_spawn = False
         with self._resource_lock:
             if not self._cleanup_started:
                 self._cleanup_started = True
@@ -992,36 +991,27 @@ class OpenVikingMemoryManager(MemoryManager):
                             entry.closed = True
                             to_close.append(entry)
                 close_fn = getattr(self._credential_provider, "close", None)
-                if callable(close_fn):
-                    should_spawn_provider_close = True
-                elif to_close:
-                    should_close_entries = True
+                if not to_close and not callable(close_fn):
+                    self._cleanup_done.set()
                 else:
+                    should_spawn = True
+
+        if should_spawn:
+
+            def _run_cleanup() -> None:
+                try:
+                    self._close_entries(to_close)
+                    self._close_credential_provider()
+                except Exception as exc:
+                    logger.warning("Failed to close OpenViking memory resources (%s)", type(exc).__name__)
+                finally:
                     self._cleanup_done.set()
 
-        if should_spawn_provider_close:
-            try:
-                self._close_entries(to_close)
-            finally:
-
-                def _run_provider_cleanup() -> None:
-                    try:
-                        self._close_credential_provider()
-                    except Exception as exc:
-                        logger.warning("Failed to close OpenViking memory resources (%s)", type(exc).__name__)
-                    finally:
-                        self._cleanup_done.set()
-
-                threading.Thread(
-                    target=_run_provider_cleanup,
-                    name="openviking-resource-cleanup",
-                    daemon=True,
-                ).start()
-        elif should_close_entries:
-            try:
-                self._close_entries(to_close)
-            finally:
-                self._cleanup_done.set()
+            threading.Thread(
+                target=_run_cleanup,
+                name="openviking-resource-cleanup",
+                daemon=True,
+            ).start()
 
         return self._cleanup_done
 
