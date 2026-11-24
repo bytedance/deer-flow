@@ -2010,15 +2010,14 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         tracked.sandbox.close()
         confirmed = False
         release_lease = False
-        needs_kill = True
         try:
             claimed = self._ownership.claim(sandbox_id, for_destroy=True)
             if not claimed:
                 logger.info("Skipping remote retirement for veFaaS sandbox %s (%s): owned by a peer", sandbox_id, reason)
                 confirmed = True
-                needs_kill = False
             else:
                 release_lease = True
+                needs_kill = True
                 function_id = self._config["function_id"]
                 client = self._get_client()
                 with self._teardown_lease_heartbeat(sandbox_id) as heartbeat:

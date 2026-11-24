@@ -1895,13 +1895,13 @@ class TestVeFaaSPauseResumeLifecycle:
                 self.uploaded_files[provider_mod._INIT_MARKER_PATH] = f"{sid_b}\n".encode()
 
         monkeypatch.setattr(provider_mod, "AioSandbox", _PreInitAioB)
-        errors_b: list[BaseException] = []
+        errors_b: list[Exception] = []
         results_b: dict[str, str] = {}
 
         def run_acquire(name: str, prov: VeFaaSSandboxProvider) -> None:
             try:
                 results_b[name] = prov.acquire("t-conc-resume", user_id="u1")
-            except BaseException as exc:  # pragma: no cover
+            except Exception as exc:  # pragma: no cover
                 errors_b.append(exc)
 
         try:
