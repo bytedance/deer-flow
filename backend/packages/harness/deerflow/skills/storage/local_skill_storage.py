@@ -15,6 +15,7 @@ from pathlib import Path
 
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.history_lock import locked_history_file
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
@@ -299,11 +300,12 @@ class LocalSkillStorage(SkillStorage):
         self.validate_skill_name(name)
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
         # A record reaches the file in one O_APPEND write together with its LF
-        # terminator. Appenders in other threads and processes do not always
-        # share a lock, and a record holding two SKILL.md revisions outgrows the
-        # text-file buffer: a separate terminator write let another record land
-        # between a record and its "\n", and read_history then rejected the
-        # joined line for good. Encoding first leaves no file behind on failure.
+        # terminator, under the history file's own lock. Appenders in other
+        # threads and processes do not always share a mutation lock, and a record
+        # holding two SKILL.md revisions outgrows the text-file buffer: a
+        # separate terminator write let another record land between a record and
+        # its "\n", and read_history then rejected the joined line for good.
+        # Encoding first leaves no file behind on failure.
         data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -312,11 +314,13 @@ class LocalSkillStorage(SkillStorage):
         # raw-byte reader describe different revisions of the same entry.
         fd = os.open(history_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o666)
         try:
-            remaining = memoryview(data)
-            # A short write (a full disk, a signal) continues with the rest
-            # rather than dropping the tail of the record.
-            while remaining:
-                remaining = remaining[os.write(fd, remaining) :]
+            # The lock spans the retries: a short write (a full disk, a signal)
+            # continues with the rest rather than dropping the tail, and no other
+            # writer's record can land inside this one meanwhile.
+            with locked_history_file(fd):
+                remaining = memoryview(data)
+                while remaining:
+                    remaining = remaining[os.write(fd, remaining) :]
         finally:
             os.close(fd)
 

@@ -78,8 +78,13 @@ def test_concurrent_appends_keep_one_record_per_line(storage):
     assert all(record["new_content"] == bodies[record["author"]] for record in records)
 
 
-def _history_writes(monkeypatch, storage, *, first_write_limit=None):
-    """Record every ``os.write`` to the history file, optionally shortening the first."""
+def _script_history_writes(monkeypatch, storage, script=None):
+    """Route every ``os.write`` to the history file through ``script``.
+
+    ``script(data, write)`` performs the write with ``write`` and returns its
+    count; it may shorten ``data`` or let another writer run around it. Returns
+    the list of bytes that reached the file, one entry per write.
+    """
     import os
 
     history_path = storage.get_skill_history_file("demo-skill")
@@ -97,18 +102,41 @@ def _history_writes(monkeypatch, storage, *, first_write_limit=None):
     def write(fd, data):
         if not is_history(fd):
             return real_write(fd, data)
-        data = bytes(data)
-        if first_write_limit is not None and not writes:
-            data = data[:first_write_limit]
-        writes.append(data)
-        return real_write(fd, data)
+
+        def record(chunk):
+            writes.append(bytes(chunk))
+            return real_write(fd, chunk)
+
+        return script(bytes(data), record) if script is not None else record(data)
 
     monkeypatch.setattr(os, "write", write)
     return writes
 
 
+def _shorten_first_write(limit, before_rest=None):
+    """Cut the first write to ``limit`` bytes; run ``before_rest`` before the retry."""
+    calls = []
+
+    def script(data, write):
+        calls.append(data)
+        if len(calls) == 1:
+            return write(data[:limit])
+        if len(calls) == 2 and before_rest is not None:
+            before_rest()
+        return write(data)
+
+    return script
+
+
+def _operation(operation_id):
+    from deerflow_extension_api.skill_mutations import AssetRevision, Operation
+
+    revision = AssetRevision("incarnation", 1, "digest")
+    return Operation(operation_id, "history-owner", "demo-skill", "published", "main", revision, revision, 1)
+
+
 def test_each_record_reaches_the_file_in_one_write(storage, monkeypatch):
-    writes = _history_writes(monkeypatch, storage)
+    writes = _script_history_writes(monkeypatch, storage)
 
     storage.append_history("demo-skill", {"action": "edit", "new_content": "x" * 65536})
     storage.append_history("demo-skill", {"action": "edit", "reason": "small"})
@@ -119,10 +147,65 @@ def test_each_record_reaches_the_file_in_one_write(storage, monkeypatch):
 
 
 def test_a_short_write_still_stores_the_whole_record(storage, monkeypatch):
-    writes = _history_writes(monkeypatch, storage, first_write_limit=10)
+    writes = _script_history_writes(monkeypatch, storage, _shorten_first_write(10))
 
     storage.append_history("demo-skill", {"action": "edit", "new_content": "x" * 1000})
 
     assert len(writes) == 2 and len(writes[0]) == 10
     (record,) = storage.read_history("demo-skill")
     assert record["new_content"] == "x" * 1000
+
+
+def test_another_append_waits_for_a_short_write_to_finish(storage, monkeypatch):
+    import threading
+
+    other = threading.Thread(target=storage.append_history, args=("demo-skill", {"action": "edit", "author": "b"}))
+
+    def let_the_other_append_run():
+        # Between the short write and its retry: the record is half written.
+        other.start()
+        other.join(timeout=0.5)
+
+    _script_history_writes(monkeypatch, storage, _shorten_first_write(10, before_rest=let_the_other_append_run))
+
+    storage.append_history("demo-skill", {"action": "edit", "author": "a", "new_content": "x" * 1000})
+    other.join(timeout=5)
+
+    assert not other.is_alive()
+    assert [record["author"] for record in storage.read_history("demo-skill")] == ["a", "b"]
+
+
+def test_the_operation_mirror_and_appends_share_the_history_lock(storage, monkeypatch):
+    import threading
+
+    from deerflow.skills.mutations.history import mirror_operations
+
+    storage.get_skill_history_file("demo-skill").parent.mkdir(parents=True)
+    append_cut, resume_append = threading.Event(), threading.Event()
+    append = threading.Thread(target=storage.append_history, args=("demo-skill", {"action": "edit", "author": "a"}))
+    append_calls = []
+
+    def script(data, write):
+        if b'"operation_id":"op-b"' in data:
+            # The mirror is about to write. An append that starts now must not
+            # get its first, short write in before the mirror's record.
+            append.start()
+            append_cut.wait(timeout=0.5)
+            written = write(data)
+            resume_append.set()
+            return written
+        append_calls.append(data)
+        if len(append_calls) > 1:
+            return write(data)
+        written = write(data[:10])
+        append_cut.set()
+        resume_append.wait(timeout=5)
+        return written
+
+    _script_history_writes(monkeypatch, storage, script)
+
+    mirror_operations(storage, [_operation("op-b")])
+    append.join(timeout=5)
+
+    assert not append.is_alive()
+    assert [record.get("operation_id", record.get("author")) for record in storage.read_history("demo-skill")] == ["op-b", "a"]
