@@ -170,6 +170,71 @@ class TestMemoryBackendConfigCheck:
         assert "USER API key is missing" in result.detail
         assert result.fix == "Add OPENVIKING_API_KEY=<your-key> to your .env file"
 
+    def test_multi_user_valid_config_passes(self, doctor, monkeypatch):
+        monkeypatch.setenv("ALICE_OV_KEY", "alice-secret")
+        monkeypatch.setenv("BOB_OV_KEY", "bob-secret")
+        static_cfg = self._config(
+            "openviking",
+            {
+                "base_url": "http://127.0.0.1:1933",
+                "user_credentials": {
+                    "alice": {"api_key_env": "ALICE_OV_KEY", "tenant_id": "acme"},
+                    "bob": {"api_key_env": "BOB_OV_KEY", "tenant_id": "globex"},
+                },
+                "client_pool": {"max_clients": 16, "idle_ttl_seconds": None},
+            },
+        )
+        assert doctor._check_memory_backend_config(static_cfg).status == "ok"
+
+        provider_cfg = self._config(
+            "openviking",
+            {
+                "base_url": "http://127.0.0.1:1933",
+                "credential_provider": "nonexistent_doctor_mod.auth:VaultProvider",
+                "credential_provider_config": {"endpoint": "https://vault.internal"},
+            },
+        )
+        assert doctor._check_memory_backend_config(provider_cfg).status == "ok"
+
+    def test_multi_user_missing_api_key_advises_dotenv(self, doctor, monkeypatch):
+        monkeypatch.setenv("ALICE_OV_KEY", "alice-secret")
+        monkeypatch.delenv("BOB_OV_KEY", raising=False)
+        config = self._config(
+            "openviking",
+            {
+                "base_url": "http://127.0.0.1:1933",
+                "user_credentials": {
+                    "alice": {"api_key_env": "ALICE_OV_KEY"},
+                    "bob": {"api_key_env": "BOB_OV_KEY"},
+                },
+            },
+        )
+
+        result = doctor._check_memory_backend_config(config)
+
+        assert result.status == "fail"
+        assert "USER API key is missing" in result.detail
+        assert "bob" in result.detail
+        assert result.fix == "Add BOB_OV_KEY=<your-key> to your .env file"
+
+    def test_conflicting_owner_user_id_and_user_credentials_fails(self, doctor, monkeypatch):
+        monkeypatch.setenv("ALICE_OV_KEY", "alice-secret")
+        config = self._config(
+            "openviking",
+            {
+                "base_url": "http://127.0.0.1:1933",
+                "owner_user_id": "alice",
+                "user_credentials": {
+                    "alice": {"api_key_env": "ALICE_OV_KEY"},
+                },
+            },
+        )
+
+        result = doctor._check_memory_backend_config(config)
+
+        assert result.status == "fail"
+        assert "owner_user_id" in result.detail
+
 
 def test_memory_backend_config_failure_is_reported_end_to_end(doctor_checkout: Path):
     (doctor_checkout / "config.yaml").write_text(

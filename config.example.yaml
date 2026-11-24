@@ -2068,6 +2068,37 @@ sandbox:
 #   # environment:                    # merged into every command's environment
 #   #   PYTHONUNBUFFERED: "1"
 
+# Option 8: BytePlus veFaaS Cloud Sandbox
+# Provisions managed All-in-One Sandbox instances via BytePlus Function Service
+# (veFaaS) OpenAPI (Version=2024-06-06) and reuses AioSandbox for the data plane.
+# Requires no extra cloud SDK dependency (uses httpx + SigV4 directly).
+# sandbox:
+#   use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+#   vefaas:
+#     region: ap-southeast-1
+#     endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+#     function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+#     sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL   # unified domain or https://{sandbox_id}.example.com
+#     access_key_env: BYTEPLUS_ACCESS_KEY_ID
+#     secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+#     # session_token_env: BYTEPLUS_SESSION_TOKEN           # optional STS temporary credentials
+#     # sandbox_access_token: $BYTEPLUS_VEFAAS_SANDBOX_ACCESS_TOKEN  # optional APIG data-plane token
+#     # cpu_milli: 1000                                     # 250..16000
+#     # memory_mb: 2048                                     # 512..131072
+#     # timeout_minutes: 60                                 # 3..1440
+#     # ready_timeout: 60                                   # seconds to wait for Running + HTTP readiness
+#     # tos_mount:                                          # optional per-thread scoped TOS mount
+#     #   enabled: false
+#     #   bucket: $BYTEPLUS_TOS_BUCKET
+#     #   prefix: deerflow-user-data
+#   # replicas: 3                     # active + warm soft cap per gateway process
+#   # idle_timeout: 600               # warm seconds before KillSandbox; 0 disables
+#   # bash_command_timeout: 600       # default remote command timeout seconds
+#   # ownership:
+#   #   type: redis                   # required for multi-worker gateways sharing one veFaaS app
+#   # environment:
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
@@ -2551,10 +2582,9 @@ memory:
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   #
-  # OpenViking example (replace this DeerMem backend_config block when
-  # manager_class is openviking). This first official-adapter integration uses
-  # one credential-bound OpenViking USER key for one DeerFlow user and supports
-  # middleware mode only. Use owner_user_id: default when DeerFlow auth is off.
+  # OpenViking single-user example (replace this DeerMem backend_config block
+  # when manager_class is openviking; supports middleware mode only). Use
+  # owner_user_id: default when DeerFlow auth is off.
   #
   # backend_config:
   #   base_url: http://openviking:1933
@@ -2575,6 +2605,26 @@ memory:
   #     injection_query: >-
   #       user profile preferences important entities events ongoing goals
   #       constraints and prior decisions
+  #
+  # OpenViking multi-user / multi-tenant isolation example (api_key mode,
+  # middleware mode only; mutually exclusive with owner_user_id/api_key_env):
+  #
+  # backend_config:
+  #   base_url: http://openviking:1933
+  #   user_credentials:
+  #     alice:
+  #       api_key_env: OPENVIKING_API_KEY_ALICE
+  #       tenant_id: acme # optional; derives tenant-isolated v2 session IDs
+  #     bob:
+  #       api_key_env: OPENVIKING_API_KEY_BOB
+  #       tenant_id: globex
+  #   # Or resolve credentials dynamically (optionally paired with user_credentials
+  #   # or injected programmatically via host_hooks["credential_provider"]):
+  #   # credential_provider: my_company.openviking_auth:VaultCredentialProvider
+  #   # credential_provider_config: {}
+  #   client_pool:              # multi-user mode only
+  #     max_clients: 64         # LRU cap (1..4096)
+  #     idle_ttl_seconds: 900.0 # null disables idle TTL eviction
   #
   # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
   # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled

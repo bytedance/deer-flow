@@ -35,9 +35,25 @@ usable after the source link is revoked.
 
 The copied messages are context for the model, not something the visitor said,
 so memory extraction skips them, also when compaction removes them. New turns in
-the copy are remembered as in any other conversation, including assistant replies
-that repeat copied content. A copy made before this behavior existed has its
-copied messages marked before its next run.
+the copy are remembered as in any other conversation. With the default DeerMem
+backend, extraction is also told that the conversation continues someone else's,
+so details an assistant reply repeats from the copy, such as the sharer's name or
+preferences, are not recorded as the visitor's. Other memory backends receive the
+visitor's turns without that note.
+
+The copy records its origin in server-owned thread state, so compaction, a branch
+of the copy and later runs keep it. A copy made before this behavior existed is
+updated before its next run, before a manual compaction and when it is branched.
+If a manual compaction cannot determine whether the thread is such a copy, it
+compacts without updating memory. When the history the import wrote can no
+longer be read, the copy's own turns cannot be told from the copied ones, so
+memory is not updated from that conversation until a later run can read it. When
+the update cannot be stored at all, for example while the checkpoint store is
+unavailable, the run is refused with `503` and can be retried. Two
+cases can still pass the copied turns of such an older copy to memory: a run that
+starts from a checkpoint written before the update, for example an edit of an
+earlier turn, and the run that resumes a tool approval that was pending when the
+Gateway was upgraded.
 
 ## Deployment and limits
 

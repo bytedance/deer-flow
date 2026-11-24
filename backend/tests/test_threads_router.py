@@ -3103,7 +3103,8 @@ def test_stamp_turn_duration_recovers_from_non_mapping_additional_kwargs(caplog)
 # ── branch threads from completed assistant turns ─────────────────────────────
 
 
-def test_branch_thread_can_prepare_regenerate_without_branch_run_events() -> None:
+@pytest.mark.parametrize("source_checkpoint_count", [3, 473], ids=["short-turn", "long-turn"])
+def test_branch_thread_can_prepare_regenerate_without_branch_run_events(source_checkpoint_count: int) -> None:
     app, _store, checkpointer = _build_thread_app()
     app.include_router(thread_runs.router)
     source_thread_id = "source-regenerate"
@@ -3122,32 +3123,26 @@ def test_branch_thread_can_prepare_regenerate_without_branch_run_events() -> Non
     human = HumanMessage(id="human-1", content="Question", additional_kwargs={"run_id": source_run_id})
     ai = AIMessage(id="ai-1", content="Answer")
 
+    async def seed_turn(parent_config: dict) -> None:
+        for step in range(1, source_checkpoint_count):
+            messages = [human, ai] if step == source_checkpoint_count - 1 else [human]
+            parent_config = await _write_checkpoint(
+                checkpointer,
+                source_thread_id,
+                str(uuid6()),
+                messages,
+                step=step,
+                metadata={"created_at": "2026-07-05T00:00:00+00:00"},
+                parent_config=parent_config,
+            )
+
     with TestClient(app) as client:
         created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
         assert created.status_code == 200, created.text
 
         initial = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}))
         assert initial is not None
-        after_human = asyncio.run(
-            _write_checkpoint(
-                checkpointer,
-                source_thread_id,
-                str(uuid6()),
-                [human],
-                step=1,
-                parent_config=initial.config,
-            )
-        )
-        asyncio.run(
-            _write_checkpoint(
-                checkpointer,
-                source_thread_id,
-                str(uuid6()),
-                [human, ai],
-                step=2,
-                parent_config=after_human,
-            )
-        )
+        asyncio.run(seed_turn(initial.config))
 
         branch_response = client.post(
             f"/api/threads/{source_thread_id}/branches",
@@ -3181,6 +3176,24 @@ def test_branch_thread_can_prepare_regenerate_without_branch_run_events() -> Non
     )
     assert branch_base is not None
     assert branch_base.checkpoint.get("channel_values", {}).get("messages", []) == []
+
+
+def test_branch_replay_deadline_returns_504_and_logs_exception(monkeypatch, caplog) -> None:
+    from app.gateway import checkpoint_lineage
+
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "source-replay-deadline"
+    monkeypatch.setattr(checkpoint_lineage, "_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id})
+        assert created.status_code == 200, created.text
+        _seed_branchable_thread(app, thread_id)
+        response = client.post(f"/api/threads/{thread_id}/branches", json={"message_id": "ai-1"})
+
+    assert response.status_code == 504, response.text
+    assert response.json()["detail"] == "Timed out resolving the checkpoint before the target user message"
+    assert any(thread_id in record.message and record.exc_info for record in caplog.records)
 
 
 def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> None:
