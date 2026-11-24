@@ -582,6 +582,18 @@ class TestCheckWebSearch:
         assert result.status == "ok"
         assert "WebRouter" in result.detail
 
+    @pytest.mark.parametrize(("pinned", "env", "status"), [("brave", None, "warn"), ("brave", "BRAVE_SEARCH_API_KEY", "ok"), ("auto", None, "ok")])
+    def test_webrouter_pinned_backend_needs_its_key(self, tmp_path, monkeypatch, pinned, env, status):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        if env:
+            monkeypatch.setenv(env, "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n    provider: {pinned}\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == status
+        if status == "warn":
+            assert result.detail == "WebRouter is pinned to 'brave', which is not configured here"
+
     def test_webrouter_without_the_extra_warns(self, tmp_path, monkeypatch):
         monkeypatch.setattr(doctor, "find_spec", lambda name: None)
         cfg = tmp_path / "config.yaml"
@@ -890,6 +902,14 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "ok"
         assert "WebRouter" in result.detail
+
+    def test_webrouter_pinned_fetch_backend_without_its_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.webrouter.tools:web_fetch_tool\n    provider: firecrawl\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert result.detail == "WebRouter is pinned to 'firecrawl', which is not configured here"
 
     @pytest.mark.usefixtures("delegated_backend_dns")
     def test_browserless_fetch_explicit_token_wins_over_the_environment(self, tmp_path, monkeypatch):

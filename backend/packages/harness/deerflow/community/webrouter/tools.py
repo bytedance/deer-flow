@@ -79,6 +79,11 @@ async def _open_router(provider: str):
         raise
 
 
+async def _close(router) -> None:
+    """Close the router, finishing even if the caller is cancelled again meanwhile."""
+    await await_drained(router.aclose())
+
+
 def _provider(settings: dict) -> str:
     provider = settings.get("provider")
     return provider.strip() if isinstance(provider, str) and provider.strip() else _DEFAULT_PROVIDER
@@ -121,7 +126,7 @@ async def web_search_tool(query: str, max_results: int | None = None, time_range
         try:
             response = await router.search(query, **search_kwargs)
         finally:
-            await router.aclose()
+            await _close(router)
     except _NotInstalledError as e:
         return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
     except Exception as e:
@@ -171,7 +176,7 @@ async def web_fetch_tool(url: str) -> str:
         try:
             response = await router.extract(url, format="markdown", timeout=_timeout(settings), data_apis=False)
         finally:
-            await router.aclose()
+            await _close(router)
     except _NotInstalledError as e:
         return f"Error: {e}"
     except Exception as e:

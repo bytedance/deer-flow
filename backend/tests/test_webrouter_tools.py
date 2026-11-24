@@ -89,6 +89,52 @@ async def _fetch(backend: _Backend, tool_config: dict, url: str = "https://examp
         return await webrouter_tools.web_fetch_tool.ainvoke({"url": url})
 
 
+@pytest.mark.parametrize(
+    ("provider", "call"),
+    [
+        ("brave", lambda: webrouter_tools.web_search_tool.ainvoke({"query": "q"})),
+        ("jina", lambda: webrouter_tools.web_fetch_tool.ainvoke({"url": "https://example.com/post"})),
+    ],
+)
+async def test_repeated_cancel_still_waits_for_the_router_to_close(tool_config, provider, call):
+    tool_config["provider"] = provider
+    answer, closing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def never_answers(request: httpx.Request) -> httpx.Response:
+        await answer.wait()
+        raise AssertionError("the request should be cancelled")
+
+    real_router = web_router.AsyncWebRouter
+    closed: list[bool] = []
+
+    def build(name: str):
+        router = real_router(name, provider_config={name: {"transport": httpx.MockTransport(never_answers)}})
+        close = router.aclose
+
+        async def slow_close() -> None:
+            closing.set()
+            await release.wait()
+            await close()
+            closed.append(True)
+
+        router.aclose = slow_close
+        return router
+
+    with patch.object(web_router, "AsyncWebRouter", build):
+        task = asyncio.create_task(call())
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await asyncio.wait_for(closing.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert closed == [True]
+
+
 class TestWebSearchTool:
     async def test_returns_normalized_results(self, tool_config):
         backend = _brave([_hit(1), _hit(2)])

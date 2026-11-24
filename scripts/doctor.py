@@ -653,6 +653,21 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
     return results
 
 
+def _webrouter_pin(tool: dict, tool_name: str) -> tuple[str | None, bool]:
+    """Return the backend a WebRouter tool is pinned to, and whether WebRouter can use it here.
+
+    ``provider: auto`` (the default) falls back across keyless backends, so it
+    is not a pin; a named backend does not fall back and needs its own key.
+    """
+    pinned = tool.get("provider")
+    if not isinstance(pinned, str) or pinned.strip() in ("", "auto"):
+        return None, True
+    import web_router
+
+    configured = web_router.configured_extract_providers() if tool_name == "web_fetch" else web_router.configured_providers()
+    return pinned.strip(), pinned.strip() in configured
+
+
 def check_web_search(config_path: Path) -> CheckResult:
     return check_web_tool(config_path, tool_name="web_search", label="web search configured")
 
@@ -853,8 +868,14 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
                 if provider in use:
-                    if provider == "webrouter" and find_spec("web_router") is None:
-                        return CheckResult(label, "warn", "WebRouter is configured but the webrouter extra is not installed", fix="cd backend && uv sync --extra webrouter")
+                    if provider == "webrouter":
+                        if find_spec("web_router") is None:
+                            return CheckResult(label, "warn", "WebRouter is configured but the webrouter extra is not installed", fix="cd backend && uv sync --extra webrouter")
+                        pinned, usable = _webrouter_pin(tool, tool_name)
+                        if pinned and not usable:
+                            return CheckResult(label, "warn", f"WebRouter is pinned to '{pinned}', which is not configured here", fix=f"Set the API key '{pinned}' needs in .env, or remove 'provider' to route automatically")
+                        if pinned:
+                            return CheckResult(label, "ok", f"WebRouter (pinned to '{pinned}', no fallback)")
                     var, reads_config = free_provider_keys.get(provider, (None, False))
                     sources = [_config_source(tool, "api_key")] if reads_config else []
                     if var:
