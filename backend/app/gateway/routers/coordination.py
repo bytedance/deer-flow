@@ -7,7 +7,7 @@ from typing import Annotated
 from deerflow_extension_api.agent_runs import AgentRunError
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StrictBool, StringConstraints
 
 from app.gateway.authz import require_permission
 from app.gateway.coordination_workers import worker_context, worker_error
@@ -25,6 +25,7 @@ class CreateWorkerTask(BaseModel):
     objective: TaskText
     assistant_id: str = Field(default="lead_agent", min_length=1, max_length=128)
     project_id: str | None = Field(default=None, min_length=1, max_length=64)
+    coordinator: StrictBool = False
 
 
 class WorkerInput(BaseModel):
@@ -42,7 +43,7 @@ async def create_worker_task(body: CreateWorkerTask, request: Request):
     service, owner, runs = worker_context(request)
 
     async def dispatch():
-        task = await service.repo.create(owner, request_id=body.request_id, objective=body.objective, project_id=body.project_id)
+        task = await service.repo.create(owner, request_id=body.request_id, objective=body.objective, project_id=body.project_id, coordinator=body.coordinator)
         return await service.dispatch(runs, owner, task["id"], body.assistant_id)
 
     try:

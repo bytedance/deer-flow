@@ -16,7 +16,7 @@ import math
 import re
 import threading
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -2473,6 +2473,7 @@ async def start_run(
     require_existing_thread: bool = False,
     evidence_origin: str | None = None,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
+    agent_factory_override: Callable | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -2501,6 +2502,8 @@ async def start_run(
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
     if scheduled_task_runtime is not None and getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
         raise HTTPException(status_code=403, detail="Scheduled runtime authority requires an internal launcher")
+    if agent_factory_override is not None and not getattr(request.state, "coordination_execution_id", None):
+        raise HTTPException(status_code=403, detail="Coordinator factory requires a managed execution")
 
     try:
         validate_thread_id(thread_id)
@@ -2602,7 +2605,9 @@ async def start_run(
         # Cold resolution imports the lead-agent stack. Use the assembly pool
         # so import-lock waiters cannot starve unrelated default-executor work.
         # Keep this before admission so import failures cannot create a run.
-        agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
+        agent_factory = agent_factory_override
+        if agent_factory is None:
+            agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
         admitted_origin = evidence_origin or ("unknown" if is_internal_caller else "interactive")
         if admitted_origin not in EVIDENCE_ORIGINS:
             raise ValueError("Unsupported host evidence origin")

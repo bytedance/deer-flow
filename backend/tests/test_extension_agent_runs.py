@@ -920,6 +920,74 @@ async def test_managed_worker_routes_followups_and_retains_the_producing_runs_fi
 
 
 @pytest.mark.asyncio
+async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(worker_gateway, monkeypatch):
+    import asyncio
+    from uuid import uuid4
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    client, runs, state, entered, _ = worker_gateway
+
+    async def echo_model(prompt, runtime):
+        journal = runtime.context["__run_journal"]
+        result = LLMResult(generations=[[ChatGeneration(message=AIMessage(content=f"answer:{prompt}"))]])
+        journal.on_llm_end(result, run_id=uuid4())
+
+    state.present_worker_report = echo_model
+    model = Mock()
+    model.bind_tools.return_value.ainvoke = AsyncMock(
+        side_effect=[
+            AIMessage(content="", tool_calls=[{"name": "inspect_task", "id": "inspect", "args": {}}]),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_task_decision",
+                        "id": "decision",
+                        "args": {
+                            "tasks": [
+                                {"key": "research", "objective": "wait"},
+                                {"key": "report", "objective": "Write the report", "depends_on": ["research"]},
+                            ]
+                        },
+                    }
+                ],
+            ),
+        ]
+    )
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    url = "/api/coordination/tasks"
+    body = {"request_id": "plan", "coordinator": True, "objective": "Research and write a report"}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    task_id = first["task"]["id"]
+    planner_run = first["execution"]["run_id"]
+    assert (await client.post(url, json=body)).raise_for_status().json()["execution"]["run_id"] == planner_run
+    assert (await client.post(url, json={**body, "coordinator": False})).status_code == 409
+    assert (await runs.wait(thread_id=first["assignment"]["thread_id"], run_id=planner_run, timeout=8)).status == "success"
+    planned = (await client.get(f"{url}/{task_id}")).raise_for_status().json()
+    research = next(child for child in planned["children"] if child["objective"] == "wait")
+    report = next(child for child in planned["children"] if child["id"] != research["id"])
+    assert report["depends_on"] == [research["id"]]
+    assert report["status"] == research["status"] == "queued"
+
+    await _restart_coordination(state)
+    state.coordination_workers.start_recovery()
+    await asyncio.wait_for(entered.wait(), 8)
+    waiting = (await client.get(f"{url}/{report['id']}")).raise_for_status().json()
+    assert waiting["execution"] is None
+    state.release_worker.set()
+    final = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert {child["id"] for child in final["children"] if child["status"] == "succeeded"} == {research["id"], report["id"]}
+    assert final["execution"]["run_id"] == planner_run
+    finished_report = (await client.get(f"{url}/{report['id']}")).raise_for_status().json()
+    messages = (await client.get(finished_report["task"]["result_ref"])).raise_for_status().json()
+    assert any("answer:wait" in str(message["content"]) for message in messages["data"])
+    assert model.bind_tools.return_value.ainvoke.await_count == 2
+    assert [tool.name for tool in model.bind_tools.call_args.args[0]] == ["submit_task_decision"]
+
+
+@pytest.mark.asyncio
 async def test_managed_worker_create_retry_returns_task_after_grant_expires(worker_gateway, monkeypatch):
     import asyncio
 

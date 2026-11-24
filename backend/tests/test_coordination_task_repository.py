@@ -178,11 +178,19 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     engine, _, schema = database
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
     previous = "0058_mcp_browser_oauth"
-    revision = "0059_coordination_grants"
+    revision = "0060_coordination_coordinator"
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
     await asyncio.to_thread(command.upgrade, config, previous)
     repo = CoordinationTaskRepository(async_sessionmaker(engine))
-    task = await repo.create("alice", request_id="root", objective="Test the upgraded schema")
+    task_id = uuid4().hex
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO coord_tasks (id, owner_id, request_id, root_id, depends_on, objective, status, revision, execution_epoch, latest_input_seq, created_at, updated_at) "
+                "VALUES (:id, 'alice', 'root', :id, '[]', 'Test the upgraded schema', 'queued', 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"id": task_id},
+        )
     await asyncio.to_thread(command.upgrade, config, revision)
     async with engine.connect() as conn:
 
@@ -194,14 +202,15 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
             return compare_metadata(context, Base.metadata)
 
         assert await conn.run_sync(diff) == []
-    assert (await repo.get("alice", task["id"]))["status"] == TaskStatus.QUEUED
-    await repo.append_input("alice", task["id"], request_id="update", content="Record an input")
+    assert (await repo.get("alice", task_id))["status"] == TaskStatus.QUEUED
+    await repo.append_input("alice", task_id, request_id="update", content="Record an input")
     await asyncio.to_thread(command.downgrade, config, previous)
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
     assert "mcp_oauth_attempts" in tables
     assert "coord_task_grants" not in tables
-    assert (await repo.get("alice", task["id"]))["latest_input_seq"] == 1
+    async with engine.connect() as conn:
+        assert await conn.scalar(text("SELECT latest_input_seq FROM coord_tasks WHERE id = :id"), {"id": task_id}) == 1
     await asyncio.to_thread(command.downgrade, config, "0055_thread_shares")
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
@@ -209,6 +218,65 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     assert not {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts", "coord_task_grants"} & tables
     await asyncio.to_thread(command.upgrade, config, revision)
     assert (await repo.create("alice", request_id="root", objective="After re-upgrade"))["status"] == TaskStatus.QUEUED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_input", [False, True], ids=["current", "stale-input"])
+async def test_coordinator_decision_is_atomic_idempotent_and_fenced(database, changed_input):
+    from time import time
+
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, RUN_KEY_PREFIX, CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
+
+    engine, dialect, schema = database
+    await bootstrap.bootstrap_schema(engine, backend=dialect, postgres_schema=schema)
+    sessions = async_sessionmaker(engine)
+    workers, runs = CoordinationWorkerRepository(sessions), RunRepository(sessions)
+    async with sessions.begin() as session:
+        session.add(UserRow(id="alice", email="alice@example.com"))
+    root = await workers.create("alice", request_id="plan", objective="Research", coordinator=True)
+    task_id = root["id"]
+    grant = {"id": "grant", "authority": {"token_version": 0, "source": "session", "permissions": ["runs:create"]}, "channel": None, "expires_at": time() + 100}
+    worker, execution, _ = await workers.prepare("alice", task_id, "lead_agent", initial_grant=grant)
+    await runs.create_thread_operation_atomic(
+        "planner-run",
+        thread_id=worker["thread_id"],
+        user_id="alice",
+        owner_worker_id="worker",
+        lease_expires_at=None,
+        idempotency_key=RUN_KEY_PREFIX + execution["id"],
+        metadata={RUN_GRANT_METADATA: "grant"},
+    )
+    first = {"key": "research", "assistant_id": "lead_agent", "objective": "Find sources", "depends_on": []}
+    second = {"key": "brief", "assistant_id": "lead_agent", "objective": "Use sources", "depends_on": ["research"]}
+    args = ("alice", task_id, execution["id"], "planner-run", "grant")
+    if changed_input:
+        await workers.append_input("alice", task_id, request_id="change", content="Use a different source")
+        with pytest.raises(TaskConflict, match="stale task inputs"):
+            await workers.submit_task_decision(*args, [first, second])
+        assert (await workers.view("alice", task_id))["children"] == []
+        return
+    with pytest.raises(TaskConflict, match="dependencies"):
+        await workers.submit_task_decision(*args, [first, {**second, "depends_on": ["missing"]}])
+    assert (await workers.view("alice", task_id))["children"] == []
+    await workers.set_grant("alice", task_id, None)
+    with pytest.raises(PermissionError):
+        await workers.submit_task_decision(*args, [first, second])
+    await workers.set_grant("alice", task_id, grant)
+    decision, retry = await asyncio.gather(*(workers.submit_task_decision(*args, [first, second]) for _ in range(2)))
+    assert decision == retry
+    view = await workers.view("alice", task_id)
+    assert len(view["children"]) == 2
+    assert (await workers.get("alice", decision["brief"]))["depends_on"] == [decision["research"]]
+    assert (await workers.grant("alice", decision["brief"]))["id"] == grant["id"]
+    assert await workers.prepare("alice", decision["brief"]) is None
+    with pytest.raises(TaskConflict, match="different tasks"):
+        await workers.submit_task_decision(*args, [first])
+    await workers.request_cancel("alice", task_id, expected_revision=view["task"]["revision"])
+    with pytest.raises(TaskConflict, match="no longer current"):
+        await workers.submit_task_decision(*args, [first, second])
+    assert await workers.prepare("alice", decision["research"]) is None
 
 
 @pytest.mark.asyncio

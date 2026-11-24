@@ -391,7 +391,18 @@ class _BoundAgentRuns:
             )
             request.state.coordination_execution_id = execution_id
             request.state.coordination_grant_id = grant_id
-            record = await start_run(body, thread_id, request, require_existing_thread=True, idempotency_key=RUN_KEY_PREFIX + execution_id)
+            coordinator_factory = None
+            if "expected_revision" in frozen:
+                from app.gateway.authz import authorize_model_use
+                from app.gateway.coordinator_agent import build_coordinator_factory
+
+                async def check_model_access(app_config):
+                    async with self._request("runs:create", thread_id) as model_request:
+                        await asyncio.to_thread(authorize_model_use, model_request.state.user, None, is_internal=False, app_config=app_config)
+
+                workers = request.app.state.coordination_workers
+                coordinator_factory = build_coordinator_factory(workers, self._user_id, task_id, execution_id, grant_id, worker["assistant_id"], check_model_access)
+            record = await start_run(body, thread_id, request, require_existing_thread=True, idempotency_key=RUN_KEY_PREFIX + execution_id, agent_factory_override=coordinator_factory)
             return _view(record)
 
     async def wait_coordination_worker(self, *, thread_id, run_id, timeout=60):
@@ -417,6 +428,20 @@ class _BoundAgentRuns:
 
         async with self._request("runs:cancel", thread_id) as request:
             await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=self._user_id, continuation_authority=self)
+
+    async def coordination_result_text(self, *, thread_id, run_id):
+        from app.gateway.deps import get_run_event_store
+        from deerflow.utils.messages import message_to_text
+
+        async with self._request("runs:read", thread_id) as request:
+            rows = await get_run_event_store(request).list_messages_by_run(thread_id, run_id, user_id=self._user_id, limit=12)
+        for row in reversed(rows):
+            caller = str((row.get("metadata") or {}).get("caller", ""))
+            if row.get("event_type") in ("llm.ai.response", "ai_message") and not caller.startswith("middleware:"):
+                text = message_to_text(row.get("content") or {})
+                if text:
+                    return text[:4000]
+        return None
 
     async def coordination_recovery_checkpoint(self, *, thread_id, run_id):
         from app.gateway.deps import get_run_store
