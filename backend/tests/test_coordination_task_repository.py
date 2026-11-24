@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -177,6 +179,34 @@ async def test_concurrent_replay_and_owner_isolation(repo):
     assert await repo.list_inputs("bob", task_id) == []
     with pytest.raises(TaskConflict, match="different input"):
         await repo.append_input("alice", task_id, request_id="one", content="mutated replay")
+
+
+@pytest.mark.asyncio
+async def test_root_task_listing_filters_before_paging_and_breaks_timestamp_ties(repo, monkeypatch):
+    created_at = datetime(2026, 11, 24, tzinfo=UTC)
+    clock = Mock()
+    clock.now.return_value = created_at
+    monkeypatch.setattr("deerflow.persistence.coordination.sql.datetime", clock)
+    old = await repo.create("alice", request_id="old", objective="Earlier", project_id="project")
+    old = await repo.start("alice", old["id"], expected_revision=old["revision"])
+
+    clock.now.return_value = created_at + timedelta(seconds=1)
+    settings = {"recursion_limit": 400, "thinking_enabled": False}
+    recent = await repo.create("alice", request_id="recent", objective="Review", project_id="project", run_settings=settings)
+    other_project = await repo.create("alice", request_id="other-project", objective="Unassigned")
+    await repo.create("alice", request_id="child", objective="Child work", parent_id=old["id"])
+    await repo.create("bob", request_id="other-owner", objective="Other owner", project_id="project")
+
+    recent_ids = sorted([recent["id"], other_project["id"]], reverse=True)
+    first_page = await repo.list_root_tasks("alice", limit=2, offset=0)
+    assert [task["id"] for task in first_page] == recent_ids
+    assert next(task["run_settings"] for task in first_page if task["id"] == recent["id"]) == settings
+    assert [task["id"] for task in await repo.list_root_tasks("alice", limit=2, offset=2)] == [old["id"]]
+    assert [task["id"] for task in await repo.list_root_tasks("alice", project_id="project", limit=1, offset=1)] == [old["id"]]
+    running = await repo.list_root_tasks("alice", project_id="project", status=TaskStatus.RUNNING, limit=1, offset=0)
+    assert [task["id"] for task in running] == [old["id"]]
+    assert running[0]["run_settings"] is None
+    assert await repo.list_root_tasks("alice", project_id="missing", limit=2, offset=0) == []
 
 
 @pytest.mark.asyncio

@@ -834,6 +834,41 @@ async def worker_gateway(runtime, tmp_path):
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_managed_worker_task_list_requires_owner_read_access(worker_gateway, host):
+    client, _, state, _, owner = worker_gateway
+    repo = state.coordination_workers.repo
+    settings = {"recursion_limit": 400, "thinking_enabled": False}
+    task = await repo.create(owner, request_id="list", objective="Review", project_id="project", run_settings=settings)
+    legacy = await repo.create(owner, request_id="elsewhere", objective="Unassigned")
+    await repo.create("another-user", request_id="list", objective="Private work", project_id="project")
+
+    _, request, _ = host
+    request.state.auth = AuthContext(request.state.user, ["runs:read"])
+    url = "/api/coordination/tasks"
+    response = await client.get(url, params={"status": "queued", "project_id": "project", "limit": 1})
+    assert response.status_code == 200
+    (summary,) = response.json()
+    assert summary == {
+        "id": task["id"],
+        "objective": "Review",
+        "project_id": "project",
+        "status": "queued",
+        "run_settings": settings,
+        "created_at": summary["created_at"],
+        "updated_at": summary["updated_at"],
+    }
+    assert summary["run_settings"]["thinking_enabled"] is False
+    all_tasks = (await client.get(url)).raise_for_status().json()
+    assert {row["id"]: row["run_settings"] for row in all_tasks} == {task["id"]: settings, legacy["id"]: None}
+    assert (await client.get(url, params={"status": "pending"})).status_code == 422
+    assert (await client.get(url, params={"limit": 101})).status_code == 422
+    assert (await client.get(url, params={"offset": -1})).status_code == 422
+
+    request.state.auth = AuthContext(request.state.user, ["runs:create"])
+    assert (await client.get(url)).status_code == 403
+
+
 async def _wait_for_worker(client, task_id, section, field, value):
     import asyncio
 

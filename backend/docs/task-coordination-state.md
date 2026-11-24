@@ -61,10 +61,20 @@ The response includes the task, its assignment (agent and thread), and the
 latest execution. After the task has admitted a Run, replaying the same create
 request returns the saved task view and its current `authorization_required`
 value, even if the Worker grant has expired. Read the same view with
-`GET /api/coordination/tasks/{task_id}`. Add a follow-up with
-`POST /api/coordination/tasks/{task_id}/inputs` and a JSON object containing
-`request_id` and `content`. The owner can replay an accepted input with the same
-ID and content to get its original receipt after task closure or grant expiry.
+`GET /api/coordination/tasks/{task_id}`.
+
+A signed-in caller with `runs:read` can find their top-level tasks with
+`GET /api/coordination/tasks`. Filter by `status` or `project_id`, and page
+with `limit` (default 50, maximum 100) and `offset` (default 0). Results are
+ordered by creation time newest first, with task ID descending as the
+tie-breaker. The JSON array contains summaries with the task ID, objective,
+project, status, saved run settings and timestamps. Use the task detail
+endpoint for its assignment, execution and authorization state.
+
+Add a follow-up with `POST /api/coordination/tasks/{task_id}/inputs` and a
+JSON object containing `request_id` and `content`. The owner can replay an
+accepted input with the same ID and content to get its original receipt
+after task closure or grant expiry.
 This applies to the task input and managed Run input endpoints. New inputs need
 a valid Worker grant. A text message sent to the worker thread uses the same
 queue. Streaming and wait callers observe the run that consumes their message.
