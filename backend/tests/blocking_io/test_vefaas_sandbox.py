@@ -46,6 +46,7 @@ class _BlockingProbeOwnershipStore:
         self._probe_path = probe_path
         self._probe_path.write_text("owner", encoding="utf-8")
         self.calls: list[str] = []
+        self._owned_keys: set[str] = set()
 
     @property
     def owner_id(self) -> str:
@@ -57,10 +58,12 @@ class _BlockingProbeOwnershipStore:
 
     def take(self, sandbox_id: str) -> bool:
         self._touch("take")
+        self._owned_keys.add(sandbox_id)
         return True
 
     def claim(self, sandbox_id: str, *, for_destroy: bool = False) -> bool:
         self._touch("claim")
+        self._owned_keys.add(sandbox_id)
         return True
 
     def renew(self, sandbox_id: str) -> RenewOutcome:
@@ -69,9 +72,11 @@ class _BlockingProbeOwnershipStore:
 
     def release(self, sandbox_id: str) -> None:
         self._touch("release")
+        self._owned_keys.discard(sandbox_id)
 
     def owner(self, sandbox_id: str) -> str | None:
-        return self._touch("owner")
+        self._touch("owner")
+        return self.owner_id if sandbox_id in self._owned_keys else None
 
     def close(self) -> None:
         pass

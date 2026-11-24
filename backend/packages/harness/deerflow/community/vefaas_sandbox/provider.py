@@ -287,6 +287,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         self._destroying_remote_ids: set[str] = set()
         self._mirroring_output_ids: set[str] = set()
         self._snapshotting_remote_ids: dict[str, int] = {}
+        self._remote_snapshot_fences: dict[str, int] = {}
         self._snapshot_watchers: set[threading.Thread] = set()
         # Same-process exclusion against warm-pool reaping and stale lease renewals:
         # - _local_teardown: refcount of teardowns currently active in this process
@@ -852,6 +853,9 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
     def _renew_leases_once(self) -> None:
         with self._lock:
             tracked_ids = sorted(set(self._sandboxes) | set(self._warm_pool) | {entry.sandbox_id for rid, entry in self._pending_destroys.items() if rid in self._snapshotting_remote_ids})
+            fenced_remotes = sorted(self._remote_snapshot_fences)
+        for remote_id in fenced_remotes:
+            self._refresh_snapshot_fence(remote_id)
         for sandbox_id in tracked_ids:
             with self._lock:
                 if sandbox_id in self._local_teardown or sandbox_id in self._acquire_inflight:
@@ -1881,6 +1885,51 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             return True
         return record.is_terminal_failure
 
+    @staticmethod
+    def _snapshot_fence_key(remote_id: str) -> str:
+        """Cross-worker ownership store key fencing teardowns while manual snapshots settle."""
+        return f"snapshot-fence:{remote_id}"
+
+    def _refresh_snapshot_fence(self, remote_id: str) -> bool:
+        """Best-effort refresh of our cross-worker snapshot fence for ``remote_id``."""
+        try:
+            return self._ownership.claim(self._snapshot_fence_key(remote_id), for_destroy=True)
+        except OwnershipBackendError as exc:
+            logger.warning("Failed to refresh cross-worker snapshot fence for veFaaS remote %s: %s", remote_id, exc)
+            return True
+
+    def _is_remote_snapshot_fenced(self, remote_id: str) -> bool:
+        """Return True if any worker holds a snapshot reservation for ``remote_id`` (fail closed)."""
+        with self._lock:
+            if remote_id in self._snapshotting_remote_ids:
+                return True
+        try:
+            owner = self._ownership.owner(self._snapshot_fence_key(remote_id))
+            return isinstance(owner, str) and bool(owner)
+        except OwnershipBackendError as exc:
+            logger.warning(
+                "Failed to check cross-worker snapshot fence for veFaaS remote %s; deferring teardown: %s",
+                remote_id,
+                exc,
+            )
+            return True
+
+    def _may_own_for_teardown(self, sandbox_id: str) -> bool:
+        """Return True if this worker might still be responsible for tearing down ``sandbox_id``."""
+        try:
+            current_owner = self._ownership.owner(sandbox_id)
+        except OwnershipBackendError:
+            return True
+        return current_owner is None or current_owner == self._ownership.owner_id
+
+    def _restore_deferred_teardown_lease(self, sandbox_id: str, *, context: str) -> None:
+        """Unwind our destructive ``del:`` claim and best-effort restore ``own:`` when teardown defers."""
+        self._release_ownership_best_effort(sandbox_id, context=context)
+        try:
+            self._ownership.claim(sandbox_id)
+        except OwnershipBackendError as exc:
+            logger.warning("Failed to restore ownership lease (%s) for veFaaS sandbox %s: %s", context, sandbox_id, exc)
+
     def _refresh_owned_lease(self, sandbox_id: str) -> bool:
         """Refresh our normal ``own:`` lease; return False if a peer took or started destroying it."""
         try:
@@ -2109,6 +2158,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         """Pause or snapshot-then-destroy an idle warm sandbox under full teardown fencing."""
         remote_id = tracked.remote_sandbox_id
         sandbox_id = tracked.sandbox_id
+        if self._is_remote_snapshot_fenced(remote_id):
+            return False
         with self._lock:
             if self._shutdown_called or not self._accepting:
                 shutdown_active = True
@@ -2127,11 +2178,16 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         tracked.sandbox.close()
         confirmed = False
         release_lease = False
+        deferred_by_snapshot = False
         try:
             claimed = self._ownership.claim(sandbox_id, for_destroy=True)
             if not claimed:
                 logger.info("Skipping remote retirement for veFaaS sandbox %s (%s): owned by a peer", sandbox_id, reason)
                 confirmed = True
+            elif self._is_remote_snapshot_fenced(remote_id):
+                logger.info("Deferring remote retirement for veFaaS sandbox %s (remote=%s, %s): snapshot fence active", sandbox_id, remote_id, reason)
+                deferred_by_snapshot = True
+                self._restore_deferred_teardown_lease(sandbox_id, context="deferred warm retirement")
             else:
                 release_lease = True
                 needs_kill = True
@@ -2237,10 +2293,12 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     self._local_teardown.pop(sandbox_id, None)
                 else:
                     self._local_teardown[sandbox_id] = remaining_teardowns
-                if self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked:
+                if not deferred_by_snapshot and self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked:
                     self._warm_pool.pop(sandbox_id, None)
                 self._destroying_remote_ids.discard(remote_id)
-                if confirmed:
+                if deferred_by_snapshot:
+                    self._pending_destroys.pop(remote_id, None)
+                elif confirmed:
                     self._pending_destroys.pop(remote_id, None)
                     bucket = self._quarantined_remote_ids.get(sandbox_id)
                     if bucket is not None:
@@ -2249,7 +2307,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                             self._quarantined_remote_ids.pop(sandbox_id, None)
                 else:
                     self._quarantined_remote_ids.setdefault(sandbox_id, set()).add(remote_id)
-        return True
+        return not deferred_by_snapshot
 
     def _drain_quarantine_for_scope(self, sandbox_id: str) -> None:
         with self._lock:
@@ -2302,6 +2360,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
     ) -> bool:
         remote_id = tracked.remote_sandbox_id
         sandbox_id = tracked.sandbox_id
+        if pop_warm and self._is_remote_snapshot_fenced(remote_id):
+            return False
         with self._lock:
             if require_pending and self._pending_destroys.get(remote_id) is not tracked:
                 return False
@@ -2316,12 +2376,17 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         tracked.sandbox.close()
         confirmed = False
         release_lease = False
+        deferred_by_snapshot = False
         try:
             claimed = self._ownership.claim(sandbox_id, for_destroy=True)
             if not claimed:
                 # Owned by a live peer: never destroy remotely; drop local pending state.
                 logger.info("Skipping remote kill for veFaaS sandbox %s (%s): owned by a peer", sandbox_id, reason)
                 confirmed = True
+            elif self._is_remote_snapshot_fenced(remote_id):
+                logger.info("Deferring remote kill for veFaaS sandbox %s (remote=%s, %s): snapshot fence active", sandbox_id, remote_id, reason)
+                deferred_by_snapshot = True
+                self._restore_deferred_teardown_lease(sandbox_id, context="deferred teardown")
             else:
                 release_lease = True
                 function_id = self._config["function_id"]
@@ -2345,10 +2410,13 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     self._local_teardown.pop(sandbox_id, None)
                 else:
                     self._local_teardown[sandbox_id] = remaining_teardowns
-                if pop_warm and self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked:
+                if pop_warm and not deferred_by_snapshot and self._warm_pool.get(sandbox_id, (None, 0.0))[0] is tracked:
                     self._warm_pool.pop(sandbox_id, None)
                 self._destroying_remote_ids.discard(remote_id)
-                if confirmed:
+                if deferred_by_snapshot:
+                    if pop_warm:
+                        self._pending_destroys.pop(remote_id, None)
+                elif confirmed:
                     self._pending_destroys.pop(remote_id, None)
                     bucket = self._quarantined_remote_ids.get(sandbox_id)
                     if bucket is not None:
@@ -2357,7 +2425,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                             self._quarantined_remote_ids.pop(sandbox_id, None)
                 else:
                     self._quarantined_remote_ids.setdefault(sandbox_id, set()).add(remote_id)
-        return True
+        return not deferred_by_snapshot
 
     def _retry_pending_destroys(self) -> None:
         with self._lock:
@@ -2566,39 +2634,55 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 snapshot_id: str | None = None
                 settled = True
                 handed_off = False
+                remote_fence_reserved = False
                 try:
                     if self._is_sandbox_dirty(tracked.sandbox):
                         raise RuntimeError(f"Refusing to snapshot corrupted veFaaS sandbox {sandbox_id}")
+                    fence_key = self._snapshot_fence_key(remote_id)
+                    if not self._ownership.claim(sandbox_id):
+                        raise RuntimeError(f"Refusing to snapshot veFaaS sandbox {sandbox_id}: owned by a peer or tearing down")
+                    if not self._ownership.claim(fence_key, for_destroy=True):
+                        raise RuntimeError(f"Refusing to snapshot veFaaS sandbox {sandbox_id} (remote={remote_id}): another worker holds a snapshot reservation")
+                    with self._lock:
+                        self._remote_snapshot_fences[remote_id] = self._remote_snapshot_fences.get(remote_id, 0) + 1
+                    remote_fence_reserved = True
+                    # Dekker re-check: verify no peer claimed destructive teardown on sandbox_id
+                    # before fence_key became visible.
+                    if not self._ownership.claim(sandbox_id):
+                        raise RuntimeError(f"Refusing to snapshot veFaaS sandbox {sandbox_id}: ownership moved to a peer before snapshot started")
+
                     metadata = self._scoped_metadata(sandbox_id)
-                    snapshot_id = self._get_client().create_sandbox_snapshot(
-                        function_id,
-                        remote_id,
-                        snapshot_type=resolved_type,
-                        retention_days=resolved_retention,
-                        metadata=metadata,
-                    )
-                    settled = False
-                    if not wait:
-                        return VeFaaSSnapshotRecord(
-                            id=snapshot_id,
-                            sandbox_id=remote_id,
-                            function_id=function_id,
-                            status="Creating",
+                    with self._teardown_lease_heartbeat(fence_key):
+                        snapshot_id = self._get_client().create_sandbox_snapshot(
+                            function_id,
+                            remote_id,
                             snapshot_type=resolved_type,
                             retention_days=resolved_retention,
                             metadata=metadata,
                         )
-                    try:
-                        record = self._wait_for_snapshot_ready(
-                            function_id,
-                            snapshot_id,
-                            deadline=time.monotonic() + resolved_timeout,
-                        )
-                        settled = True
-                        return record
-                    except _VeFaaSSnapshotSettledFailureError:
-                        settled = True
-                        raise
+                        settled = False
+                        if not wait:
+                            return VeFaaSSnapshotRecord(
+                                id=snapshot_id,
+                                sandbox_id=remote_id,
+                                function_id=function_id,
+                                status="Creating",
+                                snapshot_type=resolved_type,
+                                retention_days=resolved_retention,
+                                metadata=metadata,
+                            )
+                        try:
+                            record = self._wait_for_snapshot_ready(
+                                function_id,
+                                snapshot_id,
+                                deadline=time.monotonic() + resolved_timeout,
+                                refresh_lease=lambda: self._refresh_snapshot_fence(remote_id) or True,
+                            )
+                            settled = True
+                            return record
+                        except _VeFaaSSnapshotSettledFailureError:
+                            settled = True
+                            raise
                 finally:
                     if not settled and snapshot_id is not None:
                         try:
@@ -2616,15 +2700,30 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                                 self._redact(watch_exc),
                             )
                     if not handed_off:
-                        with self._lock:
-                            self._release_snapshot_fence_locked(remote_id)
+                        self._release_snapshot_fence(remote_id, release_remote=remote_fence_reserved)
 
-    def _release_snapshot_fence_locked(self, remote_id: str) -> None:
-        snap_remaining = self._snapshotting_remote_ids.get(remote_id, 1) - 1
-        if snap_remaining <= 0:
-            self._snapshotting_remote_ids.pop(remote_id, None)
-        else:
-            self._snapshotting_remote_ids[remote_id] = snap_remaining
+    def _release_snapshot_fence(self, remote_id: str, *, release_remote: bool) -> None:
+        drop_remote_key = False
+        with self._lock:
+            if release_remote:
+                remote_remaining = self._remote_snapshot_fences.get(remote_id, 1) - 1
+                if remote_remaining <= 0:
+                    self._remote_snapshot_fences.pop(remote_id, None)
+                    drop_remote_key = True
+                else:
+                    self._remote_snapshot_fences[remote_id] = remote_remaining
+        if drop_remote_key:
+            self._release_ownership_best_effort(self._snapshot_fence_key(remote_id), context="snapshot fence")
+            with self._lock:
+                re_fenced = self._remote_snapshot_fences.get(remote_id, 0) > 0
+            if re_fenced:
+                self._refresh_snapshot_fence(remote_id)
+        with self._lock:
+            snap_remaining = self._snapshotting_remote_ids.get(remote_id, 1) - 1
+            if snap_remaining <= 0:
+                self._snapshotting_remote_ids.pop(remote_id, None)
+            else:
+                self._snapshotting_remote_ids[remote_id] = snap_remaining
 
     def _start_snapshot_watcher(self, *, function_id: str, remote_id: str, snapshot_id: str) -> None:
         thread = threading.Thread(
@@ -2652,6 +2751,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         try:
             client = self._get_client()
             while True:
+                self._refresh_snapshot_fence(remote_id)
                 try:
                     record = client.describe_sandbox_snapshot(function_id, snapshot_id)
                 except Exception as exc:
@@ -2678,8 +2778,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                         return
                 waiter.wait(self._snapshot_watch_interval)
         finally:
+            self._release_snapshot_fence(remote_id, release_remote=True)
             with self._lock:
-                self._release_snapshot_fence_locked(remote_id)
                 self._snapshot_watchers.discard(threading.current_thread())
 
     def _join_snapshot_watchers(self) -> None:
@@ -2879,6 +2979,10 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                     # Keep clients, snapshot sources, and lease renewal alive until in-flight
                     # output mirrors and manual snapshots settle.
                     raise _VeFaaSShutdownIncompleteError(f"veFaaS shutdown incomplete: {len(self._mirroring_output_ids)} output mirror(s) and {len(self._snapshotting_remote_ids)} snapshot(s) active; retry shutdown")
+                tracked_remote_scopes = {entry.remote_sandbox_id: entry.sandbox_id for entry in (list(self._sandboxes.values()) + [entry for entry, _ in self._warm_pool.values()] + list(self._pending_destroys.values()))}
+            fenced_owned_remotes = [rid for rid, sid in sorted(tracked_remote_scopes.items()) if self._is_remote_snapshot_fenced(rid) and self._may_own_for_teardown(sid)]
+            if fenced_owned_remotes:
+                raise _VeFaaSShutdownIncompleteError(f"veFaaS shutdown incomplete: {len(fenced_owned_remotes)} peer snapshot fence(s) active; retry shutdown")
 
             self._acquire_serializer.close()
 

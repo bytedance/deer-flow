@@ -450,6 +450,7 @@ class TestVeFaaSSandboxProviderLifecycle:
             sandbox_id = provider.acquire("t-lost", user_id="u1")
             mock_store = MagicMock()
             mock_store.supports_cross_process = True
+            mock_store.owner.return_value = None
             mock_store.renew.return_value = RenewOutcome.LOST
             provider._ownership = mock_store
 
@@ -842,6 +843,7 @@ class TestVeFaaSSandboxProviderLifecycle:
             # Simulate a renew() that observes a concurrent re-acquire (bumping epoch) before returning LOST.
             mock_store = MagicMock()
             mock_store.supports_cross_process = True
+            mock_store.owner.return_value = None
 
             def stale_renew(sid: str) -> RenewOutcome:
                 with provider._lock:
@@ -3353,6 +3355,153 @@ class TestVeFaaSImagePrecache:
             assert peer_b.owner(sid_lost) == "worker-destroyer-b"
         finally:
             provider_b.shutdown()
+
+    def test_manual_snapshot_rejects_peer_owned_handle_and_fences_peer_teardown_across_workers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: Stale local handle after peer takeover must be rejected before CreateSandboxSnapshot.
+        server_a = _FakeVeFaaSServer()
+        store_a1 = MemoryOwnershipStore(owner_id="worker-snap-a1", ttl_seconds=60.0)
+        store_a2 = MemoryOwnershipStore(owner_id="worker-snap-a2", ttl_seconds=60.0)
+        store_a2._leases = store_a1._leases
+        store_a2._lock = store_a1._lock
+        monkeypatch.setattr(store_a1, "close", lambda: None)
+        monkeypatch.setattr(store_a2, "close", lambda: None)
+
+        persisted_a: dict[str, bytes] = {}
+
+        class _PersistingAioA(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_a
+
+        worker_a1, _, _ = _install_provider(monkeypatch, tmp_path / "stale-a1", server=server_a)
+        worker_a2, _, _ = _install_provider(monkeypatch, tmp_path / "stale-a2", server=server_a)
+        worker_a1._ownership = store_a1
+        worker_a2._ownership = store_a2
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAioA)
+        try:
+            sid_a = worker_a1.acquire("t-stale-snap", user_id="u1")
+            remote_a = worker_a1._sandboxes[sid_a].remote_sandbox_id
+            worker_a1.release(sid_a)
+            assert sid_a in worker_a1._warm_pool
+
+            # Worker 2 takes over ownership while Worker 1 still holds its stale warm handle.
+            assert worker_a2.acquire("t-stale-snap", user_id="u1") == sid_a
+            assert store_a2.owner(sid_a) == "worker-snap-a2"
+            assert sid_a in worker_a1._warm_pool
+
+            with pytest.raises(RuntimeError, match="owned by a peer"):
+                worker_a1.create_snapshot(sid_a, wait=True)
+            assert not any(action == "CreateSandboxSnapshot" for action, _, _ in server_a.requests)
+            assert store_a1.owner(provider_mod.VeFaaSSandboxProvider._snapshot_fence_key(remote_a)) is None
+        finally:
+            worker_a1.shutdown()
+            worker_a2.shutdown()
+
+        # Case B: Async snapshot started by Worker 1 reserves cross-worker fence refreshed past TTL;
+        # even if Worker 2 subsequently takes `own:` on sandbox_id, Worker 2's warm reap/eviction and
+        # shutdown MUST defer until Worker 1's snapshot settles and releases the cross-worker fence.
+        server_b = _FakeVeFaaSServer()
+        server_b.snapshot_status_sequence = ["Creating"]
+        orig_handler_b = server_b.handler
+        creating_seen = threading.Event()
+        allow_ready = threading.Event()
+        clock_b = {"now": 100.0}
+
+        def gated_handler_b(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "DescribeSandboxSnapshot":
+                if allow_ready.is_set():
+                    payload = json.loads(req.content.decode("utf-8"))
+                    snap_rec = server_b.snapshots.get(payload["SnapshotId"])
+                    if snap_rec is not None:
+                        snap_rec["Status"] = "Ready"
+                        snap_rec["_status_queue"] = ["Ready"]
+                else:
+                    creating_seen.set()
+            return orig_handler_b(req)
+
+        server_b.handler = gated_handler_b  # type: ignore[method-assign]
+        store_b1 = MemoryOwnershipStore(owner_id="worker-snap-b1", ttl_seconds=10.0, time_source=lambda: clock_b["now"])
+        store_b2 = MemoryOwnershipStore(owner_id="worker-snap-b2", ttl_seconds=60.0, time_source=lambda: clock_b["now"])
+        store_b2._leases = store_b1._leases
+        store_b2._lock = store_b1._lock
+        monkeypatch.setattr(store_b1, "close", lambda: None)
+        monkeypatch.setattr(store_b2, "close", lambda: None)
+
+        persisted_b: dict[str, bytes] = {}
+
+        class _PersistingAioB(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.uploaded_files = persisted_b
+
+        worker_b1, _, _ = _install_provider(monkeypatch, tmp_path / "fence-b1", server=server_b)
+        worker_b2, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "fence-b2",
+            server=server_b,
+            sandbox_overrides={"idle_timeout": 10, "vefaas": {"pause_on_idle": True}},
+        )
+        worker_b1._ownership = store_b1
+        worker_b2._ownership = store_b2
+        worker_b1._snapshot_watch_interval = 0.01
+        monkeypatch.setattr(provider_mod, "AioSandbox", _PersistingAioB)
+        try:
+            sid_b = worker_b1.acquire("t-peer-snap-fence", user_id="u1")
+            remote_b = worker_b1._sandboxes[sid_b].remote_sandbox_id
+            fence_key_b = provider_mod.VeFaaSSandboxProvider._snapshot_fence_key(remote_b)
+
+            snap_b = worker_b1.create_snapshot(sid_b, wait=False)
+            assert snap_b.status == "Creating"
+            assert creating_seen.wait(timeout=5)
+            assert store_b1.owner(fence_key_b) == "worker-snap-b1"
+
+            # Advance clock past initial 10s TTL in two 6s steps; watcher refreshes fence_key_b.
+            wait_evt = threading.Event()
+            for _ in range(2):
+                clock_b["now"] += 6.0
+                creating_seen.clear()
+                assert creating_seen.wait(timeout=5)
+            assert store_b1.owner(fence_key_b) == "worker-snap-b1"
+
+            # Worker 2 takes over sandbox_id, releases it to warm pool, and tries idle reap + eviction + shutdown.
+            assert worker_b2.acquire("t-peer-snap-fence", user_id="u1") == sid_b
+            assert store_b2.owner(sid_b) == "worker-snap-b2"
+            worker_b2.release(sid_b)
+            assert sid_b in worker_b2._warm_pool
+            worker_b2._warm_pool[sid_b] = (worker_b2._warm_pool[sid_b][0], time.monotonic() - 120.0)
+            worker_b2._reap_expired_warm(idle_timeout=10)
+            assert worker_b2._evict_oldest_warm() is None
+            assert sid_b in worker_b2._warm_pool
+            assert not any(action in {"KillSandbox", "PauseSandbox"} for action, _, _ in server_b.requests)
+
+            with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError, match="snapshot"):
+                worker_b2.shutdown()
+            assert remote_b in server_b.sandboxes
+            assert not any(action == "KillSandbox" for action, _, _ in server_b.requests)
+
+            # Once Worker 1's snapshot settles, fence_key_b is cleared and Worker 2's shutdown succeeds.
+            allow_ready.set()
+            deadline = time.monotonic() + 5.0
+            while worker_b1._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            assert not worker_b1._snapshotting_remote_ids
+            assert store_b1.owner(fence_key_b) is None
+
+            worker_b2.shutdown()
+            assert remote_b not in server_b.sandboxes
+            assert sum(1 for action, _, _ in server_b.requests if action == "KillSandbox") == 1
+        finally:
+            allow_ready.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while worker_b1._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            worker_b1.shutdown()
+            worker_b2.shutdown()
 
 
 # ── 10. Prewarm Integration ──────────────────────────────────────────────
