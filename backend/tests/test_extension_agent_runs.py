@@ -1034,6 +1034,51 @@ async def test_coordinator_replans_after_restart_before_submission(worker_gatewa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "inspect_first", "recovery_expected", "expected_calls"),
+    [
+        ("rate-limit", False, True, 2),
+        ("missing-tool-call", False, True, 2),
+        ("invalid-arguments", True, True, 3),
+        ("rate-limit", False, False, 2),
+        ("invalid-credentials", False, False, 1),
+    ],
+)
+async def test_coordinator_bounds_retries_before_committing_a_decision(worker_gateway, monkeypatch, failure, inspect_first, recovery_expected, expected_calls):
+    import httpx
+    from langchain_core.messages import AIMessage
+    from openai import AuthenticationError, RateLimitError
+
+    client, runs, state, _, _ = worker_gateway
+    request = httpx.Request("POST", "https://provider.example.test/v1/chat/completions")
+    failure_outcomes = {
+        "rate-limit": RateLimitError("Rate limited", response=httpx.Response(429, request=request), body=None),
+        "missing-tool-call": AIMessage(content="Plan without a tool call."),
+        "invalid-arguments": AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "empty", "args": {"tasks": []}}]),
+        "invalid-credentials": AuthenticationError("Invalid credentials", response=httpx.Response(401, request=request), body=None),
+    }
+    decision = AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "decision", "args": {"tasks": [{"key": "draft", "objective": "Write a draft"}]}}])
+    bad_result = failure_outcomes[failure]
+    responses = [AIMessage(content="", tool_calls=[{"name": "inspect_task", "id": "inspect", "args": {}}])] if inspect_first else []
+    responses.extend([bad_result, decision if recovery_expected or failure == "invalid-credentials" else bad_result])
+    model = Mock()
+    invoke = model.bind_tools.return_value.ainvoke = AsyncMock(side_effect=responses)
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    monkeypatch.setattr("app.gateway.coordination_workers.RECOVERY_INTERVAL", 0.1)
+    state.coordination_workers.start_recovery()
+    url = "/api/coordination/tasks"
+    started = (await client.post(url, json={"request_id": "pre-commit-error", "coordinator": True, "objective": "Write a draft"})).raise_for_status().json()
+    planner_run = started["execution"]["run_id"]
+    planner = await runs.wait(thread_id=started["assignment"]["thread_id"], run_id=planner_run, timeout=8)
+    assert planner.status == ("success" if recovery_expected else "error")
+    terminal_status = "succeeded" if recovery_expected else "failed"
+    final = await _wait_for_worker(client, started["task"]["id"], "task", "status", terminal_status)
+    assert final["execution"]["run_id"] == planner_run
+    assert [(child["objective"], child["status"]) for child in final["children"]] == ([("Write a draft", "succeeded")] if recovery_expected else [])
+    assert invoke.await_count == expected_calls
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["failed", "cancelled"])
 async def test_coordinator_does_not_admit_dependents_of_unsuccessful_prerequisite(worker_gateway, monkeypatch, outcome):
     import asyncio

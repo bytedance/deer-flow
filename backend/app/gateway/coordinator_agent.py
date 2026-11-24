@@ -4,11 +4,13 @@ import asyncio
 import json
 from typing import Annotated
 
+import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from langgraph.types import RetryPolicy
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from deerflow.models.factory import create_chat_model
 
@@ -30,6 +32,23 @@ class TaskDecision(BaseModel):
 
     tasks: list[PlannedTask] = Field(min_length=1, max_length=8)
 
+
+class _InvalidPlannerReply(ValueError):
+    """The model returned an unusable tool call."""
+
+
+def _retry_planner_error(error: Exception) -> bool:
+    if isinstance(error, _InvalidPlannerReply):
+        return True
+    transport_errors = (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+    # Some model SDKs wrap the transport exception in a provider-specific error.
+    if isinstance(error, transport_errors) or isinstance(error.__cause__, transport_errors):
+        return True
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    return isinstance(status, int) and (status in (408, 429) or 500 <= status < 600)
+
+
+_PLANNER_RETRY = RetryPolicy(max_attempts=2, retry_on=_retry_planner_error)
 
 _PLANNING_PROMPT = SystemMessage(
     content=(
@@ -76,11 +95,19 @@ def build_coordinator_factory(workers, owner, task_id, execution_id, grant_id, a
             if after_inspection:
                 messages.extend(state["messages"][-2:])
             response = await binding.ainvoke([_PLANNING_PROMPT, *messages])
-            if not isinstance(response, AIMessage) or len(response.tool_calls) != 1:
-                raise ValueError("Coordinator must return exactly one tool call")
+            if not isinstance(response, AIMessage) or len(response.tool_calls) != 1 or response.invalid_tool_calls:
+                raise _InvalidPlannerReply("Coordinator must return exactly one tool call")
             call = response.tool_calls[0]
             if call["name"] not in {tool.name for tool in tools} or not call.get("id"):
-                raise ValueError("Coordinator returned an invalid decision call")
+                raise _InvalidPlannerReply("Coordinator returned an invalid decision call")
+            if call["name"] == "inspect_task":
+                if call["args"]:
+                    raise _InvalidPlannerReply("inspect_task does not accept arguments")
+            else:
+                try:
+                    TaskDecision.model_validate(call["args"])
+                except ValidationError as exc:
+                    raise _InvalidPlannerReply("Coordinator returned invalid task arguments") from exc
             return {"messages": [response]}
 
         async def plan(state: MessagesState):
@@ -94,8 +121,6 @@ def build_coordinator_factory(workers, owner, task_id, execution_id, grant_id, a
 
         async def inspect(state: MessagesState):
             call = state["messages"][-1].tool_calls[0]
-            if call["args"]:
-                raise ValueError("inspect_task does not accept arguments")
             info = await inspect_task()
             return {"messages": [ToolMessage(content=json.dumps(info), tool_call_id=call["id"], name=inspect_tool.name)]}
 
@@ -106,9 +131,9 @@ def build_coordinator_factory(workers, owner, task_id, execution_id, grant_id, a
             return {"messages": [ToolMessage(content=json.dumps(task_ids), tool_call_id=call["id"], name=decision_tool.name)]}
 
         graph = StateGraph(MessagesState)
-        graph.add_node("plan", plan)
+        graph.add_node("plan", plan, retry_policy=_PLANNER_RETRY)
         graph.add_node("inspect_task", inspect)
-        graph.add_node("plan_after_inspection", plan_after_inspection)
+        graph.add_node("plan_after_inspection", plan_after_inspection, retry_policy=_PLANNER_RETRY)
         graph.add_node("submit_task_decision", submit)
         graph.add_edge(START, "plan")
         graph.add_conditional_edges("plan", next_node, ["inspect_task", "submit_task_decision"])

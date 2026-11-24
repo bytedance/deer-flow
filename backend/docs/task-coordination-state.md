@@ -147,6 +147,8 @@ The Gateway starts a planning Run with two model tools. `inspect_task` reads
 the root and recent child statuses. `submit_task_decision` commits up to eight
 child tasks in dependency order. The planner uses the default configured
 model. The requested assistant is the default Worker for the plan.
+Each planning step retries once after a temporary provider error or a malformed
+tool call. A second failure ends that planning step with an error.
 
 The Gateway binds the decision to the planner's Run, the root revision and
 the covered input sequence. It checks the root and the current grant under
