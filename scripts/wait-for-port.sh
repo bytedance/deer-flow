@@ -30,12 +30,6 @@ if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
 fi
 
 interval=1
-# This process has one deadline. serve.sh starts a separate wait for each
-# service, so the Gateway (30s, or DEER_FLOW_GATEWAY_STARTUP_TIMEOUT), the
-# Frontend (300s) and Nginx (10s) do not share it. With no argument the budget
-# is 60s. Probes and sleeps both use deadline minus SECONDS; neither restarts it.
-started=$SECONDS
-deadline=$((started + TIMEOUT))
 
 _remaining() {
     local left=$((deadline - SECONDS))
@@ -63,12 +57,24 @@ _fail_timed_out() {
     exit 1
 }
 
+# Stop the coproc once. Exit, INT and TERM all use this, as does a read timeout.
+# The worker's process group comes from `set -m`, so the signal reaches netstat
+# and sleep. KILL follows TERM: a probe that ignores TERM must not leave `wait` stuck.
+_probe_stopped=0
 _stop_probe() {
     local pid=$1
-    # Own process group from `set -m`, so netstat or sleep dies with the probe.
+    [ -n "$pid" ] || return 0
+    [ "$_probe_stopped" = 0 ] || return 0
+    _probe_stopped=1
     kill -TERM -- "-${pid}" 2>/dev/null || true
     kill -TERM "$pid" 2>/dev/null || true
+    kill -KILL -- "-${pid}" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
+}
+
+_cleanup_probe() {
+    _stop_probe "${_probe_worker_PID:-}"
 }
 
 # One worker for every poll. Forking a shell per probe makes the simulated
@@ -86,6 +92,17 @@ coproc _probe_worker {
     done
 }
 set +m
+trap _cleanup_probe EXIT
+trap '_cleanup_probe; exit 130' INT
+trap '_cleanup_probe; exit 143' TERM
+
+# One deadline for this process, starting once the worker is ready. serve.sh
+# starts a separate wait for each service, so the Gateway (30s, or
+# DEER_FLOW_GATEWAY_STARTUP_TIMEOUT), the Frontend (300s) and Nginx (10s) do
+# not share it. With no argument the budget is 60s. Probes and sleeps both use
+# deadline minus SECONDS; neither restarts it.
+started=$SECONDS
+deadline=$((started + TIMEOUT))
 
 _probe_within_deadline() {
     local remaining status

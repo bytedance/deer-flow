@@ -278,7 +278,14 @@ def _run_budgeted_wait(tmp_path: Path, *, timeout: int, netstat: str, subprocess
     )
     bash = require_script_bash()
     env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV"}}
-    env.update(OSTYPE="msys", TEST_SCRIPT=(scripts / "wait-for-port.sh").as_posix(), TEST_TIMEOUT=str(timeout))
+    env.update(
+        OSTYPE="msys",
+        TEST_SCRIPT=(scripts / "wait-for-port.sh").as_posix(),
+        TEST_TIMEOUT=str(timeout),
+        TEST_PROBE_CALLS=(tmp_path / "probe-calls").as_posix(),
+        TEST_PROBE_SLOW=(tmp_path / "probe-slow").as_posix(),
+        TEST_PROBE_DONE=(tmp_path / "probe-done").as_posix(),
+    )
     result = subprocess.run(
         [bash, "-c", prelude, "budgeted-wait"],
         cwd=tmp_path,
@@ -296,39 +303,156 @@ def _run_budgeted_wait(tmp_path: Path, *, timeout: int, netstat: str, subprocess
 
 _LISTENING_NETSTAT = """
 netstat() {
+    printf 'x\\n' >> "$TEST_PROBE_CALLS"
+    printf 'slow\\n' >> "$TEST_PROBE_SLOW"
     sleep 2
+    printf 'done\\n' >> "$TEST_PROBE_DONE"
     printf '%s\\n' '  TCP    127.0.0.1:8001         0.0.0.0:0              LISTENING       9'
     return 0
 }
 """
 
 
+def _probe_lines(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return path.read_text(encoding="utf-8").splitlines()
+
+
 def test_probe_that_outlasts_its_budget_is_not_a_success(tmp_path: Path) -> None:
-    """A 1s budget and a 2s probe: the late listener is a timeout."""
+    """A 1s budget and a 2s probe: the late listener is a timeout, and the probe is stopped."""
     result, seconds = _run_budgeted_wait(tmp_path, timeout=1, netstat=_LISTENING_NETSTAT, subprocess_timeout=8)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "after 1s" in result.stdout
     assert seconds < 3, result.stdout + result.stderr
+    assert _probe_lines(tmp_path / "probe-calls") == ["x"]
+    assert (tmp_path / "probe-slow").is_file()
+    assert not (tmp_path / "probe-done").exists()
 
 
 def test_later_probe_keeps_only_the_time_still_left(tmp_path: Path) -> None:
-    """Misses spend the budget. The probe that finally listens does not get it back."""
+    """Misses spend the budget. The third probe is the slow one, and it does not get the budget back.
+
+    Two fast misses plus the poll sleeps take a few seconds on Windows, so the
+    budget is 5s and the third probe sleeps 4s. That sleep is longer than the
+    time still left and shorter than a fresh 5s budget.
+    """
     netstat = """
-_netstat_calls=0
 netstat() {
-    _netstat_calls=$((_netstat_calls + 1))
-    if [ "$_netstat_calls" -lt 3 ]; then
+    printf 'x\\n' >> "$TEST_PROBE_CALLS"
+    count=0
+    while IFS= read -r _; do
+        count=$((count + 1))
+    done < "$TEST_PROBE_CALLS"
+    if [ "$count" -lt 3 ]; then
         return 1
     fi
-    sleep 2
+    printf 'slow\\n' >> "$TEST_PROBE_SLOW"
+    sleep 4
+    printf 'done\\n' >> "$TEST_PROBE_DONE"
     printf '%s\\n' '  TCP    127.0.0.1:8001         0.0.0.0:0              LISTENING       9'
     return 0
 }
 """
-    result, seconds = _run_budgeted_wait(tmp_path, timeout=3, netstat=netstat, subprocess_timeout=8)
+    result, seconds = _run_budgeted_wait(tmp_path, timeout=5, netstat=netstat, subprocess_timeout=15)
     assert result.returncode == 1, result.stdout + result.stderr
-    assert "after 3s" in result.stdout
-    assert seconds < 4, result.stdout + result.stderr
+    assert "after 5s" in result.stdout
+    assert seconds < 8, result.stdout + result.stderr
+    assert len(_probe_lines(tmp_path / "probe-calls")) == 3, result.stdout + result.stderr
+    assert (tmp_path / "probe-slow").is_file()
+    assert not (tmp_path / "probe-done").exists()
+
+
+def test_term_reaps_a_probe_that_ignores_term(tmp_path: Path) -> None:
+    """TERM ends the wait, and a probe that ignores TERM does not stay behind."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("port-listening.sh", "wait-for-port.sh"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    probe_pid = tmp_path / "probe.pid"
+    prelude = r"""
+command() {
+    if [ "$1" = -v ] && { [ "$2" = lsof ] || [ "$2" = ss ]; }; then
+        return 1
+    fi
+    builtin command "$@"
+}
+netstat() {
+    printf '%s\n' "$BASHPID" > "$TEST_PROBE_PID"
+    trap '' TERM
+    while true; do
+        :
+    done
+}
+export -f command netstat
+finish() {
+    if [ -n "${child:-}" ] && kill -0 "$child" 2>/dev/null; then
+        kill -KILL "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+    fi
+    if [ -s "$TEST_PROBE_PID" ]; then
+        probe=$(cat "$TEST_PROBE_PID")
+        kill -KILL -- "-$probe" 2>/dev/null || true
+        kill -KILL "$probe" 2>/dev/null || true
+    fi
+}
+trap finish EXIT
+bash "$TEST_SCRIPT" 8001 30 Gateway &
+child=$!
+i=0
+while [ "$i" -lt 50 ]; do
+    if [ -s "$TEST_PROBE_PID" ]; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+if [ ! -s "$TEST_PROBE_PID" ]; then
+    echo "probe never started"
+    exit 1
+fi
+kill -TERM "$child"
+wait "$child"
+status=$?
+probe=$(cat "$TEST_PROBE_PID")
+i=0
+while [ "$i" -lt 20 ]; do
+    if ! kill -0 "$probe" 2>/dev/null; then
+        echo "REAPED status=$status"
+        exit 0
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+echo "PROBE_ALIVE:$probe"
+exit 1
+"""
+    bash = require_script_bash()
+    env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV"}}
+    env.update(OSTYPE="msys", TEST_SCRIPT=(scripts / "wait-for-port.sh").as_posix(), TEST_PROBE_PID=probe_pid.as_posix())
+    proc = subprocess.Popen(
+        [bash, "-c", prelude, "reap-probe"],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        stdout = stderr = ""
+        raise
+    finally:
+        if proc.poll() is None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+            else:
+                proc.kill()
+            proc.wait(timeout=5)
+    assert proc.returncode == 0, stdout + stderr
+    assert "REAPED" in stdout
 
 
 def test_linux_netstat_listen_check_still_matches_local_address(tmp_path: Path) -> None:
