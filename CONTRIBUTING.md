@@ -289,9 +289,21 @@ Nginx (port 2026) ← Unified entry point
 
 ## Development Workflow
 
-1. **Create a feature branch**:
+Only maintainers can push branches to this repository, so contributions come
+from a fork. Fork it on GitHub, then clone your fork and keep the canonical
+repository as `upstream`:
+
+```bash
+git clone https://github.com/<your-username>/deer-flow.git
+cd deer-flow
+git remote add upstream https://github.com/bytedance/deer-flow.git
+git fetch upstream
+```
+
+1. **Create a feature branch** from `upstream/main`, so the change is based on
+   the latest code:
    ```bash
-   git checkout -b feature/your-feature-name
+   git checkout -b feature/your-feature-name upstream/main
    ```
 
 2. **Make your changes** with hot-reload enabled
@@ -315,10 +327,15 @@ Nginx (port 2026) ← Unified entry point
    git commit -m "feat: description of your changes"
    ```
 
-6. **Push and create a Pull Request**:
+6. **Push to your fork and create a Pull Request**:
    ```bash
    git push origin feature/your-feature-name
    ```
+
+   Open the pull request against `bytedance/deer-flow:main`, not against your
+   fork's `main`. The first pull request also runs the `license/cla` check:
+   CLAassistant comments with a link to sign the CLA once for your GitHub
+   account, and later pull requests reuse that signature.
 
 Please don't include changes to `CHANGELOG.md` or `CHANGELOG_zh.md` in your
 pull request. Maintainers add the changelog entry at merge time: this keeps
