@@ -40,16 +40,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Double, cast, extract, func, or_, select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.channel_leases.model import ChannelLeaseGrant, ChannelLeaseRow, ChannelLeaseState
-
-#: Julian day number of the Unix epoch (1970-01-01T00:00:00Z).
-_UNIX_EPOCH_JULIAN_DAY = 2440587.5
-_SECONDS_PER_DAY = 86400.0
+from deerflow.persistence.clock import db_now  # noqa: F401  (re-exported for lease callers)
 
 
 def _dialect(session: AsyncSession) -> str:
@@ -57,18 +54,6 @@ def _dialect(session: AsyncSession) -> str:
     if name not in ("postgresql", "sqlite"):
         raise ValueError(f"Unsupported channel lease database dialect: {name}")
     return name
-
-
-def db_now(dialect: str) -> Any:
-    """The current time of the statement, in epoch seconds, from the database clock.
-
-    SQLite evaluates ``'now'`` once per statement step, PostgreSQL's
-    ``statement_timestamp()`` is fixed for the statement, so every reference in
-    one statement sees the same instant.
-    """
-    if dialect == "postgresql":
-        return cast(extract("epoch", func.statement_timestamp()), Double)
-    return (func.julianday("now") - _UNIX_EPOCH_JULIAN_DAY) * _SECONDS_PER_DAY
 
 
 class SqlChannelLeaseRepository:

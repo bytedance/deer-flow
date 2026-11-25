@@ -72,6 +72,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **coordination:** Task grants now expire on the database clock. A Gateway
+  whose host clock drifted could keep an expired 24-hour grant usable for Run
+  admission and Coordinator decisions, or hide a live task from restart
+  recovery for as long as the skew lasted; minting and all three expiry checks
+  now use the database time that every instance shares.
+  ([#8632](https://github.com/bytedance/deer-flow/issues/8632))
+
 - **agents:** A todo list revised after the last `write_todos` call (for
   example an approved plan edited on resume) is shown to the model again
   instead of being silently skipped, and a stale injected reminder is
