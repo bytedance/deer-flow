@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -151,6 +152,41 @@ def test_invalid_spec_raises_before_request(
     spec.write_text(json.dumps(fields), encoding="utf-8")
     with pytest.raises(error_type, match=field):
         mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
+
+
+@pytest.mark.parametrize("api_key", ["test-key", ""], ids=["configured", "missing"])
+def test_cli_rejects_invalid_instrumental_flag(monkeypatch, tmp_path, api_key):
+    monkeypatch.setenv("MINIMAX_API_KEY", api_key)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    (tmp_path / "requests.py").write_text(
+        "def post(*args, **kwargs):\n"
+        "    raise AssertionError('must not call the API for an invalid spec')\n",
+        encoding="utf-8",
+    )
+    spec = tmp_path / "spec.json"
+    spec.write_text('{"prompt":"ballad","is_instrumental":"false"}', encoding="utf-8")
+    out = tmp_path / "song.mp3"
+    out.write_bytes(_ID3_AUDIO)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            mus.__file__,
+            "--prompt-file",
+            str(spec),
+            "--output-file",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert result.stdout == ""
+    assert "`is_instrumental` must be a JSON boolean" in result.stderr
+    assert out.read_bytes() == _ID3_AUDIO
 
 
 def test_empty_lyrics_falls_back_to_optimizer(monkeypatch, tmp_path):
