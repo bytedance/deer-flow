@@ -1068,3 +1068,19 @@ describe("reference discovery failures and polish round trips", () => {
     ]);
   });
 });
+
+it("keeps cancellation available while approvals lock new input", async () => {
+  const stop = rs.fn();
+  renderComposer("approval-stop", rs.fn(), rs.fn(), {
+    status: "streaming",
+    inputLocked: true,
+    onStop: stop,
+  });
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox").disabled).toBe(true);
+  const submit = screen.getByRole<HTMLButtonElement>("button", {
+    name: "Submit",
+  });
+  expect(submit.disabled).toBe(false);
+  fireEvent.click(submit);
+  expect(stop).toHaveBeenCalledOnce();
+});

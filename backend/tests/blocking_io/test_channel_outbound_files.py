@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telegram.error import BadRequest
 
 from app.channels.feishu import FeishuChannel
 from app.channels.message_bus import MessageBus, OutboundMessage, ResolvedAttachment
@@ -133,22 +134,27 @@ async def test_feishu_outbound_uploads_do_not_block_event_loop(tmp_path: Path, m
     assert file_worker_thread != event_loop_thread
 
 
-@pytest.mark.parametrize("is_image", [False, True])
-async def test_telegram_outbound_upload_does_not_block_event_loop(tmp_path: Path, is_image: bool) -> None:
+@pytest.mark.parametrize("is_image,rejected_photo", [(False, False), (True, False), (True, True)])
+async def test_telegram_outbound_upload_does_not_block_event_loop(tmp_path: Path, is_image: bool, rejected_photo: bool) -> None:
     path = tmp_path / ("chart.png" if is_image else "report.bin")
     payload = b"telegram-payload"
     await asyncio.to_thread(path.write_bytes, payload)
 
     sent_file = None
+    calls = []
 
     class _Bot:
         async def send_document(self, **kwargs):
             nonlocal sent_file
+            calls.append("document")
             sent_file = kwargs["document"]
             return SimpleNamespace(message_id=7)
 
         async def send_photo(self, **kwargs):
             nonlocal sent_file
+            calls.append("photo")
+            if rejected_photo:
+                raise BadRequest("PHOTO_INVALID_DIMENSIONS")
             sent_file = kwargs["photo"]
             if hasattr(sent_file, "read"):
                 sent_file.read()
@@ -160,6 +166,7 @@ async def test_telegram_outbound_upload_does_not_block_event_loop(tmp_path: Path
     assert await channel.send_file(_outbound("telegram"), _attachment(path, is_image=is_image))
     assert sent_file.input_file_content == payload
     assert sent_file.filename == path.name
+    assert calls == (["photo", "document"] if rejected_photo else ["photo"] if is_image else ["document"])
 
 
 async def test_wecom_outbound_upload_does_not_block_event_loop(tmp_path: Path) -> None:

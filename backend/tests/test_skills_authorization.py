@@ -539,7 +539,7 @@ def test_client_ensure_agent_filters_skills_by_authorization(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", _capture_build_middlewares)
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_: [])
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
@@ -592,7 +592,7 @@ def test_client_ensure_agent_noop_when_authorization_disabled(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", _capture_build_middlewares)
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_: [])
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
@@ -884,7 +884,7 @@ def test_client_wires_skill_authorization_into_middleware(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", _capture_build_middlewares)
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_: [])
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
@@ -969,7 +969,7 @@ def test_client_filter_candidates_reuse_catalog_loader(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", lambda *a, **kw: [])
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
         lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
@@ -1079,7 +1079,7 @@ def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
 
     executor = SubagentExecutor.__new__(SubagentExecutor)
     executor.input_gate = None
-    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25)
+    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25, tools=None, disallowed_tools=["task"])
     executor.model_name = "m"
     executor.thinking_enabled = False
     executor.reasoning_effort = None
@@ -1151,7 +1151,7 @@ def test_client_skill_surface_uses_one_effective_user(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", lambda *a, **kw: [])
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
         lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
@@ -1446,7 +1446,7 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
 
     executor = SubagentExecutor.__new__(SubagentExecutor)
     executor.input_gate = None
-    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25)
+    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25, tools=None, disallowed_tools=["task"])
     executor.model_name = "m"
     executor.thinking_enabled = False
     executor.reasoning_effort = None
@@ -2580,6 +2580,97 @@ def test_lead_chain_wires_durable_render_filter():
     assert durables[0]._skill_authorization is resolved
     assert durables[0]._entry_decisions_owner_token == activations[0]._slash_source_owner_token
     assert middlewares.index(activations[0]) < middlewares.index(durables[0]), "activation must wrap outside durable so the per-step decisions are published before the renderer reads them"
+
+
+def test_lead_chain_prefers_injected_skill_storage_over_user_scoped_storage():
+    """Embedding hosts can supply request-scoped storage; it must win over the
+    user-scoped default even when a user_id is present."""
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    injected = SimpleNamespace(get_container_root=lambda: "/mnt/skills")
+    middlewares = build_middlewares(
+        {"configurable": {}},
+        app_config=_make_app_config(),
+        model_name="gpt-4",
+        user_id="user-123",
+        skill_storage=injected,
+    )
+
+    activation = next(m for m in middlewares if isinstance(m, SkillActivationMiddleware))
+    assert activation._storage() is injected
+
+
+def test_tool_error_handling_prefers_injected_skill_storage():
+    """Skill-read canonicalization must use the same request-scoped tree."""
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    injected = SimpleNamespace(get_container_root=lambda: "/mnt/skills")
+    middleware = ToolErrorHandlingMiddleware(
+        app_config=_make_app_config(),
+        user_id="user-123",
+        skill_storage=injected,
+    )
+
+    assert middleware._storage() is injected
+
+
+def test_subagent_chain_accepts_injected_skill_storage():
+    """Direct subagent-chain builders can keep the same request-scoped tree."""
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+
+    injected = SimpleNamespace(get_container_root=lambda: "/mnt/skills")
+    middlewares = build_subagent_runtime_middlewares(
+        app_config=_make_app_config(),
+        user_id="user-456",
+        skill_storage=injected,
+    )
+
+    activation = next(m for m in middlewares if isinstance(m, SkillActivationMiddleware))
+    assert activation._storage() is injected
+
+
+def test_skills_prompt_section_uses_injected_skill_storage():
+    """Prompt-side skill discovery must read the same request-scoped tree."""
+    from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
+
+    calls: list[bool] = []
+
+    def _load_skills(*, enabled_only: bool):
+        calls.append(enabled_only)
+        return []
+
+    storage = SimpleNamespace(load_skills=_load_skills, get_container_root=lambda: "/mnt/skills")
+
+    section = get_skills_prompt_section(
+        app_config=_make_app_config(),
+        user_id="user-123",
+        skill_storage=storage,
+    )
+
+    assert section == ""
+    assert calls == [False, True]
+
+
+def test_prompt_renders_paths_from_the_injected_skill_storage(tmp_path, monkeypatch):
+    from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: ExtensionsConfig())
+    skill_dir = tmp_path / "public" / "request-only"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: request-only\ndescription: Request-only skill\n---\n\nSkill body.\n", encoding="utf-8")
+    app_config = _make_app_config()
+    storage = LocalSkillStorage(host_path=str(tmp_path), container_path="/mnt/request-skills")
+    section = get_skills_prompt_section(app_config=app_config, skill_storage=storage)
+    activation = SkillActivationMiddleware(app_config=app_config, skill_storage=storage, slash_source_owner_token="test")
+    resolved = activation._resolve_activation("/request-only")
+
+    assert resolved.activation is not None
+    assert resolved.activation.container_file_path in section
 
 
 def test_subagent_chain_wires_durable_render_filter():

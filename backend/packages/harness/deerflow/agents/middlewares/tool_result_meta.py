@@ -35,6 +35,7 @@ class ToolResultMeta:
     recoverable_by_model: bool
     recommended_next_action: RecommendedNextAction
     source: Literal["exception", "tool_return", "content_analysis", "progress_middleware"]
+    exit_code: int | None = None
 
 
 _UNKNOWN_ERROR: dict[str, object] = {

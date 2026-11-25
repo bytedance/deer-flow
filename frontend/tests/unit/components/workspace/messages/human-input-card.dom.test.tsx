@@ -95,6 +95,44 @@ function renderCard() {
 }
 
 afterEach(cleanup);
+it("submits exact edited arguments and disables invalid JSON", async () => {
+  const onSubmit = rs.fn().mockResolvedValue(true);
+  const action = {
+    ...approvalRequest.actions[0]!,
+    args: { path: "/tmp/a.txt", content: "A" },
+    args_schema: { type: "object" },
+    grant_allowed: true,
+  };
+  renderApprovalCard({
+    onSubmit,
+    request: {
+      ...approvalRequest,
+      version: 2,
+      actions: [action],
+      pending_tool_call_ids: [action.tool_call_id],
+      allowed_decisions: ["approve", "approve_thread", "edit", "reject"],
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Edit arguments" }));
+  fireEvent.change(
+    screen.getByRole("textbox", { name: "Edit arguments write_file" }),
+    { target: { value: "invalid" } },
+  );
+  expect(
+    screen
+      .getByRole("button", { name: "Submit decisions" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  fireEvent.change(
+    screen.getByRole("textbox", { name: "Edit arguments write_file" }),
+    { target: { value: '{"path":"/tmp/a.txt","content":"B"}' } },
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Submit decisions" }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  expect(onSubmit.mock.calls[0]?.[1]).toMatchObject([
+    { option_id: "edit", args: { path: "/tmp/a.txt", content: "B" } },
+  ]);
+});
 afterEach(() => {
   rs.restoreAllMocks();
 });

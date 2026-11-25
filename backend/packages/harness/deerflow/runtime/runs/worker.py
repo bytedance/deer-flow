@@ -25,19 +25,20 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from uuid import uuid4
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.errors import GraphRecursionError
-from langgraph.types import Command, Overwrite
+from langgraph.types import Command, Overwrite, StateSnapshot
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
@@ -50,7 +51,6 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
     THREAD_INCARNATION_METADATA_GUARD_KEY,
 )
-from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -63,9 +63,11 @@ from deerflow.runtime.checkpoint_state import (
     graph_writable_channels,
 )
 from deerflow.runtime.context_keys import (
+    AGENT_AUTH_CONTEXT_KEY,
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
+    MCP_BROWSER_USER_CONTEXT_KEY,
     PROJECT_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
@@ -118,6 +120,10 @@ from .naming import resolve_root_run_name
 from .schemas import GOAL_RUN_HARD_STOP_REASONS as _GOAL_RUN_HARD_STOP_REASONS
 from .schemas import RunStatus, ThreadOperationKind
 from .store.base import canonical_run_created_at
+
+if TYPE_CHECKING:
+    from deerflow.runtime.journal import RunJournal
+
 
 logger = logging.getLogger(__name__)
 _THREAD_INCARNATION_UNSET = object()
@@ -243,6 +249,7 @@ def _release_run_scoped_references(
     internal_context_keys = {
         "__run_journal",
         "__run_input_control",
+        "__tool_approval_runtime",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
         SCHEDULER_CAPABILITY_CONTEXT_KEY,
@@ -358,8 +365,47 @@ async def _persist_delivery_receipt(
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR = "Scheduled goal cleanup failed"
 _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
+# Stream error frames and the /wait error envelope share one name for a run that
+# ends in error without an exception; the Gateway spells it the same way.
+_RUN_ERROR_NAME = "RunError"
 _RECURSION_CAPPED_LISTED_OUTPUTS = 5
+
+
+_GRAPH_INVOCATION_KEY = "deerflow_graph_invocation_id"
+
+
+async def _graph_stream_events(stream: AsyncIterator[Any], accessor: CheckpointStateAccessor, thread_id: str, invocation_id: str, journal: RunJournal | None = None) -> AsyncIterator[Any]:
+    """Accept a step-boundary completion only with this invocation's idle root checkpoint."""
+    try:
+        async for event in stream:
+            yield event
+    except GraphRecursionError as error:
+        completed = None
+        try:
+            if accessor.checkpointer is not None:
+                snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+                if (
+                    isinstance(snapshot, StateSnapshot)
+                    and snapshot.metadata
+                    and snapshot.metadata.get("source") == "loop"
+                    and snapshot.metadata.get(_GRAPH_INVOCATION_KEY) == invocation_id
+                    and not snapshot.next
+                    and not snapshot.tasks
+                    and not snapshot.interrupts
+                ):
+                    completed = snapshot
+        except Exception:
+            logger.debug("Could not verify the checkpoint at the graph step limit", exc_info=True)
+        finally:
+            if journal is not None:
+                try:
+                    journal.record_step_limit_outcome(error, completed)
+                except Exception:
+                    logger.warning("Could not journal the graph step-limit outcome", exc_info=True)
+        if completed is None:
+            raise
 
 
 def _recursion_capped_message(recursion_limit: object, delivery_content: dict[str, Any] | None) -> str:
@@ -394,8 +440,15 @@ def _delivery_content_with_outputs(
     produced_paths: list[str],
     *,
     pre_run_snapshot: WorkspaceSnapshot | None = None,
+    required: bool = False,
 ) -> dict[str, Any]:
-    """Attach a delivery verdict or explain why a truncated scan skipped it."""
+    """Attach a delivery verdict or explain why a truncated scan skipped it.
+
+    ``required`` marks a goal run, where clearing the goal depends on a presented
+    deliverable. An ordinary run still records the verdict (``enforcement:
+    "advisory"``) but does not fail on it: working files and a local copy of a
+    result written to an external system are not deliverables.
+    """
     if not produced_paths:
         if pre_run_snapshot is not None and pre_run_snapshot.truncated:
             return {**content, "verification_skipped": "truncated_pre_run_snapshot"}
@@ -416,14 +469,29 @@ def _delivery_content_with_outputs(
         "matched_paths": matched_paths,
         "stage": "presented" if satisfied else ("mismatched" if presented_paths else "not_started"),
         "satisfied": satisfied,
+        "enforcement": "required" if required else "advisory",
     }
 
 
 def _delivery_error(content: dict[str, Any]) -> str | None:
-    """Return the terminal error when no changed output was presented."""
+    """Return the terminal error when a required delivery is missing."""
+    if content.get("enforcement") != "required":
+        return None
     if not content.get("produced_paths") or content.get("satisfied") is True:
         return None
     return _DELIVERY_INCOMPLETE_ERROR
+
+
+def _with_delivery_enforcement(content: dict[str, Any], *, required: bool) -> dict[str, Any]:
+    """Normalize a receipt's enforcement after the goal verdict is known.
+
+    The recursion-capped path builds its receipt before the goal continuation
+    call can record a verdict; without this it would persist ``advisory`` for a
+    goal run. Receipts without produced paths carry no enforcement field.
+    """
+    if not content.get("produced_paths"):
+        return content
+    return {**content, "enforcement": "required" if required else "advisory"}
 
 
 def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
@@ -624,9 +692,11 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CONVERSATION_READER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
+            AGENT_AUTH_CONTEXT_KEY,
+            MCP_BROWSER_USER_CONTEXT_KEY,
             "__run_input_control",
+            "__tool_approval_runtime",
             "_hitl_disabled_resume_escape",
-            "_hitl_resume_tool_names",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -657,6 +727,8 @@ def _build_runtime_context(
     *,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     scheduler_capability: SchedulerRunCapability | None = None,
+    agent_mcp_authority: Any | None = None,
+    mcp_browser_user: str | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -686,6 +758,10 @@ def _build_runtime_context(
         runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
     if scheduler_capability is not None:
         runtime_ctx[SCHEDULER_CAPABILITY_CONTEXT_KEY] = scheduler_capability
+    if agent_mcp_authority is not None:
+        runtime_ctx[AGENT_AUTH_CONTEXT_KEY] = agent_mcp_authority
+    if mcp_browser_user is not None:
+        runtime_ctx[MCP_BROWSER_USER_CONTEXT_KEY] = mcp_browser_user
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -736,6 +812,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     mcp_task_repo: Any | None = field(default=None)
+    approval_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
@@ -750,6 +827,8 @@ class RunContext:
     conversation_reader: Any | None = field(default=None)
     agent_runs: Any | None = field(default=None)
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
+    agent_mcp_authority: Any | None = field(default=None)
+    mcp_browser_user: str | None = None
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
     # Host-only preflight under durable run ownership; failures reject execution.
@@ -764,6 +843,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
+        configurable.pop(AGENT_AUTH_CONTEXT_KEY, None)
+        configurable.pop(MCP_BROWSER_USER_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1041,6 +1122,8 @@ async def run_agent(
         lead_task_outcome,
         notify_task_start,
         notify_task_stop,
+        read_only_copy,
+        stopped_task_info,
     )
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
@@ -1063,6 +1146,10 @@ async def run_agent(
     # earlier runs on the same thread — without it, one stale fallback in
     # history would mark every subsequent run on this thread as ``error``.
     pre_existing_message_ids: set[str] = set()
+    # First values frame replayed when the pre-run capture failed. It is an
+    # emission boundary, not current output: only later message IDs can decide
+    # this run's fallback.
+    fallback_boundary_ids: set[str] | None = None
 
     # Bound agent graph accessor + captured pre-run rollback point; assigned
     # inside the try block so the finally rollback path can fork the pre-run
@@ -1083,8 +1170,13 @@ async def run_agent(
     pending_pause = False
     streamed_interrupts: list[Any] = []
     input_control = None
+    approval_runtime = None
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
+    # Whether this run took part in a goal at all. A verdict can stay unset when
+    # persisting the evaluation fails, so delivery enforcement must not depend on
+    # the verdict alone.
+    goal_participated = False
     produced_output_paths: list[str] | None = None
     terminal_error_frame: dict[str, str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
@@ -1172,10 +1264,13 @@ async def run_agent(
                     exc_info=True,
                 )
         else:
+            from deerflow.persistence.coordination.workers import WORKER_SHUTDOWN
+
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
                 error=cleanup_error,
+                stop_reason=WORKER_SHUTDOWN if record.coordination_shutdown else None,
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
@@ -1262,6 +1357,7 @@ async def run_agent(
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
+                metadata=read_only_copy(record.metadata),
             )
             task_store = ExtensionData(task_id)
             # Seed the identity for every hook handed this store, not only
@@ -1356,7 +1452,6 @@ async def run_agent(
         hitl_config = getattr(hitl_app_config, "hitl_approval", None)
         hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
         hitl_resume_actions = await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input)
-        hitl_resume_tool_names = _hitl_action_tool_names(hitl_resume_actions)
         hitl_resume_calls = _hitl_action_calls(hitl_resume_actions)
         if journal is not None and hitl_resume_calls:
             journal.adopt_resumed_tool_calls(hitl_resume_calls)
@@ -1375,14 +1470,13 @@ async def run_agent(
             ctx.agent_runs,
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
+            agent_mcp_authority=ctx.agent_mcp_authority,
+            mcp_browser_user=ctx.mcp_browser_user,
         )
         # A disabled all-reject escape still needs the HITL hook to consume the
         # pending interrupt. The assembly marker makes that hook deny rather
         # than pause again; all other runs cannot inject this internal mode.
         runtime_ctx.pop("_hitl_disabled_resume_escape", None)
-        runtime_ctx.pop("_hitl_resume_tool_names", None)
-        if hitl_resume_tool_names:
-            runtime_ctx["_hitl_resume_tool_names"] = hitl_resume_tool_names
         if hitl_resume_escape:
             runtime_ctx["_hitl_disabled_resume_escape"] = True
         register_sandbox_prewarm_cleanup(runtime_ctx)
@@ -1401,6 +1495,10 @@ async def run_agent(
             checkpoint_metadata = {}
             config["metadata"] = checkpoint_metadata
         checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+        from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, WORKER_CHECKPOINT_RUN
+
+        if (record.metadata or {}).get(RUN_GRANT_METADATA):
+            checkpoint_metadata[WORKER_CHECKPOINT_RUN] = run_id
         _pin_admission_project_context(config, runtime_ctx)
         if knowledge_scope is not None:
             runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
@@ -1432,6 +1530,21 @@ async def run_agent(
                 on_replan=record_steered_response,
             )
             runtime_ctx[INPUT_CONTEXT_KEY] = input_control
+        if ctx.approval_store is not None and hitl_config is not None and hitl_config.enabled and isinstance(thread_incarnation, str) and record.user_id:
+            from deerflow.approvals.policy import resolve_mode
+            from deerflow.approvals.runtime import ApprovalRuntime
+
+            approval_runtime = ApprovalRuntime(
+                ctx.approval_store,
+                scope=(record.user_id, thread_id, thread_incarnation),
+                run_id=run_id,
+                mode=resolve_mode(hitl_config, runtime_ctx),
+                timeout=hitl_config.child_approval_timeout_seconds,
+                record=record,
+                journal=journal,
+                interactive=resolve_run_interaction_policy({"context": runtime_ctx}).allows_clarification and origin_kind_of(record.metadata) is None,
+            )
+            runtime_ctx["__tool_approval_runtime"] = approval_runtime
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
@@ -1453,6 +1566,10 @@ async def run_agent(
             configurable["checkpoint_ns"] = ""
             configurable.pop("checkpoint_id", None)
             configurable.pop("checkpoint_map", None)
+            if runtime_ctx.pop(MCP_BROWSER_USER_CONTEXT_KEY, None) is not None:
+                # The worker can continue a Goal after the interactive turn.
+                # Keep the same runtime state but retire browser-only authority.
+                continuation_config["context"].pop(MCP_BROWSER_USER_CONTEXT_KEY, None)
             continuation_config["configurable"] = configurable
             continuation = RunnableConfig(**continuation_config)
             runnable_configs.append(continuation)
@@ -1636,41 +1753,83 @@ async def run_agent(
             streamed_interrupts.extend(interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])
 
         def remember_approval(interrupts: Any) -> None:
+            from deerflow.approvals.protocol import combine_approval_payloads
+
+            payloads = []
             for pending_interrupt in interrupts:
                 value = pending_interrupt.get("value") if isinstance(pending_interrupt, Mapping) else getattr(pending_interrupt, "value", None)
                 if isinstance(value, dict) and value.get("kind") == "hitl_approval":
-                    record.metadata["hitl_approval"] = value
-                    return
+                    payloads.append(value)
+            if payloads:
+                record.metadata["hitl_approval"] = combine_approval_payloads(payloads)
 
         async def detect_pending_pause() -> None:
             nonlocal pending_pause
             if pending_pause or record.abort_event.is_set():
                 return
-            if streamed_interrupts:
-                pending_pause = True
-                remember_approval(streamed_interrupts)
-                return
             # Values/update frames expose interrupts directly, so disabled HITL
             # keeps the old hot path there. Message-only streams need the snapshot
             # fallback for generic (non-HITL) interrupts as well.
             hitl_enabled = bool(hitl_config is not None and hitl_config.enabled)
+            if streamed_interrupts and not hitl_enabled:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
+                return
             if not hitl_enabled and {"values", "updates"} & requested_modes:
                 return
             snapshot_capable = accessor is not None and accessor.checkpointer is not None and callable(getattr(getattr(accessor, "graph", None), "aget_state", None))
             if not snapshot_capable:
+                if streamed_interrupts:
+                    pending_pause = True
+                    remember_approval(streamed_interrupts)
                 return
             snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
             snapshot_tasks = getattr(snapshot, "tasks", None) or ()
             pending_pause = any(getattr(task, "interrupts", ()) for task in snapshot_tasks)
             if pending_pause:
-                for task in snapshot_tasks:
-                    remember_approval(getattr(task, "interrupts", ()) or ())
+                remember_approval([item for task in snapshot_tasks for item in (getattr(task, "interrupts", ()) or ())])
+            elif streamed_interrupts:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
+
+        def _fallback_scope(chunk: Any, mode: str) -> set[str] | None:
+            """Message IDs allowed to decide this run's fallback for one frame.
+
+            ``None`` means this frame only establishes the boundary and must not
+            latch a fallback. Without a captured pre-run snapshot, the first values
+            frame can be entirely replayed history; later frames are compared
+            against that baseline.
+            """
+            nonlocal fallback_boundary_ids
+            if not snapshot_capture_failed or checkpointer is None:
+                return pre_existing_message_ids
+            if mode in {"checkpoints", "debug"}:
+                # Introspection snapshots can contain the full pre-run state.
+                # They seed the boundary but never decide the current status.
+                fallback_boundary_ids = (fallback_boundary_ids or set()) | _collect_message_ids_deep(chunk)
+                return None
+            if mode not in {"values", "updates"}:
+                return pre_existing_message_ids
+            if fallback_boundary_ids is None:
+                # Establish the boundary even when the frame is empty: a new
+                # thread's first message-bearing frame can be the current fallback.
+                fallback_boundary_ids = _collect_message_ids_deep(chunk)
+                return None
+            return pre_existing_message_ids | fallback_boundary_ids
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
             if input_control is not None:
                 await input_control.inputs.reopen()
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
+            # A Goal continuation is a distinct graph invocation on the same run and thread.
+            invocation = uuid4()
+            invocation_id = invocation.hex
+            stream_config["metadata"] = {**(stream_config.get("metadata") or {}), _GRAPH_INVOCATION_KEY: invocation_id}
+            if journal is not None:
+                root_id = stream_config.get("run_id") or invocation
+                stream_config["run_id"] = root_id
+                journal.step_limit_root = root_id
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
@@ -1679,7 +1838,7 @@ async def run_agent(
                         stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
                         broke_on_abort = False
                         try:
-                            async for chunk in stream:
+                            async for chunk in _graph_stream_events(stream, accessor, thread_id, invocation_id, journal):
                                 if record.abort_event.is_set():
                                     broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
@@ -1687,7 +1846,9 @@ async def run_agent(
                                 if single_mode != "custom":
                                     # Custom frames carry task_* events whose payload can hold a delegated
                                     # subagent's messages; see the multi-mode branch below.
-                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                    scope_ids = _fallback_scope(chunk, single_mode)
+                                    if scope_ids is not None:
+                                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, scope_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
                                 single_payload = serialize(chunk, mode=single_mode)
                                 if single_mode == "values" and seq_stamper is not None:
@@ -1727,7 +1888,7 @@ async def run_agent(
                     )
                     broke_on_abort = False
                     try:
-                        async for item in stream:
+                        async for item in _graph_stream_events(stream, accessor, thread_id, invocation_id, journal):
                             if record.abort_event.is_set():
                                 broke_on_abort = True
                                 logger.info("Run %s abort requested — stopping", run_id)
@@ -1743,7 +1904,9 @@ async def run_agent(
                                 # executor's to map (task_failed), not this run's. That
                                 # includes the child messages task_running custom events
                                 # carry, which are root frames too.
-                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                scope_ids = _fallback_scope(chunk, mode)
+                                if scope_ids is not None:
+                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, scope_ids)
                             observe_stream_pause(mode, chunk, namespace)
                             await _publish_stream_item(
                                 bridge=bridge,
@@ -1777,6 +1940,8 @@ async def run_agent(
                             else:
                                 logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
             finally:
+                if journal is not None:
+                    journal.step_limit_root = None
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
                     try:
@@ -1794,6 +1959,18 @@ async def run_agent(
         # turns complete cleanly afterward (#4176 review).
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
+
+        def mark_goal_participation(_goal: GoalState | None) -> None:
+            """Record that this run took part in a goal, before evaluation persists.
+
+            The verdict callback only fires after the checkpoint write succeeds,
+            so a transient write failure must not downgrade delivery enforcement
+            to advisory for a run that actually took part in a goal. ``None``
+            means the goal state could not be read: unknown is not absent, so
+            delivery stays required.
+            """
+            nonlocal goal_participated
+            goal_participated = True
 
         def capture_goal_verdict(evaluated_goal: GoalState, evaluation: GoalEvaluation, stand_down_reason: str | None) -> None:
             nonlocal final_goal_verdict
@@ -1832,6 +2009,7 @@ async def run_agent(
                 interaction_policy=resolve_run_interaction_policy(config),
                 expected_goal=scheduled_goal,
                 verdict_callback=capture_goal_verdict,
+                participation_callback=mark_goal_participation,
                 usage_callback=journal.record_external_llm_usage_records if journal is not None else None,
             )
             if isinstance(continuation_input, _GoalCompletionCandidate):
@@ -1849,6 +2027,12 @@ async def run_agent(
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
+            # Deliberately no `error` frame here, unlike the delivery check below.
+            # The fallback was streamed and stored as a visible assistant message
+            # carrying the provider failure (tagged `deerflow_error_fallback`), so
+            # this turn never looked like a silent success; a frame would only
+            # duplicate that notice. The record still commits `error` for
+            # accounting and retry purposes.
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
@@ -1895,6 +2079,11 @@ async def run_agent(
                     journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
                     produced_output_paths,
                     pre_run_snapshot=pre_run_workspace_snapshot,
+                    # A goal run's completion depends on the presented deliverable;
+                    # an ordinary run that leaves working files or a local copy of
+                    # an external write is still finished (issue #8239).
+                    # Participation covers a goal run whose verdict write failed.
+                    required=goal_participated or scheduled_goal is not None or record.goal_verdict is not None,
                 )
                 delivery_error = _delivery_error(delivery_content)
             cancel_action = await run_manager.set_status_if_not_cancelled(
@@ -1907,6 +2096,17 @@ async def run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif delivery_error is not None and not record.ownership_lost:
+                # The run record is terminal `error`, so the stream must say the
+                # same thing: the web UI raises its run-failure toast only for an
+                # `error` frame, and streaming IM channels mark a turn failed only
+                # on that frame. Without it they report a successful turn while
+                # the record (and /wait) report the failure.
+                delivery_frame = {"message": delivery_error, "name": _RUN_ERROR_NAME}
+                if record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True):
+                    await bridge.publish(run_id, "error", delivery_frame)
+                else:
+                    terminal_error_frame = delivery_frame
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
@@ -1956,8 +2156,14 @@ async def run_agent(
                     interaction_policy=resolve_run_interaction_policy(config),
                     expected_goal=scheduled_goal,
                     verdict_callback=capture_goal_verdict,
+                    participation_callback=mark_goal_participation,
                 )
                 record.goal_verdict = final_goal_verdict
+            # The receipt was built before the continuation call could record a
+            # verdict; normalize its enforcement now so a capped goal run does
+            # not persist an advisory verdict. Participation covers a run whose
+            # verdict write failed after the evaluator saw an active goal.
+            delivery_content = _with_delivery_enforcement(delivery_content, required=goal_participated or scheduled_goal is not None or record.goal_verdict is not None)
             stop_status_kwargs = {"stop_reason": _RECURSION_CAPPED_STOP_REASON, "goal_verdict": record.goal_verdict}
         else:
             logger.exception("Run %s failed: %s", run_id, error_msg)
@@ -1998,7 +2204,7 @@ async def run_agent(
 
         async def finalize() -> None:
             nonlocal completion_hook_task
-            nonlocal journal, seq_stamper
+            nonlocal journal, seq_stamper, approval_runtime
             nonlocal accessor, agent, agent_result, cancel_action, checkpoint_rollback_completed
             nonlocal completion_data, deferred_finalization_interrupt, delivery_content, goal_completion, goal_evaluator_model
             nonlocal graph_input, pre_run_workspace_snapshot, produced_output_paths, rollback_point, runtime
@@ -2022,7 +2228,9 @@ async def run_agent(
 
                 # A rejected resume has not written state; compensating it through
                 # the state-only graph would itself discard the pending Sends.
-                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_resume_rejected:
+                # A native pause has not failed: restoring the pre-run checkpoint
+                # would drop the edit and strand the interrupt behind the new head.
+                if not record.ownership_lost and _is_edit_replay_run(record) and record.status not in (RunStatus.success, RunStatus.waiting_for_input) and not checkpoint_resume_rejected:
                     if not record.finalizing:
                         await run_manager.set_finalizing(run_id, True)
                     try:
@@ -2080,10 +2288,20 @@ async def run_agent(
                     if delivery_content is None:
                         if produced_output_paths is None:
                             produced_output_paths = await _produced_output_paths(pre_run_workspace_snapshot, thread_id=thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
-                        delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths, pre_run_snapshot=pre_run_workspace_snapshot)
+                        delivery_content = _delivery_content_with_outputs(
+                            journal.get_delivery_content(),
+                            produced_output_paths,
+                            pre_run_snapshot=pre_run_workspace_snapshot,
+                            required=goal_participated or scheduled_goal is not None or record.goal_verdict is not None,
+                        )
                     receipt_persisted = await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content)
-                    if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                    if produced_output_paths and record.status == RunStatus.success and not receipt_persisted and delivery_content.get("enforcement") == "required":
                         await run_manager.set_status(run_id, RunStatus.error, error=_DELIVERY_RECEIPT_FAILED_ERROR, persist=False)
+                        # Same invariant as the completion branch: the record is now
+                        # `error`, so the stream must not end as a success. Frames
+                        # already deferred and published below the finalizer run
+                        # before END.
+                        terminal_error_frame = {"message": _DELIVERY_RECEIPT_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and journal is not None and persist_completion:
                     try:
@@ -2125,7 +2343,10 @@ async def run_agent(
                         deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(cleanup_task, deferred_finalization_interrupt)
                     except Exception:
                         logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
-                        await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
+                        await run_manager.set_status(run_id, RunStatus.error, error=_SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, persist=False)
+                        # Same invariant as the receipt failure above: the record
+                        # is now `error`, so the stream must not end as a success.
+                        terminal_error_frame = {"message": _SCHEDULED_GOAL_CLEANUP_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
                     try:
@@ -2195,11 +2416,12 @@ async def run_agent(
                     except Exception:
                         logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
 
-                if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+                needs_local_title = record.status == RunStatus.interrupted or (record.status == RunStatus.error and getattr(record, "stop_reason", None) == _RECURSION_CAPPED_STOP_REASON)
+                if started and not record.ownership_lost and checkpointer is not None and needs_local_title and not _is_edit_replay_run(record):
                     try:
                         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                         if not await run_manager.has_later_started_run(thread_id, run_id):
-                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input, accessor=accessor)
                     except Exception:
                         logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
@@ -2273,7 +2495,13 @@ async def run_agent(
                         notify_task_stop(
                             extensions,
                             task_store,
-                            task_info,
+                            stopped_task_info(
+                                task_info,
+                                status=record.status.value,
+                                error=record.error,
+                                goal_verdict=record.goal_verdict,
+                                persisted=not record.ownership_lost and getattr(record, "terminal_status_persisted", True),
+                            ),
                             lead_task_outcome(
                                 aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
                                 succeeded=record.status == RunStatus.success,
@@ -2359,7 +2587,12 @@ async def run_agent(
 
                 terminal_stream_authorized = not record.ownership_lost and record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True)
                 if terminal_stream_authorized:
-                    if terminal_error_frame is not None:
+                    # A staged frame predates the final outcome, and a cancellation
+                    # can still win after it was staged: an interrupt replaces the
+                    # status and a rollback replaces the message (both can land
+                    # while scheduled-goal cleanup runs). Publish only the error
+                    # the record actually committed.
+                    if terminal_error_frame is not None and record.status == RunStatus.error and record.error == terminal_error_frame.get("message"):
                         await bridge.publish(
                             run_id,
                             "error",
@@ -2376,6 +2609,12 @@ async def run_agent(
                     raise deferred_finalization_interrupt
             finally:
                 try:
+                    if approval_runtime is not None:
+                        try:
+                            await approval_runtime.close()
+                        except Exception:
+                            logger.warning("Failed to cancel pending child approvals for run %s", run_id, exc_info=True)
+                        approval_runtime = None
                     if journal is not None:
                         try:
                             await journal.close(flush=not record.ownership_lost)
@@ -2820,6 +3059,7 @@ async def _prepare_goal_continuation_input(
     interaction_policy: RunInteractionPolicy | None = None,
     expected_goal: GoalState | None = None,
     verdict_callback: Callable[[GoalState, GoalEvaluation, str | None], None] | None = None,
+    participation_callback: Callable[[GoalState | None], None] | None = None,
     usage_callback: Callable[[list[dict[str, int | str | None]]], None] | None = None,
 ) -> dict[str, Any] | _GoalCompletionCandidate | None:
     """Return a continuation input or a completion candidate for finalization.
@@ -2834,15 +3074,31 @@ async def _prepare_goal_continuation_input(
     if abort_event is not None and abort_event.is_set():
         return None
 
-    try:
-        goal = await read_thread_goal(checkpointer, thread_id)
-    except Exception:
-        logger.warning("Could not read goal for thread %s after run %s", thread_id, run_id, exc_info=True)
-        return None
+    goal: GoalState | None = None
+    for attempt in range(2):
+        try:
+            goal = await read_thread_goal(checkpointer, thread_id)
+            break
+        except Exception:
+            if attempt == 0:
+                continue
+            logger.warning("Could not read goal for thread %s after run %s", thread_id, run_id, exc_info=True)
+            # The goal state is unknown, not absent: keep delivery required for
+            # this run instead of downgrading an interactive goal run to
+            # advisory when a transient checkpoint read fails.
+            if participation_callback is not None:
+                participation_callback(None)
+            return None
     if not goal or goal.get("status") != "active":
         return None
     if expected_goal is not None and not _goal_instance_matches(expected_goal, goal):
         return None
+
+    # This run took part in a goal. Record it before any evaluation write: the
+    # verdict callback only fires after the write succeeds, and delivery
+    # enforcement must stay required even when that write fails.
+    if participation_callback is not None:
+        participation_callback(goal)
 
     async def _persist(
         goal: GoalState,
@@ -3185,21 +3441,11 @@ def _is_resume_command_input(graph_input: Any) -> bool:
     return isinstance(graph_input, Command) and graph_input.resume is not None
 
 
-async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> set[str]:
-    """Recover gated names from the durable pause matched by this resume."""
-    return _hitl_action_tool_names(await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input))
-
-
-def _hitl_action_tool_names(actions: list[Mapping[str, Any]]) -> set[str]:
-    """Names for the replay gate: every action naming a tool, with or without a usable call id."""
-    return {action["tool_name"] for action in actions if isinstance(action.get("tool_name"), str)}
-
-
 def _hitl_action_calls(actions: list[Mapping[str, Any]]) -> dict[str, str]:
     """Calls for journal adoption: only actions that also carry a usable ``tool_call_id``.
 
     The calls were dispatched by the paused Run, but the resume Run produces
-    their results: a rejection is written by HITL ``after_model`` with no tool
+    their results: a rejection is returned by the approval gate without a tool
     callback, so the resume journal must adopt these calls to persist it.
     """
     return {action["tool_call_id"]: action["tool_name"] for action in actions if isinstance(action.get("tool_call_id"), str) and action["tool_call_id"] and isinstance(action.get("tool_name"), str)}
@@ -3209,7 +3455,10 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
     """Return the actions of the live durable pause this resume answers."""
     if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
         return []
-    responses = graph_input.resume.get("responses")
+    from deerflow.approvals.protocol import approval_responses
+    from deerflow.runtime.checkpoint_history import recent_checkpoint_history
+
+    responses = approval_responses(graph_input.resume)
     if not isinstance(responses, list):
         return []
     response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
@@ -3232,9 +3481,17 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
                 payload = getattr(pending_interrupt, "value", None)
                 if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval":
                     continue
+                # Version 2 routes parallel decisions by LangGraph interrupt
+                # ID. Match each pause against its own response group, rather
+                # than comparing every action with the flattened batch.
+                interrupt_id = getattr(pending_interrupt, "id", None)
+                grouped_responses = responses if "responses" in graph_input.resume else approval_responses(graph_input.resume.get(interrupt_id))
+                if not isinstance(grouped_responses, list):
+                    continue
+                group_ids = {response.get("tool_call_id") for response in grouped_responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
                 pending_ids = payload.get("pending_tool_call_ids")
                 actions = payload.get("actions")
-                if not isinstance(pending_ids, list) or set(pending_ids) != response_ids or not isinstance(actions, list):
+                if not isinstance(pending_ids, list) or set(pending_ids) != group_ids or not isinstance(actions, list):
                     continue
                 matched.extend(action for action in actions if isinstance(action, Mapping))
         return matched
@@ -3245,7 +3502,9 @@ def _is_all_reject_hitl_resume(graph_input: Any) -> bool:
     """Return whether this is a well-formed reject-only HITL resume payload."""
     if not isinstance(graph_input, Command) or not isinstance(graph_input.resume, dict):
         return False
-    responses = graph_input.resume.get("responses")
+    from deerflow.approvals.protocol import approval_responses
+
+    responses = approval_responses(graph_input.resume)
     return (
         isinstance(responses, list)
         and bool(responses)
@@ -3695,8 +3954,8 @@ async def _persist_run_duration(
     )
 
 
-async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:
-    """Persist a local fallback title for interrupted first-turn runs.
+async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None, accessor: CheckpointStateAccessor | None = None) -> str | None:
+    """Persist a local fallback title for interrupted or recursion-capped first turns.
 
     Returns the title that is now persisted (existing or newly written), or
     ``None`` when no checkpoint is available or no title text can be derived.
@@ -3716,6 +3975,10 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
         if existing_title:
             return existing_title
 
+        if ckpt_tuple is not None and accessor is not None and accessor.mode == "delta":
+            # Reconstruct messages at this exact checkpoint before checking which turn stopped.
+            snapshot = await accessor.aget(ckpt_tuple.config)
+            channel_values = snapshot.values
         result = middleware._generate_title_result(_title_generation_state(channel_values, graph_input), allow_partial_exchange=True)
         title = result.get("title") if isinstance(result, dict) else None
         if not title:
@@ -3909,6 +4172,34 @@ def _collect_pre_existing_message_ids(values: Any) -> set[str]:
     if not isinstance(messages, (list, tuple)):
         return set()
     return {message_id for message in messages if (message_id := _message_id(message)) is not None}
+
+
+def _collect_message_ids_deep(value: Any) -> set[str]:
+    """Collect message IDs from values or nested updates frames."""
+    ids: set[str] = set()
+    seen: set[int] = set()
+
+    def walk(obj: Any) -> None:
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+        if isinstance(obj, dict):
+            message_id = _message_id(obj)
+            if message_id is not None:
+                ids.add(message_id)
+            for item in obj.values():
+                walk(item)
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                walk(item)
+        else:
+            message_id = _message_id(obj)
+            if message_id is not None:
+                ids.add(message_id)
+
+    walk(value)
+    return ids
 
 
 def _unpack_stream_item(

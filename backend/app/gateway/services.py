@@ -16,7 +16,7 @@ import math
 import re
 import threading
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -28,7 +28,8 @@ from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, Syst
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, get_auth_disabled_user, is_auth_disabled
+from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
@@ -48,6 +49,7 @@ from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
 from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
@@ -55,7 +57,7 @@ from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECE
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.agents_config import load_agent_config
-from deerflow.config.app_config import get_app_config
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
 from deerflow.mcp_scope import (
@@ -92,7 +94,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -110,12 +112,12 @@ from deerflow.runtime.user_context import get_current_user, reset_current_user, 
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
-from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_STATUS_VALUES, SUBAGENT_STOP_REASON_VALUES, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -204,6 +206,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
             UNTRUSTED_INPUT_KEY,
+            # Only a share import marks history as someone else's; what a
+            # caller sends is its own and stays eligible for memory.
+            IMPORTED_HISTORY_KEY,
             "run_input_id",
             "run_input_source",
             "origin_task_id",
@@ -643,10 +648,12 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs"})
+#: Older checkpoints can contain loop detection's record of frequency-capped
+#: tools. Reserve its channel for server-owned state.
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY, IMPORTED_HISTORY_CHANNEL})
 
 #: The ``write_todos`` status contract the todo middleware renders.
-_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
+_TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
 
 
 def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, Any]] | None:
@@ -671,9 +678,126 @@ def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, An
             raise HTTPException(status_code=400, detail=f"{location}[{index}].content must be a string")
         status = entry.get("status", "pending")
         if not isinstance(status, str) or status not in _TODO_STATUSES:
-            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, or completed")
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, completed, blocked, or waiting")
         normalized.append({**entry, "content": content, "status": status})
     return normalized
+
+
+def _normalize_external_skill_context(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject skill references the durable-context reducer cannot read.
+
+    ``skill_context`` is a checkpointed reducer channel a caller may Overwrite.
+    ``merge_skill_context`` normalizes each entry with ``entry.get(...)`` and
+    ``str(entry["path"])``, so a non-object entry or a missing path raises while
+    the state update merges — failing the run with an unhandled
+    ``AttributeError``/``KeyError`` instead of a 400 at this boundary. The other
+    fields are optional: the reducer coerces ``name``/``description`` and
+    ``loaded_at`` itself, so only the path needs to be usable here.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of skill reference objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].path must be a non-empty string")
+        normalized.append({**entry, "name": str(entry.get("name") or "")})
+    return normalized
+
+
+def _reject_overwrite_marker(value: Mapping[str, Any], *, location: str) -> None:
+    """Refuse a value LangGraph would apply with ``Overwrite`` semantics.
+
+    ``Overwrite`` reaches the validator in two dict spellings: the sentinel form
+    ``{"__overwrite__": value}`` and the dataclass-erased form an orjson round
+    trip produces, ``{"type": "__overwrite__", "value": value}``. Either one
+    bypasses the channel reducer and stores the caller's value directly on an
+    initialized channel, so a shape check alone cannot catch it.
+    """
+    if "__overwrite__" in value or value.get("type") == "__overwrite__":
+        raise HTTPException(status_code=400, detail=f"{location} cannot contain an Overwrite marker")
+
+
+def _normalize_external_promoted(value: Any, *, location: str) -> dict[str, Any] | None:
+    """Reject deferred-tool promotion records the reducer cannot merge.
+
+    ``promoted`` is a checkpointed reducer channel a caller may Overwrite even
+    though only the server writes it. ``merge_promoted`` calls ``new.get(...)``
+    and indexes ``new["catalog_hash"]``/``new["names"]``, so a string, a missing
+    key or a non-list ``names`` raises while the state update merges — failing
+    the run with an unhandled ``AttributeError``/``KeyError``/``TypeError``
+    instead of a 400 at this boundary. On the thread-state route the bad shape
+    would also be persisted, so every later promotion write on that thread would
+    keep failing on it.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise HTTPException(status_code=400, detail=f"{location} must be an object with a catalog_hash and a names list")
+    _reject_overwrite_marker(value, location=location)
+    catalog_hash = value.get("catalog_hash")
+    if not isinstance(catalog_hash, str) or not catalog_hash:
+        raise HTTPException(status_code=400, detail=f"{location}.catalog_hash must be a non-empty string")
+    names = value.get("names")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise HTTPException(status_code=400, detail=f"{location}.names must be a list of strings")
+    turn_id = value.get("turn_id")
+    if turn_id is not None and not isinstance(turn_id, str):
+        raise HTTPException(status_code=400, detail=f"{location}.turn_id must be a string")
+    return {**value, "catalog_hash": catalog_hash, "names": names}
+
+
+def _normalize_external_tool_artifacts(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject artifact-registry entries the reducer cannot key.
+
+    ``tool_artifacts`` is a checkpointed reducer channel a caller may Overwrite.
+    ``merge_tool_artifacts`` keys each entry by its ``handle``, so an entry whose
+    handle is missing or unhashable raises while the state update merges — a 500
+    instead of a 400 at this boundary. The thread-state route persists the value
+    with ``Overwrite`` before any reducer sees it, so the thread stays broken for
+    every later artifact capture. Require the registry's list-of-objects shape
+    with a non-empty string handle; the reducer also tolerates an already-poisoned
+    checkpoint.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of artifact objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        handle = entry.get("handle")
+        if not isinstance(handle, str) or not handle:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].handle must be a non-empty string")
+        normalized.append(dict(entry))
+    return normalized
+
+
+def _normalize_external_artifacts(value: Any, *, location: str) -> list[str] | None:
+    """Reject artifact lists the reducer cannot merge.
+
+    ``artifacts`` and ``tool_artifact_processed`` are checkpointed reducer
+    channels a caller may Overwrite. ``merge_artifacts`` concatenates the stored
+    list with the new one, so a caller-supplied non-list value fails the next
+    artifact-producing run with an unhandled ``TypeError``. The thread-state
+    route persists the value with ``Overwrite`` before any reducer sees it, so
+    without this boundary the thread stays broken across runs. Require the
+    declared ``list[str]`` shape; the reducer also tolerates an already-poisoned
+    checkpoint.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of strings")
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be a string")
+    return list(value)
 
 
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
@@ -682,8 +806,7 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
         return None
     if not isinstance(value, Mapping) or not isinstance(value.get("objective"), str):
         raise HTTPException(status_code=400, detail=f"{location} must be an object with a string objective")
-    if "__overwrite__" in value or value.get("type") == "__overwrite__":
-        raise HTTPException(status_code=400, detail=f"{location} cannot contain an Overwrite marker")
+    _reject_overwrite_marker(value, location=location)
     try:
         objective = normalize_goal_objective(value["objective"])
     except ValueError as exc:
@@ -692,6 +815,61 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
         if field in value and (type(value[field]) is not int or value[field] < 0):
             raise HTTPException(status_code=400, detail=f"{location}.{field} must be a non-negative integer")
     return {**{key: item for key, item in value.items() if key != "last_batch_wakeup_run_id"}, "objective": objective}
+
+
+#: Statuses the ledger reducer and renderer understand: the runtime's terminal
+#: values plus the in-progress marker a live delegation carries.
+_DELEGATION_STATUSES = frozenset({"in_progress", *SUBAGENT_STATUS_VALUES})
+
+
+def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject ledger entries the reducer and renderer cannot read.
+
+    ``delegations`` is a reducer channel a caller may Overwrite. ``merge_delegations``
+    keys on ``id`` and indexes ``status``, and the ledger renderer reads
+    ``description``/``subagent_type`` on every model call. A non-list value, a
+    non-object entry or a missing field raises while the state update merges —
+    failing the run with an unhandled ``TypeError``/``KeyError`` instead of a
+    400 at this boundary. On the thread-state route the bad shape would also be
+    persisted, so every later genuine ledger write would keep failing on it.
+
+    The id must be non-empty because it is the reducer's identity key (an empty
+    id can never be matched by the runtime's write-back), and the status must be
+    one the runtime produces so a caller cannot inject its own steering line into
+    the model-visible ledger. Optional fields the reducer and renderer read as
+    text are validated when present: an unhashable ``run_id`` breaks the
+    reducer's identity key, a non-string ``result_brief`` breaks the renderer's
+    length bound, and an unknown ``stop_reason`` renders guardrail-cap guidance
+    the runtime never stamped.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        _reject_overwrite_marker(value, location=location)
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of delegation objects")
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of delegation objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        for field in ("id", "description", "subagent_type"):
+            if not isinstance(entry.get(field), str):
+                raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string")
+        if not entry["id"]:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].id must be non-empty")
+        status = entry.get("status")
+        if not isinstance(status, str) or status not in _DELEGATION_STATUSES:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be one of {', '.join(sorted(_DELEGATION_STATUSES))}")
+        for field in ("run_id", "result_brief"):
+            optional_text = entry.get(field)
+            if optional_text is not None and not isinstance(optional_text, str):
+                raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string or null")
+        stop_reason = entry.get("stop_reason")
+        if stop_reason is not None and (not isinstance(stop_reason, str) or stop_reason not in SUBAGENT_STOP_REASON_VALUES):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].stop_reason must be one of {', '.join(SUBAGENT_STOP_REASON_VALUES)}")
+        normalized.append(dict(entry))
+    return normalized
 
 
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -728,8 +906,27 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
             stripped[channel] = None if normalized_todos is None else [_strip_external_metadata_from_message_like(item) for item in normalized_todos]
         elif channel == "messages" and value is not None:
             stripped[channel] = _normalize_input_messages(value, location="values.messages")
-        elif channel == "delegations" and isinstance(value, list):
-            stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
+        elif channel == "delegations":
+            normalized_delegations = _normalize_external_delegations(value, location="values.delegations")
+            stripped[channel] = None if normalized_delegations is None else [_strip_external_delegation_verdict(item) for item in normalized_delegations]
+        elif channel == "skill_context":
+            normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
+            stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
+        elif channel == "promoted":
+            # A dedicated validator must not bypass the metadata strip the
+            # generic branches apply to caller-supplied channel values.
+            stripped[channel] = _strip_external_metadata_from_message_like(_normalize_external_promoted(value, location="values.promoted"))
+        elif channel == "tool_artifacts":
+            normalized_tool_artifacts = _normalize_external_tool_artifacts(value, location="values.tool_artifacts")
+            # Registry entries are rich dicts, so keep the per-entry metadata
+            # strip the generic list branch applied: a caller-crafted entry must
+            # not smuggle server-owned message metadata into the checkpoint.
+            stripped[channel] = None if normalized_tool_artifacts is None else [_strip_external_metadata_from_message_like(item) for item in normalized_tool_artifacts]
+        elif channel in ("artifacts", "tool_artifact_processed"):
+            # Entries are display paths, so the generic list branch's
+            # message-metadata strip is a no-op for them; the shape check
+            # replaces that pass rather than skipping a real sanitizer.
+            stripped[channel] = _normalize_external_artifacts(value, location=f"values.{channel}")
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
@@ -793,11 +990,21 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
         converted = _normalize_input_messages(messages, location="input.messages", trusted_internal=trusted_internal)
         result = {**raw_input, "messages": converted}
     if not trusted_internal:
-        delegations = result.get("delegations")
-        if isinstance(delegations, list):
-            cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
-            if cleaned != delegations:
-                result = {**result, "delegations": cleaned}
+        if "delegations" in result:
+            normalized_delegations = _normalize_external_delegations(result["delegations"], location="input.delegations")
+            result = {
+                **result,
+                "delegations": None if normalized_delegations is None else [_strip_external_delegation_verdict(entry) for entry in normalized_delegations],
+            }
+        if "skill_context" in result:
+            result = {**result, "skill_context": _normalize_external_skill_context(result["skill_context"], location="input.skill_context")}
+        if "promoted" in result:
+            result = {**result, "promoted": _normalize_external_promoted(result["promoted"], location="input.promoted")}
+        if "tool_artifacts" in result:
+            result = {**result, "tool_artifacts": _normalize_external_tool_artifacts(result["tool_artifacts"], location="input.tool_artifacts")}
+        for artifact_channel in ("artifacts", "tool_artifact_processed"):
+            if artifact_channel in result:
+                result = {**result, artifact_channel: _normalize_external_artifacts(result[artifact_channel], location=f"input.{artifact_channel}")}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
             normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
@@ -991,6 +1198,7 @@ _DEFAULT_ASSISTANT_ID = "lead_agent"
 _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
     {
         "model_name",
+        "tool_approval_mode",
         "mode",
         "thinking_enabled",
         "reasoning_effort",
@@ -1030,6 +1238,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "__run_tool_promotion_recorder",
             "__run_tool_progress_recorder",
             "__run_input_control",
+            "__tool_approval_runtime",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
             THREAD_INCARNATION_METADATA_GUARD_KEY,
@@ -1037,6 +1246,10 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # at admission from threads_meta; a client-supplied value must
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
+            AGENT_AUTH_CONTEXT_KEY,
+            # Obsolete run field. Discard it even on internal requests.
+            "github_token",
+            MCP_BROWSER_USER_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
@@ -1048,14 +1261,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),
 # never into ``config['configurable']``. These are read by tools and
 # middlewares from ``runtime.context`` and have no reason to live in
-# ``configurable`` — and ``configurable`` is persisted in checkpoints, so
-# keeping secrets like ``github_token`` out of it avoids writing a
-# short-lived installation token into the checkpoint store.
+# ``configurable``, which is persisted in checkpoints.
 #
-#   ``github_token``         — App installation token minted by the GitHub
-#                              channel; the bash tool exposes it as
-#                              ``GH_TOKEN``/``GITHUB_TOKEN`` so ``gh`` and
-#                              ``git`` push as the bot, not the host user.
 #   ``disable_clarification`` — set for non-interactive channels (GitHub
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
@@ -1066,7 +1273,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 # (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
 # which reach the Gateway over the internally-authenticated request channel, so
 # they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"disable_clarification", "channel_name"})
 
 # Public run-only controls are accepted through body.context, not body.config.
 _MODEL_SELECTION_CONTEXT_KEYS = frozenset({"subagent_model_name", "model_selection_requested"})
@@ -1080,10 +1287,7 @@ _MODEL_SELECTION_CONTEXT_KEYS = frozenset({"subagent_model_name", "model_selecti
 # included — with "proceed without asking" instead of interrupting, and
 # ``SandboxMiddleware`` reads the two keys as the same non-interactive signal.
 # Accepting it from a client therefore reproduces the effect the
-# ``non_interactive`` gate exists to prevent. ``github_token`` is a live
-# credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
-# smuggled through ``body.config['configurable']`` would be written to the
-# checkpoint store.
+# ``non_interactive`` gate exists to prevent.
 _INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS
 
 
@@ -1130,12 +1334,8 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     is True; for non-internal callers those keys are dropped from client requests
     by :func:`strip_internal_context_keys`.
 
-    A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is likewise forwarded only when ``internal`` is True,
-    and then into ``config['context']`` only, never ``configurable``. These are
-    secrets / runtime flags read by tools and middlewares from ``runtime.context``;
-    keeping them out of ``configurable`` avoids persisting a short-lived token in the
-    checkpoint store.
+    Runtime-only flags such as ``disable_clarification`` are forwarded only for
+    internal requests and land exclusively in ``config['context']``.
 
     Client capability context is runtime-only: it is sanitized and copied into
     ``config['context']['client']`` but never into ``configurable``.
@@ -1194,7 +1394,7 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context[key] = value
     if "model_selection_requested" in context and (context.get("model_name") != context["model_selection_requested"] or not isinstance(runtime_context, dict) or runtime_context.get("model_name") != context["model_selection_requested"]):
         raise HTTPException(status_code=400, detail="model_selection_requested must match model_name in context.")
-    # Context-only keys (secrets / runtime flags) land in ``config['context']``
+    # Runtime-only flags land in ``config['context']``
     # only — never ``configurable`` (which is persisted in checkpoints) — and only
     # for internal callers, the sole legitimate producers.
     if internal:
@@ -1335,10 +1535,11 @@ _DEFAULT_RECURSION_LIMIT = 100
 _DEFAULT_MAX_RECURSION_LIMIT = 1000
 
 
-def _resolve_gateway_recursion_limits() -> tuple[int, int]:
+def _resolve_gateway_recursion_limits(app_config: AppConfig | None = None) -> tuple[int, int]:
     """Resolve the run default and ceiling from one hot-reloaded snapshot."""
     try:
-        app_config = get_app_config()
+        if app_config is None:
+            app_config = get_app_config()
         raw = app_config.recursion_limit
         max_limit = app_config.max_recursion_limit
         if raw > max_limit:
@@ -1420,11 +1621,17 @@ def _clamp_recursion_limit(value: Any, max_limit: int, default_limit: int) -> in
     return min(value, max_limit)
 
 
-def custom_agent_name(assistant_id: str | None) -> str | None:
+# Error details echo caller-supplied agent names; bound them so an oversized
+# value cannot bloat the response or any log line that records the detail.
+_MAX_ECHOED_AGENT_NAME_CHARS = 200
+
+
+def custom_agent_name(assistant_id: str | None, *, field: str = "assistant_id") -> str | None:
     """Return the custom agent *assistant_id* selects, or ``None`` for the lead agent.
 
     Custom names are normalized (trimmed, lowercased, ``_`` to ``-``) and must
-    then contain only letters, digits and hyphens.
+    then contain only letters, digits and hyphens. *field* names the request
+    field in the error message.
 
     Raises:
         ValueError: *assistant_id* cannot name an agent.
@@ -1433,7 +1640,7 @@ def custom_agent_name(assistant_id: str | None) -> str | None:
         return None
     normalized = assistant_id.strip().lower().replace("_", "-")
     if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-        raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        raise ValueError(f"Invalid {field} {assistant_id!r:.{_MAX_ECHOED_AGENT_NAME_CHARS}}: must contain only letters, digits, and hyphens after normalization.")
     return normalized
 
 
@@ -1443,6 +1650,7 @@ def build_run_config(
     metadata: dict[str, Any] | None,
     *,
     assistant_id: str | None = None,
+    app_config: AppConfig | None = None,
 ) -> dict[str, Any]:
     """Build a RunnableConfig dict for the agent.
 
@@ -1460,13 +1668,16 @@ def build_run_config(
     This mirrors the channel manager's ``_resolve_run_params`` logic. IM
     channel runs send no ``recursion_limit`` unless their session config or
     channel policy sets one, so they get the same configured default here.
+
+    *app_config* is the snapshot the recursion limits come from; without it
+    they are read through ``get_app_config()``, which does file IO.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
     # subagent inside ONE lead tools-node step, and subagents enforce their own
     # limit via `subagents.max_turns`. Do not conflate this budget with the
     # general-purpose subagent's max_turns.
-    default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits()
+    default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits(app_config)
     config: dict[str, Any] = {"recursion_limit": default_recursion_limit}
     if request_config:
         caller_configurable = request_config.get("configurable")
@@ -2166,20 +2377,30 @@ async def _load_scope_agent_config(
 ) -> Any | None:
     if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
         return None
+    # The caller's config/context ``agent_name`` arrives here unvalidated, and
+    # every run that names a custom agent passes through, with or without a
+    # knowledge scope, so each rejection says what is wrong with the agent.
+    if not isinstance(assistant_id, str):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid agent_name: expected a string, got {type(assistant_id).__name__}.",
+        )
     try:
-        # The caller's config/context ``agent_name`` arrives here unvalidated.
-        if not isinstance(assistant_id, str):
-            raise ValueError("agent_name must be a string")
-        normalized = assistant_id.strip().lower().replace("_", "-")
+        normalized = custom_agent_name(assistant_id, field="agent_name")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
         return await asyncio.to_thread(
             load_agent_config,
             normalized,
             user_id=user_id,
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=422, detail=f"Agent '{normalized:.{_MAX_ECHOED_AGENT_NAME_CHARS}}' not found") from exc
+    except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail="knowledge_scope assistant configuration could not be resolved",
+            detail=f"Agent '{normalized:.{_MAX_ECHOED_AGENT_NAME_CHARS}}' configuration could not be loaded",
         ) from exc
 
 
@@ -2252,6 +2473,8 @@ async def start_run(
     require_existing_thread: bool = False,
     evidence_origin: str | None = None,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
+    agent_factory_override: Callable | None = None,
+    input_message_idempotency_key: str | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -2269,6 +2492,9 @@ async def start_run(
     evidence_origin : str | None
         Trusted Python entry-point provenance, never copied from request data.
         Internal launches without an explicit origin remain unknown.
+    input_message_idempotency_key : str | None
+        Reuse input message IDs when a managed planner replays a previous
+        execution. Admission still uses this run's own idempotency key.
     """
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
@@ -2280,6 +2506,8 @@ async def start_run(
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
     if scheduled_task_runtime is not None and getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
         raise HTTPException(status_code=403, detail="Scheduled runtime authority requires an internal launcher")
+    if (agent_factory_override is not None or input_message_idempotency_key is not None) and not getattr(request.state, "coordination_execution_id", None):
+        raise HTTPException(status_code=403, detail="Coordinator factory requires a managed execution")
 
     try:
         validate_thread_id(thread_id)
@@ -2299,7 +2527,11 @@ async def start_run(
     stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    run_ctx = get_run_context(request)
+    # Building the context loads the live AppConfig, which stats and hashes
+    # config.yaml and reparses it after an edit, so it runs in a worker. The
+    # rest of the run start reuses that snapshot.
+    run_ctx = await asyncio.to_thread(get_run_context, request)
+    app_config = run_ctx.app_config
     admission_run_id: str | None = None
     producer_lease_started = False
     producer_lease_handed_off = False
@@ -2315,7 +2547,6 @@ async def start_run(
 
     # Validate model against the allowlist when a model_name is provided.
     if model_name:
-        app_config = get_app_config()
         resolved = app_config.get_model_config(model_name)
         if resolved is None:
             raise HTTPException(
@@ -2362,6 +2593,13 @@ async def start_run(
     if not await thread_access_allowed():
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    from app.gateway.coordination_workers import direct_worker_run, managed_task
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, THREAD_PREFIX, WORKER_CHECKPOINT_RUN
+
+    if thread_id.startswith(THREAD_PREFIX) and not getattr(request.state, "coordination_execution_id", None):
+        if task_id := await managed_task(request, thread_id):
+            return await direct_worker_run(request, task_id, body, idempotency_key)
+
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
@@ -2371,7 +2609,9 @@ async def start_run(
         # Cold resolution imports the lead-agent stack. Use the assembly pool
         # so import-lock waiters cannot starve unrelated default-executor work.
         # Keep this before admission so import failures cannot create a run.
-        agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
+        agent_factory = agent_factory_override
+        if agent_factory is None:
+            agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
         admitted_origin = evidence_origin or ("unknown" if is_internal_caller else "interactive")
         if admitted_origin not in EVIDENCE_ORIGINS:
             raise ValueError("Unsupported host evidence origin")
@@ -2404,9 +2644,12 @@ async def start_run(
                     thread_id=thread_id,
                     accessor=accessor,
                     read_config=read_config,
-                    enabled=get_app_config().hitl_approval.enabled,
+                    enabled=app_config.hitl_approval.enabled,
                     body=body,
                 )
+                resume_map = getattr(validated_approval_request_ids, "resume_map", None)
+                if isinstance(resume_map, dict):
+                    graph_input = Command(resume=resume_map)
         else:
             if admitted_run is None:
                 await reject_new_run_when_approval_pending(request, thread_id)
@@ -2417,7 +2660,7 @@ async def start_run(
         request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
         knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
         if isinstance(graph_input, dict):
-            graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=idempotency_key)
+            graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=input_message_idempotency_key or idempotency_key)
         # deerflow_trace_id is server-issued, so the caller's value is replaced
         # here at the trust boundary. body.metadata forks two ways -- through
         # build_run_config into config["metadata"], which the run worker
@@ -2433,18 +2676,22 @@ async def start_run(
         # is what keeps a forged value out of the live run config.
         origin = resolve_request_origin(request, body.metadata)
         run_metadata = _admit_scheduler_metadata(body.metadata, trusted=scheduled_task_runtime is not None)
+        run_metadata.pop(RUN_GRANT_METADATA, None)
+        run_metadata.pop(WORKER_CHECKPOINT_RUN, None)
         run_metadata.pop(DEERFLOW_ORIGIN_KEY, None)
         if origin is not None:
             run_metadata[DEERFLOW_ORIGIN_KEY] = origin
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
         try:
-            config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+            config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id, app_config=app_config)
         except ValueError as exc:
             # Raised only for the caller's own config sections or assistant_id.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if isinstance(config.get("metadata"), dict):
             config["metadata"] = _admit_scheduler_metadata(config["metadata"], trusted=scheduled_task_runtime is not None)
+            config["metadata"].pop(RUN_GRANT_METADATA, None)
+            config["metadata"].pop(WORKER_CHECKPOINT_RUN, None)
             config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)
             if origin is not None:
                 config["metadata"][DEERFLOW_ORIGIN_KEY] = origin
@@ -2455,6 +2702,12 @@ async def start_run(
         # that carries agent configuration (model_name, thinking_enabled, etc.).
         # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
         merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
+        from deerflow.approvals.policy import resolve_mode
+
+        try:
+            resolve_mode(app_config.hitl_approval, config.get("context") or {})
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, detail={"code": "invalid_approval_mode", "message": "The selected tool approval mode is not allowed"}) from exc
         if not is_internal_caller:
             # ``body.config`` is free-form and copied verbatim by
             # ``build_run_config``; scrub internal-only keys smuggled there.
@@ -2548,6 +2801,30 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
+        if (
+            user is not None
+            and getattr(request.state, "auth_source", None) == AUTH_SOURCE_SESSION
+            and bool(getattr(request, "cookies", {}).get(ACCESS_TOKEN_COOKIE_NAME))
+            and origin is None
+            and admitted_origin == "interactive"
+            and body.multitask_strategy != "enqueue"
+        ):
+            run_ctx = replace(run_ctx, mcp_browser_user=str(user.id))
+
+        if agent_config is not None and getattr(run_ctx.app_config, "mcp_agent_auth", None):
+            from deerflow.mcp.agent_auth import McpAgentAuthorizationError, capture_agent_authority
+
+            try:
+                agent_authority = await run_assembly(
+                    capture_agent_authority,
+                    run_ctx.app_config,
+                    user_id=owner_user_id or str(user.id),
+                    agent_config=agent_config,
+                )
+            except McpAgentAuthorizationError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from None
+            run_ctx = replace(run_ctx, agent_mcp_authority=agent_authority)
+
         if scheduled_task_runtime is not None:
             run_ctx = replace(run_ctx, scheduled_task_runtime=dict(scheduled_task_runtime))
         conversation_references = list(getattr(body, "conversation_references", None) or [])
@@ -2560,7 +2837,7 @@ async def start_run(
                 user_id=owner_user_id or (str(user.id) if user is not None else None),
                 run_context=run_ctx,
                 run_manager=run_mgr,
-                app_config=get_app_config(),
+                app_config=app_config,
             )
             reader, source_ids = prepared
             run_ctx = replace(run_ctx, conversation_reader=reader)
@@ -2801,6 +3078,9 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
+                from app.gateway.share_fork import ensure_share_import_history_marked
+
+                await ensure_share_import_history_marked(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
                 # A strict caller may have observed the thread before a
                 # concurrent delete removed it while checkpoint preparation
                 # yielded. Recheck immediately before durable admission. The
@@ -2838,6 +3118,8 @@ async def start_run(
                             # appear while this request prepares its admission. Recheck
                             # under the thread lock so a fresh input cannot replace it.
                             await reject_new_run_when_approval_pending(request, thread_id)
+                        if (grant_id := getattr(request.state, "coordination_grant_id", None)) is not None:
+                            run_metadata[RUN_GRANT_METADATA] = grant_id
                         return await run_mgr.create_or_reject(
                             thread_id,
                             body.assistant_id,
@@ -3053,7 +3335,7 @@ async def launch_scheduled_thread_run(
         input=graph_input,
         command=None,
         metadata=metadata or {},
-        config={"recursion_limit": _resolve_scheduler_recursion_limit()},
+        config={"recursion_limit": await asyncio.to_thread(_resolve_scheduler_recursion_limit)},
         # ``user_id`` mirrors what IM channels put in ``body.context`` so
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;

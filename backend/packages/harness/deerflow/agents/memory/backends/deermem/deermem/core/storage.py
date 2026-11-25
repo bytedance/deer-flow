@@ -14,6 +14,7 @@ import abc
 import copy
 import hashlib
 import importlib
+import itertools
 import json
 import logging
 import math
@@ -23,6 +24,7 @@ import threading
 import time
 import uuid
 import weakref
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -49,6 +51,11 @@ from .paths import (
 logger = logging.getLogger(__name__)
 
 DOCUMENT_VERSION = "2.0"
+# Parsed documents kept in process, least recently used first out. The cache
+# only saves a re-read: an evicted scope is read from its files again. Without
+# a cap every (user, agent) scope a process ever touched stayed in memory,
+# including scopes named only by a request's agent_name.
+MEMORY_CACHE_MAX_SCOPES = 256
 CORE_CATEGORIES = frozenset({"preference", "correction", "context", "goal", "behavior", "cognitive", "identity", "constraint", "decision", "other"})
 
 
@@ -638,7 +645,7 @@ class FileMemoryStorage(MemoryStorage):
     def __init__(self, config: DeerMemConfig, retrieval: RetrievalPort | None = None):
         self._config = config
         self._retrieval = retrieval
-        self._memory_cache: dict[tuple[str | None, str | None], tuple[dict[str, Any], tuple[Any, ...]]] = {}
+        self._memory_cache: OrderedDict[tuple[str | None, str | None], tuple[dict[str, Any], tuple[Any, ...]]] = OrderedDict()
         self._cache_lock = threading.Lock()
         self._scope_locks: weakref.WeakValueDictionary[tuple[str | None, str | None], threading.RLock] = weakref.WeakValueDictionary()
         self._retrieval_dirty_scopes: set[tuple[str | None, str | None]] = set()
@@ -981,6 +988,13 @@ class FileMemoryStorage(MemoryStorage):
     @staticmethod
     def _cache_key(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[str | None, str | None]:
         return (user_id, agent_name)
+
+    def _cache_document_locked(self, key: tuple[str | None, str | None], document: dict[str, Any], signature: tuple[Any, ...]) -> None:
+        """Store a scope's document as the most recent entry; the caller holds ``_cache_lock``."""
+        self._memory_cache[key] = (copy.deepcopy(document), signature)
+        self._memory_cache.move_to_end(key)
+        while len(self._memory_cache) > MEMORY_CACHE_MAX_SCOPES:
+            self._memory_cache.popitem(last=False)
 
     def _scope_lock(self, key: tuple[str | None, str | None]) -> threading.RLock:
         with self._cache_lock:
@@ -1347,14 +1361,21 @@ class FileMemoryStorage(MemoryStorage):
 
         scope = _scope_dict(user_id, agent_name)
         prepared: dict[str, tuple[dict[str, Any], dict[str, Any] | None, Path]] = {}
+        seen_ids: set[str] = set()
         for incoming in upserts:
             if not isinstance(incoming, dict):
                 raise ValueError("change_set.upserts must contain fact objects")
             candidate = copy.deepcopy(incoming)
             candidate["id"] = str(candidate.get("id") or f"fact_{uuid.uuid4().hex}")
             fact_id = candidate["id"]
-            if fact_id in prepared:
+            # Duplicate detection must consider every incoming id, not just the
+            # ones scheduled for a write: an unchanged entry (existing equals the
+            # normalized candidate) is skipped from `prepared`, so a duplicate
+            # after it would otherwise pass and the import outcome would depend
+            # on the order of the two entries.
+            if fact_id in seen_ids:
                 raise ValueError(f"Duplicate fact id {fact_id!r} in upserts")
+            seen_ids.add(fact_id)
             if agent_name is None:  # guarded above
                 raise ValueError("agent_name is required for fact repository changes")
             existing, fact_path = self._read_fact(path, fact_id, user_id=user_id, agent_name=agent_name)
@@ -1624,10 +1645,11 @@ class FileMemoryStorage(MemoryStorage):
         with self._cache_lock:
             cached = self._memory_cache.get(key)
             if cached is not None and cached[1] == signature:
+                self._memory_cache.move_to_end(key)
                 return copy.deepcopy(cached[0])
         document = self._read_document(path, agent_name, user_id=user_id)
         with self._cache_lock:
-            self._memory_cache[key] = (copy.deepcopy(document), signature)
+            self._cache_document_locked(key, document, signature)
         return copy.deepcopy(document)
 
     def reload(self, agent_name: str | None = None, *, user_id: str | None = None, _rebuild_retrieval: bool = True) -> dict[str, Any]:
@@ -1653,7 +1675,7 @@ class FileMemoryStorage(MemoryStorage):
         signature = self._scope_signature(path, agent_name)
         document = self._read_document(path, agent_name, user_id=user_id)
         with self._cache_lock:
-            self._memory_cache[key] = (copy.deepcopy(document), signature)
+            self._cache_document_locked(key, document, signature)
         if _rebuild_retrieval and agent_name is not None and self._retrieval is not None:
             self.rebuild_index([{"userId": user_id, "agentName": agent_name}])
         return copy.deepcopy(document)
@@ -1741,7 +1763,7 @@ class FileMemoryStorage(MemoryStorage):
                 if int(memory_file.get("revision") or 0) != pre_revision:
                     committed = (pre_revision, signature)
                 with self._cache_lock:
-                    self._memory_cache[key] = (copy.deepcopy(document), signature)
+                    self._cache_document_locked(key, document, signature)
         except MemoryRevisionConflict:
             raise
         except (OSError, ValueError, MemoryStorageCorruption) as exc:
@@ -2130,7 +2152,12 @@ class FileMemoryStorage(MemoryStorage):
         synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
         if scopes is None:
             root = Path(self._config.storage_path) if self._config.storage_path else memory_file_path(self._config).parent
-            candidates = root.glob("**/facts/**/*.md")
+            # Only the fact directories the scoped readers use: the legacy root
+            # bucket and each user's bucket. The host's default root is the
+            # runtime home, which also holds every thread's sandbox-writable
+            # workspace (users/{id}/threads/...), so a wider walk would index
+            # files a sandbox wrote as that user's memory.
+            candidates = itertools.chain(root.glob("agents/*/facts/**/*.md"), root.glob("users/*/agents/*/facts/**/*.md"))
             # One signature per manifest: every agent bucket of a user shares its
             # memory.json, and _scope_signature reads only that file.
             manifest_signatures: dict[Path, tuple[Any, ...]] = {}

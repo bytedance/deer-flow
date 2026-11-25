@@ -191,7 +191,14 @@ def test_overlay_points_explicit_sandbox_ownership_at_the_harness_redis():
     base = {
         "sandbox": {
             "use": "deerflow.sandbox.local:LocalSandboxProvider",
-            "ownership": {"type": "redis", "redis_url": "redis://prod-redis:6379/3", "renewal_interval_seconds": 7.5, "ttl_multiplier": 3},
+            "ownership": {
+                "type": "redis",
+                "redis_url": "rediss://ops:example-password@prod-redis:6379/0",
+                "redis_mode": "cluster",
+                "redis_cluster_nodes": ["prod-backup:6379"],
+                "renewal_interval_seconds": 7.5,
+                "ttl_multiplier": 3,
+            },
         }
     }
 
@@ -199,6 +206,7 @@ def test_overlay_points_explicit_sandbox_ownership_at_the_harness_redis():
 
     assert config["sandbox"]["ownership"] == {"type": "redis", "redis_url": REDIS_URL, "renewal_interval_seconds": 7.5, "ttl_multiplier": 3}
     assert any("sandbox.ownership" in note for note in notes)
+    assert all("example-password" not in note for note in notes)
 
 
 def test_overlay_gives_local_aio_sandboxes_a_harness_container_prefix():

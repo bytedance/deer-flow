@@ -7,10 +7,9 @@ from unittest.mock import patch
 import pytest
 
 from deerflow.sandbox.exceptions import SandboxError
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
-    _apply_cwd_prefix,
     _compiled_mask_patterns,
     _extract_skill_name_from_skills_path,
     _get_custom_mount_for_path,
@@ -233,36 +232,6 @@ def test_mask_local_paths_masks_every_entry_of_a_colon_joined_path_list() -> Non
         masked = mask_local_paths_in_output("PATH=" + ":".join([*hosts, "/usr/bin"]), _THREAD_DATA)
 
     assert masked == "PATH=" + ":".join([*virtuals, "/usr/bin"])
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX shell and ':'-separated PATH")
-def test_local_bash_tool_output_masks_every_entry_of_a_colon_joined_path_list(tmp_path: Path, monkeypatch) -> None:
-    """End to end through ``bash_tool``: output passes ``LocalSandbox``'s reverse
-    resolution and then ``mask_local_paths_in_output`` before reaching the model."""
-    thread_root = tmp_path / "threads" / "t1" / "user-data"
-    thread_data = {f"{name}_path": str(thread_root / name) for name in ("workspace", "uploads", "outputs")}
-    for path in thread_data.values():
-        Path(path).mkdir(parents=True)
-    workspace = str(Path(thread_data["workspace_path"]).resolve())
-    sandbox = LocalSandbox(
-        id="local",
-        path_mappings=[PathMapping(container_path=f"{VIRTUAL_PATH_PREFIX}/workspace", local_path=workspace)],
-    )
-    runtime = SimpleNamespace(
-        state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data},
-        context={"thread_id": "t1"},
-        config={},
-    )
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
-
-    # The shell expands ``$PWD`` (the host workspace), so the host paths exist only
-    # in the output -- the ``export PATH="$PWD/.venv/bin:$PATH"`` shape.
-    command = "echo " + ":".join(f"$PWD/e{i}/bin" for i in range(_PATH_LIST_ENTRIES))
-    result = bash_tool.func(runtime=runtime, description="print PATH", command=command)
-
-    assert str(tmp_path) not in result
-    assert result.strip() == ":".join(f"{VIRTUAL_PATH_PREFIX}/workspace/e{i}/bin" for i in range(_PATH_LIST_ENTRIES))
 
 
 @pytest.mark.parametrize("prefix", ["", "cwd: ", "see "])
@@ -1387,88 +1356,21 @@ def test_validate_local_bash_command_paths_rejects_pwd_traversal_like_relative_t
             validate_local_bash_command_paths(command, _THREAD_DATA)
 
 
-def test_bash_tool_rejects_variable_prefixed_host_path_before_execution(monkeypatch) -> None:
+@pytest.mark.parametrize("sandbox_id", ["local", "fixture:cached"])
+def test_bash_tool_rejects_local_sandbox_with_legacy_setting(monkeypatch, sandbox_id) -> None:
     runtime = SimpleNamespace(
-        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        state={"sandbox": {"sandbox_id": sandbox_id}, "thread_data": _THREAD_DATA.copy()},
         context={"thread_id": "thread-1"},
     )
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
-        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
-    )
+
+    from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+    sandbox = LocalSandbox("local")
+    monkeypatch.setattr(sandbox, "execute_command", lambda *args, **kwargs: pytest.fail("a local workspace must not execute the command"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: sandbox)
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=True))
+    monkeypatch.setattr("deerflow.sandbox.security.get_app_config", lambda: config)
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
-
-    result = bash_tool.func(runtime=runtime, description="read key", command="cat $HOME/.ssh/id_rsa")
-
-    assert "Unsafe absolute paths in command: $HOME/.ssh/id_rsa" in result
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX shell expands $HOME")
-@pytest.mark.parametrize(
-    ("command", "rejected"),
-    [
-        ('cat "$HOME/.ssh/id_rsa"', "Unsafe absolute paths in command: $HOME/.ssh/id_rsa"),
-        ('CDPATH="$HOME" cd .ssh && cat $PWD/id_rsa', "Unsafe working directory change via CDPATH"),
-        ('cat "$HOME/文档/id_rsa"', "Unsafe absolute paths in command: $HOME/文档/id_rsa"),
-        ('cat "${REVIEW_ROOT}/2"', "Unsafe absolute paths in command: /2"),
-        ('cat "$(printenv REVIEW_ROOT)/2"', "Unsafe absolute paths in command: /2"),
-        ("cat ${ROOT}[x]/secret", "Unsafe absolute paths in command: /secret"),
-        ('cat $(printf %s "$ROOT" # f(\n)/secret', "Unsafe absolute paths in command: /secret"),
-    ],
-)
-def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Path, monkeypatch, command: str, rejected: str) -> None:
-    """End to end through a real ``LocalSandbox``: before the fix the shell
-    expanded ``$HOME`` and printed the host file."""
-    home = tmp_path / "home"
-    (home / ".ssh").mkdir(parents=True)
-    (home / ".ssh" / "id_rsa").write_text("host-private-key")
-    (home / "文档").mkdir()
-    (home / "文档" / "id_rsa").write_text("host-private-key")
-    (home / "2").write_text("host-private-key", encoding="utf-8")
-    (home / "secret").write_text("host-private-key", encoding="utf-8")
-    glob_home = tmp_path / "homex"
-    glob_home.mkdir()
-    (glob_home / "secret").write_text("host-private-key", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("ROOT", str(home))
-    monkeypatch.setenv("REVIEW_ROOT", str(home))
-    thread_root = tmp_path / "threads" / "t1" / "user-data"
-    thread_data = {f"{name}_path": str(thread_root / name) for name in ("workspace", "uploads", "outputs")}
-    for path in thread_data.values():
-        Path(path).mkdir(parents=True)
-    workspace = str(Path(thread_data["workspace_path"]).resolve())
-    sandbox = LocalSandbox(
-        id="local",
-        path_mappings=[PathMapping(container_path=f"{VIRTUAL_PATH_PREFIX}/workspace", local_path=workspace)],
-    )
-    runtime = SimpleNamespace(
-        state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data},
-        context={"thread_id": "t1"},
-        config={},
-    )
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
-
-    # The real shell can read the synthetic file; the public tool must stop it.
-    assert "host-private-key" in sandbox.execute_command(command)
-    result = bash_tool.func(runtime=runtime, description="read key", command=command)
-
-    assert "host-private-key" not in result
-    assert rejected in result
-
-
-def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> None:
-    runtime = SimpleNamespace(
-        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
-        context={"thread_id": "thread-1"},
-    )
-
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
-        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("host bash should not execute")),
-    )
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: False)
 
     result = bash_tool.func(
         runtime=runtime,
@@ -1477,60 +1379,6 @@ def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> 
     )
 
     assert "Host bash execution is disabled" in result
-
-
-def test_bash_tool_description_scopes_environment_detection_to_local_host_bash() -> None:
-    description = bash_tool.description
-
-    assert "local host via host bash" in description
-    assert "inspect the current environment instead of" in description
-    assert "`uname -s`" in description
-    assert "`sw_vers`" in description
-    assert "`uname -a`" in description
-    assert "`/etc/os-release` only when the active" in description
-    assert "sandbox policy permits it" in description
-    assert "do not repeat the rejected command" in description
-    assert "otherwise use allowed virtual paths or explain the restriction" in description
-
-
-def test_bash_tool_guides_recovery_after_host_path_rejection(monkeypatch) -> None:
-    runtime = SimpleNamespace(
-        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
-        context={"thread_id": "thread-1"},
-    )
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
-        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
-    )
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
-
-    result = bash_tool.func(runtime=runtime, description="detect the OS", command="cat /etc/os-release")
-
-    assert "For environment questions, use command-only probes" in result
-    assert "Do not repeat the rejected path" in result
-
-
-def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) -> None:
-    runtime = SimpleNamespace(
-        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
-        context={"thread_id": "thread-1"},
-    )
-
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
-        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
-    )
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
-
-    result = bash_tool.func(
-        runtime=runtime,
-        description="run command",
-        command="cat ../uploads/secret.txt",
-    )
-
-    assert "path traversal" in result
 
 
 # ---------- Skills path tests ----------
@@ -1759,34 +1607,6 @@ def test_mask_local_paths_in_output_hides_acp_workspace_host_paths() -> None:
 
         assert acp_host not in masked
         assert "/mnt/acp-workspace/hello.py" in masked
-
-
-# ---------- _apply_cwd_prefix ----------
-
-
-def test_apply_cwd_prefix_prepends_workspace() -> None:
-    """Command is prefixed with cd <workspace> && when workspace_path is set."""
-    result = _apply_cwd_prefix("ls -la", _THREAD_DATA)
-    assert result.startswith("cd ")
-    assert "ls -la" in result
-    assert "/tmp/deer-flow/threads/t1/user-data/workspace" in result
-
-
-def test_apply_cwd_prefix_no_thread_data() -> None:
-    """Command is returned unchanged when thread_data is None."""
-    assert _apply_cwd_prefix("ls -la", None) == "ls -la"
-
-
-def test_apply_cwd_prefix_missing_workspace_path() -> None:
-    """Command is returned unchanged when workspace_path is absent from thread_data."""
-    assert _apply_cwd_prefix("ls -la", {}) == "ls -la"
-
-
-def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
-    """Workspace path containing spaces is properly shell-quoted."""
-    thread_data = {**_THREAD_DATA, "workspace_path": "/tmp/my workspace/t1"}
-    result = _apply_cwd_prefix("echo hello", thread_data)
-    assert result == "cd '/tmp/my workspace/t1' && echo hello"
 
 
 def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None:

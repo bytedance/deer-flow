@@ -92,7 +92,7 @@ The following tools interact with the sandbox filesystem. They require a sandbox
 | `grep`        | Search file contents                                                              |
 | `write_file`  | Write content to a file                                                           |
 | `str_replace` | Replace a string in a file                                                        |
-| `bash`        | Execute a shell command (requires `allow_host_bash: true` or a container sandbox) |
+| `bash`        | Execute a shell command in an isolated sandbox |
 
 These are configured in `config.yaml` under `tools:`:
 
@@ -277,10 +277,10 @@ tools:
   - name: web_fetch
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
-    api_key: $JINA_API_KEY # optional; anonymous usage has rate limits
 ```
 Converts web pages to clean Markdown. Works without an API key at reduced rate
-limits.
+limits; set `JINA_API_KEY` in `.env` for higher limits. The tool reads only that
+variable, not an `api_key` field.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

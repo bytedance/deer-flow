@@ -11,6 +11,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,8 +34,15 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
     import msvcrt
 
+
+@dataclass(slots=True)
+class _ProcessLockEntry:
+    lock: threading.RLock
+    refcount: int = 0
+
+
 _locks_guard = threading.Lock()
-_process_locks: dict[Path, threading.RLock] = {}
+_process_locks: dict[Path, _ProcessLockEntry] = {}
 _held_projection_locks = threading.local()
 _MANIFEST_VERSION = 1
 _MAX_REBUILD_ATTEMPTS = 2
@@ -71,15 +79,19 @@ def get_skill_projection_paths(storage: SkillStorage) -> SkillProjectionPaths:
     )
 
 
-def get_thread_skill_projection_paths(storage: SkillStorage, thread_id: str) -> SkillProjectionPaths:
+def get_thread_skill_projection_paths(storage: SkillStorage, thread_id: str, *, projection_user_id: str | None = None) -> SkillProjectionPaths:
     """Return stable category roots for one user's thread policy view."""
     from deerflow.config.paths import get_paths
 
-    paths = getattr(storage, "_paths", None) or get_paths()
-    user_id = getattr(storage, "user_id", None)
-    if user_id is None:
-        raise ValueError("Thread skill projections require user-scoped skill storage")
-    root = paths.thread_skills_view_dir(thread_id, user_id=user_id)
+    if projection_user_id is None:
+        projection_user_id = getattr(storage, "user_id", None)
+        if projection_user_id is None:
+            raise ValueError("Thread skill projections require user-scoped skill storage")
+        paths = getattr(storage, "_paths", None) or get_paths()
+    else:
+        # Providers find a request projection at the run user's thread path.
+        paths = get_paths()
+    root = paths.thread_skills_view_dir(thread_id, user_id=projection_user_id)
     return SkillProjectionPaths(
         public=root / SkillCategory.PUBLIC.value,
         custom=root / SkillCategory.CUSTOM.value,
@@ -94,28 +106,42 @@ def thread_skill_projection_exists(storage: SkillStorage, thread_id: str) -> boo
     return paths.public.parent.exists()
 
 
-def _lock_for(path: Path) -> threading.RLock:
-    resolved = path.resolve()
+@contextmanager
+def _hold_process_lock(key: Path, *, deadline: float | None, check=None) -> Iterator[None]:
     with _locks_guard:
-        return _process_locks.setdefault(resolved, threading.RLock())
+        entry = _process_locks.get(key)
+        if entry is None:
+            entry = _ProcessLockEntry(threading.RLock())
+            _process_locks[key] = entry
+        # Count waiters before releasing the guard so they share one lock with later callers.
+        entry.refcount += 1
+
+    process_lock = entry.lock
+    try:
+        while not process_lock.acquire(timeout=0.05):
+            if check:
+                check()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Skill projection lock timeout")
+        try:
+            yield
+        finally:
+            process_lock.release()
+    finally:
+        with _locks_guard:
+            entry.refcount -= 1
+            if entry.refcount == 0 and _process_locks.get(key) is entry:
+                _process_locks.pop(key)
 
 
 @contextmanager
 def _projection_lock(root: Path, *, timeout: float | None = None, check=None) -> Iterator[None]:
     """Serialize projection replacement in-process and across POSIX workers."""
-    import time
-
     lock_path = root.parent / f".{root.name}.projection.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    process_lock = _lock_for(lock_path)
     key = lock_path.resolve()
     deadline = None if timeout is None else time.monotonic() + timeout
-    while not process_lock.acquire(timeout=0.05):
-        if check:
-            check()
-        if deadline is not None and time.monotonic() >= deadline:
-            raise TimeoutError("Skill projection lock timeout")
-    try:
+    with _hold_process_lock(key, deadline=deadline, check=check):
         held = getattr(_held_projection_locks, "paths", None)
         if held is None:
             held = _held_projection_locks.paths = set()
@@ -152,8 +178,6 @@ def _projection_lock(root: Path, *, timeout: float | None = None, check=None) ->
                 else:  # pragma: no cover - Windows
                     lock_file.seek(0)
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-    finally:
-        process_lock.release()
 
 
 def _copy_into_view(source: str, target: str, *, follow_symlinks: bool = True) -> str:
@@ -362,14 +386,14 @@ def _update_tree_digest(
             if entry.is_symlink():
                 kind = "link"
                 if follow_package_directory_symlinks and relative_root == Path(".") and entry.is_dir(follow_symlinks=True):
-                    digest.update(f"{label}:{relative.as_posix()}:target:{Path(entry.path).resolve(strict=False)}\0".encode())
+                    digest.update(f"{label}:{relative.as_posix()}:target:{Path(entry.path).resolve(strict=False)}\0".encode(errors="surrogatepass"))
                     child_dirs.append((Path(entry.path), relative))
             elif entry.is_dir(follow_symlinks=False):
                 kind = "dir"
                 child_dirs.append((Path(entry.path), relative))
             else:
                 kind = "file"
-            digest.update((f"{label}:{relative.as_posix()}:{kind}:{metadata.st_ino}:{metadata.st_mode}:{metadata.st_size}:{metadata.st_mtime_ns}\0").encode())
+            digest.update((f"{label}:{relative.as_posix()}:{kind}:{metadata.st_ino}:{metadata.st_mode}:{metadata.st_size}:{metadata.st_mtime_ns}\0").encode(errors="surrogatepass"))
         stack.extend(reversed(child_dirs))
 
 
@@ -517,8 +541,16 @@ def _thread_source_signature(
     """Sign every input that changes a thread's effective skill view."""
     digest = hashlib.sha256()
     digest.update(f"policy-version:{_THREAD_PROJECTION_POLICY_VERSION}\0".encode())
-    digest.update(f"public:{_source_signature(storage, 'public')}\0".encode())
-    digest.update(f"user:{_source_signature(storage, 'user')}\0".encode())
+    host_root = storage.get_skills_root_path()
+    digest.update(f"host-root:{host_root}\0".encode())
+    if getattr(storage, "user_id", None) is None:
+        # Local request catalogs keep every category under their own host root.
+        for category in SkillCategory:
+            _update_tree_digest(digest, host_root / category.value, category.value, follow_package_directory_symlinks=True)
+        digest.update(json.dumps(_extensions_state(), sort_keys=True, separators=(",", ":")).encode())
+    else:
+        digest.update(f"public:{_source_signature(storage, 'public')}\0".encode())
+        digest.update(f"user:{_source_signature(storage, 'user')}\0".encode())
     policy = None if allowed_skills is None else sorted(allowed_skills)
     digest.update(json.dumps(policy, separators=(",", ":"), ensure_ascii=True).encode())
     return digest.hexdigest()
@@ -703,30 +735,35 @@ def ensure_thread_skill_projection(
     storage: SkillStorage,
     thread_id: str,
     allowed_skills: set[str] | None,
+    *,
+    projection_user_id: str | None = None,
 ) -> SkillProjectionPaths | None:
     from deerflow.skills.mutations.guard import managed_global_read, managed_read
 
     # Global -> owner -> thread. No fresh-view fast path bypasses recovery.
     with managed_global_read(storage):
         with managed_read(storage):
-            return _ensure_thread_skill_projection(storage, thread_id, allowed_skills)
+            return _ensure_thread_skill_projection(storage, thread_id, allowed_skills, projection_user_id=projection_user_id)
 
 
 def _ensure_thread_skill_projection(
     storage: SkillStorage,
     thread_id: str,
     allowed_skills: set[str] | None,
+    *,
+    projection_user_id: str | None = None,
 ) -> SkillProjectionPaths | None:
     """Ensure the filesystem view for one run's effective Agent skill policy.
 
     ``None`` keeps the existing shared projection for threads that have never
     needed policy isolation. Once a thread has a scoped view, later unrestricted
     runs rebuild that same stable mount with all enabled skills so switching
-    agents cannot leave the thread accidentally restricted.
+    agents cannot leave the thread accidentally restricted. An explicit
+    projection owner selects the request catalog even without an allowlist.
     """
-    paths = get_thread_skill_projection_paths(storage, thread_id)
+    paths = get_thread_skill_projection_paths(storage, thread_id, projection_user_id=projection_user_id)
     scope_root = paths.public.parent
-    if allowed_skills is None and not scope_root.exists():
+    if projection_user_id is None and allowed_skills is None and not scope_root.exists():
         return None
 
     try:

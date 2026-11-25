@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage
 
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
+SUBAGENT_RESULT_MESSAGE_NAME = "subagent-result"
 
 #: Server-owned mark the Gateway stamps on an untrusted caller's message when it
 #: carries a framework marker (``hide_from_ui``, a ``summary`` name) that would
@@ -17,6 +18,59 @@ SUMMARY_MESSAGE_NAME = "summary"
 #: the trust boundary.  Stripping the marker instead would unhide three
 #: legitimate frontend senders (quoted context, sidecar context, agent save).
 UNTRUSTED_INPUT_KEY = "untrusted_input"
+
+#: Server-owned mark on history copied in from someone else's conversation; the
+#: value names the source (``"share"``).  The model still sees the copied turns,
+#: but memory capture skips them: the importer did not say them, and extraction
+#: would otherwise record the other person's statements as the importer's facts.
+IMPORTED_HISTORY_KEY = "deerflow_imported_history"
+
+#: Server-owned thread-state channel set on a thread whose history was copied
+#: from someone else's conversation; the value names the source (``"share"``).
+#: It lives in state rather than thread metadata so that every checkpoint, a
+#: compacted head and a branch carry it: compaction removes the copied messages
+#: and their marks, and memory capture must still know the thread is a copy.
+IMPORTED_HISTORY_CHANNEL = "imported_history"
+
+#: :data:`IMPORTED_HISTORY_CHANNEL` value for a copy whose copied turns could
+#: not be told apart from the owner's: the history the import wrote is no longer
+#: readable. Memory capture skips such a thread rather than guess.
+IMPORTED_HISTORY_UNRESOLVED = "unresolved"
+
+
+def without_imported_history(messages: list[Any]) -> list[Any]:
+    """Drop messages carrying :data:`IMPORTED_HISTORY_KEY`; any truthy value counts."""
+    kept = []
+    for message in messages:
+        kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(kwargs, Mapping) and kwargs.get(IMPORTED_HISTORY_KEY):
+            continue
+        kept.append(message)
+    return kept
+
+
+#: Mark on queued memory copies, never on graph state: the conversation they
+#: come from continues history copied from someone else. An assistant reply can
+#: restate that person's details, so extraction must not read them as the user's.
+FOLLOWS_IMPORTED_HISTORY_KEY = "deerflow_follows_imported_history"
+
+
+def own_messages_for_memory(messages: list[Any], imported_history: object = None) -> list[Any]:
+    """Drop imported history and mark the remaining copies when the thread is a copy.
+
+    *imported_history* is the thread's :data:`IMPORTED_HISTORY_CHANNEL` value.
+    The thread also counts as a copy when a message carries the import mark,
+    which covers state written before the channel existed. Nothing is
+    returned for :data:`IMPORTED_HISTORY_UNRESOLVED`.
+    """
+    if imported_history == IMPORTED_HISTORY_UNRESOLVED:
+        return []
+    own = without_imported_history(messages)
+    is_copy = len(own) != len(messages) or bool(imported_history)
+    if not is_copy:
+        return own
+    return [message.model_copy(update={"additional_kwargs": {**message.additional_kwargs, FOLLOWS_IMPORTED_HISTORY_KEY: True}}) for message in own]
+
 
 #: Suffix ``DynamicContextMiddleware``'s ID-swap gives the real user message; the
 #: reminder SystemMessage takes the original id so ``add_messages`` can replace it

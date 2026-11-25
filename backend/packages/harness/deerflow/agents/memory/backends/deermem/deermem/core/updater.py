@@ -40,6 +40,10 @@ from .storage import (
 logger = logging.getLogger(__name__)
 
 
+class DuplicateFactIdError(ValueError):
+    """A backup contains more than one entry for a fact ID."""
+
+
 # Thread pool for offloading sync memory updates when called from an async
 # context.  Unlike the previous asyncio.run() approach, this runs *sync*
 # model.invoke() calls — no event loop is created, so the langchain async
@@ -858,6 +862,18 @@ def _memory_language_preference(messages: list[Any]) -> str:
     return ""
 
 
+def _imported_history_note(messages: list[Any]) -> str:
+    # Set by the host on queued copies; DeerMem only reads the flag.
+    if any((getattr(message, "additional_kwargs", {}) or {}).get("deerflow_follows_imported_history") for message in messages):
+        return (
+            "Note: this conversation continues a copy of another person's conversation, which is not shown here. "
+            "When the assistant repeats or summarizes details from that copy (a name, employer, role, health details, "
+            "preferences or standing instructions), they belong to the other person. Never record them as facts about "
+            "the user; record only what the user says about themselves."
+        )
+    return ""
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -942,6 +958,8 @@ class MemoryUpdater:
             "access_half_life_days": self._config.eviction_access_half_life_days,
             "correction_reserved_fraction": self._config.eviction_correction_reserved_fraction,
             "correction_reserved_max": self._config.eviction_correction_reserved_max,
+            "reserved_categories": self._config.eviction_reserved_categories,
+            "decay_exempt_categories": self._config.eviction_decay_exempt_categories,
         }
         decision = select_facts_for_capacity(
             facts,
@@ -1000,6 +1018,15 @@ class MemoryUpdater:
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
                 raise ValueError("fact.revision must be an integer >= 1")
         memory_data = normalize_memory_data(memory_data)
+        # Duplicate detection must cover BOTH storage paths (the apply_changes
+        # override and the base save() path) and run before capacity selection,
+        # which can drop one of two same-id entries and hide the duplicate.
+        seen_import_ids: set[str] = set()
+        for fact in memory_data.get("facts", []):
+            fact_id = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
+            if fact_id in seen_import_ids:
+                raise DuplicateFactIdError(f"Duplicate fact id {fact_id!r} in memory import")
+            seen_import_ids.add(fact_id)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
             incoming_facts = copy.deepcopy(memory_data.get("facts", []))
@@ -1413,12 +1440,12 @@ class MemoryUpdater:
             "consolidation_section": consolidation_section,
         }
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
-        language_preference = _memory_language_preference(messages)
-        if language_preference:
-            # Per-run preference is data, not part of the cached system text.
+        # Per-run notes are data, not part of the cached system text.
+        notes = "\n\n".join(note for note in (_memory_language_preference(messages), _imported_history_note(messages)) if note)
+        if notes:
             for index, message in enumerate(prompt):
                 if message.type == "human":
-                    prompt[index] = message.model_copy(update={"content": f"{language_preference}\n\n{message.content}"})
+                    prompt[index] = message.model_copy(update={"content": f"{notes}\n\n{message.content}"})
                     break
         if config.prompt_prepend or config.prompt_append:
             # Extend trusted instructions only, after formatting the original
@@ -1868,6 +1895,15 @@ class MemoryUpdater:
             # at recent turns, a veto answers for the batch.
             batch_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir, window=None)
             batch_text = format_conversation_for_update(feed_messages)
+            project = None
+            if callable(self._config.project_memory):
+                try:
+                    project = self._config.project_memory(feed_messages, thread_id, user_id)
+                except Exception:
+                    logger.warning("Project memory preparation failed; deferring extraction", exc_info=True)
+                    return False
+            # The user-profile pre-screen cannot decide whether a batch contains
+            # project facts. An active project pool therefore vetoes its skip.
             # The memory judge (when the host injected one) runs here: still off the
             # turn path, before any LLM call, on exactly the text the extractor would
             # see -- no second truncation. ``judge=False`` (the shutdown drain) and a
@@ -1886,7 +1922,9 @@ class MemoryUpdater:
             verdict_payload = getattr(verdict, "payload", None)
             if isinstance(verdict_payload, dict):
                 metrics.update({key: value for key, value in verdict_payload.items() if value is not None})
-            if getattr(verdict, "skip", False):
+            if getattr(verdict, "skip", False) and project is not None:
+                metrics["project_memory_prescreen_veto"] = True
+            if getattr(verdict, "skip", False) and project is None:
                 # The pre-screen decided this batch is not worth a call: consume it
                 # and advance the watermark (nothing else runs -- no prompt, no
                 # invoke, no apply). Advancing is what makes the saving real; leaving
@@ -1914,6 +1952,10 @@ class MemoryUpdater:
                 return False
 
             current_memory, prompt = prepared
+            if project is not None:
+                prompt = list(prompt)
+                prompt[0] = prompt[0].model_copy(update={"content": prompt[0].content + "\n\n" + project["instruction"]})
+                prompt[-1] = prompt[-1].model_copy(update={"content": prompt[-1].content + "\n\n" + project["context"]})
             model_name = self._config.model.model
             model = self._llm
             if model is None:
@@ -1970,6 +2012,16 @@ class MemoryUpdater:
                 metrics=metrics,
                 signals=frozenset(feed_signals),
             )
+            if success and project is not None:
+                try:
+                    project["apply"](_parse_memory_update_response(response.content), self._config.fact_confidence_threshold)
+                except Exception:
+                    # The user pool has committed. Consume this batch rather than
+                    # replaying its paid extraction and user writes on every turn.
+                    metrics["project_memory_apply_success"] = False
+                    logger.warning("Project memory apply failed after user memory committed; consuming extraction batch", exc_info=True)
+                else:
+                    metrics["project_memory_apply_success"] = True
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
                 # suffix, so this is messages[-1]). Skipped on the emergency
@@ -2166,7 +2218,7 @@ class MemoryUpdater:
         user_updates = update_data.get("user", {})
         for section in ["workContext", "personalContext", "topOfMind", "cognitiveStyle"]:
             section_data = user_updates.get(section, {})
-            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not isinstance(section_data.get("summary"), str) or not section_data["summary"]:
                 continue
             rejection_reason = _summary_scope_gate_reason(section_data)
             if rejection_reason is not None:
@@ -2181,7 +2233,7 @@ class MemoryUpdater:
         history_updates = update_data.get("history", {})
         for section in ["recentMonths", "earlierContext", "longTermBackground"]:
             section_data = history_updates.get(section, {})
-            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not isinstance(section_data.get("summary"), str) or not section_data["summary"]:
                 continue
             rejection_reason = _summary_scope_gate_reason(section_data)
             if rejection_reason is not None:

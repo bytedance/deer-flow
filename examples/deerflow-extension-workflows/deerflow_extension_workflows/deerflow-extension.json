@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "community.workflows",
+  "locales": {
+    "zh-CN": {
+      "title": "脚本工作流",
+      "description": "运行可检查的 Agent 脚本工作流，跟踪步骤进度，并按保留版本确认成果。",
+      "usage": [
+        {
+          "title": "打开脚本工作流",
+          "description": "进入工作流页面，准备一个受支持的 JavaScript 工作流及其输入参数。"
+        },
+        {
+          "title": "提交并查看执行过程",
+          "description": "启动后查看步骤进度、Agent 子会话和执行结果；需要人工确认的步骤会等待你的处理。"
+        },
+        {
+          "title": "按保留版本确认成果",
+          "description": "检查实际保留的输出版本，再确认或继续工作流。重启恢复取决于工作流和部署是否支持。"
+        }
+      ],
+      "requirements": [
+        "管理员已配置可调用的 Agent 和持久化存储；Gateway 运行在 Linux 或 macOS。"
+      ]
+    },
+    "en-US": {
+      "title": "Script workflows",
+      "description": "Run inspectable Agent workflows, track steps and review retained output versions.",
+      "usage": [
+        {
+          "title": "Open Script workflows",
+          "description": "Open the workflow page and prepare a supported JavaScript workflow and its input arguments."
+        },
+        {
+          "title": "Run and inspect",
+          "description": "Start the workflow and inspect steps, Agent conversations and results. Human checkpoints wait for your response."
+        },
+        {
+          "title": "Review retained output",
+          "description": "Inspect the retained output version before approving or continuing. Restart recovery depends on workflow and deployment compatibility."
+        }
+      ],
+      "requirements": [
+        "The administrator must configure allowed Agents and persistent storage on a Linux or macOS Gateway."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-workflows#readme"
+}

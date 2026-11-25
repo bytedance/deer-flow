@@ -3103,7 +3103,8 @@ def test_stamp_turn_duration_recovers_from_non_mapping_additional_kwargs(caplog)
 # ── branch threads from completed assistant turns ─────────────────────────────
 
 
-def test_branch_thread_can_prepare_regenerate_without_branch_run_events() -> None:
+@pytest.mark.parametrize("source_checkpoint_count", [3, 473], ids=["short-turn", "long-turn"])
+def test_branch_thread_can_prepare_regenerate_without_branch_run_events(source_checkpoint_count: int) -> None:
     app, _store, checkpointer = _build_thread_app()
     app.include_router(thread_runs.router)
     source_thread_id = "source-regenerate"
@@ -3122,32 +3123,26 @@ def test_branch_thread_can_prepare_regenerate_without_branch_run_events() -> Non
     human = HumanMessage(id="human-1", content="Question", additional_kwargs={"run_id": source_run_id})
     ai = AIMessage(id="ai-1", content="Answer")
 
+    async def seed_turn(parent_config: dict) -> None:
+        for step in range(1, source_checkpoint_count):
+            messages = [human, ai] if step == source_checkpoint_count - 1 else [human]
+            parent_config = await _write_checkpoint(
+                checkpointer,
+                source_thread_id,
+                str(uuid6()),
+                messages,
+                step=step,
+                metadata={"created_at": "2026-07-05T00:00:00+00:00"},
+                parent_config=parent_config,
+            )
+
     with TestClient(app) as client:
         created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
         assert created.status_code == 200, created.text
 
         initial = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}))
         assert initial is not None
-        after_human = asyncio.run(
-            _write_checkpoint(
-                checkpointer,
-                source_thread_id,
-                str(uuid6()),
-                [human],
-                step=1,
-                parent_config=initial.config,
-            )
-        )
-        asyncio.run(
-            _write_checkpoint(
-                checkpointer,
-                source_thread_id,
-                str(uuid6()),
-                [human, ai],
-                step=2,
-                parent_config=after_human,
-            )
-        )
+        asyncio.run(seed_turn(initial.config))
 
         branch_response = client.post(
             f"/api/threads/{source_thread_id}/branches",
@@ -3181,6 +3176,24 @@ def test_branch_thread_can_prepare_regenerate_without_branch_run_events() -> Non
     )
     assert branch_base is not None
     assert branch_base.checkpoint.get("channel_values", {}).get("messages", []) == []
+
+
+def test_branch_replay_deadline_returns_504_and_logs_exception(monkeypatch, caplog) -> None:
+    from app.gateway import checkpoint_lineage
+
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "source-replay-deadline"
+    monkeypatch.setattr(checkpoint_lineage, "_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id})
+        assert created.status_code == 200, created.text
+        _seed_branchable_thread(app, thread_id)
+        response = client.post(f"/api/threads/{thread_id}/branches", json={"message_id": "ai-1"})
+
+    assert response.status_code == 504, response.text
+    assert response.json()["detail"] == "Timed out resolving the checkpoint before the target user message"
+    assert any(thread_id in record.message and record.exc_info for record in caplog.records)
 
 
 def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> None:
@@ -4168,6 +4181,45 @@ def _create_extension_thread(client, checkpointer, custom_factory, mode, thread_
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize(
+    ("latest_todos", "expected_todos"),
+    [
+        ([{"content": "Verify the result", "status": "completed"}], [{"content": "Verify the result", "status": "completed"}]),
+        ([], []),
+        (None, None),
+        ([None, {"content": {"invalid": True}}, {"content": "Keep this task", "status": "pending"}], [{"content": "Keep this task", "status": "pending"}]),
+    ],
+)
+def test_history_head_preserves_current_todos(monkeypatch, mode, latest_todos, expected_todos) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"todo-head-{mode}"
+
+    async def write_todos():
+        accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        await accessor.aupdate(config, {"todos": [{"content": "Older task", "status": "pending"}]}, as_node="model")
+        await accessor.aupdate(config, {"todos": latest_todos}, as_node="model")
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        if latest_todos is not None:
+            asyncio.run(write_todos())
+        head_response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1})
+        history_response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert head_response.status_code == history_response.status_code == 200
+    history = history_response.json()
+    assert head_response.json() == history[:1]
+    if expected_todos is None:
+        assert "todos" not in history[0]["values"]
+    else:
+        assert history[0]["values"]["todos"] == expected_todos
+    assert len(history) > 1
+    assert all("todos" not in entry["values"] for entry in history[1:])
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
 def test_history_head_carries_goal_state_without_messages(monkeypatch, mode) -> None:
     """useStream rebuilds thread values from the head, so a goal set on /chats/new
     and a met-goal record must be there even before any message exists."""
@@ -4807,6 +4859,65 @@ def test_update_thread_state_real_mutation_graph_finishes_without_scheduling(mon
     assert body["values"]["artifacts"] == ["artifact-1"]
     assert body["values"]["title"] == "Renamed"
     assert body["next"] == []
+
+
+def _use_real_mutation_graph(monkeypatch) -> None:
+    real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None):
+        return real_mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("as_node", ["__start__", "__end__", "__interrupt__", "a:b", "a|b"])
+def test_update_thread_state_rejects_an_as_node_langgraph_cannot_compile(monkeypatch, mode, as_node) -> None:
+    """A node name the mutation graph cannot register is the client's input error, not a 500."""
+    import asyncio
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.checkpoint_channel_mode = mode
+    _use_real_mutation_graph(monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        created = client.post("/api/threads", json={"thread_id": "state-bad-node", "metadata": {}})
+        assert created.status_code == 200, created.text
+        response = client.post("/api/threads/state-bad-node/state", json={"values": {"title": "Renamed"}, "as_node": as_node})
+        state = client.get("/api/threads/state-bad-node/state")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"] == ["body", "as_node"]
+    assert state.status_code == 200, state.text
+    assert state.json()["values"].get("title") != "Renamed"
+
+    async def _count() -> int:
+        return len([item async for item in checkpointer.alist({"configurable": {"thread_id": "state-bad-node"}})])
+
+    assert asyncio.run(_count()) == 1
+
+
+@pytest.mark.parametrize(("as_node", "expected_writer"), [("custom_editor", "custom_editor"), ("", "manual_state_update"), (None, "manual_state_update")])
+def test_update_thread_state_keeps_accepting_compilable_as_node_values(monkeypatch, as_node, expected_writer) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    _use_real_mutation_graph(monkeypatch)
+    recorded: list[str] = []
+    real_boundary = threads.build_thread_checkpoint_state_mutation_accessor
+
+    async def recording_boundary(request, *, thread_id, as_node, checkpoint_id=None):
+        recorded.append(as_node)
+        return await real_boundary(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", recording_boundary)
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "state-good-node", "metadata": {}})
+        assert created.status_code == 200, created.text
+        response = client.post("/api/threads/state-good-node/state", json={"values": {"title": "Renamed"}, "as_node": as_node})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["values"]["title"] == "Renamed"
+    assert recorded == [expected_writer]
 
 
 def test_update_thread_state_forks_from_checkpoint_object(monkeypatch) -> None:
@@ -5490,6 +5601,35 @@ def test_move_thread_does_not_bump_updated_at(tmp_path):
         assert after == before
 
 
+def test_move_thread_deleted_after_the_move_is_404(tmp_path):
+    """A DELETE that lands between the move and its re-read is a 404, not a 500.
+
+    The move takes no thread lock, so a concurrent DELETE can remove the row
+    after ``set_project`` commits and before the route reads the record back.
+    """
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    store = app.state.thread_store
+    set_project = store.set_project
+    moves: list[bool] = []
+
+    async def set_project_then_concurrent_delete(thread_id, project_id, **kwargs):
+        moved = await set_project(thread_id, project_id, **kwargs)
+        moves.append(moved)
+        await store.delete(thread_id)
+        return moved
+
+    store.set_project = set_project_then_concurrent_delete
+    with TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}).json()["thread_id"]
+
+        response = client.post(f"/api/threads/{thread_id}/move", json={"project_id": project["id"]})
+
+        assert moves == [True]
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"] == "Thread or project not found"
+
+
 def _seed_branchable_thread(app: FastAPI, thread_id: str) -> None:
     """Write a three-turn conversation so a middle AI turn can be branched."""
     human_1 = HumanMessage(id="human-1", content="First question")
@@ -5676,6 +5816,58 @@ def test_create_thread_marks_a_host_origin_from_request_state() -> None:
         response = client.post("/api/threads", json={"thread_id": "ext-thread", "metadata": {"title": "t"}})
     assert response.status_code == 200, response.text
     assert response.json()["metadata"] == {"title": "t", DEERFLOW_ORIGIN_KEY: {"kind": "extension", "namespace": "community.teams"}}
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        {"parents": "x"},
+        {"step": "zero"},
+        {"source": "loop", "writes": {"runtime_run_duration": {"run-1": 1.0}}},
+        {"counters_since_delta_snapshot": "x"},
+        {CHECKPOINT_AGENT_NAME_METADATA_KEY: "forged-agent"},
+    ],
+    ids=["parents", "step", "source-writes", "delta-counters", "agent-binding"],
+)
+def test_create_thread_keeps_server_checkpoint_metadata(monkeypatch, forged) -> None:
+    """Client metadata cannot supply the keys the server reads back from the root checkpoint.
+
+    A bad ``parents`` breaks every history read, a bad ``step`` or delta
+    counter breaks every later turn and state update, and a forged agent
+    binding is copied into the next state rewrite as if the server wrote it.
+    """
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.run_event_store = MemoryRunEventStore()
+    graph_factory = _wire_extension_agent(monkeypatch, app, checkpointer, "full")
+    config = {"configurable": {"thread_id": "forged-meta", "checkpoint_ns": ""}}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "forged-meta", "metadata": {**forged, "title": "mine"}})
+        assert created.status_code == 200, created.text
+
+        root = asyncio.run(checkpointer.aget_tuple(config)).metadata
+        assert {key: root[key] for key in ("step", "source", "writes", "parents")} == {"step": -1, "source": "input", "writes": None, "parents": {}}
+        assert "counters_since_delta_snapshot" not in root
+        assert CHECKPOINT_AGENT_NAME_METADATA_KEY not in root
+        assert root["title"] == "mine"
+        for response in (client.get("/api/threads/forged-meta"), client.get("/api/threads/forged-meta/state"), client.post("/api/threads/forged-meta/history", json={})):
+            assert response.status_code == 200, response.text
+
+        updated = client.post("/api/threads/forged-meta/state", json={"values": {"title": "renamed"}})
+        assert updated.status_code == 200, updated.text
+        assert CHECKPOINT_AGENT_NAME_METADATA_KEY not in asyncio.run(checkpointer.aget_tuple(config)).metadata
+
+    graph = graph_factory()
+    graph.checkpointer = checkpointer
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hi")]}, config))
+
+    with TestClient(app) as client:
+        history = client.post("/api/threads/forged-meta/history", json={})
+        assert history.status_code == 200, history.text
+        assert history.json()[-1]["metadata"]["step"] == -1
+        assert all(isinstance(entry["metadata"]["step"], int) for entry in history.json())
 
 
 def _unread_app(tmp_path, *, owner_check_passes: bool = True):

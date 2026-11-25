@@ -7,9 +7,11 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from support.symlinks import symlink_or_skip
 
@@ -26,7 +28,7 @@ from app.channels.dingtalk import (
     _normalize_conversation_type,
     _parse_allowed_users,
 )
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
 
@@ -1207,11 +1209,12 @@ class TestGroupMessageMarkdownFormat:
                     return FakeResponse()
 
             with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
-                await channel._send_group_message("bot", "conv1", "hello")
+                await channel._send_group_message("bot", "conv1", "Use `` `--flag` ``.")
 
             assert len(captured_json) == 1
             payload = captured_json[0]
             assert payload["msgKey"] == "sampleMarkdown"
+            assert json.loads(payload["msgParam"])["text"] == "Use **`--flag`**."
 
         _run(go())
 
@@ -1257,10 +1260,22 @@ class TestAdaptMarkdownForDingtalk:
         assert "```" not in result
         assert "> **bash**" in result
 
-    def test_inline_code_to_bold(self):
-        text = "Use `pip install` to install"
-        result = _adapt_markdown_for_dingtalk(text)
-        assert result == "Use **pip install** to install"
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Use `pip install` to install", "Use **pip install** to install"),
+            ("Use ``a`b`` and `pwd`.", "Use **a`b** and **pwd**."),
+            ("Use ```a``b```.", "Use **a``b**."),
+            ("Use `` cmd ``.", "Use **cmd**."),
+            ("Use `` `--flag` ``.", "Use **`--flag`**."),
+            ("Keep `  cmd  `.", "Keep ** cmd **."),
+            ("Keep ` cmd` and `   `.", "Keep ** cmd** and **   **."),
+            ("Keep ``unfinished and use `pwd`.", "Keep ``unfinished and use **pwd**."),
+            ("Keep ``one\ntwo`` across lines.", "Keep ``one\ntwo`` across lines."),
+        ],
+    )
+    def test_inline_code_to_bold(self, text, expected):
+        assert _adapt_markdown_for_dingtalk(text) == expected
 
     def test_horizontal_rule_to_unicode(self):
         text = "Above\n---\nBelow"
@@ -1289,6 +1304,24 @@ class TestAdaptMarkdownForDingtalk:
 
 
 class TestConvertMarkdownTable:
+    @pytest.mark.parametrize("separator", ["|---|---|", "|---|---|---|---|", "|---||---|"])
+    def test_invalid_three_column_table_preserves_text(self, separator):
+        text = f"| A | B | C |\n{separator}\n| 1 | 2 | 3 |"
+        assert _adapt_markdown_for_dingtalk(text) == text
+
+    def test_table_in_fenced_code_remains_literal(self):
+        text = "```text\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        assert _adapt_markdown_for_dingtalk(text) == "> **text**\n> | A | B |\n> |---|---|\n> | 1 | 2 |\n"
+
+    def test_tab_padded_delimiter_cells(self):
+        text = "| Key | Value |\n|\t---\t|\t:---:\t|\n| a | b |"
+        assert _adapt_markdown_for_dingtalk(text) == "> **Key**: a\n> **Value**: b\n"
+
+    @pytest.mark.parametrize("separator", ["| : | : |", "| --- | |", "| -- -- | --- |"], ids=["missing-hyphens", "empty-cell", "internal-space"])
+    def test_invalid_delimiter_cells_preserve_text(self, separator):
+        text = f"| Key | Value |\n{separator}\n| a | b |"
+        assert _adapt_markdown_for_dingtalk(text) == text
+
     @pytest.mark.parametrize(
         ("header", "row", "expected"),
         [
@@ -1303,6 +1336,13 @@ class TestConvertMarkdownTable:
     )
     def test_cell_boundaries_preserved(self, header, row, expected):
         text = f"{header}\n|---|---|\n{row}"
+        assert _convert_markdown_table(text) == expected
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 4])
+    def test_backslashes_before_pipe(self, count):
+        prefix = "path" + "\\" * count
+        text = f"| A | B |\n|---|---|\n|{prefix}|suffix|"
+        expected = f"> **A**: {prefix}|suffix\n" if count % 2 else f"> **A**: {prefix}\n> **B**: suffix\n"
         assert _convert_markdown_table(text) == expected
 
     def test_fallback_adapter_preserves_table_values(self):
@@ -3356,3 +3396,212 @@ class TestDingTalkDownloadGuardLogging:
 
         _run(go())
         assert any("inbound file download returned no content" in r.message and "photo.png" in r.message for r in caplog.records)
+
+
+class TestSendFileDeliveryVerification:
+    """``send_file`` must verify the recipient actually received the file.
+
+    DingTalk's P2P batch-send API returns HTTP 200 with ``processQueryKey``
+    even when the single recipient was rejected (``invalidStaffIdList``) or
+    flow-controlled (``flowControlledStaffIdList``).  The old code only
+    checked ``raise_for_status`` and always returned ``True``.
+    """
+
+    _STAFF_ID = "user_001"
+    _ROBOT = "robot_001"
+
+    def _make_channel(self) -> DingTalkChannel:
+        channel = DingTalkChannel(MessageBus(), config={})
+        channel._client_id = self._ROBOT
+        channel._upload_media = AsyncMock(return_value="media_001")
+        channel._get_access_token = AsyncMock(return_value="token_001")
+        return channel
+
+    def _make_msg(self, staff_id: str = _STAFF_ID, group: bool = False) -> OutboundMessage:
+        return OutboundMessage(
+            channel_name="dingtalk",
+            chat_id=staff_id,
+            thread_id="thread_001",
+            text="",
+            metadata={"conversation_type": _CONVERSATION_TYPE_GROUP if group else _CONVERSATION_TYPE_P2P},
+        )
+
+    def _make_attachment(self, size: int = 10) -> ResolvedAttachment:
+        return ResolvedAttachment(
+            virtual_path="/mnt/file.pdf",
+            actual_path=Path("/tmp/file.pdf"),
+            filename="file.pdf",
+            mime_type="application/pdf",
+            size=size,
+            is_image=False,
+        )
+
+    def _run_send(
+        self,
+        payload,
+        status: int = 200,
+        staff_id: str = _STAFF_ID,
+        group: bool = False,
+    ) -> tuple[bool, list[dict]]:
+        """Run ``send_file`` against a fake HTTP response; return (result, captured_requests)."""
+        from unittest.mock import patch
+
+        channel = self._make_channel()
+        msg = self._make_msg(staff_id=staff_id, group=group)
+        attachment = self._make_attachment()
+        captured: list[dict] = []
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def post(self, url, **kwargs):
+                captured.append(kwargs.get("json", {}))
+                request = httpx.Request("POST", url)
+                if isinstance(payload, json.JSONDecodeError):
+                    return httpx.Response(status, content=b"{", request=request)
+                return httpx.Response(status, json=payload, request=request)
+
+        with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+            result = _run(channel.send_file(msg, attachment))
+        return result, captured
+
+    # -- success paths -------------------------------------------------
+
+    def test_p2p_success_returns_true(self):
+        result, _ = self._run_send({"processQueryKey": "key_001"})
+        assert result is True
+
+    def test_group_success_returns_true(self):
+        result, _ = self._run_send({"processQueryKey": "key_001"}, group=True)
+        assert result is True
+
+    # -- partial delivery failures (the core bug) ---------------------
+
+    def test_p2p_invalid_recipient_returns_false(self):
+        """Target user in invalidStaffIdList -> not delivered."""
+        result, _ = self._run_send({"processQueryKey": "key_001", "invalidStaffIdList": [self._STAFF_ID]})
+        assert result is False
+
+    def test_p2p_flow_controlled_returns_false(self):
+        """Target user in flowControlledStaffIdList -> not delivered."""
+        result, _ = self._run_send({"processQueryKey": "key_001", "flowControlledStaffIdList": [self._STAFF_ID]})
+        assert result is False
+
+    def test_p2p_other_user_invalid_target_ok_returns_true(self):
+        """Another user in the failure list must not affect our target."""
+        result, _ = self._run_send({"processQueryKey": "key_001", "invalidStaffIdList": ["other_user"]})
+        assert result is True
+
+    def test_p2p_both_lists_target_in_one_returns_false(self):
+        """Target in flowControlled but not invalid -> still a failure."""
+        result, _ = self._run_send(
+            {
+                "processQueryKey": "key_001",
+                "invalidStaffIdList": ["someone_else"],
+                "flowControlledStaffIdList": [self._STAFF_ID],
+            }
+        )
+        assert result is False
+
+    # -- group chat is not affected by P2P failure lists --------------
+
+    def test_group_ignores_invalid_list(self):
+        """Group endpoint has no per-user failure lists; key check only."""
+        result, _ = self._run_send(
+            {"processQueryKey": "key_001", "invalidStaffIdList": [self._STAFF_ID]},
+            group=True,
+        )
+        assert result is True
+
+    # -- missing or blank processQueryKey ------------------------------
+
+    def test_missing_process_key_returns_false(self):
+        result, _ = self._run_send({})
+        assert result is False
+
+    def test_blank_process_key_returns_false(self):
+        result, _ = self._run_send({"processQueryKey": ""})
+        assert result is False
+
+    def test_whitespace_process_key_returns_false(self):
+        result, _ = self._run_send({"processQueryKey": "  "})
+        assert result is False
+
+    def test_app_error_response_returns_false(self):
+        """DingTalk app-level error (no processQueryKey) -> not delivered."""
+        result, _ = self._run_send({"code": "sendMessage.model.notMatch"})
+        assert result is False
+
+    # -- malformed responses -------------------------------------------
+
+    def test_array_response_returns_false(self):
+        """Non-dict JSON body (array) -> conservative failure."""
+        result, _ = self._run_send(["not", "a", "dict"])
+        assert result is False
+
+    def test_bad_json_returns_false(self):
+        """Unparseable JSON body -> conservative failure."""
+        result, _ = self._run_send(json.JSONDecodeError("err", "", 0))
+        assert result is False
+
+    # -- HTTP errors ---------------------------------------------------
+
+    def test_http_400_returns_false(self):
+        result, _ = self._run_send({}, status=400)
+        assert result is False
+
+    def test_http_500_returns_false(self):
+        result, _ = self._run_send({}, status=500)
+        assert result is False
+
+    # -- non-list failure list types (defensive) -----------------------
+
+    def test_non_list_invalid_list_returns_false(self):
+        """Malformed failure lists must not be mistaken for accepted delivery."""
+        result, _ = self._run_send({"processQueryKey": "key_001", "invalidStaffIdList": "user_001"})
+        assert result is False
+
+    # -- upload / size / cancel guardrails -----------------------------
+
+    def test_upload_media_returns_none_returns_false(self):
+        channel = self._make_channel()
+        channel._upload_media = AsyncMock(return_value=None)
+        msg = self._make_msg()
+        attachment = self._make_attachment()
+        result = _run(channel.send_file(msg, attachment))
+        assert result is False
+
+    def test_oversized_attachment_returns_false(self):
+        from app.channels.dingtalk import _MAX_UPLOAD_SIZE_BYTES
+
+        channel = self._make_channel()
+        msg = self._make_msg()
+        attachment = self._make_attachment(size=_MAX_UPLOAD_SIZE_BYTES + 1)
+        result = _run(channel.send_file(msg, attachment))
+        assert result is False
+
+    def test_cancelled_error_propagates(self):
+        """asyncio.CancelledError must not be swallowed by the except block."""
+        channel = self._make_channel()
+        channel._upload_media = AsyncMock(side_effect=asyncio.CancelledError())
+        msg = self._make_msg()
+        attachment = self._make_attachment()
+        with pytest.raises(asyncio.CancelledError):
+            _run(channel.send_file(msg, attachment))
+
+    # -- request payload verification ---------------------------------
+
+    def test_p2p_sends_target_in_user_ids(self):
+        _, captured = self._run_send({"processQueryKey": "key_001"}, staff_id="user_42")
+        assert captured[0]["userIds"] == ["user_42"]
+        assert captured[0]["robotCode"] == self._ROBOT
+        assert captured[0]["msgKey"] == "sampleFile"
+
+    def test_group_sends_conversation_id_not_user_ids(self):
+        _, captured = self._run_send({"processQueryKey": "key_001"}, staff_id="ignored", group=True)
+        assert "openConversationId" in captured[0]
+        assert "userIds" not in captured[0]

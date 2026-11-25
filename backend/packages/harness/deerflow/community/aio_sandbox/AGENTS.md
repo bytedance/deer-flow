@@ -1,189 +1,91 @@
-# AIO Sandbox
+# AIO sandbox provider (`deerflow/community/aio_sandbox/`)
 
-## Stdin contracts per transport
+The container sandbox provider: local Docker and Apple Container, and remote Pods
+through the provisioner. It creates, reuses, quarantines and destroys sandboxes,
+and runs commands in them. General sandbox rules are in the
+[sandbox guide](../../sandbox/AGENTS.md).
 
-AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a
-PTY, while `/v1/bash` uses a subprocess pipe that stays open for writes. Keep
-persistent shell stdin unchanged: the Lark broker shim already ignores TTY
-input. Only fresh `_run_bash_exec` calls prefix the original command with
-`exec < /dev/null` so default stdin gets immediate EOF; explicit
-pipes/heredocs/files still override fd0. Those sessions are created and
-released per invocation, so the prefix never closes a reusable terminal or
-alters its state. Avoid brace-group/eval wrappers: they shift top-level
-parsing (alias/extglob timing), disturb `PIPESTATUS` across calls, can fire an
-`ERR` trap an extra time, or append a delimiter a trailing backslash consumes.
+## Verify
 
-The broker shim forwards pipe/file input only after EOF: an idle pipe exits
-124 without a broker request, and read errors fail rather than becoming empty
-input. Window overrides must be finite positive seconds, at most 600. Broker
-INFO logs contain argc/exit/elapsed only, never argument values.
+```bash
+cd backend
+python -m pytest tests -q -k "aio_sandbox or sandbox_quarantine or remote_sandbox or provisioner or lark_broker"
+make test-blocking-io
+```
 
-Regressions: `tests/test_aio_sandbox.py`, `tests/test_lark_broker.py`.
+## Ownership across Gateways
 
-## Command cancellation
+- **The ownership lease answers "who reaps this sandbox", not "who may use it".**
+  Authorization is a separate check.
+- **The store fails closed in both directions.** An unreadable owner is not
+  adopted, and an unconfirmed release is not treated as released.
+- **A delete marker is held for the whole stop**, so that a peer cannot adopt a
+  sandbox that is being destroyed. Adoption is a promotion of an existing record,
+  and a sandbox is active or warm, never both.
+- **The lease excludes peers, not this process.** Exclusion inside one process
+  comes from the local teardown reservation and the acquire epoch. Check again
+  after every round trip to the store.
+- **Renewal does not depend on `idle_timeout`.** A lapsed lease and a lost lease
+  are different results of `renew()`; keep them apart.
+- **The `memory` store is for a single instance.** Gateways that share containers
+  share the store and `DEER_FLOW_HOME`, which holds the quarantine records.
+- **`get()` never performs storage I/O.** It runs on hot paths.
 
-Managed bash uses existing async exec/poll APIs without retrying execution.
-Read only the current console entry; keep exit codes and persistent-shell stdin.
-Legacy Shell needs a same-line owner prefix. Poll by returned session/command identity; stop inherited owner processes through
-a separate fixed control command with pidfds. Missing command state or cleanup
-receipts fence reuse through existing quarantine. New output from a running
-command needs its next offset; empty polls retain the previous offsets.
-Markers support cooperative cleanup, not hostile-code isolation.
+## Absence, quarantine and reuse
 
-Scoped env calls register in the same scope table and hold its lock through
-fresh bash creation, execution, polling and cleanup. Only that private path
-skips the shared implicit-shell lock. Releasing entries reject admission and stay
-visible to close until drained; queued calls recheck identity. Keep same-scope
-ordering, fresh env sessions, cancellation ownership and closed admission.
-Close also retains draining entries. Retire the command owner only after the
-scope lock drains, under the registry identity check, so cancellation during
-release/close reaches the active command and concurrent releases stay idempotent.
-`scope_lock_held=True` requires ownership of the registered scope lock for the
-whole invocation, including retries. Release has no separate drain deadline;
-HTTP cleanup bounds do not bound that lock wait. A timed-out release must retain
-ownership until work drains before client detach or reuse can be safe.
-All env calls share a cancellable Bash semaphore, held through cleanup. Scoped
-calls acquire it after the scope lock, then recheck registry admission; unscoped
-calls acquire it after the shared lock. `AIO_BASH_MAX_SESSIONS` (default 50) sets
-both provisioning and client limits. Docker reuse checks persisted env; remote
-reuse requires Pod-attested capacity. Unknown metadata defers, never proves a
-need for replacement. Keep this pool independent of persistent Shell capacity.
-Regressions: `tests/test_aio_scoped_env_concurrency.py`, `tests/test_aio_bash_capacity.py`.
+- **Only a confirmed absence retires a record.** An accepted DELETE, a discovery
+  that returns nothing, a stopped container or a failed probe proves nothing. A
+  probe failure raises. The remote proof inspects the Pod, because the status
+  route returns 404 when only the Service is missing.
+- **An unknown generation is fenced.** A quarantine record is bound to the
+  container ID or Pod UID, and a failed stop, a lease expiry or a Gateway restart
+  never clears it.
+- **An implicit-shell fence lasts for the container's lifetime**, also after a
+  successful recovery session. The container is recycled once no execution
+  holds it.
+- **A port reservation is returned only when creation definitely did not
+  happen.** In restricted mode the proxy can already own the port, so a failed
+  sandbox CLI call does not prove that. Compare the reservation token before you
+  release, so a late failure cannot free a successor's port.
+- **A broker capability failure is unknown, not a negative.** Cache successful
+  observations only. An attested mode of a running Pod outranks a failed
+  deployment-level probe, and a policy change never stops a live peer's Pod.
+- **Locks never cover network I/O or slow cleanup.**
 
-## Readiness polling
+## Commands
 
-Build the async readiness client off the event loop. Drain construction and
-close a late client on caller cancellation. If construction or close is
-itself cancelled, log it and preserve the caller's original cancellation.
-Regression: `tests/blocking_io/test_aio_sandbox_readiness_ssl.py`.
+- **The two transports have different stdin.** The persistent shell is a PTY. A
+  fresh `bash` call is a pipe that stays open, so it is prefixed with
+  `exec < /dev/null` to give the command an immediate EOF. Do not wrap the command
+  in a brace group or `eval`: that changes top-level parsing, `PIPESTATUS` and
+  `ERR` traps.
+- **Execution is never retried.** A command may have had effects. Missing command
+  state or a missing cleanup receipt quarantines the sandbox.
+- **Cleanup markers support cooperative cleanup.** They do not isolate hostile
+  code.
+- **Broker logs carry argument count, exit code and duration**, never argument
+  values.
+- **`read_file` returns content or an `Error: ...` string and never raises.** A
+  missing file is expected when a write probes first, and is logged at debug.
 
-## Reuse admission
+## Restricted network mode
 
-Open-mode creation returns its port reservation when the Docker or Apple
-Container CLI raises `FileNotFoundError` or `PermissionError` during spawn.
-Catch these only around the CLI call, preserving the original exception;
-post-start errors cannot prove absence. Restricted creation must not opt in:
-its proxy may already own the port, even if the final sandbox CLI cannot start.
-Regressions: `tests/test_aio_sandbox_spawn_ports.py`.
+- **The sandbox stays on an internal network**, and a per-sandbox sidecar handles
+  egress. Reject a host that the policy denies before any DNS lookup.
+- **An approval never replays a tool call.** Subagent and non-interactive runs
+  deny without asking.
+- **Discovery and enumeration are read-only**, also when the policy or network
+  mode does not match. Only the provider replaces a sandbox, under the teardown
+  reservation and the cross-instance lease. The sandbox, its sidecar and both
+  networks are destroyed together.
 
-Restricted creation tracks only the current call's proxy `docker create` boundary.
-A definite non-creation, confirmed proxy removal, or authoritative proxy absence
-permits returning its port. Preserve the creation error through ordinary
-rollback/probe failures and log their diagnostics. Register the reservation in
-`_unknown_cleanup_ports` before resources become discoverable; compare its token
-before release. Destroy transfers that token to its existing teardown entry so
-late startup failures cannot release a successor's port. Successful creation
-forgets only its own token without releasing the port.
-Uncertain reservations remain for the existing fenced `complete_absent_teardown`
-path or process restart. Ordinary creation does not reconcile earlier failures,
-and empty-URL destruction does not infer ports from unrelated unknown entries.
-Durable creation identity and automatic recovery are separate work. Regressions:
-`tests/test_aio_sandbox_restricted_creation_ports.py`.
+## Shutdown
 
-An implicit-shell fence is sticky for the container's lifetime, even after a
-successful explicit recovery session. `requires_container_recycle` includes
-that fence and ambiguous shell or bash creation tombstones; a pending creation
-is a transient in-flight request and does not fence reuse. Once all holders
-and command cleanup have drained, release treats any remaining pending create
-as abandoned and recycles conservatively. Release persists a
-generation-bound record in `{DEER_FLOW_HOME}/sandbox-quarantine` before stopping;
-failed stops, lease expiry and Gateway restarts never clear it. Docker discovery
-restores the container ID; provisioner responses restore the Pod UID. Unknown
-generations fail closed against existing records. New generations can reuse the
-logical sandbox ID. Gateways sharing containers must share this home as well as
-the configured ownership store. Keep `get`/`get_scoped` free of storage IO.
-Before creation, retire records only under a local reservation and teardown
-lease, after `SandboxBackend.is_absent` confirms logical-ID vacancy. It must
-distinguish missing resources from stopped/Pending/Terminating resources and
-probe failures; DELETE acceptance and discovery returning None are insufficient.
-Local absence matching compares Docker's fixed error scaffolding
-case-insensitively — CLI v29 lowercases `Error: No such object:` to
-`error: no such object:` — while the resource name stays byte-exact and the
-whole message must match; Apple Container forms remain exact-match.
-Missing-network errors may end with Docker CLI v29's exact `exit status 1` line;
-other trailing diagnostics still fail closed.
-Remote proofs use `/api/sandboxes/{id}/presence`, which inspects the Pod directly;
-the ordinary status GET can return 404 merely because its Service is missing.
-This covers runtimes without a recoverable generation, including Apple Container.
-`inspect_runtime` returns metadata independently of health, running state or
-Service availability; only confirmed resource absence returns None. Probe failures
-raise, including Docker context/daemon errors. Under the same teardown fences,
-retry partial cleanup only if that current generation is quarantined, then prove
-absence before retiring records. Preserve an unquarantined replacement generation
-and its predecessor's records; unknown generations remain fenced.
-Local retries recover published ports, including stopped Docker bindings, and
-retain pending reservations by immutable generation until resource teardown
-succeeds. Apple logical IDs are not generations or Docker policy metadata.
-Remembered ports without a generation may be released only after confirmed name
-vacancy; never attach them to metadata for a present replacement runtime.
-A fenced sandbox still tracked by this instance is recycled inline on a later
-acquire only when no execution holder remains. Ordinary release and destruction
-reserve that idle transition atomically in the provider's lease manager; new
-bindings cannot enter until teardown finishes. Slow cleanup stays outside the
-metadata lock. Local teardown or ownership refusal returns false so acquire
-defers. Shutdown explicitly closes the whole provider, including unfinished
-executions. Genuine uncertainty is persisted even when live holders defer its
-recycle; pending creation alone never triggers inline replacement.
-Post-acquire client loss still raises `SandboxNotFoundError` after lease rollback.
-Gateway sync preserves its missing-client response without a second release;
-unrelated provider or cleanup errors propagate.
-A Pod-attested broker mode outranks an unavailable deployment-level probe: the probe failure delays drift detection but never denies reuse of an attested runtime, while an unattested mode stays fail-closed. An unattested mode is unknown, not contradictory: during Gateway/provisioner skew, reuse defers without replacement so the healthy Pod survives until the provisioner attests it.
-Before retiring records, `complete_absent_teardown` releases pending local ports
-under those same fences after confirmed absence, including a timed-out stop that
-actually removed the container.
-It also clears deterministic local proxy/network leftovers before recreation;
-unknown cleanup errors retain the quarantine record.
-Explicit stop failures use that same generation-bound quarantine before dropping
-tracking. Failed record writes retain metadata and fence cached lookups in memory.
-Warm-to-active promotion clears an obsolete in-memory fence under the metadata
-lock, only for the entry that passed reuse checks; a changed entry must retry.
-Partial shutdown raises and remains retryable; successful resources are not retried,
-and cleanup infrastructure closes only after every owned teardown completes.
-
-Signal handlers are a fallback for hosts without a lifespan (embedded
-`DeerFlowClient`, scripts). The handler runs `shutdown()` synchronously and
-force-destroys every sandbox, so on the Gateway's event-loop thread it would
-freeze the loop and kill in-flight runs before uvicorn starts the drain. Under
-`hold_sandbox_shutdown_ownership()` the constructor therefore installs only
-SIGHUP, which uvicorn does not handle; SIGTERM/SIGINT go to uvicorn and the
-lifespan hook shuts the provider down after the run drain and MCP teardown. A
-provider built before the declaration keeps its handlers: the Gateway declares
-first, and uvicorn already replaced any earlier handler and re-raises captured
-signals only after lifespan shutdown.
-
-`shutdown()` closes admission (`_admission_closed`) under `_lock` before its
-snapshot and never reopens it, even when a failed teardown resets
-`_shutdown_called` for retry. `acquire`/`acquire_async`, the post-serializer
-recheck and every active commit (warm reclaim, discovery, create) then raise
-`SandboxCapacityExceededError(reason="shutdown")`. A refused warm reclaim stays
-warm for shutdown to destroy; a refused create rolls back its container.
-
-Broker capability failures are unknown, never confirmed negatives. Cache only
-successful observations per provisioner endpoint/auth identity; a failed refresh
-may retain a confirmed broker requirement. A provisioner lark-configuration conflict marks its create response; the
-Gateway drops that endpoint's cached observation so the next acquire re-probes
-instead of outliving the negative TTL. Acquisition validates actual mode in
-active, warm, discovered and create responses. Policy replacement keeps the
-existing ownership and local teardown fences; do not stop a live peer's Pod.
-`bash` uses the admitted sandbox's mode, never a fresh deployment-wide probe.
-Contradictory Pod observations bypass cached capabilities before replacement;
-unattested observations are not contradictions and never trigger replacement.
-One in-flight probe per endpoint/auth identity shares results/errors; cache locks
-never cover network IO or waits. Failure retry time is separate from confirmation
-freshness and cannot authorize credential mounts. All post-create registration
-failures use the existing fenced cleanup, including policy/storage/probe errors.
-Rejected provisioner creation metadata must retain its `SandboxInfo` for that
-cleanup. Failed discovery registration closes only its own HTTP client.
-
-Regressions: `test_aio_sandbox_provider.py`, `test_sandbox_quarantine.py`,
-`test_remote_sandbox_backend.py`, `test_provisioner_request_threading.py`.
-
-## Read failure contract
-
-`read_file` returns content or an ``Error: ...`` string, never raises. The
-server reports missing files as an error envelope with ``data: {}``, which the
-SDK cannot parse into ``FileReadResult``; the resulting ``ValidationError``
-becomes ``Error: file not found or unreadable: <path>`` logged at debug
-(missing files are expected on ReadBeforeWrite probes of new files), never the
-raw pydantic text. Other exceptions keep the error log.
-Regressions: `test_aio_sandbox.py`.
+- **`shutdown()` closes admission first and never reopens it**, also when a failed
+  teardown leaves it retryable. A refused create rolls back its container.
+- **Under the Gateway the provider installs no SIGTERM or SIGINT handler.** The
+  handler would destroy every sandbox on the event-loop thread before the run
+  drain. The lifespan hook shuts the provider down after the drain. The signal
+  handlers remain for hosts without a lifespan, such as the embedded client.
+- **Build the readiness client off the event loop**, and close a client that
+  arrives after the caller was cancelled.

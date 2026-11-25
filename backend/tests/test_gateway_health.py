@@ -112,6 +112,124 @@ async def test_check_database_health_unreachable(monkeypatch):
     assert await check_database_health() == PROBE_UNREACHABLE
 
 
+class _TrackingEngine:
+    """Fake engine that records how many probe connections are open at once."""
+
+    def __init__(self, *, delay: float = 0.02, hang: bool = False) -> None:
+        self._delay = delay
+        self._hang = hang
+        self.active = 0
+        self.max_active = 0
+
+    def connect(self):
+        @asynccontextmanager
+        async def _connect():
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(30 if self._hang else self._delay)
+                yield _FakeConnection()
+            finally:
+                self.active -= 1
+
+        return _connect()
+
+
+@pytest.mark.anyio
+async def test_concurrent_database_probes_are_serialized(monkeypatch):
+    """The ORM probe shares the repositories' pool, so probe traffic may hold one connection at most."""
+    engine = _TrackingEngine()
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: engine)
+
+    results = await asyncio.gather(*(check_database_health() for _ in range(8)))
+
+    assert results == [PROBE_OK] * 8
+    assert engine.max_active == 1
+
+
+@pytest.mark.anyio
+async def test_concurrent_readiness_requests_check_out_one_pooled_database_connection(monkeypatch, tmp_path):
+    """Through a real SQLAlchemy pool, concurrent requests never check out more than one connection."""
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'app.db'}")
+    checked_out = 0
+    max_checked_out = 0
+
+    @event.listens_for(engine.sync_engine, "checkout")
+    def _checkout(*args):
+        nonlocal checked_out, max_checked_out
+        checked_out += 1
+        max_checked_out = max(max_checked_out, checked_out)
+
+    @event.listens_for(engine.sync_engine, "checkin")
+    def _checkin(*args):
+        nonlocal checked_out
+        checked_out -= 1
+
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: engine)
+    try:
+        results = await asyncio.gather(*(readiness_payload(CheckpointerConfig(type="memory"), stream_bridge=MemoryStreamBridge()) for _ in range(50)))
+    finally:
+        await engine.dispose()
+
+    assert {(status_code, payload["database"]) for status_code, payload in results} == {(200, PROBE_OK)}
+    assert max_checked_out == 1
+
+
+@pytest.mark.anyio
+async def test_database_and_checkpointer_probes_use_separate_gates(monkeypatch, tmp_path):
+    """One request's database and checkpointer probes still run side by side."""
+    database_started = asyncio.Event()
+    checkpointer_started = asyncio.Event()
+
+    class _RendezvousEngine:
+        def connect(self):
+            @asynccontextmanager
+            async def _connect():
+                database_started.set()
+                await checkpointer_started.wait()
+                yield _FakeConnection()
+
+            return _connect()
+
+    async def _rendezvous_sqlite(conn_string: str | None) -> str:
+        checkpointer_started.set()
+        await database_started.wait()
+        return PROBE_OK
+
+    # Each probe waits until the other has entered its gate. With one shared
+    # gate neither can, so the deadline reports both probes unreachable.
+    monkeypatch.setattr(health_module, "_READINESS_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: _RendezvousEngine())
+    monkeypatch.setattr(health_module, "_probe_sqlite_backend", _rendezvous_sqlite)
+
+    status_code, payload = await readiness_payload(CheckpointerConfig(type="sqlite", connection_string=str(tmp_path / "store.db")), stream_bridge=MemoryStreamBridge())
+
+    assert status_code == 200
+    assert payload["database"] == PROBE_OK
+    assert payload["checkpointer"] == PROBE_OK
+
+
+@pytest.mark.anyio
+async def test_database_probe_cancelled_by_the_deadline_releases_its_gate(monkeypatch):
+    """A probe the endpoint deadline cancels must not leave later probes waiting on its gate."""
+    monkeypatch.setattr(health_module, "_READINESS_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: _TrackingEngine(hang=True))
+
+    status_code, payload = await readiness_payload(CheckpointerConfig(type="memory"), stream_bridge=MemoryStreamBridge())
+
+    assert status_code == 503
+    assert payload["database"] == PROBE_UNREACHABLE
+
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: _FakeEngine())
+    status_code, payload = await readiness_payload(CheckpointerConfig(type="memory"), stream_bridge=MemoryStreamBridge())
+
+    assert status_code == 200
+    assert payload["database"] == PROBE_OK
+
+
 @pytest.mark.anyio
 async def test_readiness_payload_ready_when_database_ok_and_memory_backend(monkeypatch):
     monkeypatch.setattr("app.gateway.health.get_engine", lambda: _FakeEngine())
