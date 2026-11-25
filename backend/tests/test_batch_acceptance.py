@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
+from langchain_core.messages import AIMessage
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.paths import Paths
@@ -111,7 +112,8 @@ async def test_tool_preserves_per_item_criteria_and_legacy_shape(env, monkeypatc
         lambda *args, **kwargs: SubagentConfig(name="general-purpose", description="Worker", prompt_overlay=PromptOverlay(prepend="First", append="Last")),
     )
     tools = {tool.name: tool for tool in bind_batch_tools(env.service)}
-    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1", "user_id": "user-1"}, config={"metadata": {}})
+    dispatch = AIMessage(content="", id="batch-dispatch", tool_calls=[{"name": "batch_task", "id": "c1", "args": {}}])
+    runtime = SimpleNamespace(state={"messages": [dispatch]}, context={"thread_id": "thread-1", "user_id": "user-1"}, config={"metadata": {}})
     command = await tools["batch_task"].coroutine(
         runtime=runtime, title="Batch", items=[BatchTaskItem(key="one", prompt="p", acceptance_criteria=["file:../outputs/report.md exists"]), BatchTaskItem(key="two", prompt="q")], subagent_type="general-purpose", tool_call_id="c1"
     )
@@ -222,7 +224,7 @@ async def test_no_criteria_skips_checker_and_preserves_success(env, monkeypatch)
 async def test_criteria_survive_lease_recovery_and_submission_replay(env):
     criteria = ["file:../outputs/report.md exists"]
     first = await _submit(env, criteria)
-    replay = await _submit(env, ["different"])
+    replay = await _submit(env, criteria)
     assert replay["id"] == first["id"]
     now = datetime.now(UTC)
     one = (await env.repo.claim_items(now=now, lease_owner="dead", lease_seconds=1, limit=1))[0]

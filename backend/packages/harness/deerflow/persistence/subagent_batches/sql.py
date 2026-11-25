@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased, defer
 
@@ -23,6 +24,7 @@ BATCH_ACTIVE_STATUSES = ("queued", "running", "paused")
 BATCH_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 ITEM_ACTIVE_STATUSES = ("queued", "leased", "running")
 ITEM_TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
+_SUBMISSION_DIGEST_KEY = "_submission_digest"
 _BATCH_PUBLIC_FIELDS = (
     "id",
     "thread_id",
@@ -58,6 +60,10 @@ _ITEM_PUBLIC_FIELDS = (
     "updated_at",
 )
 _ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
+
+
+class BatchSubmissionConflictError(ValueError):
+    """A submission identity already belongs to different or unverifiable work."""
 
 
 class SubagentBatchRepository:
@@ -117,10 +123,11 @@ class SubagentBatchRepository:
         max_attempts: int,
         execution_spec: dict[str, Any],
         continuation: dict[str, Any] | None = None,
+        submission_digest: str | None = None,
     ) -> dict[str, Any]:
         dependencies = batch_dependencies(items)
         now = datetime.now(UTC)
-        batch = SubagentBatchRow(
+        values = dict(
             id=batch_id,
             user_id=user_id,
             thread_id=thread_id,
@@ -134,7 +141,7 @@ class SubagentBatchRepository:
             max_live_items=max_live_items,
             max_running_items=max_running_items,
             max_attempts=max_attempts,
-            execution_spec=execution_spec,
+            execution_spec=execution_spec if submission_digest is None else {**execution_spec, _SUBMISSION_DIGEST_KEY: submission_digest},
             continuation_json=continuation,
             continuation_status="pending" if continuation is not None else None,
             created_at=now,
@@ -156,34 +163,28 @@ class SubagentBatchRepository:
             )
             for position, item in enumerate(items)
         ]
-        async with self._sf() as session:
-            try:
-                session.add(batch)
-                # The models intentionally do not declare an ORM relationship;
-                # flush the parent explicitly so SQLite's immediate FK check
-                # never observes item inserts before their batch row. Keep the
-                # flush inside the idempotency handler: a duplicate submission
-                # key can fail here before commit.
+        async with self._sf() as session, session.begin():
+            insert = postgres_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+            statement = insert(SubagentBatchRow).values(**values).on_conflict_do_nothing(index_elements=["user_id", "submission_key"]).returning(SubagentBatchRow)
+            batch = await session.scalar(statement)
+            if batch is None:
+                # The unique constraint arbitrates concurrent writers. A
+                # separate read sees the winner after its transaction commits.
+                existing = await session.scalar(select(SubagentBatchRow).filter_by(user_id=user_id, submission_key=submission_key))
+                if existing is None:
+                    raise RuntimeError("Conflicting batch submission disappeared before it could be read")
+                if submission_digest is None or existing.execution_spec.get(_SUBMISSION_DIGEST_KEY) != submission_digest:
+                    raise BatchSubmissionConflictError("Batch submission conflict: this identity was already used with a different or unverifiable request")
+                return await self._with_counts(session, existing)
+
+            session.add_all(rows)
+            # Flush items before inserting edges because both endpoints are FKs
+            # and the models do not declare ORM relationships.
+            await session.flush()
+            if dependencies:
+                identities = {row.item_key: row.id for row in rows}
+                session.add_all(SubagentBatchDependencyRow(item_id=identities[key], prerequisite_id=identities[dependency]) for key, required in dependencies.items() for dependency in required)
                 await session.flush()
-                session.add_all(rows)
-                if dependencies:
-                    await session.flush()
-                    identities = {row.item_key: row.id for row in rows}
-                    session.add_all(SubagentBatchDependencyRow(item_id=identities[key], prerequisite_id=identities[dependency]) for key, required in dependencies.items() for dependency in required)
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                existing = (
-                    await session.execute(
-                        select(SubagentBatchRow).where(
-                            SubagentBatchRow.user_id == user_id,
-                            SubagentBatchRow.submission_key == submission_key,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if existing is not None:
-                    return await self._with_counts(session, existing)
-                raise
             return await self._with_counts(session, batch)
 
     async def _counts(self, session: AsyncSession, batch_id: str) -> Counter[str]:

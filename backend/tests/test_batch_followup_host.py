@@ -217,11 +217,12 @@ async def test_resumed_native_batch_preserves_admitted_scope_in_followup(batch_h
             interrupt("Continue?")
             record = await state.run_manager.get(runtime.context["run_id"])
             assert record.kwargs["input"] is None
+            dispatch = AIMessage(content="", id="scoped-batch-dispatch", tool_calls=[{"name": "batch_task", "id": "scoped-call", "args": {}}])
             command = await tool_module.batch_task.coroutine(
                 title="Scoped batch",
                 items=[tool_module.BatchTaskItem(key="a", prompt="Read authorized records")],
                 subagent_type="general-purpose",
-                runtime=SimpleNamespace(context=runtime.context, state=values, config=config),
+                runtime=SimpleNamespace(context=runtime.context, state={**values, "messages": [*values["messages"], dispatch]}, config=config),
                 tool_call_id="scoped-call",
                 continuation="Present the result",
             )

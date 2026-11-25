@@ -323,6 +323,19 @@ cancellation independently. A failed cancellation logs the batch and run IDs.
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand and opens a selected item’s stored report and captured evidence for review. Citations open the matching saved excerpt without contacting the provider, and an open result refreshes until the item finishes and when the item list observes a later retry. Closed result dialogs do not fetch full details. Bulk stored results remain available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](../../docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
+Each model response can submit its own batch even when the provider reuses a
+tool-call ID. If a checkpoint replays the same submission with the same
+request, `batch_task` returns the original batch ID, including after a run
+change. Replaying that submission with different work returns a submission
+conflict and leaves the original batch intact.
+
+Existing batches remain available for lookup, execution, and management by
+their original IDs. If the older version stored a batch before the parent
+run checkpoint saved its receipt, resuming that call after the upgrade can
+submit another batch. Before switching versions, let those submissions finish
+and checkpoint their receipts. Check for an existing batch before resuming
+any submission whose receipt is unconfirmed.
+
 Queued requests finish removing their queue entry and returning any transferred
 slot before cancellation propagates. The cleanup waits for the capacity lock
 without its own deadline. Cancellation during timeout cleanup takes precedence

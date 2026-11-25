@@ -6,10 +6,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import pytest_asyncio
 
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
+from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+from deerflow.persistence.subagent_batches import SubagentBatchRepository
+from deerflow.persistence.subagent_batches.model import SubagentBatchRow
+from deerflow.persistence.subagent_batches.sql import BatchSubmissionConflictError
 from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.batch_service import SubagentBatchService
@@ -232,6 +238,82 @@ def test_browser_evidence_source_cap_preserves_omissions(persisted_omissions):
     assert len(projected["sources"]) == 100
     assert projected["omitted_count"] == persisted_omissions + 3
     assert artifact["knowledge_sources"]["omitted_count"] == persisted_omissions
+
+
+@pytest_asyncio.fixture
+async def submission_repo(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        yield SubagentBatchRepository(get_session_factory())
+    finally:
+        await close_engine()
+
+
+def _submission_service(repository, **defaults):
+    return SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(**defaults),
+        runtime_config=SubagentRuntimeConfig(),
+        prepare_continuation=AsyncMock(side_effect=lambda request: {"run_id": request.run_id, "prompt": request.continuation}),
+        dispatch_continuation=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_replays_the_original_receipt_with_new_run_and_defaults(submission_repo) -> None:
+    service = _submission_service(submission_repo, default_max_live_items=5, default_max_running_items=2)
+    submission = _request(title="  Records ", continuation="Present results")
+    original = await service.submit(submission)
+
+    resumed_service = _submission_service(submission_repo, default_max_live_items=8, default_max_running_items=4)
+    replay = await resumed_service.submit(
+        _request(
+            submission_key=submission.submission_key,
+            title="Records",
+            run_id="resumed-run",
+            execution_spec={"authz_attributes": {"tenant": "new-snapshot"}},
+            continuation="Present results",
+            continuation_context={"context": {"run_id": "resumed-run"}},
+        )
+    )
+
+    assert replay == original
+    assert (original["title"], original["max_live_items"], original["max_running_items"]) == ("Records", 5, 2)
+    assert await submission_repo.list_by_thread("thread-1", user_id="user-1") == [original]
+    assert [item["item_key"] for item in await submission_repo.list_items(original["id"], user_id="user-1")] == ["record-1"]
+    async with get_session_factory()() as session:
+        stored = await session.get(SubagentBatchRow, original["id"])
+        assert stored.run_id == "run-1"
+        assert stored.continuation_json == {"run_id": "run-1", "prompt": "Present results"}
+    assert "execution_spec" not in replay
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_changed_content_under_the_same_identity(submission_repo) -> None:
+    service = _submission_service(submission_repo)
+    items = [
+        {"key": "one", "prompt": "Read", "acceptance_criteria": ["file:report.md exists"]},
+        {"key": "two", "prompt": "Summarize", "depends_on": ["one"]},
+    ]
+    original = await service.submit(_request(items=items, continuation="Present results"))
+    original_items = await submission_repo.list_items(original["id"], user_id="user-1", include_prompt=True)
+    changes = [
+        {"title": "Different title"},
+        {"subagent_type": "different-type"},
+        {"items": [{**items[0], "prompt": "Read another document"}, items[1]]},
+        {"items": [{**items[0], "acceptance_criteria": ["file:other.md exists"]}, items[1]]},
+        {"items": [items[0], {**items[1], "depends_on": []}]},
+        {"items": items[::-1]},
+        {"max_live_items": original["max_live_items"]},
+        {"max_running_items": original["max_running_items"]},
+        {"continuation": "Write a report instead"},
+    ]
+    for change in changes:
+        with pytest.raises(BatchSubmissionConflictError, match="Batch submission conflict"):
+            await service.submit(_request(**({"items": items, "continuation": "Present results"} | change)))
+
+    assert await submission_repo.list_by_thread("thread-1", user_id="user-1") == [original]
+    assert await submission_repo.list_items(original["id"], user_id="user-1", include_prompt=True) == original_items
 
 
 @pytest.mark.asyncio
@@ -776,10 +858,6 @@ async def test_cancel_during_tool_assembly_skips_launch(monkeypatch, tmp_path) -
     """
     import threading
     from datetime import UTC, datetime
-
-    from deerflow.config.database_config import DatabaseConfig
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
-    from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:

@@ -36,6 +36,7 @@ from deerflow.subagents.registry import get_available_subagent_names, get_subage
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.messages import find_tool_call_message
 
 
 class BatchTaskItem(BaseModel):
@@ -213,6 +214,11 @@ async def batch_task(
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
     if context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
         runtime_thread_incarnation(runtime)
+    dispatch = find_tool_call_message(getattr(runtime, "state", None), tool_call_id)
+    if not tool_call_id or dispatch is None or not isinstance(dispatch.id, str) or not dispatch.id.strip():
+        return _result(tool_call_id, content="Batch submission requires an originating model message with an ID.", error=True)
+    if sum(isinstance(call, dict) and call.get("id") == tool_call_id for call in dispatch.tool_calls) != 1:
+        return _result(tool_call_id, content="Batch submission requires a unique tool call ID within the originating model message.", error=True)
     metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
@@ -249,7 +255,8 @@ async def batch_task(
         if metadata.get("model_name"):
             continuation_context["context"]["model_name"] = metadata["model_name"]
     run_id = context.get("run_id")
-    submission_key = f"{run_id or thread_id}:{tool_call_id}"
+    identity = json.dumps((str(thread_id), context.get(THREAD_INCARNATION_CONTEXT_KEY), dispatch.id, tool_call_id), separators=(",", ":"))
+    submission_key = "batch-v1:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     execution_spec = {
         "subagent_config": {**asdict(config), "prompt_overlay": config.prompt_overlay.model_dump()},
         "parent_model": metadata.get("model_name"),
@@ -279,7 +286,7 @@ async def batch_task(
                 run_id=str(run_id) if run_id else None,
                 tool_call_id=tool_call_id,
                 submission_key=submission_key,
-                title=title.strip()[:256] or "Subagent batch",
+                title=title,
                 subagent_type=subagent_type,
                 items=[cast(BatchItemInput, item.model_dump(exclude_none=True)) for item in items],
                 max_live_items=max_live_items,

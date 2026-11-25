@@ -4,11 +4,21 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
 SUBAGENT_RESULT_MESSAGE_NAME = "subagent-result"
+
+
+def find_tool_call_message(state: object, tool_call_id: str) -> AIMessage | None:
+    """Find the most recent AI message that issued the tool request's call."""
+    messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+    for message in reversed(messages or []):
+        if isinstance(message, AIMessage) and any(isinstance(call, dict) and call.get("id") == tool_call_id for call in message.tool_calls or ()):
+            return message
+    return None
+
 
 #: Server-owned mark the Gateway stamps on an untrusted caller's message when it
 #: carries a framework marker (``hide_from_ui``, a ``summary`` name) that would

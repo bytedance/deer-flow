@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from deerflow.utils.messages import SUBAGENT_RESULT_MESSAGE_NAME
+from deerflow.utils.messages import SUBAGENT_RESULT_MESSAGE_NAME, find_tool_call_message
 
 from .inputs import RunInputs
 from .schemas import GOAL_RUN_HARD_STOP_REASONS
@@ -64,18 +64,6 @@ class ChildInputGate:
                 if not self._instructions and self.resume.is_set():
                     self.closed = True
                     return None
-
-
-def _dispatch_message_id(request) -> str | None:
-    """Return the id of the latest AIMessage in the tool request's state that issued its call."""
-    state = getattr(request, "state", None)
-    messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
-    call_id = request.tool_call["id"]
-    for message in reversed(messages or []):
-        if isinstance(message, AIMessage):
-            if any(isinstance(call, dict) and call.get("id") == call_id for call in message.tool_calls or ()):
-                return message.id if isinstance(message.id, str) and message.id else None
-    return None
 
 
 class RunInputControl:
@@ -174,7 +162,9 @@ class RunInputControl:
         # the steered entry and the captured one are the same delegation. Held
         # per wait, not per call id: a later response reusing the id while this
         # call is still observed must not take over its args or dispatch.
-        dispatch = AIMessage(content="", id=_dispatch_message_id(request), tool_calls=[dict(request.tool_call)])
+        message = find_tool_call_message(getattr(request, "state", None), request.tool_call["id"])
+        dispatch_id = message.id if message is not None and isinstance(message.id, str) and message.id else None
+        dispatch = AIMessage(content="", id=dispatch_id, tool_calls=[dict(request.tool_call)])
         self.finished_calls.discard(request.tool_call["id"])
         # Create the gate before scheduling: an immediately available input
         # can arrive before the tool handler reaches the native executor.

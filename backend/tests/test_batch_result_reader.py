@@ -112,19 +112,24 @@ async def submit(env):
     from deerflow.subagents.config import SubagentConfig
 
     tool = {t.name: t for t in tools_module.bind_batch_tools(env.service)}["batch_task"]
+    call_id = "submit-1"
+    tool_runtime = runtime()
+    tool_runtime.state = {"messages": [AIMessage(content="", id="ai-submit-1", tool_calls=[{"name": "batch_task", "id": call_id, "args": {}}])]}
     with pytest.MonkeyPatch.context() as patcher:
         patcher.setattr(tools_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
         patcher.setattr(tools_module, "get_subagent_config", lambda *args, **kwargs: SubagentConfig(name="general-purpose", description="Worker"))
         command = await tool.coroutine(
-            runtime=runtime(),
+            runtime=tool_runtime,
             title="Research",
             subagent_type="general-purpose",
-            tool_call_id="submit-1",
+            tool_call_id=call_id,
             items=[tools_module.BatchTaskItem(key="one", prompt="Private item prompt", acceptance_criteria=["Human review required"]), tools_module.BatchTaskItem(key="two", prompt="Second")],
             max_live_items=2,
             max_running_items=2,
         )
-    return command.update["messages"][0].additional_kwargs["subagent_batch_id"]
+    receipt = command.update["messages"][0]
+    assert receipt.status == "success", receipt.content
+    return receipt.additional_kwargs["subagent_batch_id"]
 
 
 async def read(service, batch_id, **args):

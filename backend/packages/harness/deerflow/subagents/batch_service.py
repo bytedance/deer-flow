@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import socket
 import uuid
@@ -44,6 +46,30 @@ _BROWSER_EVIDENCE_FIELDS = (
     "document_name",
     "text",
 )
+
+
+def _submission_digest(request: BatchSubmitRequest, title: str) -> str:
+    """Hash the requested work independently of the run and execution snapshot."""
+    payload = {
+        "title": title,
+        "subagent_type": request.subagent_type,
+        "items": [
+            {
+                "key": item["key"],
+                "prompt": item["prompt"],
+                "acceptance_criteria": item.get("acceptance_criteria") or [],
+                "depends_on": item.get("depends_on") or [],
+            }
+            for item in request.items
+        ],
+        "max_live_items": request.max_live_items,
+        "max_running_items": request.max_running_items,
+        "continuation": request.continuation,
+    }
+    digest = hashlib.sha256()
+    for chunk in json.JSONEncoder(separators=(",", ":")).iterencode(payload):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _browser_evidence_snapshot(artifact: object) -> dict[str, Any] | None:
@@ -321,6 +347,8 @@ class SubagentBatchService:
             if self._prepare_continuation is None or self._dispatch_continuation is None:
                 raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
             continuation = await self._prepare_continuation(request)
+        title = request.title.strip()[:256] or "Subagent batch"
+        submission_digest = await run_assembly(_submission_digest, request, title)
         return await self._repository.create_batch(
             batch_id=f"subagent-batch-{uuid.uuid4().hex}",
             user_id=request.user_id,
@@ -328,13 +356,14 @@ class SubagentBatchService:
             run_id=request.run_id,
             tool_call_id=request.tool_call_id,
             submission_key=request.submission_key,
-            title=request.title,
+            title=title,
             subagent_type=request.subagent_type,
             items=request.items,
             max_live_items=max_live,
             max_running_items=max_running,
             max_attempts=self._config.max_attempts,
             execution_spec=request.execution_spec,
+            submission_digest=submission_digest,
             **({"continuation": continuation} if continuation is not None else {}),
         )
 

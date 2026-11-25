@@ -1,23 +1,39 @@
 import importlib
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import ToolMessage
+import pytest_asyncio
+from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_tool_call
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+from deerflow.agents.factory import create_deerflow_agent
+from deerflow.agents.features import RuntimeFeatures
+from deerflow.config.app_config import AppConfig
+from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
     THREAD_INCARNATION_METADATA_GUARD_KEY,
 )
+from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+from deerflow.persistence.subagent_batches import SubagentBatchRepository
+from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.subagents.config import SubagentConfig
+from deerflow.subagents.runtime import SubagentRuntime
 from deerflow.tools.builtins.batch_task_tool import BatchTaskItem
 
 tool_module = importlib.import_module("deerflow.tools.builtins.batch_task_tool")
 _MISSING = object()
 
 
-def _runtime(thread_incarnation=_MISSING):
+def _runtime(thread_incarnation=_MISSING, *, call_id="call-1"):
     context = {
         "thread_id": "thread-1",
         "run_id": "run-1",
@@ -32,7 +48,7 @@ def _runtime(thread_incarnation=_MISSING):
     if thread_incarnation is not _MISSING:
         context[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
     return SimpleNamespace(
-        state={},
+        state={"messages": [_dispatch(1, call_id=call_id)]},
         context=context,
         config={
             "metadata": {
@@ -50,6 +66,96 @@ def _message(command: Command) -> ToolMessage:
     messages = command.update["messages"]
     assert len(messages) == 1 and isinstance(messages[0], ToolMessage)
     return messages[0]
+
+
+class _ScriptedModel(GenericFakeChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+def _dispatch(job: int, *, call_id: str = "call_0") -> AIMessage:
+    return AIMessage(
+        content="",
+        id=f"ai-{job}",
+        tool_calls=[{"name": "batch_task", "id": call_id, "args": {"title": f"Job {job}", "items": [{"key": f"job-{job}", "prompt": f"Do job {job}"}], "subagent_type": "general-purpose"}}],
+    )
+
+
+@pytest_asyncio.fixture
+async def batch_service(monkeypatch, tmp_path):
+    _mock_subagent_catalog(monkeypatch)
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        repository = SubagentBatchRepository(get_session_factory())
+        service = SubagentBatchService(repository=repository, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig())
+        yield service, repository
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sdk", [False, True], ids=["one-run", "sdk-invocations"])
+async def test_reused_call_id_submits_both_model_responses(batch_service, sdk) -> None:
+    service, repository = batch_service
+    final = AIMessage(content="Done", id="ai-final")
+    responses = [_dispatch(1), AIMessage(content="First done", id="ai-first-done"), _dispatch(2), final] if sdk else [_dispatch(1), _dispatch(2), final]
+    model = _ScriptedModel(messages=iter(responses))
+    checkpointer = InMemorySaver()
+    if sdk:
+        runtime = SubagentRuntime(
+            SubagentRuntimeConfig(),
+            batch_submitter=service,
+            app_config=AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}),
+        )
+        graph = create_deerflow_agent(model, features=RuntimeFeatures(subagent=True, sandbox=False, loop_detection=False), subagent_runtime=runtime, checkpointer=checkpointer)
+    else:
+        graph = create_agent(model=model, tools=tool_module.bind_batch_tools(service), checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": "thread-1"}}
+    context = {"user_id": "user-1"} if sdk else {"user_id": "user-1", "run_id": "run-1"}
+    state = await graph.ainvoke({"messages": [HumanMessage("Submit jobs")]}, config, context=context)
+    if sdk:
+        state = await graph.ainvoke({"messages": [HumanMessage("Submit another job")]}, config, context=context)
+
+    receipts = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+    assert [(receipt.tool_call_id, receipt.status) for receipt in receipts] == [("call_0", "success"), ("call_0", "success")]
+    batch_ids = [receipt.additional_kwargs["subagent_batch_id"] for receipt in receipts]
+    batches = await repository.list_by_thread("thread-1", user_id="user-1")
+    assert len(batches) == 2, f"Received two successful receipts for {batch_ids}, but stored {len(batches)} batch(es)"
+    assert {batch["id"] for batch in batches} == set(batch_ids)
+    for job, batch_id in enumerate(batch_ids, start=1):
+        items = await repository.list_items(batch_id, user_id="user-1", include_prompt=True)
+        assert [(item["batch_id"], item["item_key"], item["prompt"]) for item in items] == [(batch_id, f"job-{job}", f"Do job {job}")]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_replay_under_new_run_returns_original_batch(batch_service) -> None:
+    service, repository = batch_service
+    receipts = []
+
+    @wrap_tool_call
+    async def lose_first_receipt(request, handler):
+        command = await handler(request)
+        receipts.append(_message(command))
+        if len(receipts) == 1:
+            raise RuntimeError("Lost receipt before checkpoint")
+        return command
+
+    graph = create_agent(
+        model=_ScriptedModel(messages=iter([_dispatch(1), AIMessage(content="Done")])),
+        tools=tool_module.bind_batch_tools(service),
+        checkpointer=InMemorySaver(),
+        middleware=[lose_first_receipt],
+    )
+    config = {"configurable": {"thread_id": "thread-1"}}
+    with pytest.raises(RuntimeError, match="Lost receipt before checkpoint"):
+        await graph.ainvoke({"messages": [HumanMessage("Submit job")]}, config, context={"user_id": "user-1", "run_id": "run-1"})
+    state = await graph.ainvoke(None, config, context={"user_id": "user-1", "run_id": "resumed-run"})
+
+    assert [receipt.status for receipt in receipts] == ["success", "success"]
+    batch_id = receipts[0].additional_kwargs["subagent_batch_id"]
+    assert [message.additional_kwargs["subagent_batch_id"] for message in state["messages"] if isinstance(message, ToolMessage)] == [batch_id]
+    assert [batch["id"] for batch in await repository.list_by_thread("thread-1", user_id="user-1")] == [batch_id]
+    assert [item["item_key"] for item in await repository.list_items(batch_id, user_id="user-1")] == ["job-1"]
 
 
 @pytest.mark.asyncio
@@ -102,7 +208,8 @@ async def test_batch_task_is_explicit_idempotent_submission(
 
     message = _message(command)
     request = submitter.submit.await_args.args[0]
-    assert request.submission_key == "run-1:call-1"
+    assert re.fullmatch(r"batch-v1:[a-f0-9]{64}", request.submission_key)
+    assert request.run_id == "run-1"
     assert request.execution_spec["mcp_plugins"] == ["stable-plugin"]
     assert request.user_id == "user-1"
     assert [item["key"] for item in request.items] == ["record-1", "record-2"]
@@ -118,6 +225,59 @@ async def test_batch_task_is_explicit_idempotent_submission(
         assert request.execution_spec[THREAD_INCARNATION_CONTEXT_KEY] is thread_incarnation
     assert message.additional_kwargs["subagent_batch_id"] == "subagent-batch-1"
     assert "running independently" in message.content
+
+
+@pytest.mark.asyncio
+async def test_submission_key_scopes_the_dispatch_independently_of_run(monkeypatch) -> None:
+    _mock_subagent_catalog(monkeypatch)
+    submitter = _explicit_submitter()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+
+    async def submit(runtime, call_id="call-1"):
+        command = await tool_module.batch_task.coroutine(runtime=runtime, title="Batch", items=[BatchTaskItem(key="a", prompt="Read")], subagent_type="general-purpose", tool_call_id=call_id)
+        assert _message(command).status == "success"
+        return submitter.submit.await_args.args[0]
+
+    runtime = _runtime("incarnation-1")
+    original = await submit(runtime)
+    runtime.context["run_id"] = "resumed-run"
+    replay = await submit(runtime)
+    assert replay.run_id == "resumed-run"
+    assert replay.submission_key == original.submission_key
+
+    other_thread = _runtime("incarnation-1")
+    other_thread.context["thread_id"] = "thread-2"
+    other_dispatch = _runtime("incarnation-1")
+    other_dispatch.state["messages"].append(_dispatch(2, call_id="call-1"))
+    separated = [
+        await submit(other_thread),
+        await submit(_runtime("incarnation-2")),
+        await submit(other_dispatch),
+        await submit(_runtime("incarnation-1", call_id="call-2"), "call-2"),
+    ]
+    assert len({request.submission_key for request in [original, *separated]}) == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("problem", ["missing", "empty-id", "ambiguous"])
+async def test_batch_task_rejects_unidentifiable_dispatch(monkeypatch, problem) -> None:
+    _mock_subagent_catalog(monkeypatch)
+    submitter = _explicit_submitter()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+    runtime = _runtime(call_id="call_0")
+    dispatch = _dispatch(2)
+    if problem == "missing":
+        runtime.state["messages"] = [_dispatch(1, call_id="another-call")]
+    elif problem == "empty-id":
+        runtime.state["messages"].append(dispatch.model_copy(update={"id": ""}))
+    else:
+        runtime.state["messages"].append(dispatch.model_copy(update={"tool_calls": dispatch.tool_calls * 2}))
+
+    command = await tool_module.batch_task.coroutine(runtime=runtime, title="Batch", items=[BatchTaskItem(key="a", prompt="Read")], subagent_type="general-purpose", tool_call_id="call_0")
+    message = _message(command)
+    assert message.status == "error"
+    assert message.additional_kwargs == {"subagent_batch_error": True}
+    submitter.submit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -234,7 +394,7 @@ async def test_bound_batch_task_uses_the_explicit_app_config(monkeypatch) -> Non
         )
     }
     await tools["batch_task"].coroutine(
-        runtime=_runtime(),
+        runtime=_runtime(call_id="call-explicit"),
         title="Explicit config",
         items=[BatchTaskItem(key="record-1", prompt="Process one")],
         subagent_type="general-purpose",
@@ -299,7 +459,7 @@ async def test_followup_captures_configurable_settings_with_context_precedence(m
     _mock_subagent_catalog(monkeypatch)
     submitter = _explicit_submitter()
     monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
-    runtime = _runtime()
+    runtime = _runtime(call_id="batch-call")
     runtime.config["configurable"].update(thinking_enabled=False, reasoning_effort="high", max_concurrent_subagents=2, max_total_subagents=4)
     runtime.context["reasoning_effort"] = "low"
     await tool_module.batch_task.coroutine(
@@ -340,7 +500,7 @@ def test_bound_batch_tools_sync_path_uses_the_explicit_submitter(monkeypatch) ->
     explicit = _explicit_submitter()
     tools = {tool.name: tool for tool in tool_module.bind_batch_tools(explicit)}
     command = tools["batch_task"].func(
-        runtime=_runtime(),
+        runtime=_runtime(call_id="call-sync"),
         title="Sync path",
         items=[BatchTaskItem(key="record-1", prompt="Process one")],
         subagent_type="general-purpose",
@@ -367,7 +527,7 @@ def test_bound_batch_tools_expose_a_sync_invocation_path(monkeypatch) -> None:
     assert all(tool.func is not None for tool in tools.values())
 
     command = tools["batch_task"].func(
-        runtime=_runtime(),
+        runtime=_runtime(call_id="call-sync-fresh"),
         title="Sync path",
         items=[BatchTaskItem(key="record-1", prompt="Process one")],
         subagent_type="general-purpose",
