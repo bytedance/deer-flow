@@ -560,6 +560,14 @@ describe("zonedLocalToUtcIso DST transitions", () => {
 
 describe("onceRunAtInstant", () => {
   test.each([
+    ["2026-12-07T09:00.5", "Asia/Shanghai", "2026-12-07T01:00:00.5+00:00"],
+    ["2026-12-07T09:00,5", "Asia/Shanghai", "2026-12-07T01:00:00.5+00:00"],
+    [
+      "2026-12-07T09:00:45,123",
+      "Asia/Shanghai",
+      "2026-12-07T01:00:45.123+00:00",
+    ],
+    ["2026-11-01T01:30.5", "America/New_York", "2026-11-01T05:30:00.5+00:00"],
     [
       "2026-12-07T09:00:45.123456",
       "Asia/Shanghai",
