@@ -106,13 +106,22 @@ def test_strip_duplicate_title_heading_variants(syspath):
     assert strip_duplicate_title_heading("# A B\n正文", "A B") == "正文"
 
 
-def test_assembly_keeps_heading_with_literal_hash(load):
+@pytest.mark.parametrize(
+    ("title", "opening", "body"),
+    [
+        ("C#", "# C", "# C\n正文"),
+        ("Issue 42", "### # Issue 42", "### # Issue 42\n正文"),
+        ("#42", "# # 42", "正文"),
+        ("Issue 42", "### Issue 42 # ###", "### Issue 42 # ###\n正文"),
+    ],
+)
+def test_assembly_handles_literal_hashes_in_headings(load, title, opening, body):
     handle = handler(load())
-    save(handle, 1, "C#", "# C\n正文")
+    save(handle, 1, title, f"{opening}\n正文")
 
     result = assemble(handle)
 
-    assert result.artifact["document"] == "## C#\n\n# C\n正文\n"
+    assert result.artifact["document"] == f"## {title}\n\n{body}\n"
 
 
 def test_assemble_document_counts_stripped_bodies(syspath):
