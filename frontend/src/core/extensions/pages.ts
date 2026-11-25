@@ -1,8 +1,8 @@
 import type { PluginSurface } from "./contracts";
+import { activeFrontendExtensions, type LoadedContribution } from "./registry";
 
 /** Longest thread id a page deep-link may carry. */
 const MAX_THREAD_QUERY_LENGTH = 256;
-import { activeFrontendExtensions, type LoadedContribution } from "./registry";
 
 /** Plugins register identifiers, never arbitrary host paths or external links. */
 export function pluginPagePath(namespace: string, surfaceId: string) {
