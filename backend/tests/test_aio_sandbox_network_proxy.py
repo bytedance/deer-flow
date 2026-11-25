@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import socket
 import ssl
@@ -54,11 +55,13 @@ def test_address_is_public_rejects_non_public_ipv4_inside_ipv6_spellings() -> No
         "::ffff:0:a9fe:a9fe",  # IPv4-translated (SIIT) metadata spelling
         "2002:a9fe:a9fe::1",
         "::2",  # IPv4-compatible this-network block, not a unicast target
-        # Python marks 2002::/16 private, so 6to4 stays rejected even when it
-        # carries a public IPv4 target.
-        "2002:808:808::1",
     ):
         assert not network_proxy.address_is_public(address)
+    # 6to4 carrying a public IPv4 target follows the interpreter's outer
+    # classification: CPython marks 2002::/16 private from 3.12.4 (gh-113171),
+    # so it is rejected there and allowed on earlier 3.12 patch releases.
+    sixtofour_public = "2002:808:808::1"
+    assert network_proxy.address_is_public(sixtofour_public) == ipaddress.ip_address(sixtofour_public).is_global
     # A NAT64 spelling of a public IPv4 target stays allowed; the prefix
     # reports is_reserved, so a blanket reserved check would wrongly reject it.
     assert network_proxy.address_is_public("64:ff9b::808:808")  # 8.8.8.8
