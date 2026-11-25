@@ -182,7 +182,8 @@ EOF
 # the shell before that child exists orphans the sleep and leaves it holding
 # the caller's stdout. Wait until the child is visible, or until this pid is
 # already the sleep binary, and only then signal it. One extra level covers a
-# sleeper whose child is that shell. A replacing exec has no child.
+# sleeper whose child is that shell. A replacing exec has no child. After 30
+# looks with no child and a pid that is still not sleep, signal that pid anyway.
 _compat_signal_sleep_pid() {
     local pid=$1 kids child grand tries=0
     [ -n "$pid" ] || return 0
