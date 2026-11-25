@@ -313,10 +313,12 @@ memory:
 ```
 
 The optional `openviking` backend connects to an independent OpenViking server
-through `langchain-openviking` and currently supports one DeerFlow user in
-`mode: middleware`. Its private configuration uses `base_url`,
-`owner_user_id`, `api_key_env`, `failure_policy`, and `retrieval` with an
-ordinary OpenViking USER API key instead of the DeerMem fields shown above. See
+through `langchain-openviking` in `mode: middleware` instead of using the
+DeerMem fields shown above. It supports single-user deployments
+(`owner_user_id` + `api_key_env`) as well as fail-closed multi-user and
+multi-tenant isolation using per-user OpenViking USER API keys via
+`user_credentials` or `credential_provider` (with optional `tenant_id` and
+`client_pool`), alongside `base_url`, `failure_policy`, and `retrieval`. See
 `docs/OPENVIKING.md` in the repository for the complete configuration and
 Docker startup sequence.
 

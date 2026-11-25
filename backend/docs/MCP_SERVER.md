@@ -28,6 +28,14 @@ When the compatibility middleware rewrites history, the OpenAI Responses API
 request replays the projected messages. After a switch to a text-only model,
 this lets the provider see the placeholders and surrounding tool text.
 
+## Structured-only stdio tool results
+
+When a stdio MCP tool returns `structuredContent` with an empty `content` list,
+DeerFlow exposes the JSON result as model-visible text. File references in its
+string values follow the same `/mnt/user-data/...` translation as text results.
+The tool artifact retains the original JSON. Existing content blocks take
+precedence over the fallback, and errors follow the usual error handling.
+
 ## Stdio Working Directory
 
 Set `cwd` when a stdio server needs to resolve its entrypoint or data files

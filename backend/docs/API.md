@@ -295,6 +295,15 @@ is not restored from history. A valid goal explicitly supplied in run input
 still replaces it. Historical replay clears the old `goal_outcome`, because
 the previous answer's verdict does not certify the replacement answer.
 
+#### Branch and Replay Lookup
+
+`POST /api/threads/{thread_id}/branches`,
+`POST /api/threads/{thread_id}/runs/regenerate/prepare`, and
+`POST /api/threads/{thread_id}/runs/edit-regenerate/prepare` share a deadline
+for finding the replay base on the checkpoint lineage. If that lookup expires,
+the response is HTTP 504 with detail
+`Timed out resolving the checkpoint before the target user message`.
+
 ### Runs
 
 #### Create Run
@@ -431,9 +440,11 @@ the next request without restarting the Gateway. IM channel runs get the same
 default unless a channel `session.config` sets `recursion_limit` (GitHub channel
 runs have their own floor; see
 [CONFIGURATION.md](CONFIGURATION.md#recursion-limits)); embedded
-`DeerFlowClient` runs retain their own defaults and override paths. A run that
-reaches the limit ends with status `error` and `stop_reason: "recursion_capped"`;
-its stream `error` event and the `/wait` error envelope use the name
+`DeerFlowClient` runs retain their own defaults and override paths. When the current graph
+invocation has a terminal checkpoint at the limit, the Gateway finalizes the run
+normally. A run with work remaining at the limit ends with status `error` and
+`stop_reason: "recursion_capped"`. Its stream `error` event and the `/wait`
+error envelope use the name
 `GraphRecursionError`, and the message lists up to five outputs the run created
 but did not present.
 

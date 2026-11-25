@@ -1,6 +1,8 @@
 # Skills & Tools
 
-**Runtime tool approvals**: Enable `hitl_approval.enabled` to offer Ask and Auto
+**Runtime tool approvals.** HITL approval is **disabled by default**. When it is
+disabled, tool calls can execute without runtime human review, and the Gateway
+logs a warning at startup. Enable `hitl_approval.enabled` to offer Ask and Auto
 independently of reasoning mode. Operators can also enable Full access in
 `hitl_approval.allowed_modes`. Ask presents the complete operation before
 execution. Auto makes a separate, tool-free review call using

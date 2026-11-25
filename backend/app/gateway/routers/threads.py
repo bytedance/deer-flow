@@ -29,12 +29,14 @@ from sqlalchemy.exc import IntegrityError
 from app.gateway.authz import _is_internal_caller, authorize_model_use, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
+    CheckpointLineageTimeoutError,
     CheckpointParentMissingError,
-    find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    find_replay_checkpoint_before_message,
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
+    replay_lineage_timeout_http_error,
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
@@ -308,22 +310,18 @@ async def _find_branch_replay_base(
 ) -> Any | None:
     """Resolve a replay base while preserving unlinked legacy histories."""
 
+    thread_id = config.get("configurable", {}).get("thread_id", "")
     try:
-        return await find_checkpoint_before_message(
-            accessor,
-            snapshot,
-            target_human_id,
-            max_depth=_BRANCH_HISTORY_RAW_SCAN_LIMIT,
-        )
+        return await find_replay_checkpoint_before_message(accessor, snapshot, target_human_id)
+    except CheckpointLineageTimeoutError as exc:
+        raise replay_lineage_timeout_http_error(thread_id, exc) from exc
     except CheckpointParentMissingError:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.debug(
             "Could not resolve parent lineage for branch thread %s; falling back to history scan",
             sanitize_log_param(thread_id),
             exc_info=True,
         )
     except CheckpointLineageError as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.warning(
             "Rejected unsafe checkpoint lineage for branch thread %s",
             sanitize_log_param(thread_id),
@@ -334,10 +332,8 @@ async def _find_branch_replay_base(
     try:
         history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
     except _CHECKPOINT_MODE_ERRORS as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.exception("Failed to scan replay checkpoint history for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
@@ -346,7 +342,7 @@ async def _find_branch_replay_base(
         logger.warning(
             "Could not locate branch user message %s in chronological history for thread %s",
             sanitize_log_param(target_human_id),
-            sanitize_log_param(config.get("configurable", {}).get("thread_id", "")),
+            sanitize_log_param(thread_id),
         )
     return replay_base
 

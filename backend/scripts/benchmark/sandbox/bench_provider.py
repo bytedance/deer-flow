@@ -320,7 +320,13 @@ def _make_opensandbox_provider(config: dict[str, Any]) -> tuple[Any, dict[str, A
             # The runner calls this after release. Reuse the provider's owner of
             # identity removal instead of separately editing its three maps.
             with self._acquire_serializer.hold(sandbox_id):
-                self._invalidate_sandbox(sandbox_id, reason="benchmark_no_warmpool")
+                with self._lock:
+                    sandbox = self._sandboxes.get(sandbox_id)
+                    if sandbox is None:
+                        warm_entry = self._warm_pool.get(sandbox_id)
+                        sandbox = warm_entry[0] if warm_entry is not None else None
+                if sandbox is not None:
+                    self._invalidate_sandbox(sandbox, reason="benchmark_no_warmpool")
             self._check_cleanup()
 
         def shutdown(self) -> None:

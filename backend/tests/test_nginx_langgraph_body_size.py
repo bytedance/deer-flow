@@ -33,13 +33,16 @@ from __future__ import annotations
 import pytest
 from support.nginx_conf import NGINX_CONFIGS
 from support.nginx_conf import extract_location_block as _extract_location_block
+from support.nginx_conf import multipart_body_size_floor as _multipart_body_size_floor
 from support.nginx_conf import parse_body_size_bytes as _parse_body_size_bytes
 from support.nginx_conf import parse_read_timeout_seconds as _parse_read_timeout_seconds
 from support.nginx_conf import read_config as _read
 
+from app.gateway.routers.uploads import DEFAULT_MAX_FILES, DEFAULT_MAX_TOTAL_SIZE
+
 # Text prompts never carry binary file attachments (those go through the
 # dedicated uploads route), so the ceiling here is intentionally well below
-# the uploads route's 100M -- generous for even a very long pasted document,
+# the uploads route's ceiling -- generous for even a very long pasted document,
 # while avoiding needlessly letting one chat request force Gateway to buffer
 # and JSON-parse an arbitrarily large body in memory.
 _MIN_EXPECTED_BODY_SIZE_BYTES = 5 * 1024 * 1024
@@ -73,7 +76,7 @@ def test_langgraph_route_raises_body_size_limit_for_text_prompts(path):
         f"{path}: /api/langgraph/ client_max_body_size is {size_bytes} bytes, "
         f"expected between {_MIN_EXPECTED_BODY_SIZE_BYTES} and "
         f"{_MAX_EXPECTED_BODY_SIZE_BYTES} bytes -- comfortably above nginx's 1m "
-        "default (the actual bug) but below the uploads route's 100M, since "
+        "default (the actual bug) but below the uploads route's ceiling, since "
         "this route only ever carries JSON chat text, never binary files"
     )
 
@@ -83,11 +86,19 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
     """Non-regression guard: confirms the extraction helper is precise (the
     uploads location has both directives with its own, larger value) and that
     fixing the langgraph route does not accidentally touch the upload route's
-    existing configuration."""
+    existing configuration.
+
+    Gateway's 100 MiB default counts file bytes only. Multipart headers and
+    boundaries add framing overhead, so nginx must admit strictly more than
+    that total or a valid request is rejected with a bare 413."""
     content = _read(path)
     block = _extract_location_block(content, r"~ ^/api/threads/[^/]+/uploads")
 
-    assert "client_max_body_size 100M;" in block
+    size_bytes = _parse_body_size_bytes(block)
+    required_bytes = _multipart_body_size_floor(DEFAULT_MAX_TOTAL_SIZE, DEFAULT_MAX_FILES)
+    assert size_bytes > required_bytes, (
+        f"{path}: uploads client_max_body_size is {size_bytes} bytes but a representative multipart request with Gateway's {DEFAULT_MAX_TOTAL_SIZE} bytes of content needs more than {required_bytes} bytes; nginx would 413"
+    )
     assert "proxy_request_buffering off;" in block
 
 
