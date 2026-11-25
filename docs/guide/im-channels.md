@@ -59,6 +59,10 @@ Feishu desktop posts can include a caption and files. Commands use the caption,
 and a command that starts a chat turn, such as `/goal <condition>`, passes the
 files to that turn.
 
+Links and code blocks in a Feishu rich-text post reach the agent as Markdown: a
+link as `[text](url)`, or the bare URL when its text is the URL, and a code block
+as a fenced block tagged with its language.
+
 **Configuration in `config.yaml`:**
 
 Discord's `channels.discord.allowed_guilds` accepts one positive numeric guild

@@ -169,6 +169,9 @@ async def runtime(host, monkeypatch, tmp_path):
         return {"messages": [AIMessage(content=f"answer:{prompt}")]}
 
     def factory(*, config):
+        if (settings := getattr(state, "observed_worker_settings", None)) is not None and "run_id" in config["context"]:
+            context = config["context"]
+            settings.append((config["recursion_limit"], context.get("thinking_enabled"), context.get("is_plan_mode")))
         builder = StateGraph(MessagesState)
         builder.add_node("answer", answer)
         builder.set_entry_point("answer")
@@ -808,6 +811,7 @@ async def worker_gateway(runtime, tmp_path):
     state.run_manager = RunManager(store=state.run_store)
     state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(factory), state.agent_runs_host, ChannelConnectionRepository(factory))
     state.release_worker = asyncio.Event()
+    state.observed_worker_settings = []
     request.app.include_router(coordination.router)
     request.app.include_router(thread_runs.router)
 
@@ -920,6 +924,39 @@ async def test_managed_worker_routes_followups_and_retains_the_producing_runs_fi
 
 
 @pytest.mark.asyncio
+async def test_managed_worker_reuses_saved_run_settings_for_followups(worker_gateway):
+    import asyncio
+
+    client, _, state, entered, _ = worker_gateway
+    url = "/api/coordination/tasks"
+    settings = {"recursion_limit": 400, "thinking_enabled": True, "is_plan_mode": False}
+    body = {"request_id": "dispatch", "objective": "wait", "run": settings}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    task_id = first["task"]["id"]
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        assert first["task"]["run_settings"] == settings
+        assert (await client.post(url, json=body)).raise_for_status().json() == first
+        assert (await client.post(url, json={**body, "run": {**settings, "is_plan_mode": True}})).status_code == 409
+        (await client.post(f"{url}/{task_id}/inputs", json={"request_id": "follow-up", "content": "Review the results"})).raise_for_status()
+    finally:
+        state.release_worker.set()
+
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert finished["execution"]["turn"] == 2
+    assert state.observed_worker_settings == [(400, True, False)] * 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", [{"recursion_limit": 0}, {"recursion_limit": True}, {"thinking_enabled": "false"}, {"user_id": "another-user"}, {"subagent_enabled": False}])
+async def test_managed_worker_rejects_invalid_run_settings(worker_gateway, settings):
+    client, _, _, _, _ = worker_gateway
+    response = await client.post("/api/coordination/tasks", json={"request_id": "invalid", "objective": "Review", "run": settings})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"][:2] == ["body", "run"]
+
+
+@pytest.mark.asyncio
 async def test_managed_worker_create_retry_returns_task_after_grant_expires(worker_gateway, monkeypatch):
     import asyncio
 
@@ -927,6 +964,8 @@ async def test_managed_worker_create_retry_returns_task_after_grant_expires(work
     url = "/api/coordination/tasks"
     body = {"request_id": "create-replay", "objective": "wait"}
     first = (await client.post(url, json=body)).raise_for_status().json()
+    assert first["task"]["run_settings"] is None
+    assert (await client.post(url, json={**body, "run": {}})).raise_for_status().json() == first
     task_id = first["task"]["id"]
     await asyncio.wait_for(entered.wait(), 10)
     try:
@@ -993,17 +1032,19 @@ async def test_managed_worker_replays_legacy_task_input_without_grant(worker_gat
 async def test_managed_worker_requires_explicit_resume_and_fences_cancellation(worker_gateway):
     import asyncio
 
-    client, runs, _, entered, _ = worker_gateway
+    client, runs, state, entered, _ = worker_gateway
     url = "/api/coordination/tasks"
-    paused = (await client.post(url, json={"request_id": "pause", "objective": "approve"})).raise_for_status().json()
+    settings = {"recursion_limit": 240, "thinking_enabled": False, "is_plan_mode": True}
+    paused = (await client.post(url, json={"request_id": "pause", "objective": "approve", "run": settings})).raise_for_status().json()
     task_id = paused["task"]["id"]
     await _wait_for_worker(client, task_id, "execution", "status", "waiting_for_input")
     target = f"/api/threads/{paused['assignment']['thread_id']}/runs"
-    reply = {"json": {"command": {"resume": "confirmed"}}, "headers": {"Idempotency-Key": "reply"}}
+    reply = {"json": {"command": {"resume": "confirmed"}, "config": {"recursion_limit": 25}, "context": {"is_plan_mode": False}}, "headers": {"Idempotency-Key": "reply"}}
     answered = (await client.post(target, **reply)).raise_for_status().json()
     result = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
     assert result["task"]["result_ref"].endswith(f"/{answered['run_id']}/messages")
     assert (await client.post(target, **reply)).raise_for_status().json()["run_id"] == answered["run_id"]
+    assert state.observed_worker_settings == [(240, False, True)] * 2
 
     other = (await client.post(url, json={"request_id": "cancel", "objective": "wait"})).raise_for_status().json()
     await asyncio.wait_for(entered.wait(), 10)
@@ -1081,15 +1122,18 @@ async def test_managed_worker_restart_reconciles_the_persisted_task(worker_gatew
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+    from deerflow.config.app_config import get_app_config
     from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON
     from deerflow.runtime.runs.manager import STARTUP_ORPHAN_RECOVERY_ERROR
 
     client, runs, state, entered, _ = worker_gateway
+    limit = get_app_config().max_recursion_limit
+    settings = {"recursion_limit": limit + 100, "thinking_enabled": False, "is_plan_mode": True}
     path = str(tmp_path / "checkpoints.sqlite")
     async with AsyncSqliteSaver.from_conn_string(path) as saver:
         if previous_outcome != "orphan-no-checkpoint":
             state.checkpointer = saver
-        first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart"})).raise_for_status().json()
+        first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart", "run": settings})).raise_for_status().json()
         task_id, run_id, thread = first["task"]["id"], first["execution"]["run_id"], first["assignment"]["thread_id"]
         await asyncio.wait_for(entered.wait(), 10)
         await state.coordination_workers.close()
@@ -1108,6 +1152,8 @@ async def test_managed_worker_restart_reconciles_the_persisted_task(worker_gatew
         finished = await _wait_for_worker(client, task_id, "task", "status", "failed" if previous_outcome in ("cancel-takeover", "orphan-no-checkpoint") else "succeeded")
     assert finished["assignment"]["thread_id"] == thread
     assert finished["execution"]["turn"] == (2 if previous_outcome == "shutdown" else 1)
+    assert state.observed_worker_settings == [(limit, False, True)] * finished["execution"]["turn"]
+    assert finished["task"]["run_settings"] == settings
     assert (finished["execution"]["run_id"] != run_id) is (previous_outcome == "shutdown")
     if previous_outcome == "orphan-no-checkpoint":
         assert finished["execution"]["status"] == "error"

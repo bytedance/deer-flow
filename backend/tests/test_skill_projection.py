@@ -17,6 +17,7 @@ import pytest
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
 from deerflow.sandbox.middleware import SandboxMiddleware
+from deerflow.skills import projection
 from deerflow.skills.projection import (
     ensure_public_skill_projection,
     ensure_skill_projections,
@@ -1163,3 +1164,120 @@ def test_undecodable_skill_states_file_is_treated_as_empty(projection_env) -> No
     state_file.write_bytes(b"\xff\xfe")
 
     assert projection_env.storage._read_skill_states() == {}
+
+
+@pytest.fixture
+def projection_locks(monkeypatch):
+    locks = {}
+    monkeypatch.setattr(projection, "_process_locks", locks)
+    return locks
+
+
+def test_completed_thread_projections_reclaim_idle_locks(projection_env, projection_locks):
+    for index in range(4):
+        paths = ensure_thread_skill_projection(projection_env.storage, f"thread-{index}", set())
+        assert paths is not None and paths.public.is_dir()
+    assert not projection_locks
+
+
+def test_waiter_and_late_arrival_share_the_same_projection_lock(tmp_path, projection_locks):
+    root = tmp_path / "view"
+    waiting, retry_waiter, waiter_blocked_again = Event(), Event(), Event()
+    late_holding, release_late = Event(), Event()
+
+    def check_waiter():
+        if not waiting.is_set():
+            waiting.set()
+            assert retry_waiter.wait(5)
+        else:
+            waiter_blocked_again.set()
+
+    def waiter():
+        with projection._projection_lock(root, check=check_waiter):
+            assert not late_holding.is_set()
+
+    def late_arrival():
+        with projection._projection_lock(root):
+            late_holding.set()
+            try:
+                assert release_late.wait(5)
+            finally:
+                late_holding.clear()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        try:
+            with projection._projection_lock(root):
+                (entry,) = projection_locks.values()
+                queued = executor.submit(waiter)
+                assert waiting.wait(5)
+
+            late = executor.submit(late_arrival)
+            assert late_holding.wait(5)
+            (late_entry,) = projection_locks.values()
+            assert late_entry is entry
+            retry_waiter.set()
+            assert waiter_blocked_again.wait(5)
+        finally:
+            retry_waiter.set()
+            release_late.set()
+        queued.result(timeout=5)
+        late.result(timeout=5)
+    assert not projection_locks
+
+
+def test_nested_projection_lock_keeps_entry_until_outer_exit(tmp_path, projection_locks):
+    root = tmp_path / "view"
+    with projection._projection_lock(root):
+        (entry,) = projection_locks.values()
+        with projection._projection_lock(root, timeout=0):
+            (nested_entry,) = projection_locks.values()
+            assert nested_entry is entry
+        (remaining_entry,) = projection_locks.values()
+        assert remaining_entry is entry
+    assert not projection_locks
+
+
+@pytest.mark.parametrize("abort_wait", [False, True], ids=["timeout", "check-error"])
+def test_projection_lock_reclaims_entry_after_failed_wait(tmp_path, projection_locks, abort_wait):
+    root = tmp_path / "view"
+    checked = Event()
+
+    def check():
+        checked.set()
+        if abort_wait:
+            raise RuntimeError("stop waiting")
+
+    def waiter():
+        with projection._projection_lock(root, timeout=0, check=check):
+            pytest.fail("waiter entered while the lock was held")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with projection._projection_lock(root):
+            future = executor.submit(waiter)
+            expected = RuntimeError if abort_wait else TimeoutError
+            with pytest.raises(expected, match="stop waiting" if abort_wait else "Skill projection lock timeout"):
+                future.result(timeout=5)
+            assert checked.is_set()
+    assert not projection_locks
+
+
+def test_projection_lock_reclaims_entry_when_body_raises(tmp_path, projection_locks):
+    with pytest.raises(RuntimeError, match="projection failed"):
+        with projection._projection_lock(tmp_path / "view"):
+            raise RuntimeError("projection failed")
+    assert not projection_locks
+
+
+def test_distinct_projection_paths_can_hold_locks_in_parallel(tmp_path, projection_locks):
+    both_holding = Barrier(2, timeout=5)
+
+    def acquire(root):
+        with projection._projection_lock(root):
+            both_holding.wait()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(acquire, tmp_path / "first")
+        second = executor.submit(acquire, tmp_path / "second")
+        first.result(timeout=10)
+        second.result(timeout=10)
+    assert not projection_locks

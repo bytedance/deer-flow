@@ -34,6 +34,7 @@ class CoordinationTaskRow(Base):
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("coord_tasks.id"))
     depends_on: Mapped[list[str]] = mapped_column(JSON)
     objective: Mapped[str] = mapped_column(Text)
+    run_settings: Mapped[dict[str, int | bool] | None] = mapped_column(JSON(none_as_null=True))
     status: Mapped[str] = mapped_column(String(16))
     revision: Mapped[int] = mapped_column(BigInteger)
     execution_epoch: Mapped[int] = mapped_column(BigInteger)

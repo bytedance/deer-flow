@@ -289,6 +289,14 @@ class SandboxConfig(BaseModel):
             (``BOXD_API_KEY`` is the fallback for ``boxd_api_key``).
         vcpu, memory, from_snapshot, auto_suspend_timeout, ready_timeout,
             name_prefix, labels: machine shape, readiness deadline and naming.
+
+    VeFaaSSandboxProvider specific options:
+        vefaas: Optional nested mapping (or flat fields on ``sandbox``) holding
+            ``region``, ``endpoint``, ``function_id``, ``sandbox_base_url``,
+            ``access_key`` / ``secret_key`` / ``session_token`` (or ``*_env``),
+            ``sandbox_access_token``, ``cpu_milli``, ``memory_mb``,
+            ``timeout_minutes``, ``ready_timeout``, ``request_timeout``,
+            ``allow_insecure_http``, ``tos_mount``, and ``metadata``.
     """
 
     use: str = Field(

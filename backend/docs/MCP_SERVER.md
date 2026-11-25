@@ -14,6 +14,28 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Image results and model capabilities
+
+For a model configured with `supports_vision: false`, image blocks returned by
+MCP tools become text placeholders in the model request. This covers standard
+`image` blocks, legacy `image_url` blocks, and native OpenAI Responses
+`input_image` blocks. Other result text remains available, and the original
+images stay in tool messages and checkpoints. Models configured with
+`supports_vision: true` continue to receive images. Direct SDK factories without
+a model capability profile retain their existing image handling.
+
+When the compatibility middleware rewrites history, the OpenAI Responses API
+request replays the projected messages. After a switch to a text-only model,
+this lets the provider see the placeholders and surrounding tool text.
+
+## Structured-only stdio tool results
+
+When a stdio MCP tool returns `structuredContent` with an empty `content` list,
+DeerFlow exposes the JSON result as model-visible text. File references in its
+string values follow the same `/mnt/user-data/...` translation as text results.
+The tool artifact retains the original JSON. Existing content blocks take
+precedence over the fallback, and errors follow the usual error handling.
+
 ## Stdio Working Directory
 
 Set `cwd` when a stdio server needs to resolve its entrypoint or data files

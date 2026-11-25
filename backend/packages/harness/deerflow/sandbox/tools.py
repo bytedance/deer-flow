@@ -2425,7 +2425,8 @@ async def _run_sync_tool_after_async_sandbox_init(
         text = f"Error: {e}"
         return _error_result(text, e) if _error_result else text
     except Exception as e:
-        text = f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        detail = await run_sync_lifecycle_operation(_sanitize_error, e, runtime)
+        text = f"Error: Unexpected error initializing sandbox: {detail}"
         return _error_result(text, e) if _error_result else text
 
 
