@@ -115,6 +115,16 @@ error and timeout policies. Repeated cancellation does not abandon this cleanup.
 Task-stop reports an interrupted execution as aborted, preserving any completed,
 failed or timed-out outcome already published before cancellation.
 
+The worker saves sub-agent step history separately from the live stream. It
+retries a batch only when the store confirms that no event was committed, such
+as after a transient database error before commit or a successful JSONL rollback.
+After three consecutive failed attempts, an uncertain write, or cancellation by
+the store, the worker releases the buffer and stops saving sub-agent events for
+that run. Live events and task results still reach the caller, but reloading
+the run can show an incomplete history. The `subagent history incomplete` log
+lists the unconfirmed and skipped event counts and a sample of affected task IDs.
+Unconfirmed events may already be in the store.
+
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
 before. Snapshot tasks also receive the parent's retained conversation and
