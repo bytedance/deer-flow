@@ -127,6 +127,53 @@ def _shorten_first_write(limit, before_rest=None):
     return script
 
 
+def _signal_history_lock_attempts(monkeypatch, *, only_contended=False):
+    """Set the returned event when a storage read or append asks for the history file lock.
+
+    With ``only_contended``, only an attempt that has to wait for another holder
+    sets it (POSIX). The holder of a short write uses this as a barrier: it
+    retries only once the other thread is at the lock, or past the point where
+    a lock-free path would have touched the file.
+    """
+    import threading
+
+    from deerflow.skills.storage import local_skill_storage
+
+    attempted = threading.Event()
+    real = local_skill_storage.locked_history_file
+
+    def held_elsewhere(fd):
+        import fcntl
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+
+    def locked(fd, **kwargs):
+        if not only_contended or held_elsewhere(fd):
+            attempted.set()
+        return real(fd, **kwargs)
+
+    monkeypatch.setattr(local_skill_storage, "locked_history_file", locked)
+    return attempted
+
+
+def _thread_signalling(event, target, *args):
+    """A thread running ``target`` that also sets ``event`` when it ends."""
+    import threading
+
+    def run():
+        try:
+            target(*args)
+        finally:
+            event.set()
+
+    return threading.Thread(target=run)
+
+
 def _operation(operation_id):
     from deerflow_extension_api.skill_mutations import AssetRevision, Operation
 
@@ -156,14 +203,16 @@ def test_a_short_write_still_stores_the_whole_record(storage, monkeypatch):
 
 
 def test_another_append_waits_for_a_short_write_to_finish(storage, monkeypatch):
-    import threading
-
-    other = threading.Thread(target=storage.append_history, args=("demo-skill", {"action": "edit", "author": "b"}))
+    at_lock = _signal_history_lock_attempts(monkeypatch)
+    other = _thread_signalling(at_lock, storage.append_history, "demo-skill", {"action": "edit", "author": "b"})
 
     def let_the_other_append_run():
         # Between the short write and its retry: the record is half written.
+        # The retry waits until the other append is at the lock, or has
+        # finished without it.
+        at_lock.clear()
         other.start()
-        other.join(timeout=0.5)
+        assert at_lock.wait(timeout=5)
 
     _script_history_writes(monkeypatch, storage, _shorten_first_write(10, before_rest=let_the_other_append_run))
 
@@ -175,9 +224,8 @@ def test_another_append_waits_for_a_short_write_to_finish(storage, monkeypatch):
 
 
 def test_a_read_waits_for_a_short_write_to_finish(storage, monkeypatch):
-    import threading
-
     storage.append_history("demo-skill", {"action": "create", "author": "first"})
+    at_lock = _signal_history_lock_attempts(monkeypatch)
     seen = []
 
     def read():
@@ -186,12 +234,15 @@ def test_a_read_waits_for_a_short_write_to_finish(storage, monkeypatch):
         except json.JSONDecodeError as error:
             seen.append(error)
 
-    reader = threading.Thread(target=read)
+    reader = _thread_signalling(at_lock, read)
 
     def let_the_read_run():
         # Between the short write and its retry: the tail is half a record.
+        # The retry waits until the reader is at the lock, or has read
+        # without it.
+        at_lock.clear()
         reader.start()
-        reader.join(timeout=0.5)
+        assert at_lock.wait(timeout=5)
 
     _script_history_writes(monkeypatch, storage, _shorten_first_write(10, before_rest=let_the_read_run))
 
@@ -227,7 +278,10 @@ def test_the_operation_mirror_and_appends_share_the_history_lock(storage, monkey
     from deerflow.skills.mutations.history import mirror_operations
 
     storage.get_skill_history_file("demo-skill").parent.mkdir(parents=True)
-    append_cut, resume_append = threading.Event(), threading.Event()
+    # Set when the append has to wait for the mirror's lock, or, without that
+    # lock, once the append's first, short write is in.
+    append_held = _signal_history_lock_attempts(monkeypatch, only_contended=True)
+    resume_append = threading.Event()
     append = threading.Thread(target=storage.append_history, args=("demo-skill", {"action": "edit", "author": "a"}))
     append_calls = []
 
@@ -236,7 +290,7 @@ def test_the_operation_mirror_and_appends_share_the_history_lock(storage, monkey
             # The mirror is about to write. An append that starts now must not
             # get its first, short write in before the mirror's record.
             append.start()
-            append_cut.wait(timeout=0.5)
+            assert append_held.wait(timeout=5)
             written = write(data)
             resume_append.set()
             return written
@@ -244,7 +298,7 @@ def test_the_operation_mirror_and_appends_share_the_history_lock(storage, monkey
         if len(append_calls) > 1:
             return write(data)
         written = write(data[:10])
-        append_cut.set()
+        append_held.set()
         resume_append.wait(timeout=5)
         return written
 
