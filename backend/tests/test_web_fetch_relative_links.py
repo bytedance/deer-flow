@@ -4,6 +4,7 @@ import importlib
 from ipaddress import ip_address
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import urljoin
 
 import pytest
 
@@ -65,7 +66,9 @@ def test_extract_article_resolves_images_and_relative_document_base():
     assert "![Chart](https://example.com/assets/images/chart.png)" in markdown
 
 
-def test_extract_article_without_url_preserves_legacy_relative_links():
+def test_extract_article_without_url_preserves_legacy_relative_links(monkeypatch):
+    # Exercise the real Python fallback even on hosts with a working Node bridge.
+    monkeypatch.setattr("deerflow.utils.readability._readability_js_available", lambda: False)
     article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>'))
     assert "[Next](../next)" in article.to_markdown()
 
@@ -215,10 +218,9 @@ def test_base_precheck_false_positives_do_not_override_page_url(head):
     assert '<a href="https://example.com/next">Next</a>' in _resolve_html_urls(html, PAGE_URL)
 
 
-def test_falls_back_when_extraction_returns_unextracted_document(monkeypatch):
-    """When Readability.js returns the raw document instead of the extracted
-    article (e.g. on Windows), the resolved HTML's <body> content is used so
-    that <a> destinations survive."""
+@pytest.mark.parametrize("url", [None, PAGE_URL])
+def test_falls_back_when_extraction_returns_unextracted_document(monkeypatch, url):
+    """A raw extraction result uses the source body with or without a URL."""
     import deerflow.utils.readability as R
 
     monkeypatch.setattr(
@@ -226,10 +228,11 @@ def test_falls_back_when_extraction_returns_unextracted_document(monkeypatch):
         "simple_json_from_html_string",
         lambda html, use_readability=True: {"title": "Guide", "content": html},
     )
-    article = R.ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a> <a href="/reference">Reference</a>'), url=PAGE_URL)
+    article = R.ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a> <a href="/reference">Reference</a>'), url=url)
     md = article.to_markdown()
-    assert "[Next](https://example.com/next)" in md
-    assert "[Reference](https://example.com/reference)" in md
+    assert md.count("Guide") == 1
+    assert f"[Next]({urljoin(url or '', '../next')})" in md
+    assert f"[Reference]({urljoin(url or '', '/reference')})" in md
 
 
 def test_link_free_article_with_link_bearing_chrome_does_not_fall_back(monkeypatch):

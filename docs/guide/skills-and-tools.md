@@ -505,6 +505,9 @@ repeatedly starting a missing toolchain. A non-zero extraction exit falls back
 only for that document, because malformed or oversized input can fail while
 the toolchain remains healthy. The fallback keeps resolved article links in
 the returned Markdown.
+When extraction returns a whole document, the fallback uses the source HTML
+body consistently with or without a source URL. Calls without a source URL
+retain relative link destinations and do not repeat the document title.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.
