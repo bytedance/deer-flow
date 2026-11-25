@@ -17,7 +17,9 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
+import threading
 from collections.abc import Hashable
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +44,13 @@ from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_lock import advisory_file_lock
 
 logger = logging.getLogger(__name__)
+_agent_write_lock = threading.RLock()
 
 
 def _agent_lock_path(agent_dir: Path) -> Path:
     # Deleting an agent must not remove the lock other writers are waiting on.
-    return agent_dir.parent / ".locks" / agent_dir.name
+    # A digest also avoids reserved Windows device names and name-length issues.
+    return agent_dir.parent / ".locks" / sha256(agent_dir.name.encode()).hexdigest()
 
 
 class FileAgentStore(AgentStore):
@@ -142,7 +146,7 @@ class FileAgentStore(AgentStore):
         # not be shadowed; a per-user dir may be memory-only but still blocks).
         if agent_dir.exists() or paths.agent_dir(name).exists():
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'")
-        with advisory_file_lock(_agent_lock_path(agent_dir)):
+        with _agent_write_lock, advisory_file_lock(_agent_lock_path(agent_dir)):
             try:
                 agent_dir.mkdir(parents=True, exist_ok=False)
             except FileExistsError as e:
@@ -160,7 +164,7 @@ class FileAgentStore(AgentStore):
         config_path = agent_dir / "config.yaml"
         if require_existing and not config_path.exists():
             raise FileNotFoundError(f"Agent config not found: {config_path}")
-        with advisory_file_lock(_agent_lock_path(agent_dir)):
+        with _agent_write_lock, advisory_file_lock(_agent_lock_path(agent_dir)):
             if require_existing and not config_path.exists():
                 raise FileNotFoundError(f"Agent config not found: {config_path}")
             if callable(config):
@@ -190,7 +194,7 @@ class FileAgentStore(AgentStore):
         agent_dir = paths.user_agent_dir(effective_user, name)
         if not agent_dir.exists():
             return "legacy" if paths.agent_dir(name).exists() else "missing"
-        with advisory_file_lock(_agent_lock_path(agent_dir)):
+        with _agent_write_lock, advisory_file_lock(_agent_lock_path(agent_dir)):
             if not agent_dir.exists():
                 # The write path never targets the legacy shared layout.
                 return "legacy" if paths.agent_dir(name).exists() else "missing"

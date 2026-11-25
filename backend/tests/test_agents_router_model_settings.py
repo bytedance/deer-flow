@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from threading import Event, get_ident
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -22,12 +24,16 @@ from app.gateway.routers.agents import (
     get_agent,
     update_agent,
 )
+from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import load_agents_api_config_from_dict
-from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config, set_app_config
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.persistence.agents.model import AgentRow
-from deerflow.persistence.agents.sql import SqlAgentStore
+from deerflow.persistence.agents.sql import get_sync_sessionmaker
+from deerflow.tools.builtins.setup_agent_tool import setup_agent
+from deerflow.tools.builtins.update_agent_tool import update_agent as update_agent_tool
 
 pytestmark = pytest.mark.asyncio
 
@@ -116,7 +122,38 @@ async def test_update_description_preserves_subagent_policy(_agent_env) -> None:
     assert updated.subagent_policy.max_total == 9
 
 
-@pytest.mark.parametrize("backend", ["file", "sqlite"])
+@pytest.fixture(params=["file", "sqlite"])
+def _agent_store(_agent_env, tmp_path, request):
+    if request.param == "file":
+        yield agents_router.get_agent_store()
+        return
+
+    database = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+    engine = get_sync_sessionmaker(database.app_sync_sqlalchemy_url).kw["bind"]
+    AgentRow.__table__.create(engine)
+    set_app_config(get_app_config().model_copy(update={"agent_storage": AgentStorageConfig(backend="db"), "database": database}))
+    try:
+        yield agents_router.get_agent_store()
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def pause_next_agent_update(monkeypatch):
+    before_write = asyncio.Event()
+    resume_write = asyncio.Event()
+    original = agents_router.run_drained_write
+
+    async def pause_first_write(action, *args, **kwargs):
+        if action == "Update agent" and not before_write.is_set():
+            before_write.set()
+            await resume_write.wait()
+        return await original(action, *args, **kwargs)
+
+    monkeypatch.setattr(agents_router, "run_drained_write", pause_first_write)
+    return before_write, resume_write
+
+
 @pytest.mark.parametrize(
     ("first", "second", "expected"),
     [
@@ -126,26 +163,9 @@ async def test_update_description_preserves_subagent_policy(_agent_env) -> None:
     ],
     ids=["independent-caps", "clear-one", "clear-both"],
 )
-async def test_overlapping_saves_keep_the_latest_omitted_cap(_agent_env, tmp_path, monkeypatch, backend, first, second, expected):
-    if backend == "sqlite":
-        store = SqlAgentStore(f"sqlite:///{tmp_path / 'agents.db'}")
-        engine = store._Session.kw["bind"]
-        AgentRow.__table__.create(engine)
-        monkeypatch.setattr(agents_router, "get_agent_store", lambda: store)
-        monkeypatch.setattr("deerflow.persistence.agents.get_agent_store", lambda: store)
-
+async def test_overlapping_saves_keep_the_latest_omitted_cap(_agent_store, pause_next_agent_update, first, second, expected):
     await create_agent_endpoint(AgentCreateRequest(name="bounded", subagent_policy={"max_concurrent": 4, "max_total": 10}))
-    before_write = asyncio.Event()
-    resume_write = asyncio.Event()
-    original = agents_router.run_drained_write
-
-    async def pause_first_write(*args, **kwargs):
-        if not before_write.is_set():
-            before_write.set()
-            await resume_write.wait()
-        return await original(*args, **kwargs)
-
-    monkeypatch.setattr(agents_router, "run_drained_write", pause_first_write)
+    before_write, resume_write = pause_next_agent_update
     pending = asyncio.create_task(update_agent("bounded", AgentUpdateRequest(**first)))
     try:
         await asyncio.wait_for(before_write.wait(), timeout=10)
@@ -157,6 +177,59 @@ async def test_overlapping_saves_keep_the_latest_omitted_cap(_agent_env, tmp_pat
     result = await get_agent("bounded")
     assert result.model_dump()["subagent_policy"] == expected
     assert result.description == first.get("description", "")
+
+
+async def test_paused_agent_save_does_not_recreate_a_deleted_agent(_agent_store, pause_next_agent_update):
+    await create_agent_endpoint(AgentCreateRequest(name="bounded", subagent_policy={"max_total": 10}, soul="Original"))
+    before_write, resume_write = pause_next_agent_update
+    pending = asyncio.create_task(update_agent("bounded", AgentUpdateRequest(subagent_policy={"max_concurrent": 2}, soul="Edited")))
+    try:
+        await asyncio.wait_for(before_write.wait(), timeout=10)
+        assert await asyncio.to_thread(_agent_store.delete, "bounded") == "deleted"
+    finally:
+        resume_write.set()
+        (outcome,) = await asyncio.gather(pending, return_exceptions=True)
+
+    assert isinstance(outcome, HTTPException)
+    assert outcome.status_code == 404
+    assert not await asyncio.to_thread(_agent_store.exists, "bounded")
+
+
+@pytest.mark.parametrize("tool", [setup_agent, update_agent_tool], ids=["setup", "update"])
+async def test_agent_tool_does_not_restore_a_cap_changed_by_the_api(_agent_store, monkeypatch, tool):
+    await create_agent_endpoint(AgentCreateRequest(name="bounded", subagent_policy={"max_concurrent": 4, "max_total": 10}, soul="Original"))
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = Event()
+    store_type = type(_agent_store)
+    original = store_type.update
+    worker_id = None
+
+    def pause_tool_write(self, *args, **kwargs):
+        if get_ident() == worker_id:
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(timeout=15)
+        return original(self, *args, **kwargs)
+
+    def call_tool():
+        nonlocal worker_id
+        worker_id = get_ident()
+        runtime = SimpleNamespace(context={"agent_name": "bounded"}, tool_call_id="overlapping-save")
+        return tool.func(runtime=runtime, soul="Edited", description="Updated by tool")
+
+    monkeypatch.setattr(store_type, "update", pause_tool_write)
+    pending = asyncio.create_task(asyncio.to_thread(call_tool))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        await update_agent("bounded", AgentUpdateRequest(subagent_policy={"max_total": None}))
+    finally:
+        release.set()
+        await pending
+
+    result = await get_agent("bounded")
+    assert result.model_dump()["subagent_policy"] == {"max_concurrent": 4, "max_total": None}
+    assert result.description == "Updated by tool"
+    assert result.soul == "Edited"
 
 
 async def test_create_rejects_unknown_model(_agent_env) -> None:

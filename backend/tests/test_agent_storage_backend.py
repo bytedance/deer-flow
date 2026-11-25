@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -310,6 +312,7 @@ def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch
         fs.create("racy", {"name": "racy"}, "soul", user_id="u1")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows test host denies child-process creation; POSIX covers the cross-process path")
 def test_file_update_holds_agent_lock_across_processes(tmp_path, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     from deerflow.config import paths as paths_module
@@ -322,7 +325,8 @@ def test_file_update_holds_agent_lock_across_processes(tmp_path, monkeypatch):
         "soul",
         user_id="u1",
     )
-    sidecar = tmp_path / "users" / "u1" / "agents" / ".locks" / "bounded"
+    (sidecar,) = (tmp_path / "users" / "u1" / "agents" / ".locks").iterdir()
+    assert sidecar.read_bytes() == b""
     probe = """
 import errno
 import os
@@ -350,11 +354,55 @@ with open(sys.argv[1], "r+b") as handle:
     def lower_concurrency(current):
         assert probe_lock() == "locked"
         assert current.subagent_policy.max_total == 10
-        return {"name": current.name, "subagent_policy": {"max_concurrent": 2, "max_total": 10}}
+        return {"name": current.name, "subagent_policy": {"max_concurrent": 2, "max_total": current.subagent_policy.max_total}}
 
     store.update("bounded", lower_concurrency, None, user_id="u1", require_existing=True)
     assert probe_lock() == "available"
     assert store.get("bounded", user_id="u1").subagent_policy.max_concurrent == 2
+
+
+def test_file_update_holds_agent_lock_across_threads(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    store.create("bounded", {"name": "bounded", "subagent_policy": {"max_total": 10}}, "soul", user_id="u1")
+    entered = threading.Event()
+    release = threading.Event()
+    peer: threading.Thread | None = None
+
+    def peer_update():
+        entered.set()
+        store.update(
+            "bounded",
+            lambda current: {
+                "name": current.name,
+                "subagent_policy": {"max_concurrent": current.subagent_policy.max_concurrent, "max_total": 3},
+            },
+            None,
+            user_id="u1",
+            require_existing=True,
+        )
+        release.set()
+
+    def hold_lock(current):
+        nonlocal peer
+        peer = threading.Thread(target=peer_update)
+        peer.start()
+        assert entered.wait(5)
+        assert not release.wait(0.2)
+        assert current.subagent_policy.max_total == 10
+        return {"name": current.name, "subagent_policy": {"max_concurrent": 2, "max_total": 10}}
+
+    store.update("bounded", hold_lock, None, user_id="u1", require_existing=True)
+    assert peer is not None
+    peer.join(10)
+    assert release.is_set()
+    policy = store.get("bounded", user_id="u1").subagent_policy
+    assert policy is not None
+    assert policy.max_concurrent == 2
+    assert policy.max_total == 3
 
 
 # -- graph-subprocess config resolution (db backend's core cross-process invariant) --

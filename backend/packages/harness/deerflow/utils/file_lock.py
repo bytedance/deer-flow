@@ -55,10 +55,8 @@ def advisory_file_lock(lock_path: Path) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
+            # msvcrt can lock beyond EOF. Keep the sidecar empty so workers
+            # do not race to initialize a byte before acquiring its lock.
             lock_file.seek(0)
             retry_until_locked(
                 lambda: msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1),
