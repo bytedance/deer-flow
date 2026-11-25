@@ -377,6 +377,8 @@ class _BoundAgentRuns:
             except TaskConflict as exc:
                 raise AgentRunError(409, str(exc)) from exc
         thread_id = worker["thread_id"]
+        frozen = dict(frozen)
+        planner_input_key = frozen.pop("planner_input_key", None)
         async with self._request("runs:create", thread_id) as request:
             record = await request.app.state.thread_store.get(thread_id, user_id=self._user_id)
             if record is None or record.get("assistant_id") != worker["assistant_id"] or (record.get("metadata") or {}).get(THREAD_PROJECT_METADATA_KEY) != project_id:
@@ -406,7 +408,15 @@ class _BoundAgentRuns:
 
                 workers = request.app.state.coordination_workers
                 coordinator_factory = build_coordinator_factory(workers, self._user_id, task_id, execution_id, grant_id, worker["assistant_id"], check_model_access)
-            record = await start_run(body, thread_id, request, require_existing_thread=True, idempotency_key=RUN_KEY_PREFIX + execution_id, agent_factory_override=coordinator_factory)
+            record = await start_run(
+                body,
+                thread_id,
+                request,
+                require_existing_thread=True,
+                idempotency_key=RUN_KEY_PREFIX + execution_id,
+                agent_factory_override=coordinator_factory,
+                input_message_idempotency_key=planner_input_key,
+            )
             return _view(record)
 
     async def wait_coordination_worker(self, *, thread_id, run_id, timeout=60):

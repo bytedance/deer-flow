@@ -242,6 +242,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                         parent_id=task_id,
                         depends_on=[task_ids[dep] for dep in item["depends_on"]],
                         objective=item["objective"],
+                        run_settings=root.run_settings,
                         status=TaskStatus.QUEUED,
                         revision=0,
                         execution_epoch=0,
@@ -383,6 +384,13 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                 return False
             if task.coordinator and task.revision != previous.frozen_input["expected_revision"]:
                 return False
+            if task.coordinator:
+                # Replays share the first admission's message IDs, including
+                # for executions that started before a replay key was stored.
+                planner_input_key = previous.frozen_input.get("planner_input_key", RUN_KEY_PREFIX + previous.id)
+                frozen_input = {**previous.frozen_input, "planner_input_key": planner_input_key}
+            else:
+                frozen_input = {"checkpoint_id": checkpoint_id, **({"collect_result": True} if previous.frozen_input.get("collect_result") else {})}
             previous.status = "interrupted"
             session.add(
                 Execution(
@@ -391,7 +399,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                     turn=previous.turn + 1,
                     epoch=previous.epoch,
                     covered_seq=previous.covered_seq,
-                    frozen_input=previous.frozen_input if task.coordinator else {"checkpoint_id": checkpoint_id, **({"collect_result": True} if previous.frozen_input.get("collect_result") else {})},
+                    frozen_input=frozen_input,
                     status="admitting",
                 )
             )

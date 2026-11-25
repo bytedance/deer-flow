@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import RetryPolicy
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_message_content
 from deerflow.models.factory import create_chat_model
 
 TaskKey = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
@@ -92,6 +93,8 @@ def build_coordinator_factory(workers, owner, task_id, execution_id, grant_id, a
             tools = [decision_tool] if after_inspection else [inspect_tool, decision_tool]
             binding = model.bind_tools(tools)
             messages = [message for message in state["messages"] if isinstance(message, HumanMessage)]
+            if app_config.pii_redaction.enabled:
+                messages = [message.model_copy(update={"content": redact_message_content(message.content, app_config.pii_redaction)}) for message in messages]
             if after_inspection:
                 messages.extend(state["messages"][-2:])
             response = await binding.ainvoke([_PLANNING_PROMPT, *messages])

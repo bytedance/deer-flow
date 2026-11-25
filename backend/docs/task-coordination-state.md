@@ -147,6 +147,8 @@ The Gateway starts a planning Run with two model tools. `inspect_task` reads
 the root and recent child statuses. `submit_task_decision` commits up to eight
 child tasks in dependency order. The planner uses the default configured
 model. The requested assistant is the default Worker for the plan.
+The planner applies the configured PII redaction to user text before each
+model call. Planned child Tasks inherit the root's saved Worker run settings.
 Each planning step retries once after a temporary provider error or a malformed
 tool call. A second failure ends that planning step with an error.
 
@@ -165,4 +167,5 @@ The parent task view lists child IDs, statuses, result references and artifact
 endpoints, including children from earlier plans. Only the current plan's
 children determine the root outcome. After restart, the
 Gateway continues from the saved decision or retries a planner interrupted
-before it committed. Later input stays in the same Task's inbox.
+before it committed. A replay reuses the original input message IDs. Later
+input stays in the same Task's inbox.

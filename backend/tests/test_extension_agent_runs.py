@@ -966,7 +966,8 @@ async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(work
     )
     monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
     url = "/api/coordination/tasks"
-    body = {"request_id": "plan", "coordinator": True, "objective": "Research and write a report", "run": {"recursion_limit": 400}}
+    settings = {"recursion_limit": 400, "thinking_enabled": True, "is_plan_mode": False}
+    body = {"request_id": "plan", "coordinator": True, "objective": "Research and write a report", "run": settings}
     first = (await client.post(url, json=body)).raise_for_status().json()
     task_id = first["task"]["id"]
     planner_run = first["execution"]["run_id"]
@@ -980,6 +981,7 @@ async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(work
     report = next(child for child in planned["children"] if child["id"] != research["id"])
     assert report["depends_on"] == [research["id"]]
     assert report["status"] == research["status"] == "queued"
+    assert report["run_settings"] == research["run_settings"] == settings
 
     await _restart_coordination(state)
     state.coordination_workers.start_recovery()
@@ -990,6 +992,7 @@ async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(work
     final = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
     assert {child["id"] for child in final["children"] if child["status"] == "succeeded"} == {research["id"], report["id"]}
     assert final["execution"]["run_id"] == planner_run
+    assert state.observed_worker_settings == [(400, True, False)] * 2
     finished_report = (await client.get(f"{url}/{report['id']}")).raise_for_status().json()
     messages = (await client.get(finished_report["task"]["result_ref"])).raise_for_status().json()
     assert any("answer:wait" in str(message["content"]) for message in messages["data"])
@@ -1002,7 +1005,7 @@ async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(work
 async def test_coordinator_replans_after_restart_before_submission(worker_gateway, monkeypatch):
     import asyncio
 
-    from langchain_core.messages import AIMessage
+    from langchain_core.messages import AIMessage, HumanMessage
 
     client, _, state, _, _ = worker_gateway
     planning, release = asyncio.Event(), asyncio.Event()
@@ -1031,6 +1034,39 @@ async def test_coordinator_replans_after_restart_before_submission(worker_gatewa
     assert final["execution"]["run_id"] != first["execution"]["run_id"]
     assert [(task["objective"], task["status"]) for task in final["children"]] == [("Write a draft", "succeeded")]
     assert invoke.await_count == 2
+    original, replayed = ([message for message in attempt.args[0] if isinstance(message, HumanMessage)] for attempt in invoke.await_args_list)
+    assert len(original) == len(replayed) == 1
+    assert original[0].id and replayed[0].id == original[0].id
+    assert original[0].content == replayed[0].content == "Write a draft"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_redacts_user_text_in_both_planning_calls(worker_gateway, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+    from deerflow.config.app_config import get_app_config, set_app_config
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
+
+    client, runs, _, _, _ = worker_gateway
+    pii = PiiRedactionConfig(enabled=True, token_secret="synthetic fixture only for tests")
+    set_app_config(get_app_config().model_copy(update={"pii_redaction": pii}))
+    objective = "Check the synthetic record for demo@example.test"
+    redacted = redact_text(objective, pii)
+    assert redacted != objective
+    model = Mock()
+    invoke = model.bind_tools.return_value.ainvoke = AsyncMock(
+        side_effect=[
+            AIMessage(content="", tool_calls=[{"name": "inspect_task", "id": "inspect", "args": {}}]),
+            AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "decision", "args": {"tasks": [{"key": "draft", "objective": "Write a draft"}]}}]),
+        ]
+    )
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    root = (await client.post("/api/coordination/tasks", json={"request_id": "pii", "coordinator": True, "objective": objective})).raise_for_status().json()
+    record = await runs.wait(thread_id=root["assignment"]["thread_id"], run_id=root["execution"]["run_id"], timeout=8)
+    assert record.status == "success"
+    assert root["task"]["objective"] == objective
+    assert [[msg.content for msg in attempt.args[0] if isinstance(msg, HumanMessage)] for attempt in invoke.await_args_list] == [[redacted], [redacted]]
 
 
 @pytest.mark.asyncio

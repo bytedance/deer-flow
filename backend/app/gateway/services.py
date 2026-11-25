@@ -2474,6 +2474,7 @@ async def start_run(
     evidence_origin: str | None = None,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
     agent_factory_override: Callable | None = None,
+    input_message_idempotency_key: str | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -2491,6 +2492,9 @@ async def start_run(
     evidence_origin : str | None
         Trusted Python entry-point provenance, never copied from request data.
         Internal launches without an explicit origin remain unknown.
+    input_message_idempotency_key : str | None
+        Reuse input message IDs when a managed planner replays a previous
+        execution. Admission still uses this run's own idempotency key.
     """
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
@@ -2502,7 +2506,7 @@ async def start_run(
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
     if scheduled_task_runtime is not None and getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
         raise HTTPException(status_code=403, detail="Scheduled runtime authority requires an internal launcher")
-    if agent_factory_override is not None and not getattr(request.state, "coordination_execution_id", None):
+    if (agent_factory_override is not None or input_message_idempotency_key is not None) and not getattr(request.state, "coordination_execution_id", None):
         raise HTTPException(status_code=403, detail="Coordinator factory requires a managed execution")
 
     try:
@@ -2656,7 +2660,7 @@ async def start_run(
         request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
         knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
         if isinstance(graph_input, dict):
-            graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=idempotency_key)
+            graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=input_message_idempotency_key or idempotency_key)
         # deerflow_trace_id is server-issued, so the caller's value is replaced
         # here at the trust boundary. body.metadata forks two ways -- through
         # build_run_config into config["metadata"], which the run worker
