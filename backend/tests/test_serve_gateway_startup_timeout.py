@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -705,12 +706,30 @@ def _read_pid(path: Path) -> str:
 
 
 class _WaitRun:
-    def __init__(self, result: subprocess.CompletedProcess[str], elapsed: int, branch_line: str, pids: list[str], bash: str) -> None:
+    def __init__(
+        self,
+        result: subprocess.CompletedProcess[str],
+        elapsed: int,
+        branch_line: str,
+        pids: list[str],
+        bash: str,
+        elapsed_ms: int = -1,
+    ) -> None:
         self.result = result
         self.elapsed = elapsed
         self.branch_line = branch_line
         self.pids = pids
         self.bash = bash
+        self.elapsed_ms = elapsed_ms
+
+
+def _force_compat_copy(script: Path) -> None:
+    """Run the compat function on this interpreter. The binary is unchanged."""
+    text = script.read_text(encoding="utf-8")
+    needle = 'if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then'
+    if needle not in text:
+        raise AssertionError(f"compat branch not found in {script}")
+    script.write_text(text.replace(needle, "if true; then", 1), encoding="utf-8", newline="\n")
 
 
 def _run_on_shell(
@@ -721,11 +740,15 @@ def _run_on_shell(
     timeout: int,
     signal: str = "",
     subprocess_timeout: int = 20,
+    force_compat: bool = False,
+    monotonic_ms: bool = False,
 ) -> _WaitRun:
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     for name in ("port-listening.sh", "wait-for-port.sh", "wait-for-port-bash4.sh"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    if force_compat:
+        _force_compat_copy(scripts / "wait-for-port.sh")
     branch_log = tmp_path / "branch.txt"
     called = tmp_path / "bash-called"
     probe_pid = tmp_path / "probe.pid"
@@ -767,7 +790,19 @@ echo "SIGNAL_DONE"
 cat "$TEST_OUT" 2>/dev/null || true
 """
     else:
-        launch = """
+        if monotonic_ms:
+            launch = """
+start=$SECONDS
+start_ns=$(date +%s%N)
+"$TEST_BASH" "$TEST_SCRIPT" 8001 "$TEST_TIMEOUT" Gateway
+status=$?
+end_ns=$(date +%s%N)
+echo "ELAPSED:$((SECONDS - start))"
+echo "ELAPSED_MS:$(( (end_ns - start_ns) / 1000000 ))"
+exit $status
+"""
+        else:
+            launch = """
 start=$SECONDS
 "$TEST_BASH" "$TEST_SCRIPT" 8001 "$TEST_TIMEOUT" Gateway
 status=$?
@@ -801,9 +836,11 @@ exit $status
         TEST_CHILD_PID=child_pid.as_posix(),
         TEST_BASH_CALLED=called.as_posix(),
         DEER_FLOW_WAIT_PORT_BRANCH_LOG=branch_log.as_posix(),
+        DEER_FLOW_WAIT_PORT_PID_LOG=(tmp_path / "wait-pids.txt").as_posix(),
         TEST_OUT=(tmp_path / "stdout.txt").as_posix(),
         TEST_ERR=(tmp_path / "stderr.txt").as_posix(),
     )
+    started = time.perf_counter()
     proc = subprocess.Popen(
         [bash, "-c", prelude, "versioned-wait"],
         cwd=tmp_path,
@@ -825,10 +862,15 @@ exit $status
     result = subprocess.CompletedProcess(proc.args, proc.returncode if proc.returncode is not None else 1, stdout or "", stderr or "")
     elapsed_match = re.search(r"ELAPSED:(\d+)", result.stdout)
     elapsed = int(elapsed_match.group(1)) if elapsed_match else -1
+    ms_match = re.search(r"ELAPSED_MS:(\d+)", result.stdout)
+    if monotonic_ms and ms_match:
+        elapsed_ms = int(ms_match.group(1))
+    else:
+        elapsed_ms = int((time.perf_counter() - started) * 1000) if monotonic_ms else -1
     branch_line = branch_log.read_text(encoding="utf-8").strip() if branch_log.exists() else ""
     pids = [_read_pid(probe_pid), _read_pid(child_pid)]
     assert not called.exists(), "wait script invoked bash again\n" + result.stdout + result.stderr
-    return _WaitRun(result, elapsed, branch_line, pids, bash)
+    return _WaitRun(result, elapsed, branch_line, pids, bash, elapsed_ms)
 
 
 def _assert_branch(run: _WaitRun, bash: str) -> None:
@@ -842,6 +884,26 @@ def _assert_reaped(run: _WaitRun) -> None:
             continue
         state = _process_state(run.bash, pid)
         assert state == "gone", f"pid {pid} is {state}, not reaped"
+
+
+def _logged_pids(tmp_path: Path) -> list[tuple[str, str]]:
+    log = tmp_path / "wait-pids.txt"
+    if not log.exists():
+        return []
+    found: list[tuple[str, str]] = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1].isdigit():
+            found.append((parts[0], parts[-1]))
+    return found
+
+
+def _assert_logged_pids_reaped(run: _WaitRun, tmp_path: Path) -> None:
+    rows = _logged_pids(tmp_path)
+    assert rows, "compat path did not record probe and sleeper pids"
+    for kind, pid in rows:
+        state = _process_state(run.bash, pid)
+        assert state == "gone", f"{kind} pid {pid} is {state}, not reaped"
 
 
 _LISTENER_LINE = "  TCP    127.0.0.1:8001         0.0.0.0:0              LISTENING       9"
@@ -867,6 +929,102 @@ netstat() {{
             _kill_pid(bash, pid)
 
 
+def test_compat_accepts_a_fast_listener_inside_one_second(tmp_path: Path) -> None:
+    """A 1s budget must accept a listener that is ready well inside that second.
+
+    The 5s already-up case allows almost four seconds, so it stays green when
+    the compat loop sleeps the whole poll first and then rejects the success.
+    The copy's version test is forced true. This is the installed bash running
+    the compat function, not a Bash 3.2 binary and not macOS.
+    """
+    bash = require_script_bash()
+    netstat = f"""
+netstat() {{
+    printf 'x\\n' >> "$TEST_PROBE_CALLS"
+    printf '%s\\n' '{_LISTENER_LINE}'
+    return 0
+}}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=1, subprocess_timeout=8, force_compat=True, monotonic_ms=True)
+    try:
+        _major, full = _bash_version(bash)
+        assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+        assert run.branch_line == f"compat {full}", run.branch_line
+        assert _probe_lines(tmp_path / "probe-calls") == ["x"]
+        assert 0 <= run.elapsed_ms < 1000, run.result.stdout + run.result.stderr
+        _assert_logged_pids_reaped(run, tmp_path)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+        for _kind, pid in _logged_pids(tmp_path):
+            _kill_pid(bash, pid)
+
+
+def test_compat_waits_one_second_after_a_miss(tmp_path: Path) -> None:
+    """A confirmed miss still waits about a second. That wait is not a timeout."""
+    bash = require_script_bash()
+    netstat = f"""
+netstat() {{
+    printf 'x\\n' >> "$TEST_PROBE_CALLS"
+    count=0
+    while IFS= read -r _; do
+        count=$((count + 1))
+    done < "$TEST_PROBE_CALLS"
+    if [ "$count" -lt 2 ]; then
+        return 1
+    fi
+    printf '%s\\n' '{_LISTENER_LINE}'
+    return 0
+}}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=5, subprocess_timeout=12, force_compat=True)
+    try:
+        _major, full = _bash_version(bash)
+        assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+        assert run.branch_line == f"compat {full}"
+        assert len(_probe_lines(tmp_path / "probe-calls")) == 2
+        assert 1 <= run.elapsed < 4, run.result.stdout
+        _assert_logged_pids_reaped(run, tmp_path)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+        for _kind, pid in _logged_pids(tmp_path):
+            _kill_pid(bash, pid)
+
+
+def test_compat_kills_a_probe_that_outlasts_one_second(tmp_path: Path) -> None:
+    """A probe that ignores the deadline is stopped. A late listen is not success."""
+    bash = require_script_bash()
+    netstat = f"""
+netstat() {{
+    probe=$(sh -c 'echo "$PPID"')
+    printf '%s\\n' "$probe" > "$TEST_PROBE_PID"
+    printf 'slow\\n' >> "$TEST_PROBE_SLOW"
+    sleep 30
+    printf 'done\\n' >> "$TEST_PROBE_DONE"
+    printf '%s\\n' '{_LISTENER_LINE}'
+    return 0
+}}
+"""
+    run = _run_on_shell(tmp_path, bash, netstat=netstat, timeout=1, subprocess_timeout=8, force_compat=True)
+    try:
+        _major, full = _bash_version(bash)
+        assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+        assert "after 1s" in run.result.stdout
+        assert run.branch_line == f"compat {full}"
+        assert (tmp_path / "probe-slow").is_file()
+        assert not (tmp_path / "probe-done").exists()
+        assert 1 <= run.elapsed < 3, run.result.stdout
+        assert run.pids[0], "probe pid was not recorded"
+        _assert_reaped(run)
+        _assert_logged_pids_reaped(run, tmp_path)
+    finally:
+        for pid in run.pids:
+            _kill_pid(bash, pid)
+        for _kind, pid in _logged_pids(tmp_path):
+            _kill_pid(bash, pid)
+
+
 def test_wait_succeeds_after_two_misses(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
     bash, _branch, _major = wait_shell
     netstat = f"""
@@ -888,7 +1046,7 @@ netstat() {{
         assert run.result.returncode == 0, run.result.stdout + run.result.stderr
         _assert_branch(run, bash)
         assert len(_probe_lines(tmp_path / "probe-calls")) == 3
-        assert 0 <= run.elapsed < 10, run.result.stdout
+        assert 2 <= run.elapsed < 10, run.result.stdout
     finally:
         for pid in run.pids:
             _kill_pid(bash, pid)
