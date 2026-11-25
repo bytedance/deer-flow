@@ -102,6 +102,9 @@ class FakeVeFaaSServer:
         self.precache_status_sequence: list[str] = ["Succeeded"]
         self.validate_snapshot_on_create = False
         self.ignore_list_metadata_filter = False
+        self.ignore_snapshot_filters = False
+        self.reject_snapshot_metadata_filters = False
+        self.reject_snapshot_status_filter = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         action = request.url.params.get("Action", "")
@@ -317,12 +320,41 @@ class FakeVeFaaSServer:
 
         if action == "ListSandboxSnapshots":
             wanted_sb = payload.get("SandboxId")
+            filters = payload.get("Filters") or []
+            if self.reject_snapshot_metadata_filters and any(isinstance(f, dict) and str(f.get("Name") or "").startswith("Metadata.") for f in filters):
+                return httpx.Response(
+                    400,
+                    json={"ResponseMetadata": {"RequestId": "req-snap-filter-400", "Error": {"Code": "InvalidParameter", "Message": "unsupported Metadata filter"}}},
+                )
+            if self.reject_snapshot_status_filter and any(isinstance(f, dict) and str(f.get("Name") or "") == "Status" for f in filters):
+                return httpx.Response(
+                    400,
+                    json={"ResponseMetadata": {"RequestId": "req-snap-status-400", "Error": {"Code": "InvalidParameter", "Message": "unsupported Status filter"}}},
+                )
             items = []
             for snap in self.snapshots.values():
                 if snap["FunctionId"] != payload["FunctionId"]:
                     continue
                 if wanted_sb and snap["SandboxId"] != wanted_sb:
                     continue
+                if not self.ignore_snapshot_filters and filters:
+                    matched = True
+                    for item in filters:
+                        if not isinstance(item, dict):
+                            continue
+                        name = str(item.get("Name") or "")
+                        values = [str(v) for v in (item.get("Values") or [])]
+                        if name == "Status" and values:
+                            if str(snap.get("Status") or "") not in values:
+                                matched = False
+                                break
+                        elif name.startswith("Metadata.") and values:
+                            meta_key = name.removeprefix("Metadata.")
+                            if str((snap.get("Metadata") or {}).get(meta_key, "")) not in values:
+                                matched = False
+                                break
+                    if not matched:
+                        continue
                 items.append({k: v for k, v in snap.items() if not k.startswith("_")})
             page_number = int(payload.get("PageNumber", 1))
             page_size = int(payload.get("PageSize", 50))

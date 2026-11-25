@@ -3503,6 +3503,444 @@ class TestVeFaaSImagePrecache:
             worker_b1.shutdown()
             worker_b2.shutdown()
 
+    @pytest.mark.parametrize("pause_on_idle", [False, True])
+    def test_deferred_warm_teardown_keeps_sandbox_handle_open(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        pause_on_idle: bool,
+    ) -> None:
+        provider, server, _ = _install_provider(
+            monkeypatch,
+            tmp_path,
+            sandbox_overrides={"idle_timeout": 10, "vefaas": {"pause_on_idle": pause_on_idle}},
+        )
+        try:
+            sid = provider.acquire("t-defer-open", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            tracked = provider._sandboxes[sid]
+            provider.release(sid)
+            assert sid in provider._warm_pool
+
+            # First fence check (pre-claim) sees None; second check (post-claim) raises transient backend error.
+            orig_owner = provider._ownership.owner
+            fence_key = provider_mod.VeFaaSSandboxProvider._snapshot_fence_key(remote_id)
+            fence_checks = {"count": 0}
+
+            def flaky_owner(key: str) -> str | None:
+                if key == fence_key:
+                    fence_checks["count"] += 1
+                    if fence_checks["count"] == 2:
+                        raise OwnershipBackendError("transient redis outage on second fence check")
+                return orig_owner(key)
+
+            monkeypatch.setattr(provider._ownership, "owner", flaky_owner)
+            assert provider._destroy_warm_entry(sid, tracked, reason="idle_timeout") is False
+            assert fence_checks["count"] == 2
+            assert sid in provider._warm_pool
+            assert tracked.sandbox.closed is False
+            assert not any(action in {"KillSandbox", "PauseSandbox"} for action, _, _ in server.requests)
+
+            # Next acquire reclaims the healthy warm sandbox with an open AioSandbox handle.
+            monkeypatch.setattr(provider._ownership, "owner", orig_owner)
+            reclaimed_sid = provider.acquire("t-defer-open", user_id="u1")
+            assert reclaimed_sid == sid
+            reclaimed_aio = provider.get(sid)
+            assert reclaimed_aio is tracked.sandbox
+            assert reclaimed_aio is not None and reclaimed_aio.closed is False
+        finally:
+            provider.shutdown()
+
+    def test_uncertain_snapshot_submission_retains_fence_until_reconciled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: Server accepts CreateSandboxSnapshot (creating snap-1 in Creating) then times out reading response.
+        server_a = _FakeVeFaaSServer()
+        server_a.snapshot_status_sequence = ["Creating"]
+        orig_handler_a = server_a.handler
+        reconcile_polled = threading.Event()
+        allow_ready = threading.Event()
+
+        def timeout_after_accept_handler(req: httpx.Request) -> httpx.Response:
+            action = req.url.params.get("Action")
+            if action == "CreateSandboxSnapshot":
+                # Accept snapshot on server first, then fail transport with ReadTimeout.
+                orig_handler_a(req)
+                raise httpx.ReadTimeout("timed out reading CreateSandboxSnapshot response")
+            if action == "ListSandboxSnapshots":
+                if allow_ready.is_set():
+                    for snap_rec in server_a.snapshots.values():
+                        snap_rec["Status"] = "Ready"
+                        snap_rec["_status_queue"] = ["Ready"]
+                else:
+                    reconcile_polled.set()
+            return orig_handler_a(req)
+
+        server_a.handler = timeout_after_accept_handler  # type: ignore[method-assign]
+        provider_a, _, _ = _install_provider(monkeypatch, tmp_path / "uncertain-a", server=server_a)
+        provider_a._snapshot_watch_interval = 0.01
+        try:
+            sid_a = provider_a.acquire("t-uncertain-snap", user_id="u1")
+            remote_a = provider_a._sandboxes[sid_a].remote_sandbox_id
+            fence_key_a = provider_mod.VeFaaSSandboxProvider._snapshot_fence_key(remote_a)
+
+            with pytest.raises(VeFaaSApiError, match="CreateSandboxSnapshot"):
+                provider_a.create_snapshot(sid_a, wait=True)
+
+            assert remote_a in provider_a._snapshotting_remote_ids
+            assert provider_a._ownership.owner(fence_key_a) == provider_a._owner_id
+            assert reconcile_polled.wait(timeout=5)
+
+            # Shutdown must defer teardown while the accepted snapshot is still Creating.
+            with pytest.raises(provider_mod._VeFaaSShutdownIncompleteError, match="snapshot"):
+                provider_a.shutdown()
+            assert remote_a in server_a.sandboxes
+            assert not any(action == "KillSandbox" for action, _, _ in server_a.requests)
+
+            # Once the snapshot settles to Ready, reconciler releases both fences and shutdown succeeds.
+            allow_ready.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider_a._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            assert not provider_a._snapshotting_remote_ids
+            assert provider_a._ownership.owner(fence_key_a) is None
+
+            provider_a.shutdown()
+            assert remote_a not in server_a.sandboxes
+            assert sum(1 for action, _, _ in server_a.requests if action == "KillSandbox") == 1
+        finally:
+            allow_ready.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider_a._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            provider_a.shutdown()
+
+        # Case B: ReadTimeout where server never created a snapshot -> reconciler confirms none and releases fence.
+        server_b = _FakeVeFaaSServer()
+        orig_handler_b = server_b.handler
+
+        def timeout_before_accept_handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "CreateSandboxSnapshot":
+                raise httpx.ReadTimeout("timed out before reaching server")
+            return orig_handler_b(req)
+
+        server_b.handler = timeout_before_accept_handler  # type: ignore[method-assign]
+        provider_b, _, _ = _install_provider(monkeypatch, tmp_path / "uncertain-b", server=server_b)
+        provider_b._snapshot_watch_interval = 0.01
+        try:
+            sid_b = provider_b.acquire("t-uncertain-none", user_id="u1")
+            remote_b = provider_b._sandboxes[sid_b].remote_sandbox_id
+            fence_key_b = provider_mod.VeFaaSSandboxProvider._snapshot_fence_key(remote_b)
+
+            with pytest.raises(VeFaaSApiError):
+                provider_b.create_snapshot(sid_b, wait=True)
+
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider_b._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            assert not provider_b._snapshotting_remote_ids
+            assert provider_b._ownership.owner(fence_key_b) is None
+            provider_b.shutdown()
+            assert remote_b not in server_b.sandboxes
+        finally:
+            provider_b.shutdown()
+
+        # Case C: Definitive 4xx rejection releases fences immediately without spawning a watcher.
+        server_c = _FakeVeFaaSServer()
+        server_c.snapshot_create_error = (400, "InvalidParameter", "bad snapshot request")
+        provider_c, _, _ = _install_provider(monkeypatch, tmp_path / "uncertain-c", server=server_c)
+        try:
+            sid_c = provider_c.acquire("t-definitive-400", user_id="u1")
+            remote_c = provider_c._sandboxes[sid_c].remote_sandbox_id
+            with pytest.raises(VeFaaSApiError):
+                provider_c.create_snapshot(sid_c, wait=True)
+            assert not provider_c._snapshotting_remote_ids
+            assert not provider_c._snapshot_watchers
+            assert provider_c._ownership.owner(provider_mod.VeFaaSSandboxProvider._snapshot_fence_key(remote_c)) is None
+        finally:
+            provider_c.shutdown()
+
+    def test_snapshot_fence_release_serialized_with_concurrent_reservation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        server.snapshot_status_sequence = ["Creating"]
+        orig_handler = server.handler
+        allow_snap1_ready = threading.Event()
+        allow_snap2_ready = threading.Event()
+
+        def two_snap_handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("Action") == "DescribeSandboxSnapshot":
+                payload = json.loads(req.content.decode("utf-8"))
+                snap_id = payload["SnapshotId"]
+                snap_rec = server.snapshots.get(snap_id)
+                if snap_rec is not None:
+                    if snap_id == "snap-1" and allow_snap1_ready.is_set():
+                        snap_rec["Status"] = "Ready"
+                        snap_rec["_status_queue"] = ["Ready"]
+                    elif snap_id == "snap-2" and allow_snap2_ready.is_set():
+                        snap_rec["Status"] = "Ready"
+                        snap_rec["_status_queue"] = ["Ready"]
+            return orig_handler(req)
+
+        server.handler = two_snap_handler  # type: ignore[method-assign]
+        provider, _, _ = _install_provider(monkeypatch, tmp_path, server=server)
+        provider._snapshot_watch_interval = 0.01
+        try:
+            sid = provider.acquire("t-fence-serialize", user_id="u1")
+            remote_id = provider._sandboxes[sid].remote_sandbox_id
+            fence_key = provider_mod.VeFaaSSandboxProvider._snapshot_fence_key(remote_id)
+
+            release_entered = threading.Event()
+            allow_release = threading.Event()
+            orig_release = provider._ownership.release
+
+            def gated_release(key: str) -> None:
+                if key == fence_key and not allow_release.is_set():
+                    release_entered.set()
+                    assert allow_release.wait(timeout=5)
+                orig_release(key)
+
+            monkeypatch.setattr(provider._ownership, "release", gated_release)
+
+            # Snapshot 1 starts and then settles while its fence release pauses mid-delete.
+            snap1 = provider.create_snapshot(sid, wait=False)
+            assert snap1.id == "snap-1"
+            allow_snap1_ready.set()
+            assert release_entered.wait(timeout=5)
+
+            # Snapshot 2 tries to reserve the same remote fence while Snapshot 1 is deleting it.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                snap2_future = pool.submit(provider.create_snapshot, sid, wait=False)
+                # Give Snapshot 2 a moment to contend on _snapshot_fence_lock before releasing Snapshot 1.
+                threading.Event().wait(0.03)
+                assert not snap2_future.done()
+                allow_release.set()
+                snap2 = snap2_future.result(timeout=5)
+
+            assert snap2.id == "snap-2"
+            # Snapshot 1's completion must NOT have deleted Snapshot 2's active cross-worker fence.
+            assert provider._ownership.owner(fence_key) == provider._owner_id
+            assert provider._remote_snapshot_fences.get(remote_id) == 1
+
+            allow_snap2_ready.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            assert not provider._snapshotting_remote_ids
+            assert provider._ownership.owner(fence_key) is None
+        finally:
+            allow_snap1_ready.set()
+            allow_snap2_ready.set()
+            allow_release.set()
+            wait_evt = threading.Event()
+            deadline = time.monotonic() + 5.0
+            while provider._snapshotting_remote_ids and time.monotonic() < deadline:
+                wait_evt.wait(0.01)
+            provider.shutdown()
+
+    def test_snapshot_lookup_and_pruning_use_server_filters_and_handle_multipage_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Case A: Server honors Metadata.* + Status filters -> O(1) single-page lookup despite 120 other-tenant snapshots.
+        server_a = _FakeVeFaaSServer()
+        sid_a = derive_sandbox_scope_token(user_id="u-filter", thread_id="t-filter")
+        for idx in range(120):
+            server_a.snapshots[f"snap-other-{idx:03d}"] = {
+                "SnapshotId": f"snap-other-{idx:03d}",
+                "SandboxId": f"vefaas-other-{idx}",
+                "FunctionId": "fn-demo-app",
+                "Status": "Ready",
+                "SnapshotType": "disk",
+                "CreatedAt": f"2026-11-23T00:{idx // 60:02d}:{idx % 60:02d}Z",
+                "Metadata": {
+                    provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                    provider_mod.META_KEY_SANDBOX_ID: f"other-scope-{idx}",
+                },
+            }
+        server_a.snapshots["snap-target-latest"] = {
+            "SnapshotId": "snap-target-latest",
+            "SandboxId": "vefaas-prev-a",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-23T05:00:00Z",
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_a,
+            },
+        }
+        provider_a, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "filter-a",
+            server=server_a,
+            sandbox_overrides={"vefaas": {"snapshot_on_idle": True}},
+        )
+        try:
+            assert provider_a.acquire("t-filter", user_id="u-filter") == sid_a
+            list_reqs = [payload for action, payload, _ in server_a.requests if action == "ListSandboxSnapshots"]
+            assert len(list_reqs) == 1
+            assert list_reqs[0]["PageNumber"] == 1
+            filter_map = {f["Name"]: f["Values"] for f in list_reqs[0]["Filters"]}
+            assert filter_map == {
+                f"Metadata.{provider_mod.META_KEY_PROVIDER}": [provider_mod.META_VAL_PROVIDER],
+                f"Metadata.{provider_mod.META_KEY_SANDBOX_ID}": [sid_a],
+                "Status": ["Ready"],
+            }
+            create_reqs = [payload for action, payload, _ in server_a.requests if action == "CreateSandbox"]
+            assert create_reqs[-1]["SnapshotId"] == "snap-target-latest"
+        finally:
+            provider_a.shutdown()
+
+        # Case B: Backend rejects Metadata.* filters with 400 -> caches fallback, paginates across 3 pages
+        # (120 unrelated snapshots on pages 1-3 + matching snapshot on page 3), and restores + prunes accurately.
+        server_b = _FakeVeFaaSServer()
+        server_b.reject_snapshot_metadata_filters = True
+        sid_b = derive_sandbox_scope_token(user_id="u-page", thread_id="t-page")
+        for idx in range(115):
+            server_b.snapshots[f"snap-noise-{idx:03d}"] = {
+                "SnapshotId": f"snap-noise-{idx:03d}",
+                "SandboxId": f"vefaas-noise-{idx}",
+                "FunctionId": "fn-demo-app",
+                "Status": "Ready",
+                "SnapshotType": "disk",
+                "CreatedAt": f"2026-11-23T00:{idx // 60:02d}:{idx % 60:02d}Z",
+                "Metadata": {
+                    provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                    provider_mod.META_KEY_SANDBOX_ID: f"noise-scope-{idx}",
+                },
+            }
+        server_b.snapshots["snap-page3-old"] = {
+            "SnapshotId": "snap-page3-old",
+            "SandboxId": "vefaas-prev-b1",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-23T04:00:00Z",
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_b,
+            },
+        }
+        server_b.snapshots["snap-page3-new"] = {
+            "SnapshotId": "snap-page3-new",
+            "SandboxId": "vefaas-prev-b2",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-23T06:00:00Z",
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid_b,
+            },
+        }
+        provider_b, _, _ = _install_provider(
+            monkeypatch,
+            tmp_path / "filter-b",
+            server=server_b,
+            sandbox_overrides={"vefaas": {"snapshot_on_idle": True, "max_snapshots_per_sandbox": 1}},
+        )
+        try:
+            assert provider_b.acquire("t-page", user_id="u-page") == sid_b
+            assert provider_b._snapshot_metadata_filter_supported is False
+            create_reqs_b = [payload for action, payload, _ in server_b.requests if action == "CreateSandbox"]
+            assert create_reqs_b[-1]["SnapshotId"] == "snap-page3-new"
+
+            # Subsequent prune call skips the unsupported Metadata.* filter (no extra 400) and prunes only sid_b's older snapshot.
+            reqs_before = len(server_b.requests)
+            provider_b._prune_old_snapshots("fn-demo-app", sid_b, keep=1)
+            prune_list_reqs = [payload for action, payload, _ in server_b.requests[reqs_before:] if action == "ListSandboxSnapshots"]
+            assert len(prune_list_reqs) == 3  # 117 Ready snapshots across 3 pages of 50
+            assert all(payload.get("Filters") == [{"Name": "Status", "Values": ["Ready"]}] for payload in prune_list_reqs)
+            assert "snap-page3-old" not in server_b.snapshots
+            assert "snap-page3-new" in server_b.snapshots
+            assert "snap-noise-000" in server_b.snapshots
+        finally:
+            provider_b.shutdown()
+
+    def test_snapshot_restore_with_preserved_init_marker_refreshes_skills_and_uploads_without_overwriting_workspace(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        server = _FakeVeFaaSServer()
+        sid = derive_sandbox_scope_token(user_id="u-snap-sync", thread_id="t-snap-sync")
+        server.snapshots["snap-with-marker"] = {
+            "SnapshotId": "snap-with-marker",
+            "SandboxId": "vefaas-prev-sync",
+            "FunctionId": "fn-demo-app",
+            "Status": "Ready",
+            "SnapshotType": "disk",
+            "CreatedAt": "2026-11-23T07:00:00Z",
+            "Metadata": {
+                provider_mod.META_KEY_PROVIDER: provider_mod.META_VAL_PROVIDER,
+                provider_mod.META_KEY_SANDBOX_ID: sid,
+            },
+        }
+
+        provider, _, created_aio = _install_provider(
+            monkeypatch,
+            tmp_path,
+            server=server,
+            sandbox_overrides={"vefaas": {"snapshot_on_idle": True}},
+        )
+
+        # Populate host thread dirs (new upload + stale workspace) and a post-snapshot shared skill.
+        from deerflow.config.paths import get_paths
+
+        paths = get_paths()
+        uploads_dir = paths.sandbox_uploads_dir("t-snap-sync", user_id="u-snap-sync")
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        (uploads_dir / "post-snapshot.txt").write_text("fresh upload", encoding="utf-8")
+
+        work_dir = paths.sandbox_work_dir("t-snap-sync", user_id="u-snap-sync")
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "stale-host.txt").write_text("do not overwrite snapshot workspace", encoding="utf-8")
+
+        skills_dir = tmp_path / "skills" / "public" / "updated-skill"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: updated-skill\ndescription: Post-snapshot updated skill\n---\n# Updated Skill\n",
+            encoding="utf-8",
+        )
+
+        class _SnapshotRestoredAio(_FakeAioSandbox):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                # Simulate a disk/full snapshot that preserved /tmp/.deerflow-vefaas-initialized.
+                self.uploaded_files[provider_mod._INIT_MARKER_PATH] = f"{sid}\n".encode()
+
+        monkeypatch.setattr(provider_mod, "AioSandbox", lambda **kwargs: created_aio.append(inst := _SnapshotRestoredAio(**kwargs)) or inst)
+        try:
+            acquired = provider.acquire("t-snap-sync", user_id="u-snap-sync")
+            assert acquired == sid
+            create_reqs = [payload for action, payload, _ in server.requests if action == "CreateSandbox"]
+            assert create_reqs[-1]["SnapshotId"] == "snap-with-marker"
+
+            aio = created_aio[-1]
+            # Inspect every tar.gz uploaded during snapshot restore.
+            uploaded_members: set[str] = set()
+            for remote_path, content in aio.uploaded_files.items():
+                if remote_path.endswith(".tar.gz"):
+                    with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as archive:
+                        uploaded_members.update(archive.getnames())
+
+            assert "uploads/post-snapshot.txt" in uploaded_members
+            assert "public/updated-skill/SKILL.md" in uploaded_members
+            assert "workspace/stale-host.txt" not in uploaded_members
+        finally:
+            provider.shutdown()
+
 
 # ── 10. Prewarm Integration ──────────────────────────────────────────────
 

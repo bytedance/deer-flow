@@ -48,6 +48,12 @@ sandbox:
     type: redis   # required for multi-worker gateways
 ```
 
+## Snapshot Retention & Cleanup
+
+- When `snapshot_on_idle: true` is enabled, idle snapshots retain the thread's workspace filesystem. Restoring from a snapshot preserves the snapshot's workspace/outputs while still refreshing `/mnt/skills` and syncing host `uploads/` when `/tmp/.deerflow-vefaas-initialized` is already present.
+- Set `snapshot_retention_days` (e.g. `7`) alongside `max_snapshots_per_sandbox` (default `3`) in multi-tenant deployments so veFaaS automatically expires snapshots for inactive threads; when `snapshot_retention_days` is omitted, veFaaS applies the platform default retention policy.
+- DeerFlow's `SandboxProvider` interface does not currently expose a thread-deletion hook. To delete a thread's snapshots on demand (for example, on user/thread erasure), derive `sandbox_id = derive_sandbox_scope_token(user_id=..., thread_id=...)` and call `provider.delete_snapshot(snap.id)` for each record returned by `provider.list_snapshots(sandbox_id)`.
+
 ## Verification
 
 ```bash
