@@ -216,7 +216,7 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
-For standalone skill creation, `scripts/init_skill.py <skill-name> --path <directory>` creates a new direct child of the chosen directory. Names can be up to 40 characters long and consist of lowercase ASCII letters and digits, optionally grouped with single hyphens (for example, `data-analyzer`). The creator and packager write progress to stdout and report errors on stderr.
+For standalone skill creation, `scripts/init_skill.py <skill-name> --path <directory>` creates a new direct child of the chosen directory. Names can be up to 40 characters long and consist of lowercase ASCII letters and digits, optionally grouped with single hyphens (for example, `data-analyzer`). The initializer rejects Windows reserved device names, such as `nul` and `com1`, on every platform before creating files. The creator and packager write progress to stdout and report errors on stderr.
 
 For standalone skill exports, the bundled skill creator's `scripts/package_skill.py` can be run by file path from any directory, or as `python -m scripts.package_skill` from the skill-creator directory. Both entry points validate the skill before writing a `.skill` archive. The packager requires a regular `SKILL.md` file and skips symbolic links to files and directories in the skill. Copy any linked resources the skill needs into its directory before packaging.
 
