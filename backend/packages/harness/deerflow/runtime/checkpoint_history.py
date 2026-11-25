@@ -11,6 +11,7 @@ from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER, CONFIG_KEY_D
 from langgraph.runtime import ExecutionInfo
 from langgraph.types import StateSnapshot
 
+from deerflow.checkpoint_patches import RUN_START_CHECKPOINT_KEY, RunStartCheckpoint
 from deerflow.runtime.checkpoint_mode import INTERNAL_CHECKPOINT_MODE_KEY
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 
@@ -27,15 +28,22 @@ async def task_checkpoint_ancestors(config: RunnableConfig, execution: Execution
     # ExecutionInfo identifies the task namespace. The containing graph saved
     # the checkpoint that scheduled this task under the parent namespace.
     namespace = execution.checkpoint_ns.rpartition(NS_SEP)[0]
+    durability = configurable.get(CONFIG_KEY_DURABILITY, "async")
+    checkpoint_id = execution.checkpoint_id
+    if durability == "exit":
+        anchor = configurable.get(RUN_START_CHECKPOINT_KEY)
+        if not isinstance(anchor, RunStartCheckpoint) or anchor.thread_id != thread_id or anchor.namespace != namespace:
+            return
+        checkpoint_id = anchor.checkpoint_id
     mode = "delta" if configurable.get(INTERNAL_CHECKPOINT_MODE_KEY) == "delta" else "full"
     graph = build_state_mutation_graph("read_checkpoint_history", mode)
     accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode, direct_namespace=True)
     scope = {"thread_id": thread_id, "checkpoint_ns": namespace}
-    cursor = {**scope, "checkpoint_id": execution.checkpoint_id}
+    cursor = {**scope, "checkpoint_id": checkpoint_id}
     visited = set()
     read_sync = False
     loop = asyncio.get_running_loop()
-    pending_until = loop.time() + _ASYNC_CHECKPOINT_WAIT_SECONDS if configurable.get(CONFIG_KEY_DURABILITY, "async") == "async" else 0
+    pending_until = loop.time() + _ASYNC_CHECKPOINT_WAIT_SECONDS if durability == "async" else 0
     while (checkpoint_id := cursor.get("checkpoint_id")) and checkpoint_id not in visited:
         if cursor.get("thread_id") != thread_id or cursor.get("checkpoint_ns", "") != namespace:
             return

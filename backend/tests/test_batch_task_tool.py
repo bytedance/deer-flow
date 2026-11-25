@@ -173,18 +173,23 @@ async def test_checkpoint_replay_under_new_run_returns_original_batch(batch_serv
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("scenario", "checkpoint_mode"),
+    ("scenario", "checkpoint_mode", "durability"),
     [
-        pytest.param("unconfirmed-replay", "full", id="unconfirmed-replay"),
-        pytest.param("unconfirmed-replay-with-sibling", "full", id="unconfirmed-replay-with-sibling"),
-        pytest.param("later-response", "full", id="later-response"),
-        pytest.param("compacted-response", "full", id="compacted-response"),
-        pytest.param("compacted-before-upgrade", "full", id="compacted-before-upgrade"),
-        pytest.param("compacted-before-upgrade", "delta", id="compacted-before-upgrade-delta"),
+        pytest.param("unconfirmed-replay", "full", "async", id="unconfirmed-replay"),
+        pytest.param("unconfirmed-replay-with-sibling", "full", "async", id="unconfirmed-replay-with-sibling"),
+        pytest.param("later-response", "full", "async", id="later-response"),
+        pytest.param("compacted-response", "full", "async", id="compacted-response"),
+        pytest.param("compacted-before-upgrade", "full", "async", id="compacted-before-upgrade"),
+        pytest.param("compacted-before-upgrade", "delta", "async", id="compacted-before-upgrade-delta"),
+        pytest.param("compacted-before-upgrade", "full", "exit", id="compacted-before-upgrade-full-exit"),
+        pytest.param("compacted-before-upgrade", "delta", "exit", id="compacted-before-upgrade-delta-exit"),
+        pytest.param("unconfirmed-replay", "full", "exit", id="unconfirmed-replay-full-exit"),
+        pytest.param("unconfirmed-replay-with-sibling", "full", "exit", id="unconfirmed-replay-with-sibling-full-exit"),
+        pytest.param("unconfirmed-replay-with-sibling", "delta", "exit", id="unconfirmed-replay-with-sibling-delta-exit"),
     ],
 )
 @pytest.mark.parametrize("run_id", ["original-run", None], ids=["gateway-key", "sdk-key"])
-async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batch_service, monkeypatch, tmp_path, scenario, checkpoint_mode, run_id):
+async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batch_service, monkeypatch, tmp_path, scenario, checkpoint_mode, durability, run_id):
     service, repository = batch_service
     confirm_in_sibling = scenario == "unconfirmed-replay-with-sibling"
     lost_receipt = scenario == "unconfirmed-replay" or confirm_in_sibling
@@ -277,7 +282,7 @@ async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batc
             state_schema=schema,
         )
         if lost_receipt:
-            state = await graph.ainvoke(None, resume_config, context={**context, "run_id": "resumed-run"})
+            state = await graph.ainvoke(None, resume_config, context={**context, "run_id": "resumed-run"}, durability=durability)
             [receipt] = [message for message in state["messages"] if isinstance(message, ToolMessage)]
             assert receipt.status == "error"
             assert "Batch submission conflict" in receipt.content
@@ -295,7 +300,7 @@ async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batc
                 changed = _message(await tools["batch_task"].coroutine(**(arguments | {"title": "Changed"})))
                 assert changed.status == "error"
                 assert "Batch submission conflict" in changed.content
-            state = await graph.ainvoke({"messages": [HumanMessage("Submit another job")]}, config, context={**context, "run_id": "new-run"})
+            state = await graph.ainvoke({"messages": [HumanMessage("Submit another job")]}, config, context={**context, "run_id": "new-run"}, durability=durability)
             if compact_history or compact_before_upgrade:
                 assert state["summary_text"] == "Earlier work summarized"
                 [second] = [message for message in state["messages"] if isinstance(message, ToolMessage)]
